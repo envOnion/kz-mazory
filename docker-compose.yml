@@ -1,0 +1,109 @@
+name: mazory
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: mazory-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - mazory-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: mazory-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DEBUG=1
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - WAHA_API_URL=http://waha:3000
+      - WAHA_API_KEY=mazory-waha-key-2026
+    command: python manage.py runserver 0.0.0.0:8000
+    stdin_open: true
+    tty: true
+    depends_on:
+      - redis
+    networks:
+      - mazory-network
+
+  qcluster:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: mazory-qcluster
+    restart: unless-stopped
+    command: python manage.py qcluster
+    volumes:
+      - ./backend:/app
+    environment:
+      - PYTHONUNBUFFERED=1
+      - DEBUG=1
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - WAHA_API_URL=http://waha:3000
+      - WAHA_API_KEY=mazory-waha-key-2026
+    depends_on:
+      - redis
+      - backend
+    networks:
+      - mazory-network
+
+  waha:
+    image: devlikeapro/waha:latest
+    platform: linux/amd64
+    container_name: mazory-waha
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - WHATSAPP_DEFAULT_ENGINE=NOWEB
+      - WAHA_LOG_LEVEL=INFO
+      - WAHA_LOG_FORMAT=JSON
+      - WAHA_API_KEY=mazory-waha-key-2026
+      - WAHA_DASHBOARD_USERNAME=admin
+      - WAHA_DASHBOARD_PASSWORD=admin
+      - WHATSAPP_SWAGGER_USERNAME=admin
+      - WHATSAPP_SWAGGER_PASSWORD=admin
+    volumes:
+      - ./waha_sessions:/app/.sessions
+    networks:
+      - mazory-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: mazory-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000/api
+    command: npm run dev -- --host 0.0.0.0 --port 5173
+    stdin_open: true
+    tty: true
+    depends_on:
+      - backend
+    networks:
+      - mazory-network
+
+networks:
+  mazory-network:
+    driver: bridge
+
+volumes:
+  redis_data:
