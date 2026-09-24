@@ -1,22 +1,44 @@
 from django.urls import path
-from .views import KpiSummaryView, ChatQueryView
+from .views import KpiSummaryView, ChatQueryView, MessageIngestView
 from .auth_views import (
     SendVerificationCodeView,
     VerifyCodeView,
     CurrentUserView,
     SendWhatsAppView
 )
+from .profile_views import ProfileView
+from .notification_views import (
+    NotificationListView,
+    NotificationMarkAllReadView,
+    DispatchNotificationView
+)
+from .whatsapp_views import (
+    WhatsAppStatusView,
+    WhatsAppQrView,
+    WhatsAppRestartView
+)
 
 urlpatterns = [
-    # Auth
+    # Auth & Profile
     path('auth/send-code/', SendVerificationCodeView.as_view(), name='auth-send-code'),
     path('auth/verify-code/', VerifyCodeView.as_view(), name='auth-verify-code'),
     path('auth/me/', CurrentUserView.as_view(), name='auth-me'),
+    path('profile/', ProfileView.as_view(), name='user-profile'),
     
+    # Notifications (Redis + Django Q)
+    path('notifications/', NotificationListView.as_view(), name='notifications-list'),
+    path('notifications/read-all/', NotificationMarkAllReadView.as_view(), name='notifications-read-all'),
+    path('notifications/dispatch/', DispatchNotificationView.as_view(), name='notifications-dispatch'),
+
     # WhatsApp (WAHA)
     path('whatsapp/send/', SendWhatsAppView.as_view(), name='whatsapp-send'),
+    path('whatsapp/status/', WhatsAppStatusView.as_view(), name='whatsapp-status'),
+    path('whatsapp/qr/', WhatsAppQrView.as_view(), name='whatsapp-qr'),
+    path('whatsapp/restart/', WhatsAppRestartView.as_view(), name='whatsapp-restart'),
     
     # Dashboard & Chat
     path('kpi/summary/', KpiSummaryView.as_view(), name='kpi-summary'),
     path('chat/query/', ChatQueryView.as_view(), name='chat-query'),
+    path('messages/ingest/', MessageIngestView.as_view(), name='messages-ingest'),
+    path('whatsapp/webhook/', MessageIngestView.as_view(), name='whatsapp-webhook'),
 ]

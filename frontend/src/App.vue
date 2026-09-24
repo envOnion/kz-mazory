@@ -7,12 +7,12 @@
     <AppHeader
       @go-home="goHome"
       @open-auth="isAuthModalOpen = true"
-      @toggle-notifications="showToast('Нет новых непрочитанных уведомлений')"
+      @open-profile="handleOpenProfile"
     />
 
     <!-- Main Content Area -->
     <main class="relative z-10 flex-1 flex flex-col justify-center">
-      <!-- Transition between Welcome State and Dashboard State -->
+      <!-- Transition between Welcome State, Profile State, and Dashboard State -->
       <transition
         mode="out-in"
         enter-active-class="transition duration-300 ease-out"
@@ -31,9 +31,21 @@
           @voice-input="handleVoice"
         />
 
-        <!-- View 2: KPI Dashboard Active Chat View -->
+        <!-- View 2: User Profile (Личный кабинет) - Only for authenticated users -->
+        <UserProfileView
+          v-else-if="currentView === 'profile' && isAuthenticated"
+          @back-to-chat="currentView = 'dashboard'"
+          @logged-out="handleLogout"
+        />
+
+        <!-- View 3: KPI Dashboard Active Chat View -->
         <div v-else class="flex-1 flex flex-col justify-between py-2">
-          <KpiDashboardView :data="kpiData" />
+          <KpiDashboardView
+            :data="kpiData"
+            :widget="activeWidget"
+            :response-text="chatResponseText"
+            @select-prompt="handlePromptSubmit"
+          />
 
           <!-- Bottom Docked Chat Input Bar for Dashboard View -->
           <div class="w-full pb-6 pt-4 mt-auto">
@@ -83,6 +95,7 @@ import WelcomeView from './components/WelcomeView.vue'
 import KpiDashboardView from './components/KpiDashboardView.vue'
 import ChatInput from './components/ChatInput.vue'
 import AuthModal from './components/AuthModal.vue'
+import UserProfileView from './components/UserProfileView.vue'
 import { useChat } from './composables/useChat'
 import { useAuth } from './composables/useAuth'
 
@@ -91,11 +104,13 @@ const {
   welcomeSuggestions,
   dashboardSuggestions,
   kpiData,
+  activeWidget,
+  chatResponseText,
   handlePromptSubmit,
   goHome
 } = useChat()
 
-const { checkAuth } = useAuth()
+const { isAuthenticated, checkAuth } = useAuth()
 const isAuthModalOpen = ref(false)
 const toastMessage = ref('')
 let toastTimer: number | null = null
@@ -112,8 +127,21 @@ function showToast(msg: string) {
   }, 2500)
 }
 
+function handleOpenProfile() {
+  if (isAuthenticated.value) {
+    currentView.value = 'profile'
+  } else {
+    isAuthModalOpen.value = true
+  }
+}
+
 function handleAuthSuccess() {
   showToast('✓ Вы успешно вошли в систему')
+}
+
+function handleLogout() {
+  currentView.value = 'welcome'
+  showToast('Вы вышли из системы')
 }
 
 function handleAttach() {

@@ -43,7 +43,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'django_q',
     # Local apps
-    'api',
+    'api.apps.ApiConfig',
 ]
 
 MIDDLEWARE = [
@@ -80,15 +80,31 @@ TEMPLATES = [
 WSGI_APPLICATION = 'mazory_backend.wsgi.application'
 
 
+import os
+from datetime import timedelta
+
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
+POSTGRES_DB = os.getenv('POSTGRES_DB', 'mazory_db')
+POSTGRES_USER = os.getenv('POSTGRES_USER', 'mazory')
+POSTGRES_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'mazory2026')
+POSTGRES_HOST = os.getenv('POSTGRES_HOST', 'postgres')
+POSTGRES_PORT = os.getenv('POSTGRES_PORT', '5432')
+
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': POSTGRES_DB,
+        'USER': POSTGRES_USER,
+        'PASSWORD': POSTGRES_PASSWORD,
+        'HOST': POSTGRES_HOST,
+        'PORT': POSTGRES_PORT,
     }
 }
+
+QDRANT_URL = os.getenv('QDRANT_URL', 'http://qdrant:6333')
+QDRANT_COLLECTION = os.getenv('QDRANT_COLLECTION', 'mazory_messages')
 
 
 # Password validation
@@ -136,9 +152,6 @@ MAILERS = {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
     },
 }
-
-import os
-from datetime import timedelta
 
 REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
 REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))

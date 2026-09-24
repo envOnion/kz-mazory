@@ -12,6 +12,37 @@ services:
     networks:
       - mazory-network
 
+  postgres:
+    image: postgres:16-alpine
+    container_name: mazory-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mazory_db}
+      POSTGRES_USER: ${POSTGRES_USER:-mazory}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mazory2026}
+    ports:
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mazory -d mazory_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - mazory-network
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.4
+    container_name: mazory-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    networks:
+      - mazory-network
+
   backend:
     build:
       context: ./backend
@@ -25,6 +56,12 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DEBUG=1
+      - POSTGRES_DB=${POSTGRES_DB:-mazory_db}
+      - POSTGRES_USER=${POSTGRES_USER:-mazory}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-mazory2026}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - QDRANT_URL=http://qdrant:6333
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - WAHA_API_URL=http://waha:3000
@@ -33,7 +70,12 @@ services:
     stdin_open: true
     tty: true
     depends_on:
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      qdrant:
+        condition: service_started
     networks:
       - mazory-network
 
@@ -49,13 +91,25 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - DEBUG=1
+      - POSTGRES_DB=${POSTGRES_DB:-mazory_db}
+      - POSTGRES_USER=${POSTGRES_USER:-mazory}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-mazory2026}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - QDRANT_URL=http://qdrant:6333
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - WAHA_API_URL=http://waha:3000
       - WAHA_API_KEY=mazory-waha-key-2026
     depends_on:
-      - redis
-      - backend
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      backend:
+        condition: service_started
+      qdrant:
+        condition: service_started
     networks:
       - mazory-network
 
@@ -72,9 +126,10 @@ services:
       - WAHA_LOG_FORMAT=JSON
       - WAHA_API_KEY=mazory-waha-key-2026
       - WAHA_DASHBOARD_USERNAME=admin
-      - WAHA_DASHBOARD_PASSWORD=admin
+      - WAHA_DASHBOARD_PASSWORD=mazory2026
       - WHATSAPP_SWAGGER_USERNAME=admin
-      - WHATSAPP_SWAGGER_PASSWORD=admin
+      - WHATSAPP_SWAGGER_PASSWORD=mazory2026
+
     volumes:
       - ./waha_sessions:/app/.sessions
     networks:
@@ -107,3 +162,5 @@ networks:
 
 volumes:
   redis_data:
+  postgres_data:
+  qdrant_data:

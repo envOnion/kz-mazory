@@ -12,120 +12,107 @@
       </span>
     </div>
 
-    <!-- Right controls: notifications, settings, auth/avatar -->
-    <div class="flex items-center gap-3.5">
-      <!-- Notification bell with badge -->
-      <button
-        type="button"
-        class="relative p-2 text-slate-300 hover:text-white rounded-full hover:bg-white/5 transition-colors focus:outline-none cursor-pointer"
-        title="Уведомления"
-        @click="emit('toggleNotifications')"
-      >
-        <Bell class="w-5 h-5" />
-        <span class="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-cyan-400 shadow-[0_0_8px_rgba(34,211,238,0.8)]"></span>
-      </button>
-
-      <!-- Settings button -->
-      <button
-        type="button"
-        class="p-2 text-slate-300 hover:text-white rounded-full hover:bg-white/5 transition-colors focus:outline-none cursor-pointer"
-        title="Настройки"
-      >
-        <Settings class="w-5 h-5" />
-      </button>
-
-      <!-- User avatar / Auth Dropdown Trigger -->
-      <div class="relative">
-        <div
-          @click="showDropdown = !showDropdown"
-          class="flex items-center gap-2.5 p-1 rounded-full hover:bg-white/5 cursor-pointer transition-all border border-transparent hover:border-slate-700/60"
+    <!-- Right controls: notifications, auth/profile door & avatar (NO DROPDOWNS, NO GEAR) -->
+    <div class="flex items-center gap-3">
+      <!-- Notification Bell with real Redis count & Popover - ONLY for Authenticated users -->
+      <div v-if="isAuthenticated" class="relative">
+        <button
+          type="button"
+          class="relative p-2.5 text-slate-300 hover:text-white rounded-full hover:bg-white/5 transition-colors focus:outline-none cursor-pointer"
+          title="Уведомления"
+          @click="togglePopover"
         >
-          <div class="relative">
-            <img
-              src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=120&q=80"
-              alt="Профиль"
-              class="w-8 h-8 rounded-full object-cover ring-1 transition-all"
-              :class="isAuthenticated ? 'ring-emerald-400/80' : 'ring-slate-600/60'"
-            />
-            <div
-              class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full ring-2 ring-[#060912]"
-              :class="isAuthenticated ? 'bg-emerald-400' : 'bg-slate-500'"
-            ></div>
-          </div>
-        </div>
-
-        <!-- User Dropdown Menu -->
-        <transition
-          enter-active-class="transition duration-150 ease-out"
-          enter-from-class="opacity-0 scale-95 -translate-y-1"
-          enter-to-class="opacity-100 scale-100 translate-y-0"
-          leave-active-class="transition duration-100 ease-in"
-          leave-from-class="opacity-100 scale-100 translate-y-0"
-          leave-to-class="opacity-0 scale-95 -translate-y-1"
-        >
-          <div
-            v-if="showDropdown"
-            class="absolute right-0 mt-2 w-56 p-2 rounded-2xl bg-[#0e1631]/95 border border-indigo-500/40 shadow-2xl backdrop-blur-xl z-50 text-xs text-slate-200"
+          <Bell class="w-5 h-5" />
+          <!-- Real unread dot / badge from Redis -->
+          <span
+            v-if="unreadCount > 0"
+            class="absolute top-1.5 right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-cyan-400 text-[#060912] font-extrabold text-[10px] flex items-center justify-center shadow-[0_0_8px_rgba(34,211,238,0.9)]"
           >
-            <!-- User Status Header -->
-            <div class="px-3 py-2 border-b border-slate-700/40 mb-1">
-              <div class="font-semibold text-white">
-                {{ isAuthenticated ? (currentUser?.name || 'Сотрудник') : 'Гостевой режим' }}
-              </div>
-              <div class="text-[11px] text-slate-400 truncate mt-0.5">
-                {{ isAuthenticated ? `+${currentUser?.phone}` : 'Вход не выполнен' }}
-              </div>
-            </div>
+            {{ unreadCount }}
+          </span>
+        </button>
 
-            <!-- Action buttons in dropdown -->
-            <div class="space-y-0.5">
-              <button
-                v-if="!isAuthenticated"
-                @click="handleOpenAuth"
-                class="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-indigo-300 hover:bg-indigo-600/20 hover:text-white transition-colors cursor-pointer text-left font-medium"
-              >
-                <LogIn class="w-4 h-4" />
-                <span>Войти по номеру СМС</span>
-              </button>
-
-              <button
-                v-else
-                @click="handleLogout"
-                class="w-full flex items-center gap-2 px-3 py-2 rounded-xl text-rose-300 hover:bg-rose-500/20 hover:text-white transition-colors cursor-pointer text-left font-medium"
-              >
-                <LogOut class="w-4 h-4" />
-                <span>Выйти из аккаунта</span>
-              </button>
-            </div>
-          </div>
-        </transition>
+        <!-- Working Notifications Popover -->
+        <NotificationsPopover
+          :is-open="isPopoverOpen"
+          :notifications="notifications"
+          :unread-count="unreadCount"
+          @close="closePopover"
+          @mark-all-read="markAllAsRead"
+        />
       </div>
+
+      <!-- Authentication / Profile Trigger (Direct action, NO DROPDOWNS): -->
+      <!-- Case 1: NOT Authenticated -> Door Icon Button immediately opens Login modal -->
+      <button
+        v-if="!isAuthenticated"
+        type="button"
+        @click="emit('openAuth')"
+        class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-indigo-600/20 border border-indigo-400/40 text-indigo-300 hover:bg-indigo-600 hover:text-white hover:border-indigo-400 shadow-[0_0_15px_rgba(99,102,241,0.25)] transition-all cursor-pointer text-xs font-medium"
+        title="Войти по номеру телефона"
+      >
+        <DoorOpen class="w-4 h-4" />
+        <span>Войти</span>
+      </button>
+
+      <!-- Case 2: Authenticated -> Avatar button immediately opens Personal Account (Личный кабинет) -->
+      <button
+        v-else
+        type="button"
+        @click="emit('openProfile')"
+        class="relative group p-0.5 rounded-full hover:ring-2 hover:ring-indigo-400 transition-all cursor-pointer focus:outline-none"
+        title="Личный кабинет"
+      >
+        <img
+          :src="profile.avatar_url || 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=120&q=80'"
+          alt="Профиль"
+          class="w-8 h-8 rounded-full object-cover ring-1 ring-emerald-400/80 shadow-md"
+        />
+        <div class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 ring-2 ring-[#060912] shadow-[0_0_6px_rgba(52,211,153,0.8)]"></div>
+      </button>
     </div>
   </header>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
-import { Bell, Settings, LogIn, LogOut } from 'lucide-vue-next'
+import { onMounted, watch } from 'vue'
+import { Bell, DoorOpen } from 'lucide-vue-next'
 import MazoryLogo from './icons/MazoryLogo.vue'
+import NotificationsPopover from './NotificationsPopover.vue'
 import { useAuth } from '../composables/useAuth'
+import { useProfile } from '../composables/useProfile'
+import { useNotifications } from '../composables/useNotifications'
 
 const emit = defineEmits<{
   (e: 'goHome'): void
-  (e: 'toggleNotifications'): void
   (e: 'openAuth'): void
+  (e: 'openProfile'): void
 }>()
 
-const { isAuthenticated, currentUser, logout } = useAuth()
-const showDropdown = ref(false)
+const { isAuthenticated } = useAuth()
+const { profile } = useProfile()
+const {
+  notifications,
+  unreadCount,
+  isPopoverOpen,
+  fetchNotifications,
+  markAllAsRead,
+  togglePopover,
+  closePopover
+} = useNotifications()
 
-function handleOpenAuth() {
-  showDropdown.value = false
-  emit('openAuth')
-}
+onMounted(() => {
+  if (isAuthenticated.value) {
+    fetchNotifications()
+  }
+})
 
-function handleLogout() {
-  showDropdown.value = false
-  logout()
-}
+watch(isAuthenticated, (authed) => {
+  if (authed) {
+    fetchNotifications()
+  } else {
+    closePopover()
+  }
+})
+
 </script>

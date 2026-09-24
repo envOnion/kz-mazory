@@ -1,154 +1,116 @@
-import { ref } from 'vue'
-import type { ViewMode, KpiDashboardData } from '../types/chat'
+import { ref, onMounted } from 'vue'
+import type { ViewMode, KpiDashboardData, ChatWidget } from '../types/chat'
+
+const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
 
 export function useChat() {
   const currentView = ref<ViewMode>('welcome')
   const isGenerating = ref(false)
+  const activeWidget = ref<ChatWidget | null>(null)
+  const chatResponseText = ref<string>('')
 
-  // Welcome state suggestions (Screen 2 from user attachments)
+  // Welcome state suggestions
   const welcomeSuggestions = ref([
-    'Что требует моего внимания? ↗',
+    'Покажи график продаж и выполнения плана ↗',
     'Покажи KPI команды ↗',
-    'Какие сделки зависли? ↗'
+    'Какие обещания и дедлайны горят? ↗',
+    'Покажи воронку проектов и контроль маржи ↗'
   ])
 
-  // Active dashboard suggestions (Screen 1 from user attachments)
+  // Active dashboard suggestions
   const dashboardSuggestions = ref([
-    'Сравни с прошлым месяцем ↗',
-    'Покажи воронку продаж ↗',
-    'Кто может помочь Алине? ↗'
+    'Выведи график продаж ↗',
+    'Какие обещания просрочены? ↗',
+    'Покажи воронку проектов ↗',
+    'Что с объектом Top Build 343? ↗'
   ])
 
-  // High-fidelity KPI Data matching the user's design screenshot
+  // KPI Data from Data Mart
   const kpiData = ref<KpiDashboardData>({
-    categoryBadge: 'AI АНАЛИЗ',
-    queryTitle: 'Покажи KPI менеджеров',
-    querySubtitle: 'Актуальные показатели по команде продаж',
-    updatedAtText: 'Обновлено сегодня в 10:24',
-    summaryMetrics: [
-      {
-        id: 'total-sales',
-        title: 'Общие продажи',
-        value: '24 500 000 ₽',
-        trend: '+12% к прошлому месяцу',
-        trendPositive: true,
-        icon: 'bar-chart'
-      },
-      {
-        id: 'plan-completion',
-        title: 'Выполнение плана',
-        value: '87%',
-        trend: '+6 п.п. к прошлому месяцу',
-        trendPositive: true,
-        icon: 'target'
-      },
-      {
-        id: 'deals-count',
-        title: 'Количество сделок',
-        value: '142',
-        trend: '+18% к прошлому месяцу',
-        trendPositive: true,
-        icon: 'users'
-      }
-    ],
-    managers: [
-      {
-        id: 'm1',
-        name: 'Максим Кузнецов',
-        role: 'Старший менеджер',
-        avatar: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=200&q=80',
-        isTopPerformer: true,
-        statusColor: 'green',
-        kpiPercent: 104,
-        kpiBarColor: 'green',
-        salesAmount: '7 800 000 ₽',
-        dealsCount: 28,
-        trend: '+26% к прошлому месяцу',
-        trendPositive: true
-      },
-      {
-        id: 'm2',
-        name: 'Ирина Волкова',
-        role: 'Менеджер по продажам',
-        avatar: 'https://images.unsplash.com/photo-1573496359142-b8d87734a5a2?auto=format&fit=crop&w=200&q=80',
-        statusColor: 'green',
-        kpiPercent: 92,
-        kpiBarColor: 'green',
-        salesAmount: '5 400 000 ₽',
-        dealsCount: 24,
-        trend: '+14% к прошлому месяцу',
-        trendPositive: true
-      },
-      {
-        id: 'm3',
-        name: 'Даниил Соколов',
-        role: 'Менеджер по продажам',
-        avatar: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?auto=format&fit=crop&w=200&q=80',
-        statusColor: 'yellow',
-        kpiPercent: 78,
-        kpiBarColor: 'yellow',
-        salesAmount: '4 900 000 ₽',
-        dealsCount: 22,
-        trend: '+6% к прошлому месяцу',
-        trendPositive: true
-      },
-      {
-        id: 'm4',
-        name: 'Алина Смирнова',
-        role: 'Менеджер по продажам',
-        avatar: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=200&q=80',
-        statusColor: 'red',
-        kpiPercent: 61,
-        kpiBarColor: 'red',
-        salesAmount: '3 200 000 ₽',
-        dealsCount: 14,
-        trend: '-18% к прошлому месяцу',
-        trendPositive: false
-      },
-      {
-        id: 'm5',
-        name: 'Егор Новиков',
-        role: 'Менеджер по продажам',
-        avatar: 'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?auto=format&fit=crop&w=200&q=80',
-        statusColor: 'green',
-        kpiPercent: 88,
-        kpiBarColor: 'green',
-        salesAmount: '3 200 000 ₽',
-        dealsCount: 18,
-        trend: '+11% к прошлому месяцу',
-        trendPositive: true
-      }
-    ],
+    categoryBadge: 'AQUA KIP DATA MART',
+    queryTitle: 'KPI отдела продаж',
+    querySubtitle: 'Актуальные показатели коммерческой команды (тенге ₸)',
+    updatedAtText: 'Загрузка...',
+    summaryMetrics: [],
+    managers: [],
     insight: {
       badge: 'AI-инсайт',
-      source: 'На основе анализа сделок, активности и конверсий',
-      headline: 'Лучший результат у Максима — 104% плана. У Алины — 61%.',
-      details: 'Основная причина отставания — снижение конверсии (меньше сделок при том же объеме активности).',
+      source: 'На основе витрины данных Data Mart (сбор денег, маржа, дедлайны)',
+      headline: 'Лидер по сбору денег — Жанат Бейсбаев (568.27 млн ₸).',
+      details: 'Ключевой фактор роста — крупные закрытые контракты по ПСЭМ и Top Build. По проектам с маржой ниже 15% требуется особый контроль.',
       actions: [
         { id: 'why', label: 'Почему?', icon: 'search' },
         { id: 'deals', label: 'Показать сделки', icon: 'file-text' },
-        { id: 'compare', label: 'Сравнить с прошлым месяцем', icon: 'bar-chart-2' },
-        { id: 'contact', label: 'Написать сотруднику', icon: 'send' }
+        { id: 'chart', label: 'Вывести график продаж', icon: 'bar-chart-2' },
+        { id: 'commitments', label: 'Обещания и дедлайны', icon: 'clock' }
       ]
     }
   })
 
-  function handlePromptSubmit(prompt: string) {
-    // Transition to dashboard view
+  async function fetchKpiData() {
+    try {
+      const res = await fetch(`${API_BASE}/kpi/summary/`)
+      if (res.ok) {
+        const data = await res.json()
+        kpiData.value = data
+      }
+    } catch (e) {
+      console.error('Failed to fetch KPI summary:', e)
+    }
+  }
+
+  onMounted(() => {
+    fetchKpiData()
+  })
+
+  async function handlePromptSubmit(prompt: string) {
+    isGenerating.value = true
     currentView.value = 'dashboard'
-    kpiData.value.queryTitle = prompt.includes('KPI') ? prompt : `Покажи KPI: ${prompt}`
+    kpiData.value.queryTitle = prompt
+
+    try {
+      const res = await fetch(`${API_BASE}/chat/query/`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt })
+      })
+
+      if (res.ok) {
+        const responseData = await res.json()
+        chatResponseText.value = responseData.text || ''
+        
+        if (responseData.widget) {
+          activeWidget.value = responseData.widget
+        } else {
+          activeWidget.value = null
+        }
+
+        if (responseData.insights && responseData.insights.length > 0) {
+          kpiData.value.insight.headline = responseData.insights[0]
+          kpiData.value.insight.details = responseData.insights.slice(1).join(' ') || responseData.text
+        }
+      }
+    } catch (e) {
+      console.error('Failed to query chat orchestrator:', e)
+    } finally {
+      isGenerating.value = false
+    }
   }
 
   function goHome() {
     currentView.value = 'welcome'
+    activeWidget.value = null
   }
 
   return {
     currentView,
     isGenerating,
+    activeWidget,
+    chatResponseText,
     welcomeSuggestions,
     dashboardSuggestions,
     kpiData,
+    fetchKpiData,
     handlePromptSubmit,
     goHome
   }
