@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "chart.js": "^4.5.1",
@@ -17,6 +18,7 @@
     "vue-chartjs": "^5.3.4"
   },
   "devDependencies": {
+    "@playwright/test": "^1.63.0",
     "@types/node": "^22.13.4",
     "@vitejs/plugin-vue": "^5.2.1",
     "autoprefixer": "^10.4.20",

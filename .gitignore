@@ -11,3 +11,5 @@ dist/
 .DS_Store
 *.log
 waha_sessions/
+test-results/
+playwright-report/
