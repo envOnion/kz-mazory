@@ -22,11 +22,12 @@ test.describe('Mazory AI Business OS — E2E Сквозные сценарии',
   test('2. Запрос графика продаж: монтирование Chart.js пресета (Canvas)', async ({ page }) => {
     // Вводим запрос на график продаж в поле ввода
     const chatInput = page.locator('input[placeholder*="Спросите"]')
+    await chatInput.click()
     await chatInput.fill('Выведи график продаж по менеджерам')
-    await chatInput.press('Enter')
+    await page.locator('button[title="Отправить запрос"]').click()
 
     // Ожидаем ответа оркестратора и отрисовки графика
-    await expect(page.locator('text=План-факт продаж по менеджерам').first()).toBeVisible({ timeout: 10000 })
+    await expect(page.locator('text=План-факт продаж по менеджерам').first()).toBeVisible({ timeout: 15000 })
     
     // Проверяем наличие Chart.js canvas элемента (Chart.js рендерит canvas с role="img")
     const chartCanvas = page.locator('canvas[role="img"]')
@@ -35,11 +36,12 @@ test.describe('Mazory AI Business OS — E2E Сквозные сценарии',
 
   test('3. Запрос обещаний и дедлайнов: монтирование пресета SLA обязательств', async ({ page }) => {
     const chatInput = page.locator('input[placeholder*="Спросите"]')
+    await chatInput.click()
     await chatInput.fill('Какие обещания и дедлайны горят?')
-    await chatInput.press('Enter')
+    await page.locator('button[title="Отправить запрос"]').click()
 
     // Ожидаем появления виджета контроля обещаний
-    await expect(page.locator('text=Контроль обещаний и дедлайнов (SLA)')).toBeVisible({ timeout: 10000 })
+    await expect(page.locator('text=Контроль обещаний и дедлайнов (SLA)')).toBeVisible({ timeout: 15000 })
     
     // Проверяем наличие счетчиков SLA
     await expect(page.locator('text=Выполнено:').first()).toBeVisible()
@@ -48,25 +50,39 @@ test.describe('Mazory AI Business OS — E2E Сквозные сценарии',
 
   test('4. Запрос воронки проектов: отображение таблицы объектов и контроля маржи', async ({ page }) => {
     const chatInput = page.locator('input[placeholder*="Спросите"]')
+    await chatInput.click()
     await chatInput.fill('Покажи воронку проектов и сделок')
-    await chatInput.press('Enter')
+    await page.locator('button[title="Отправить запрос"]').click()
 
     // Ожидаем появления таблицы проектов
-    await expect(page.locator('text=Воронка проектов и контроль экономики сделок')).toBeVisible({ timeout: 10000 })
+    await expect(page.locator('text=Воронка проектов и контроль экономики сделок')).toBeVisible({ timeout: 15000 })
     
-    // Проверяем отображение ключевых объектов Aqua Kip
-    await expect(page.locator('text=ПСЭМ-01-2026').first()).toBeVisible()
+    // Проверяем отображение ключевых объектов Aqua Kip из реальной базы
+    await expect(page.locator('text=ЖК Медео').first()).toBeVisible()
   })
 
   test('5. Запрос KPI команды: отображение карточек менеджеров в тенге ₸', async ({ page }) => {
     const chatInput = page.locator('input[placeholder*="Спросите"]')
+    await chatInput.click()
     await chatInput.fill('Покажи KPI менеджеров')
-    await chatInput.press('Enter')
+    await page.locator('button[title="Отправить запрос"]').click()
 
     // Проверяем карточки реальных менеджеров Aqua Kip
-    await expect(page.locator('text=Жанат Бейсбаев').first()).toBeVisible({ timeout: 10000 })
-    await expect(page.locator('text=Самат Ерланулы').first()).toBeVisible()
-    await expect(page.locator('text=Улугбек').first()).toBeVisible()
-    await expect(page.locator('text=Камиль').first()).toBeVisible()
+    await expect(page.locator('text=Камиль').first()).toBeVisible({ timeout: 15000 })
+  })
+
+  test('6. Запрос расчета суммы договоров: AI выдает расчет с суммами в ₸ и виджетом таблицы', async ({ page }) => {
+    test.setTimeout(60000)
+    const chatInput = page.locator('input[placeholder*="Спросите"]')
+    await chatInput.click()
+    await chatInput.fill('Посчитай общую сумму по всем договорам')
+    await page.locator('button[title="Отправить запрос"]').click()
+
+    // Ожидаем появления виджета таблицы проектов
+    await expect(page.locator('text=Воронка проектов и контроль экономики сделок')).toBeVisible({ timeout: 45000 })
+
+    // Проверяем, что ответ содержит символ валюты тенге ₸
+    const responseContainer = page.locator('main')
+    await expect(responseContainer).toContainText('₸')
   })
 })

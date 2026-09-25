@@ -189,7 +189,15 @@ class AIService:
         Чат-ассистент для пользователей веб-интерфейса Mazory.
         """
         cfg = AISettings.get_active()
-        system_content = f"{cfg.system_prompt_assistant}\n\nАКТУАЛЬНЫЕ ДАННЫЕ ВИТРИНЫ ДАННЫХ:\n{json.dumps(context, ensure_ascii=False)}"
+        guidance = (
+            "ИНСТРУКЦИЯ ПО ДАННЫМ:\n"
+            "В блоке АКТУАЛЬНЫЕ ДАННЫЕ ВИТРИНЫ ДАННЫХ переданы точные финансовые показатели из PostgreSQL "
+            "(включая portfolio_summary с агрегатами и matched_projects со списком проектов).\n"
+            "Если пользователь просит посчитать сумму, рассчитать итоги, предоставить статистику или сделать сравнение — "
+            "используй эти точные цифры, выполняй математические вычисления и давай структурированный, уверенный ответ на русском языке с суммами в тенге (₸).\n"
+            "Никогда не утверждай, что данных нет или что matched_projects пуст, если данные присутствуют в блоках portfolio_summary или matched_projects."
+        )
+        system_content = f"{cfg.system_prompt_assistant}\n\n{guidance}\n\nАКТУАЛЬНЫЕ ДАННЫЕ ВИТРИНЫ ДАННЫХ:\n{json.dumps(context, ensure_ascii=False)}"
 
         url = f"{cfg.chat_provider_url.rstrip('/')}/chat/completions"
         chat_key = cfg.chat_api_key or os.getenv('OPENROUTER_API_KEY', '')
