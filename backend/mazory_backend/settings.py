@@ -258,6 +258,11 @@ UNFOLD = {
                         "link": "/admin/api/bitrixsettings/",
                     },
                     {
+                        "title": "Логи изменений сделок Bitrix24",
+                        "icon": "history",
+                        "link": "/admin/api/bitrixdealchangelog/",
+                    },
+                    {
                         "title": "Бизнес-события",
                         "icon": "notifications_active",
                         "link": "/admin/api/businessevent/",
