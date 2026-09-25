@@ -134,6 +134,8 @@ class BitrixService:
         Ошибки записи не прерывают основной процесс интеграции.
         """
         try:
+            if project is not None and not Project.objects.filter(id=project.id).exists():
+                project = None
             if project is None and bitrix_deal_id:
                 project = Project.objects.filter(bitrix_id=str(bitrix_deal_id)).first()
 
@@ -166,7 +168,13 @@ class BitrixService:
             logger.info("Bitrix deal auto-creation is disabled in BitrixSettings")
             return None
 
-        title = project_data.get("name") or project_data.get("object_name") or "Новая сделка из WhatsApp"
+        title = (
+            project_data.get("name")
+            or project_data.get("TITLE")
+            or project_data.get("title")
+            or project_data.get("object_name")
+            or "Новая сделка из WhatsApp"
+        )
         
         # Защита от дублей: обязательный предварительный поиск в CRM
         existing = BitrixService.find_deal_by_name(title)
@@ -368,15 +376,15 @@ class BitrixService:
 
         # Компания
         company = None
-        if company_id:
-            company = Company.objects.filter(bitrix_company_id=company_id).first()
+        if company_id and str(company_id) not in ("0", ""):
+            company = Company.objects.filter(bitrix_company_id=str(company_id)).first()
             if not company:
                 try:
                     c_resp = BitrixService.call("crm.company.get", {"id": company_id})
                     c_data = c_resp.get("result", {})
                     c_title = c_data.get("TITLE") or f"Компания #{company_id}"
                     company, _ = Company.objects.get_or_create(
-                        bitrix_company_id=company_id,
+                        bitrix_company_id=str(company_id),
                         defaults={"name": c_title, "client_type": "private"}
                     )
                 except Exception:

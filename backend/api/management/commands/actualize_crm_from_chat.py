@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
+from django.contrib.auth.models import User
 from django.core.management.base import BaseCommand
 from django.db import transaction
 from django.db.models import Q
@@ -126,17 +127,39 @@ class Command(BaseCommand):
         ]
         managers = {}
         for p in profiles_spec:
-            prof = UserProfile.objects.filter(full_name__icontains=p["full_name"]).first()
+            user, _ = User.objects.get_or_create(
+                username=p["username"],
+                defaults={"first_name": p["full_name"], "is_active": True}
+            )
+            prof = UserProfile.objects.filter(Q(user=user) | Q(full_name__icontains=p["full_name"])).first()
             if not prof:
                 prof, _ = UserProfile.objects.get_or_create(
-                    phone=p["phone"],
-                    defaults={"full_name": p["full_name"], "role": p["role"]}
+                    user=user,
+                    defaults={"phone": p["phone"], "full_name": p["full_name"], "role": p["role"]}
                 )
             managers[p["full_name"].lower()] = prof
         return managers
 
     def _sync_bitrix_deal_catalog(self) -> int:
         """Выгружает все 576 сделок из Bitrix24 и сохраняет в локальный реестр Project."""
+        self.stdout.write("  -> Предварительная загрузка справочника компаний из Bitrix24...")
+        companies_raw = BitrixService.fetch_all_paged("crm.company.list", {"select": ["ID", "TITLE"]})
+        for c in companies_raw:
+            cid = str(c.get("ID"))
+            title = (c.get("TITLE") or f"Компания #{cid}").strip()
+            comp = Company.objects.filter(bitrix_company_id=cid).first()
+            if not comp:
+                comp = Company.objects.filter(name=title).first()
+                if comp:
+                    comp.bitrix_company_id = cid
+                    comp.save(update_fields=["bitrix_company_id"])
+                else:
+                    try:
+                        Company.objects.create(bitrix_company_id=cid, name=title, client_type="private")
+                    except Exception:
+                        pass
+        self.stdout.write(f"  -> Справочник компаний загружен: {len(companies_raw)} шт.")
+
         deal_list = BitrixService.fetch_all_paged(
             "crm.deal.list",
             {
@@ -570,8 +593,15 @@ class Command(BaseCommand):
         self.stdout.write(f"Сделок, готовых к синхронизации с Bitrix24: {total}")
 
         today = timezone.now().date()
+        can_create_tasks = True
 
         for idx, p in enumerate(projects_to_sync, start=1):
+            p_fresh = Project.objects.filter(id=p.id).first()
+            if not p_fresh:
+                self.stdout.write(f"[{idx}/{total}] Проект id={p.id} уже объединен. Пропускаем.")
+                continue
+            p = p_fresh
+
             self.stdout.write(f"[{idx}/{total}] Синхронизация сделки '{p.name}' (ID Bitrix: {p.bitrix_id or 'Новая'})...")
 
             if dry_run:
@@ -591,7 +621,7 @@ class Command(BaseCommand):
                 # Вызов update_deal (внутри автоматически вызывается _record_deal_log)
                 success = BitrixService.update_deal(
                     deal_id=p.bitrix_id,
-                    fields=fields,
+                    fields_to_update=fields,
                     project=p,
                     triggered_by="chat_actualization"
                 )
@@ -601,7 +631,11 @@ class Command(BaseCommand):
             else:
                 # Новая сделка
                 new_deal_data = {
+                    "name": p.name,
                     "TITLE": p.name,
+                    "title": p.name,
+                    "contract_amount": p.contract_amount,
+                    "direction": p.equipment_type or "БТП",
                     "STAGE_ID": BitrixService.status_to_stage(p.status),
                     "OPPORTUNITY": str(p.contract_amount) if p.contract_amount > 0 else "0.00",
                     "COMMENTS": f"Создано автоматически из чата WhatsApp Mazory. Текущий статус: {p.current_action}"
@@ -612,8 +646,23 @@ class Command(BaseCommand):
                     triggered_by="chat_actualization"
                 )
                 if new_bx_id:
-                    p.bitrix_id = new_bx_id
-                    p.save(update_fields=["bitrix_id"])
+                    existing_p = Project.objects.filter(bitrix_id=new_bx_id).exclude(id=p.id).first()
+                    if existing_p:
+                        if p.current_action and not existing_p.current_action:
+                            existing_p.current_action = p.current_action
+                        if p.next_action and not existing_p.next_action:
+                            existing_p.next_action = p.next_action
+                        if p.contract_amount > 0 and existing_p.contract_amount == 0:
+                            existing_p.contract_amount = p.contract_amount
+                        existing_p.save()
+                        Commitment.objects.filter(project=p).update(project=existing_p)
+                        FinancialRecord.objects.filter(project=p).update(project=existing_p)
+                        p.delete()
+                        p = existing_p
+                    else:
+                        if Project.objects.filter(id=p.id).exists():
+                            p.bitrix_id = new_bx_id
+                            p.save(update_fields=["bitrix_id"])
                     stats["created_deals"] += 1
                 time.sleep(0.7)
 
@@ -634,29 +683,39 @@ class Command(BaseCommand):
                 time.sleep(0.7)
 
             # 3. Создание задач в Bitrix24 только для актуальных обязательств
-            active_commitments = Commitment.objects.filter(
-                project=p,
-                bitrix_task_id__isnull=True,
-                deadline__gte=today
-            )
-            for comm in active_commitments:
-                task_title = f"[Mazory] {comm.commitment_text[:80]}"
-                task_desc = f"Сделка: {p.name}\nОбязательство: {comm.commitment_text}\nСрок: {comm.deadline}"
-                task_id = BitrixService.create_task(
-                    title=task_title,
-                    description=task_desc,
-                    deadline_iso=comm.deadline.isoformat(),
-                    deal_id=p.bitrix_id
+            if can_create_tasks:
+                active_commitments = Commitment.objects.filter(
+                    project=p,
+                    bitrix_task_id__isnull=True,
+                    deadline__gte=today
                 )
-                if task_id:
-                    comm.bitrix_task_id = task_id
-                    comm.save(update_fields=["bitrix_task_id"])
-                    stats["created_tasks"] += 1
-                time.sleep(0.7)
+                for comm in active_commitments:
+                    task_title = f"[Mazory] {comm.commitment_text[:80]}"
+                    task_desc = f"Сделка: {p.name}\nОбязательство: {comm.commitment_text}\nСрок: {comm.deadline}"
+                    try:
+                        task_id = BitrixService.create_task(
+                            title=task_title,
+                            description=task_desc,
+                            deadline_iso=comm.deadline.isoformat(),
+                            deal_id=p.bitrix_id
+                        )
+                        if task_id:
+                            comm.bitrix_task_id = task_id
+                            comm.save(update_fields=["bitrix_task_id"])
+                            stats["created_tasks"] += 1
+                        else:
+                            can_create_tasks = False
+                            self.stdout.write(self.style.WARNING("Вебхук Bitrix24 не имеет прав 'tasks'. Создание задач пропущено."))
+                            break
+                    except Exception:
+                        can_create_tasks = False
+                        break
+                    time.sleep(0.7)
 
             # Снимаем флаг needs_bitrix_sync
-            p.needs_bitrix_sync = False
-            p.save(update_fields=["needs_bitrix_sync"])
+            if p.id and Project.objects.filter(id=p.id).exists():
+                p.needs_bitrix_sync = False
+                p.save(update_fields=["needs_bitrix_sync"])
 
         stats["change_logs"] = BitrixDealChangeLog.objects.filter(triggered_by="chat_actualization").count()
         return stats
