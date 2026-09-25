@@ -147,6 +147,7 @@
 import { ref } from 'vue'
 import { Sparkles, BarChart2, Target, Users, TrendingUp } from 'lucide-vue-next'
 import type { KpiDashboardData, ChatWidget } from '../types/chat'
+import { useAuth } from '../composables/useAuth'
 import ManagerCard from './ManagerCard.vue'
 import AiInsightCard from './AiInsightCard.vue'
 import PresetChart from './presets/PresetChart.vue'
@@ -163,6 +164,8 @@ const emit = defineEmits<{
   (e: 'selectPrompt', prompt: string): void
 }>()
 
+const { isAuthenticated } = useAuth()
+
 const activeActionModal = ref<{
   title: string
   content: string
@@ -176,6 +179,10 @@ function handleActionTrigger(actionId: string, _label: string) {
   } else if (actionId === 'deals') {
     emit('selectPrompt', 'Покажи воронку проектов')
   } else if (actionId === 'why') {
+    if (!isAuthenticated.value) {
+      emit('selectPrompt', 'Почему лидер по сбору денег — Жанат Бейсбаев?')
+      return
+    }
     activeActionModal.value = {
       title: 'Анализ факторов сбора оплат (Aqua Kip)',
       content:

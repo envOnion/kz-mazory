@@ -1,7 +1,10 @@
 import { test, expect } from '@playwright/test'
+import { loginWithToken } from './auth-helper'
 
 test.describe('Mazory AI Business OS — E2E Сквозные сценарии', () => {
   test.beforeEach(async ({ page }) => {
+    // Авторизуем пользователя перед прогоном дашборда
+    await loginWithToken(page)
     // Открываем главную страницу приложения
     await page.goto('/')
     await expect(page).toHaveTitle(/Mazory/i)

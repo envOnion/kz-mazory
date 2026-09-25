@@ -1,5 +1,6 @@
 import { ref, onMounted } from 'vue'
 import type { ViewMode, KpiDashboardData, ChatWidget } from '../types/chat'
+import { useAuth } from './useAuth'
 
 const API_BASE = import.meta.env?.VITE_API_URL || '/api'
 
@@ -8,6 +9,8 @@ export function useChat() {
   const isGenerating = ref(false)
   const activeWidget = ref<ChatWidget | null>(null)
   const chatResponseText = ref<string>('')
+
+  const { isAuthModalOpen, logout } = useAuth()
 
   // Welcome state suggestions
   const welcomeSuggestions = ref([
@@ -49,7 +52,12 @@ export function useChat() {
 
   async function fetchKpiData() {
     try {
-      const res = await fetch(`${API_BASE}/kpi/summary/`)
+      const token = localStorage.getItem('mazory_access_token')
+      const headers: Record<string, string> = {}
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+      const res = await fetch(`${API_BASE}/kpi/summary/`, { headers })
       if (res.ok) {
         const data = await res.json()
         kpiData.value = data
@@ -64,18 +72,34 @@ export function useChat() {
   })
 
   async function handlePromptSubmit(prompt: string) {
+    const prevView = currentView.value
     isGenerating.value = true
-    currentView.value = 'dashboard'
-    kpiData.value.queryTitle = prompt
 
     try {
+      const token = localStorage.getItem('mazory_access_token')
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json'
+      }
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+
       const res = await fetch(`${API_BASE}/chat/query/`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ prompt })
       })
 
+      if (res.status === 401) {
+        logout()
+        currentView.value = prevView
+        isAuthModalOpen.value = true
+        return
+      }
+
       if (res.ok) {
+        currentView.value = 'dashboard'
+        kpiData.value.queryTitle = prompt
         const responseData = await res.json()
         chatResponseText.value = responseData.text || ''
         

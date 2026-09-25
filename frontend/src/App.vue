@@ -110,8 +110,7 @@ const {
   goHome
 } = useChat()
 
-const { isAuthenticated, checkAuth } = useAuth()
-const isAuthModalOpen = ref(false)
+const { isAuthenticated, checkAuth, isAuthModalOpen } = useAuth()
 const toastMessage = ref('')
 let toastTimer: number | null = null
 
@@ -145,10 +144,20 @@ function handleLogout() {
 }
 
 function handleAttach() {
+  if (!isAuthenticated.value) {
+    isAuthModalOpen.value = true
+    showToast('Для прикрепления файлов необходимо войти в систему')
+    return
+  }
   showToast('Прикрепление файлов: выберите документ Excel, PDF или скриншот')
 }
 
 function handleVoice() {
+  if (!isAuthenticated.value) {
+    isAuthModalOpen.value = true
+    showToast('Для голосового ввода необходимо войти в систему')
+    return
+  }
   showToast('Голосовой ввод активирован (слушаю...)')
 }
 </script>
