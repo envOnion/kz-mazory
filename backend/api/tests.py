@@ -286,3 +286,56 @@ class TestRawMessageAdmin(TestCase):
         self.assertContains(response, "✓ Обработано")
         self.assertContains(response, "Ожидает")
 
+
+class TestOtpVerificationCode(TestCase):
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = Client()
+
+    def test_send_verification_code_generates_random_4digit_code(self):
+        from django.core.cache import cache
+        from unittest.mock import patch
+
+        with patch('api.auth_views.async_task') as mock_async_task:
+            response = self.client.post(
+                '/api/auth/send-code/',
+                data=json.dumps({'phone': '+7 (777) 458-11-11'}),
+                content_type='application/json'
+            )
+            self.assertEqual(response.status_code, 200)
+            data = response.json()
+            self.assertEqual(data['status'], 'success')
+            self.assertEqual(data['phone'], '77774581111')
+
+            # Проверяем, что в Redis сохранен 4-значный числовой код
+            cached_code = cache.get('otp:77774581111')
+            self.assertIsNotNone(cached_code)
+            self.assertEqual(len(cached_code), 4)
+            self.assertTrue(cached_code.isdigit())
+            code_int = int(cached_code)
+            self.assertGreaterEqual(code_int, 1000)
+            self.assertLessEqual(code_int, 9999)
+
+            # Проверяем, что задача поставлена в очередь с правильными аргументами
+            mock_async_task.assert_called_once_with(
+                'api.tasks.send_sms_verification_code_task',
+                '77774581111',
+                cached_code
+            )
+
+    def test_send_sms_verification_code_task_calls_waha(self):
+        from unittest.mock import patch
+        from api.tasks import send_sms_verification_code_task
+
+        with patch('api.tasks.send_waha_whatsapp_message_task') as mock_waha:
+            mock_waha.return_value = {'status': 'delivered'}
+            result = send_sms_verification_code_task('+7 (777) 458-11-11', '7492')
+            
+            mock_waha.assert_called_once_with(
+                '77774581111',
+                'Ваш код подтверждения для входа в Mazory AI: 7492\nКод действителен 5 минут.'
+            )
+            self.assertEqual(result, {'status': 'delivered'})
+
+

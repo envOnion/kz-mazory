@@ -47,6 +47,15 @@ def send_waha_whatsapp_message_task(phone_or_group: str, text: str, session: str
         logger.error("Failed to send WhatsApp message via WAHA: %s", exc)
         return {"status": "error", "detail": str(exc)}
 
+def send_sms_verification_code_task(phone: str, code: str):
+    """
+    Фоновый воркер Django Q2: Отправка случайного 4-значного OTP-кода подтверждения через WhatsApp (WAHA).
+    """
+    clean = clean_phone_number(phone)
+    text = f"Ваш код подтверждения для входа в Mazory AI: {code}\nКод действителен 5 минут."
+    logger.info("Отправка OTP-кода подтверждения на номер %s через WAHA", clean)
+    return send_waha_whatsapp_message_task(clean, text)
+
 def process_incoming_message_task(message_data: dict):
     """
     Фоновый воркер Django Q2 (Event: Новое сообщение WhatsApp):
