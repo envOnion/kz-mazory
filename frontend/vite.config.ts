@@ -12,6 +12,7 @@ export default defineConfig({
   server: {
     port: 5173,
     host: true,
+    allowedHosts: ['ai.mazory.best', '.mazory.best', 'localhost'],
     proxy: {
       '/api': {
         target: process.env.VITE_BACKEND_PROXY_URL || 'http://localhost:8000',
