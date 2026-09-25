@@ -143,12 +143,33 @@ class AIService:
             except ValueError:
                 pass
 
+        # Извлечение названия объекта
+        object_name = None
+        obj_match = re.search(r'(?:объекту|объект|жк)\s+([A-Za-zА-Яа-я0-9\s\-]+?)(?=\s+(?:утвердили|согласовали|отправил|заключили|на|\.|\,|$))', content, re.IGNORECASE)
+        if obj_match:
+            object_name = obj_match.group(1).strip()
+            if 'жк' in content.lower() and not object_name.lower().startswith('жк'):
+                object_name = f"ЖК {object_name}"
+        elif 'жк' in content.lower():
+            m = re.search(r'(жк\s+[A-Za-zА-Яа-я0-9\-]+)', content, re.IGNORECASE)
+            if m:
+                object_name = m.group(1).strip()
+
+        # Следующее действие менеджера (обязательство)
+        next_action = None
+        action_match = re.search(r'(?:до\s+[A-Za-zА-Яа-я]+|завтра|сегодня)?\s*(?:отправлю|согласую|подготовлю|закрою|передам|выставлю|подпишу)[^.!?]*', content, re.IGNORECASE)
+        if action_match:
+            next_action = action_match.group(0).strip()
+
+        can_create = bool(object_name and amount)
+        confidence = 0.85 if can_create else (0.6 if (amount or object_name) else 0.3)
+
         return {
             "is_deal_fact": bool(amount or 'жк' in content.lower() or 'бмк' in content.lower() or 'бтп' in content.lower()),
-            "confidence": 0.6,
-            "object_name": None,
+            "confidence": confidence,
+            "object_name": object_name,
             "company_name": None,
-            "direction": "БМК / БТП" if ('бмк' in content.lower() or 'бтп' in content.lower()) else None,
+            "direction": "БТП" if 'бтп' in content.lower() else ("БМК" if 'бмк' in content.lower() else "БМК / БТП"),
             "contract_number": None,
             "deal_period": None,
             "stage": "in_execution" if "договор" in content.lower() else "qualification",
@@ -157,9 +178,9 @@ class AIService:
             "paid_amount": amount if ('оплачен' in content.lower() or 'поступил' in content.lower()) else None,
             "responsible_name": sender_name,
             "current_action": content[:120],
-            "next_action": None,
+            "next_action": next_action,
             "next_action_at": None,
-            "can_create_deal": False
+            "can_create_deal": can_create
         }
 
     @staticmethod
