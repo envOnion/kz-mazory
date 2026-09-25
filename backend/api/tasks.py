@@ -83,7 +83,7 @@ def create_bitrix_deal_task(project_id: int):
         "current_action": project.current_action,
         "next_action": project.next_action,
         "assigned_by_id": project.manager.bitrix_user_id if project.manager and project.manager.bitrix_user_id else None
-    })
+    }, project=project, triggered_by="qcluster_create_deal_task")
 
     if bitrix_id:
         project.bitrix_id = bitrix_id
@@ -136,7 +136,7 @@ def sync_single_deal_to_bitrix_task(project_id: int):
             f"Блокер: {project.blocker or '—'}"
         )
     }
-    BitrixService.update_deal(deal_id, update_fields)
+    BitrixService.update_deal(deal_id, update_fields, project=project, triggered_by="qcluster_sync_single_deal_task")
 
     # 2. Публикация сводки в таймлайн
     if cfg.sync_timeline_comments and (project.current_action or project.next_action or project.blocker):
