@@ -1,5 +1,7 @@
+from decimal import Decimal
 from django.db import models
 from django.contrib.auth.models import User
+from .deduplication import normalize_deal_name
 
 class UserProfile(models.Model):
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
@@ -14,6 +16,7 @@ class UserProfile(models.Model):
     )
     
     # Personal Sales KPI
+    bitrix_user_id = models.CharField('Bitrix24 User ID', max_length=64, blank=True, null=True, db_index=True)
     monthly_target = models.DecimalField(max_digits=14, decimal_places=2, default=50000000.00)
     current_sales = models.DecimalField(max_digits=14, decimal_places=2, default=31790000.00)
     deals_count = models.IntegerField(default=15)
@@ -106,7 +109,15 @@ class Project(models.Model):
         ('standard', 'Стандартный'),
     ]
 
+    SOURCE_CHOICES = [
+        ('chat', 'WhatsApp Чат'),
+        ('bitrix_crm', 'Bitrix24 CRM'),
+        ('manual', 'Ручной ввод'),
+    ]
+
     name = models.CharField('Название объекта', max_length=255, db_index=True)
+    normalized_name = models.CharField('Каноническое название для дедупликации', max_length=255, db_index=True, blank=True, default='')
+    source = models.CharField('Источник сделки', max_length=32, choices=SOURCE_CHOICES, default='chat')
     bitrix_id = models.CharField('Bitrix24 ID сделки', max_length=64, blank=True, null=True, unique=True)
     contract_number = models.CharField('Номер договора', max_length=255, blank=True, default='')
     deal_period = models.CharField('Период сделки', max_length=128, blank=True, default='')
@@ -116,6 +127,11 @@ class Project(models.Model):
     project_type = models.CharField('Тип заказчика', max_length=32, choices=PROJECT_TYPE_CHOICES, default='private')
     status = models.CharField('Статус сделки', max_length=64, choices=STATUS_CHOICES, default='qualification')
     
+    # Синхронизация с Bitrix24
+    needs_bitrix_sync = models.BooleanField('Требует синхронизации с Bitrix24', default=False, db_index=True)
+    last_chat_activity_at = models.DateTimeField('Время последней активности в чате', null=True, blank=True)
+    last_bitrix_synced_at = models.DateTimeField('Время последней синхронизации с Bitrix24', null=True, blank=True)
+
     # Финансовые показатели (тенге ₸)
     contract_amount = models.DecimalField('Сумма Договора ₸', max_digits=14, decimal_places=2, default=0.00)
     cost_amount = models.DecimalField('Себестоимость ₸', max_digits=14, decimal_places=2, default=0.00)
@@ -154,12 +170,16 @@ class Project(models.Model):
         return (self.contract_amount or 0) - (self.cost_amount or 0)
 
     def save(self, *args, **kwargs):
+        if self.name and not self.normalized_name:
+            self.normalized_name = normalize_deal_name(self.name)
         # Автоматический пересчет маржи и дебиторки
         if self.contract_amount and self.contract_amount > 0:
-            if self.cost_amount is not None:
-                profit = self.contract_amount - self.cost_amount
-                self.actual_margin_percent = round((profit / self.contract_amount) * 100, 2)
-            self.due_amount = max(0, self.contract_amount - (self.paid_amount or 0))
+            contract_dec = Decimal(str(self.contract_amount))
+            cost_dec = Decimal(str(self.cost_amount)) if self.cost_amount is not None else Decimal('0.00')
+            paid_dec = Decimal(str(self.paid_amount)) if self.paid_amount is not None else Decimal('0.00')
+            profit = contract_dec - cost_dec
+            self.actual_margin_percent = round((profit / contract_dec) * 100, 2)
+            self.due_amount = max(Decimal('0.00'), contract_dec - paid_dec)
         super().save(*args, **kwargs)
 
 
@@ -213,6 +233,7 @@ class Commitment(models.Model):
     deadline = models.DateField('Дедлайн', null=True, blank=True)
     status = models.CharField('Статус', max_length=32, choices=STATUS_CHOICES, default='pending')
     severity = models.CharField('Срочность', max_length=16, choices=SEVERITY_CHOICES, default='medium')
+    bitrix_task_id = models.CharField('ID задачи в Bitrix24', max_length=64, blank=True, null=True, db_index=True)
     fulfilled_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
@@ -395,9 +416,14 @@ class BitrixSettings(models.Model):
     webhook_url = models.CharField('REST Webhook URL', max_length=255, default='https://aquakip.bitrix24.kz/rest/148/71vwif5ivu5f4abk/')
     is_active = models.BooleanField('Синхронизация активна', default=True)
     auto_create_deals = models.BooleanField('Авто-создание сделок в Bitrix24', default=True)
+    auto_import_deals = models.BooleanField('Авто-импорт сделок из CRM в Mazory', default=True)
+    hourly_sync_enabled = models.BooleanField('Ежечасная фоновая синхронизация', default=True)
+    auto_create_tasks = models.BooleanField('Создавать задачи в Bitrix24 по дедлайнам', default=True)
+    sync_timeline_comments = models.BooleanField('Публиковать саммари в таймлайн сделки', default=True)
     deal_category_id = models.IntegerField('ID воронки сделок', default=0)
     default_assigned_by_id = models.IntegerField('ID ответственного по умолчанию', default=1)
     last_sync_at = models.DateTimeField('Последняя синхронизация', null=True, blank=True)
+    last_hourly_sync_at = models.DateTimeField('Время последнего запуска диспетчера', null=True, blank=True)
     last_sync_status = models.TextField('Статус последней операции', blank=True, default='')
     updated_at = models.DateTimeField(auto_now=True)
 

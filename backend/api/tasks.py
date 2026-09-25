@@ -6,6 +6,8 @@ from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
 from django.db.models import Q
+from django_q.tasks import async_task
+from .deduplication import normalize_deal_name, get_deal_lock
 
 logger = logging.getLogger(__name__)
 
@@ -56,15 +58,243 @@ def send_sms_verification_code_task(phone: str, code: str):
     logger.info("Отправка OTP-кода подтверждения на номер %s через WAHA", clean)
     return send_waha_whatsapp_message_task(clean, text)
 
+def create_bitrix_deal_task(project_id: int):
+    """
+    Асинхронный воркер Django Q2: Регистрация новой сделки в Bitrix24.
+    Выполняется изолированно, исключая блокировку вебхуков.
+    """
+    from .models import Project, BusinessEvent
+    from .bitrix_service import BitrixService
+
+    try:
+        project = Project.objects.get(id=project_id)
+    except Project.DoesNotExist:
+        return {"status": "not_found", "project_id": project_id}
+
+    if project.bitrix_id:
+        return {"status": "already_has_bitrix_id", "bitrix_id": project.bitrix_id}
+
+    bitrix_id = BitrixService.create_deal({
+        "name": project.name,
+        "contract_amount": project.contract_amount,
+        "direction": project.equipment_type,
+        "deal_period": project.deal_period,
+        "status": project.status,
+        "current_action": project.current_action,
+        "next_action": project.next_action,
+        "assigned_by_id": project.manager.bitrix_user_id if project.manager and project.manager.bitrix_user_id else None
+    })
+
+    if bitrix_id:
+        project.bitrix_id = bitrix_id
+        project.last_bitrix_synced_at = timezone.now()
+        project.needs_bitrix_sync = False
+        project.save(update_fields=['bitrix_id', 'last_bitrix_synced_at', 'needs_bitrix_sync'])
+        logger.info("Project #%d '%s' linked to Bitrix24 deal #%s", project.id, project.name, bitrix_id)
+        return {"status": "created", "bitrix_id": bitrix_id}
+
+    return {"status": "failed_to_create_in_bitrix"}
+
+def sync_single_deal_to_bitrix_task(project_id: int):
+    """
+    Атомарная асинхронная задача в очереди Redis воркеров qcluster:
+    1. Обновляет сделку в Bitrix24 (crm.deal.update).
+    2. Добавляет саммари в таймлайн (crm.timeline.comment.add).
+    3. Создает задачи по выявленным дедлайнам (tasks.task.add).
+    4. Сбрасывает флаг needs_bitrix_sync.
+    """
+    from .models import Project, BitrixSettings
+    from .bitrix_service import BitrixService
+
+    cfg = BitrixSettings.get_active()
+    if not cfg.is_active:
+        return {"status": "bitrix_integration_disabled"}
+
+    try:
+        project = Project.objects.get(id=project_id)
+    except Project.DoesNotExist:
+        return {"status": "project_not_found", "project_id": project_id}
+
+    # Если сделка еще не зарегистрирована в Bitrix24, создаем её
+    if not project.bitrix_id:
+        return create_bitrix_deal_task(project_id)
+
+    deal_id = project.bitrix_id
+
+    # 1. Обновление полей сделки
+    update_fields = {
+        "OPPORTUNITY": float(project.contract_amount or 0.0),
+        "STAGE_ID": BitrixService.status_to_stage(project.status),
+        "UF_CRM_1731131779572": project.name,
+        "UF_CRM_1778166248543": project.equipment_type or "",
+        "UF_CRM_1778164670507": project.deal_period or "",
+        "COMMENTS": (
+            f"<b>Актуальное состояние от Mazory AI:</b><br>"
+            f"Статус: {project.get_status_display()}<br>"
+            f"Текущее действие: {project.current_action or '—'}<br>"
+            f"Следующий шаг: {project.next_action or '—'}<br>"
+            f"Блокер: {project.blocker or '—'}"
+        )
+    }
+    BitrixService.update_deal(deal_id, update_fields)
+
+    # 2. Публикация сводки в таймлайн
+    if cfg.sync_timeline_comments and (project.current_action or project.next_action or project.blocker):
+        next_deadline_str = f" (срок: {project.next_action_at.strftime('%d.%m.%Y')})" if project.next_action_at else ""
+        comment = (
+            f"🤖 <b>[Mazory AI] Сводка из WhatsApp за прошедший час:</b><br>"
+            f"• <b>Последнее действие:</b> {project.current_action or '—'}<br>"
+            f"• <b>Следующий шаг:</b> {project.next_action or '—'}{next_deadline_str}<br>"
+            f"• <b>Блокер / Риск:</b> {project.blocker or 'Отсутствует'}<br>"
+            f"• <b>Оплачено:</b> {project.paid_amount:,.2f} ₸ (Остаток к сбору: {project.due_amount:,.2f} ₸)"
+        )
+        BitrixService.add_timeline_comment(deal_id, comment)
+
+    # 3. Постановка задач в Bitrix24 по несинхронизированным обязательствам
+    created_tasks_count = 0
+    if cfg.auto_create_tasks:
+        unassigned_commitments = project.commitments.filter(bitrix_task_id__isnull=True, status='pending')
+        for comm in unassigned_commitments:
+            deadline_iso = comm.deadline.isoformat() + "T18:00:00+05:00" if comm.deadline else None
+            resp_id = None
+            if comm.manager and comm.manager.bitrix_user_id and comm.manager.bitrix_user_id.isdigit():
+                resp_id = int(comm.manager.bitrix_user_id)
+
+            task_title = f"[Mazory] {comm.commitment_text[:90]}"
+            task_desc = (
+                f"<b>Обязательство зафиксировано из переписки WhatsApp</b><br>"
+                f"Объект: {project.name}<br>"
+                f"Суть задачи: {comm.commitment_text}<br>"
+                f"Дедлайн: {comm.deadline or 'Не указан'}<br>"
+                f"Срочность: {comm.get_severity_display()}"
+            )
+            task_id = BitrixService.create_task(
+                title=task_title,
+                description=task_desc,
+                deadline_iso=deadline_iso,
+                responsible_id=resp_id,
+                deal_id=deal_id
+            )
+            if task_id:
+                comm.bitrix_task_id = task_id
+                comm.save(update_fields=['bitrix_task_id'])
+                created_tasks_count += 1
+
+    # 4. Сброс флага
+    project.needs_bitrix_sync = False
+    project.last_bitrix_synced_at = timezone.now()
+    project.save(update_fields=['needs_bitrix_sync', 'last_bitrix_synced_at'])
+
+    return {
+        "status": "synced",
+        "project_id": project.id,
+        "bitrix_id": deal_id,
+        "created_tasks_count": created_tasks_count
+    }
+
+def import_single_deal_from_bitrix_task(deal_id: str):
+    """
+    Асинхронный воркер импорта сделки из Bitrix24 (например, по вебхуку ONCRMDEALADD).
+    """
+    from .bitrix_service import BitrixService
+    deal_data = BitrixService.get_deal(deal_id)
+    if deal_data:
+        proj = BitrixService.import_or_update_deal_from_bitrix(deal_data)
+        return {"status": "imported", "project_id": proj.id if proj else None, "deal_id": deal_id}
+    return {"status": "not_found", "deal_id": deal_id}
+
+def enqueue_hourly_bitrix_sync_task():
+    """
+    Диспетчер периодической синхронизации (раз в час через Schedule.HOURLY):
+    1. Reconciliation loop: сверка и подтягивание новых/измененных сделок из Bitrix24.
+    2. Поиск всех Project с needs_bitrix_sync=True и раскладка по очереди Redis.
+    """
+    from .models import Project, BitrixSettings
+    from .bitrix_service import BitrixService
+
+    cfg = BitrixSettings.get_active()
+    if not cfg.is_active or not cfg.hourly_sync_enabled:
+        logger.info("Bitrix hourly sync is disabled in settings. Skipping.")
+        return {"status": "disabled"}
+
+    logger.info("Starting hourly Bitrix CRM sync dispatcher...")
+
+    # 1. Страховочный PULL новых/измененных сделок из CRM
+    imported_from_crm = 0
+    if cfg.auto_import_deals:
+        try:
+            # Получаем свежие сделки из Bitrix24 (последние 50)
+            deals = BitrixService.fetch_all_paged("crm.deal.list", {
+                "order": {"DATE_MODIFY": "DESC"},
+                "select": ["ID", "TITLE", "OPPORTUNITY", "STAGE_ID", "COMPANY_ID", "ASSIGNED_BY_ID",
+                           "UF_CRM_1778164670507", "UF_CRM_1731131779572", "UF_CRM_1778166248543",
+                           "DATE_CREATE", "MODIFY_BY_ID"],
+                "limit": 50
+            })
+            for d in deals:
+                bx_id = str(d.get("ID"))
+                # Если такой сделки нет у нас в базе - импортируем
+                if not Project.objects.filter(bitrix_id=bx_id).exists():
+                    BitrixService.import_or_update_deal_from_bitrix(d)
+                    imported_from_crm += 1
+        except Exception as e:
+            logger.error("Failed to pull modified deals from Bitrix24: %s", e)
+
+    # 2. PUSH накопленных обновлений из чата в Bitrix24
+    pending_ids = list(Project.objects.filter(needs_bitrix_sync=True).values_list('id', flat=True))
+    for pid in pending_ids:
+        async_task('api.tasks.sync_single_deal_to_bitrix_task', pid)
+
+    cfg.last_hourly_sync_at = timezone.now()
+    cfg.last_sync_status = f"Успешно: импортировано {imported_from_crm} сделок из CRM, отправлено {len(pending_ids)} задач в очередь Redis"
+    cfg.save(update_fields=['last_hourly_sync_at', 'last_sync_status'])
+
+    logger.info("Hourly sync dispatcher completed. Enqueued %d deals, imported %d from CRM.", len(pending_ids), imported_from_crm)
+    return {
+        "status": "enqueued",
+        "pending_deals_count": len(pending_ids),
+        "imported_from_crm_count": imported_from_crm
+    }
+
+def deduplicate_bitrix_deals_task(dry_run: bool = False):
+    """
+    Фоновая задача очистки дубликатов в Bitrix24.
+    """
+    from .bitrix_service import BitrixService
+    return BitrixService.clean_duplicate_deals(dry_run=dry_run)
+
+def setup_hourly_schedule():
+    """
+    Автоматическая регистрация расписания ежечасного запуска в Django Q2.
+    """
+    try:
+        from django_q.models import Schedule
+        sched, created = Schedule.objects.get_or_create(
+            name="hourly_bitrix_crm_sync",
+            defaults={
+                "func": "api.tasks.enqueue_hourly_bitrix_sync_task",
+                "schedule_type": Schedule.HOURLY,
+                "repeats": -1,
+            }
+        )
+        if created:
+            logger.info("Schedule 'hourly_bitrix_crm_sync' successfully registered in Django Q2.")
+    except Exception as exc:
+        logger.warning("Could not auto-register hourly bitrix sync schedule: %s", exc)
+
 def process_incoming_message_task(message_data: dict):
     """
     Фоновый воркер Django Q2 (Event: Новое сообщение WhatsApp):
     1. Сохраняет RawMessage в PostgreSQL.
-    2. Векторизует через embeddings-модель (OpenRouter LFM-2.5 1024d) и сохраняет в Qdrant.
-    3. Выполняет семантический RAG-поиск в Qdrant по контексту прошлых сообщений.
-    4. Запускает чат-модель (OpenRouter Nemotron-3-Ultra 550b) с полным контекстом.
-    5. Квалифицирует сделку и при достаточности данных создает сделку в БД и Bitrix24 CRM.
-    6. Обновляет обязательства (Commitment), платежи (FinancialRecord) и витрины данных.
+    2. Векторизует через embeddings-модель и сохраняет в Qdrant.
+    3. Выполняет семантический RAG-поиск в Qdrant.
+    4. Запускает чат-модель с контекстом.
+    5. Квалифицирует сделку с ОБЯЗАТЕЛЬНОЙ защитой от дублей:
+       - Redis Lock по нормализованному названию.
+       - Поиск в локальной БД Mazory.
+       - ОБЯЗАТЕЛЬНЫЙ поиск в Bitrix24 CRM перед созданием новой!
+       - Если найдена в CRM — связывает и обновляет, НОВУЮ НЕ СОЗДАЕТ!
+    6. Обновляет обязательства (Commitment) и платежи (FinancialRecord).
     """
     from .models import (
         RawMessage, Project, Commitment, FinancialRecord,
@@ -132,7 +362,7 @@ def process_incoming_message_task(message_data: dict):
 
     logger.info("AI Analysis for message %s: %s", message_id, facts)
 
-    # 5. Обработка сущностей и обновление CRM
+    # 5. Обработка сущностей и обновление CRM с защитой от дублей
     object_name = facts.get("object_name")
     company_name = facts.get("company_name")
     responsible_name = facts.get("responsible_name") or sender_name
@@ -157,80 +387,89 @@ def process_incoming_message_task(message_data: dict):
     project = None
     if object_name and object_name.strip():
         clean_obj_name = object_name.strip()
-        # Ищем проект по неточному совпадению или создаем новый
-        project = Project.objects.filter(name__icontains=clean_obj_name).first()
-        
-        is_new_deal = (project is None)
-        can_create = facts.get("can_create_deal") or (facts.get("confidence", 0) >= 0.7)
+        core_name = normalize_deal_name(clean_obj_name) or clean_obj_name
 
-        if is_new_deal and can_create:
-            project = Project.objects.create(
-                name=clean_obj_name,
-                company=company,
-                manager=manager,
-                equipment_type=facts.get("direction") or facts.get("equipment_type") or "БТП",
-                contract_number=facts.get("contract_number") or "",
-                deal_period=facts.get("deal_period") or "",
-                status=facts.get("stage") or "qualification",
-                contract_amount=Decimal(str(facts.get("contract_amount") or 0.0)),
-                cost_amount=Decimal(str(facts.get("cost_amount") or 0.0)),
-                paid_amount=Decimal(str(facts.get("paid_amount") or 0.0)),
-                barter_amount=Decimal(str(facts.get("barter_amount") or 0.0)),
-                guarantee_amount=Decimal(str(facts.get("guarantee_amount") or 0.0)),
-                avr_status=facts.get("avr_status") or "Не закрыт",
-                current_action=facts.get("current_action") or content[:200],
-                next_action=facts.get("next_action") or "",
-                decision_maker=facts.get("decision_maker") or "",
-                blocker=facts.get("blocker") or "",
-                priority=facts.get("priority") or "standard"
-            )
-            
-            # Синхронизация в Bitrix24 CRM
-            bitrix_id = BitrixService.create_deal({
-                "name": project.name,
-                "contract_amount": project.contract_amount,
-                "direction": project.equipment_type,
-                "deal_period": project.deal_period,
-                "current_action": project.current_action,
-                "next_action": project.next_action,
-            })
-            if bitrix_id:
-                project.bitrix_id = bitrix_id
-                project.save(update_fields=['bitrix_id'])
+        # Блокировка Redis для предотвращения race condition
+        with get_deal_lock(core_name):
+            # Шаг 1: Поиск в локальной БД Mazory
+            project = Project.objects.filter(normalized_name=core_name).first()
+            if not project:
+                project = Project.objects.filter(name__icontains=clean_obj_name).first()
 
-            # Бизнес-событие и уведомление
-            event_title = f"Создана новая сделка: {project.name}"
-            BusinessEvent.objects.create(
-                event_type="new_deal",
-                project=project,
-                manager=manager,
-                title=event_title,
-                description=f"Сумма: {project.contract_amount:,.2f} ₸. Менеджер: {responsible_name}",
-                severity="info"
-            )
-            push_notification_to_redis(sender_phone, event_title, f"Сделка {project.name} успешно зарегистрирована в системе и Bitrix24", "deal")
+            # Шаг 2: Если в локальной БД сделки нет — ОБЯЗАТЕЛЬНО проверяем в CRM Bitrix24!
+            if not project:
+                crm_deal = BitrixService.find_deal_by_name(clean_obj_name)
+                if crm_deal:
+                    logger.info("Anti-Duplicate: Found existing deal #%s in Bitrix24 for '%s'. Importing.", crm_deal.get("ID"), clean_obj_name)
+                    project = BitrixService.import_or_update_deal_from_bitrix(crm_deal)
 
-        elif project:
-            # Обновление существующей сделки (не затираем существующие данные пустыми значениями)
-            if facts.get("contract_amount"):
-                project.contract_amount = Decimal(str(facts["contract_amount"]))
-            if facts.get("cost_amount"):
-                project.cost_amount = Decimal(str(facts["cost_amount"]))
-            if facts.get("paid_amount"):
-                project.paid_amount += Decimal(str(facts["paid_amount"]))
-            if facts.get("stage"):
-                project.status = facts["stage"]
-            if facts.get("current_action"):
-                project.current_action = facts["current_action"]
-            if facts.get("next_action"):
-                project.next_action = facts["next_action"]
-            if facts.get("blocker"):
-                project.blocker = facts["blocker"]
-            if company and not project.company:
-                project.company = company
-            if manager and not project.manager:
-                project.manager = manager
-            project.save()
+            can_create = facts.get("can_create_deal") or (facts.get("confidence", 0) >= 0.7)
+
+            if not project and can_create:
+                # Сделки гарантированно нет ни в локальной базе, ни в CRM Bitrix24
+                project = Project.objects.create(
+                    name=clean_obj_name,
+                    normalized_name=core_name,
+                    source='chat',
+                    company=company,
+                    manager=manager,
+                    equipment_type=facts.get("direction") or facts.get("equipment_type") or "БТП",
+                    contract_number=facts.get("contract_number") or "",
+                    deal_period=facts.get("deal_period") or "",
+                    status=facts.get("stage") or "qualification",
+                    contract_amount=Decimal(str(facts.get("contract_amount") or 0.0)),
+                    cost_amount=Decimal(str(facts.get("cost_amount") or 0.0)),
+                    paid_amount=Decimal(str(facts.get("paid_amount") or 0.0)),
+                    barter_amount=Decimal(str(facts.get("barter_amount") or 0.0)),
+                    guarantee_amount=Decimal(str(facts.get("guarantee_amount") or 0.0)),
+                    avr_status=facts.get("avr_status") or "Не закрыт",
+                    current_action=facts.get("current_action") or content[:200],
+                    next_action=facts.get("next_action") or "",
+                    decision_maker=facts.get("decision_maker") or "",
+                    blocker=facts.get("blocker") or "",
+                    priority=facts.get("priority") or "standard",
+                    needs_bitrix_sync=False
+                )
+
+                # Асинхронное создание в Bitrix24 через очередь Redis
+                async_task('api.tasks.create_bitrix_deal_task', project.id)
+
+                event_title = f"Создана новая сделка: {project.name}"
+                BusinessEvent.objects.create(
+                    event_type="new_deal",
+                    project=project,
+                    manager=manager,
+                    title=event_title,
+                    description=f"Сумма: {project.contract_amount:,.2f} ₸. Менеджер: {responsible_name}",
+                    severity="info"
+                )
+                push_notification_to_redis(sender_phone, event_title, f"Сделка {project.name} зарегистрирована в системе и отправлена в Bitrix24", "deal")
+
+            elif project:
+                # Обновление существующей сделки и выставление флага needs_bitrix_sync
+                if facts.get("contract_amount"):
+                    project.contract_amount = Decimal(str(facts["contract_amount"]))
+                if facts.get("cost_amount"):
+                    project.cost_amount = Decimal(str(facts["cost_amount"]))
+                if facts.get("paid_amount"):
+                    project.paid_amount += Decimal(str(facts["paid_amount"]))
+                if facts.get("stage"):
+                    project.status = facts["stage"]
+                if facts.get("current_action"):
+                    project.current_action = facts["current_action"]
+                if facts.get("next_action"):
+                    project.next_action = facts["next_action"]
+                if facts.get("blocker"):
+                    project.blocker = facts["blocker"]
+                if company and not project.company:
+                    project.company = company
+                if manager and not project.manager:
+                    project.manager = manager
+                
+                project.needs_bitrix_sync = True
+                project.last_chat_activity_at = timezone.now()
+                project.save()
+                logger.info("Project #%d '%s' updated from chat and marked for Bitrix sync", project.id, project.name)
 
     # Обязательства / Обещания менеджеров (Commitment)
     next_action = facts.get("next_action")
@@ -252,7 +491,8 @@ def process_incoming_message_task(message_data: dict):
             commitment_text=next_action,
             deadline=deadline,
             status='pending',
-            severity='critical' if ('срочно' in content.lower() or 'договор' in next_action.lower()) else 'medium'
+            severity='critical' if ('срочно' in content.lower() or 'договор' in next_action.lower()) else 'medium',
+            bitrix_task_id=None
         )
 
     # Финансовые записи (FinancialRecord)

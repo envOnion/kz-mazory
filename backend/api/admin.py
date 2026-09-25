@@ -36,13 +36,13 @@ class CompanyAdmin(ModelAdmin):
 @admin.register(Project)
 class ProjectAdmin(ModelAdmin):
     list_display = (
-        'name', 'company', 'manager', 'contract_amount_fmt',
+        'name', 'source', 'company', 'manager', 'contract_amount_fmt',
         'paid_amount_fmt', 'due_amount_fmt', 'margin_badge',
-        'status', 'priority', 'bitrix_link'
+        'status', 'needs_bitrix_sync', 'priority', 'bitrix_link'
     )
-    list_filter = ('status', 'priority', 'project_type', 'manager')
-    search_fields = ('name', 'contract_number', 'company__name', 'decision_maker', 'bitrix_id')
-    readonly_fields = ('actual_margin_percent', 'due_amount', 'created_at', 'updated_at')
+    list_filter = ('source', 'needs_bitrix_sync', 'status', 'priority', 'project_type', 'manager')
+    search_fields = ('name', 'normalized_name', 'contract_number', 'company__name', 'decision_maker', 'bitrix_id')
+    readonly_fields = ('normalized_name', 'actual_margin_percent', 'due_amount', 'created_at', 'updated_at')
 
     def contract_amount_fmt(self, obj):
         return f"{obj.contract_amount:,.2f} ₸" if obj.contract_amount else "—"
@@ -77,9 +77,9 @@ class ProjectAdmin(ModelAdmin):
 
 @admin.register(Commitment)
 class CommitmentAdmin(ModelAdmin):
-    list_display = ('commitment_text_snippet', 'project', 'manager', 'deadline', 'status_badge', 'severity')
+    list_display = ('commitment_text_snippet', 'project', 'manager', 'deadline', 'bitrix_task_id', 'status_badge', 'severity')
     list_filter = ('status', 'severity', 'manager')
-    search_fields = ('commitment_text', 'counterparty_person', 'project__name')
+    search_fields = ('commitment_text', 'counterparty_person', 'project__name', 'bitrix_task_id')
 
     def commitment_text_snippet(self, obj):
         return (obj.commitment_text[:60] + '...') if len(obj.commitment_text) > 60 else obj.commitment_text
@@ -223,9 +223,12 @@ class AISettingsAdmin(ModelAdmin):
 
 @admin.register(BitrixSettings)
 class BitrixSettingsAdmin(ModelAdmin):
-    list_display = ('name', 'webhook_url_masked', 'is_active', 'auto_create_deals', 'last_sync_at', 'updated_at')
-    list_editable = ('is_active', 'auto_create_deals')
-    actions = ['test_bitrix_connection']
+    list_display = (
+        'name', 'webhook_url_masked', 'is_active', 'hourly_sync_enabled',
+        'auto_import_deals', 'auto_create_tasks', 'last_hourly_sync_at', 'updated_at'
+    )
+    list_editable = ('is_active', 'hourly_sync_enabled', 'auto_import_deals', 'auto_create_tasks')
+    actions = ['test_bitrix_connection', 'run_hourly_sync_now', 'run_deduplication_now']
 
     def webhook_url_masked(self, obj):
         if not obj.webhook_url:
@@ -250,3 +253,22 @@ class BitrixSettingsAdmin(ModelAdmin):
                     messages.error(request, f"Битрикс24 ошибка: HTTP {res.status_code}")
             except Exception as e:
                 messages.error(request, f"Не удалось связаться с Битрикс24: {e}")
+
+    @action(description="Запустить синхронизацию очереди прямо сейчас (Django Q2)")
+    def run_hourly_sync_now(self, request, queryset):
+        from .tasks import enqueue_hourly_bitrix_sync_task
+        from django_q.tasks import async_task
+        task_id = async_task(enqueue_hourly_bitrix_sync_task)
+        messages.success(request, f"Синхронизация поставлена в очередь Redis (Task ID: {task_id}).")
+
+    @action(description="Найти и устранить дубликаты сделок в Bitrix24 (Deduplicate)")
+    def run_deduplication_now(self, request, queryset):
+        from .bitrix_service import BitrixService
+        try:
+            report = BitrixService.clean_duplicate_deals(dry_run=False)
+            deleted = report.get("deleted_count", 0)
+            groups = report.get("duplicate_groups_count", 0)
+            messages.success(request, f"Дедупликация завершена: найдено {groups} групп дублей, удалено {deleted} лишних сделок в Bitrix24.")
+        except Exception as e:
+            messages.error(request, f"Ошибка дедупликации: {e}")
+

@@ -274,3 +274,33 @@ class ProjectListView(ListAPIView):
     permission_classes = [AllowAny]
     queryset = Project.objects.all().select_related('company', 'manager').order_by('-contract_amount')
     serializer_class = ProjectSerializer
+
+
+class BitrixWebhookView(APIView):
+    """
+    Входящий вебхук от Bitrix24 CRM (события ONCRMDEALADD, ONCRMDEALUPDATE):
+    1. Немедленно возвращает HTTP 200 OK (без задержек для Bitrix24).
+    2. Передает задачу импорта/обновления сделки в персистентную очередь Redis воркера Django Q2.
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        event = request.data.get('event') or request.query_params.get('event', '')
+        deal_id = (
+            request.data.get('data[FIELDS][ID]') or
+            (request.data.get('data', {}).get('FIELDS', {}).get('ID') if isinstance(request.data.get('data'), dict) else None) or
+            request.data.get('id') or
+            request.query_params.get('id')
+        )
+
+        if not deal_id:
+            return Response({"status": "ignored", "reason": "no_deal_id"}, status=status.HTTP_200_OK)
+
+        task_id = async_task('api.tasks.import_single_deal_from_bitrix_task', str(deal_id))
+        return Response({
+            "status": "queued",
+            "event": event,
+            "deal_id": str(deal_id),
+            "task_id": task_id
+        }, status=status.HTTP_200_OK)
+

@@ -91,10 +91,10 @@
     <div class="p-6 rounded-2xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 shadow-sm">
       <div class="text-xs font-semibold uppercase tracking-wider text-gray-400">Подключенный аккаунт</div>
       <div class="mt-2 text-lg font-bold text-gray-900 dark:text-white">
-        {{ me.pushName|default:me.id|default:"Не авторизован" }}
+        {% if me %}{{ me.pushName|default:me.id }}{% else %}Не авторизован{% endif %}
       </div>
       <div class="mt-1 text-xs text-gray-500">
-        JID: {{ me.id|default:"—" }}
+        JID: {% if me %}{{ me.id }}{% else %}—{% endif %}
       </div>
     </div>
   </div>
