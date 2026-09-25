@@ -2,111 +2,8 @@
   <div class="space-y-6">
     <div>
       <h3 class="text-base font-semibold text-white">Каналы связи и уведомления</h3>
-      <p class="text-xs text-slate-400 mt-0.5">Управление локальной доставкой отчетов и алертов через WAHA</p>
+      <p class="text-xs text-slate-400 mt-0.5">Настройка персональных алертов и сводок в WhatsApp</p>
     </div>
-
-    <!-- Status Banner & Live QR Code for WAHA -->
-    <div class="p-4 rounded-2xl bg-[#0e1633]/70 border border-[#2d3a63]/40 space-y-3">
-      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-        <div class="flex items-center gap-3">
-          <div
-            class="w-2.5 h-2.5 rounded-full shrink-0"
-            :class="{
-              'bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.8)]': wahaStatus === 'WORKING',
-              'bg-amber-400 shadow-[0_0_8px_rgba(251,191,36,0.8)] animate-pulse': wahaStatus === 'SCAN_QR_CODE',
-              'bg-slate-500': wahaStatus !== 'WORKING' && wahaStatus !== 'SCAN_QR_CODE'
-            }"
-          ></div>
-          <div>
-            <div class="text-xs font-semibold text-white flex items-center gap-2 flex-wrap">
-              <span>WAHA (WhatsApp HTTP API)</span>
-              <span
-                class="px-2 py-0.2 rounded-full text-[10px] font-medium"
-                :class="{
-                  'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30': wahaStatus === 'WORKING',
-                  'bg-amber-500/20 text-amber-300 border border-amber-500/30': wahaStatus === 'SCAN_QR_CODE',
-                  'bg-slate-700 text-slate-300': wahaStatus !== 'WORKING' && wahaStatus !== 'SCAN_QR_CODE'
-                }"
-              >
-                {{ wahaStatus === 'WORKING' ? 'Подключен' : wahaStatus === 'SCAN_QR_CODE' ? 'Ожидает скан QR' : wahaStatus }}
-              </span>
-            </div>
-            <div class="text-[11px] text-slate-400 mt-0.5">
-              {{ wahaStatus === 'WORKING' ? `Привязан номер: +${wahaUserPhone}` : 'Локальный микросервис без сторонних API (порт 3000)' }}
-            </div>
-          </div>
-        </div>
-
-        <div class="flex items-center gap-2 self-start sm:self-center">
-          <button
-            type="button"
-            @click="toggleQrView"
-            class="px-3 py-1.5 rounded-xl bg-cyan-600/25 border border-cyan-400/40 hover:bg-cyan-600 text-white text-xs font-medium transition-all cursor-pointer flex items-center gap-1.5"
-          >
-            <QrCode class="w-3.5 h-3.5 text-cyan-300" />
-            <span>{{ isQrVisible ? 'Скрыть QR' : 'QR-код WhatsApp' }}</span>
-          </button>
-          <a
-            href="http://localhost:3000/dashboard"
-            target="_blank"
-            class="text-xs text-indigo-400 hover:text-indigo-300 font-medium underline flex items-center gap-1"
-            title="Логин: admin / Пароль: mazory2026"
-          >
-            <span>Панель WAHA</span>
-            <ExternalLink class="w-3 h-3" />
-          </a>
-        </div>
-      </div>
-
-      <!-- Live QR Code Card -->
-      <div
-        v-if="isQrVisible"
-        class="mt-3 p-4 rounded-xl bg-[#090f22]/90 border border-cyan-500/30 flex flex-col sm:flex-row items-center gap-5"
-      >
-        <div class="p-2.5 rounded-xl bg-white shadow-[0_0_25px_rgba(34,211,238,0.35)] shrink-0 flex items-center justify-center">
-          <img
-            v-if="qrBase64"
-            :src="qrBase64"
-            alt="WhatsApp QR Code"
-            class="w-48 h-48 rounded object-contain"
-          />
-          <div v-else class="w-48 h-48 flex flex-col items-center justify-center text-slate-700 text-xs text-center p-2">
-            <RefreshCw class="w-6 h-6 animate-spin text-cyan-600 mb-2" />
-            <span class="font-medium">Генерация QR-кода...</span>
-          </div>
-        </div>
-
-        <div class="flex-1 space-y-2 text-left">
-          <div class="text-xs font-bold text-white flex items-center gap-1.5">
-            <Smartphone class="w-4 h-4 text-cyan-400" />
-            <span>Как подключить WhatsApp к Mazory:</span>
-          </div>
-          <ol class="text-[11px] text-slate-300 space-y-1 list-decimal list-inside leading-relaxed">
-            <li>Откройте WhatsApp на телефоне</li>
-            <li>Перейдите в <strong class="text-white font-semibold">Настройки → Связанные устройства</strong></li>
-            <li>Нажмите <strong class="text-white font-semibold">Привязка устройства</strong> и наведите камеру на QR-код</li>
-          </ol>
-          <p class="text-[10px] text-slate-400 leading-normal pt-1">
-            Код WhatsApp Web активен 1-2 минуты. При завершении времени нажмите кнопку обновления.
-          </p>
-          <div class="pt-1 flex items-center gap-2 flex-wrap">
-            <button
-              type="button"
-              @click="refreshQr"
-              :disabled="isLoadingQr"
-              class="px-3 py-1.5 rounded-lg bg-cyan-600/30 border border-cyan-400/50 hover:bg-cyan-600/50 text-cyan-200 text-xs font-medium transition-all cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
-            >
-              <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': isLoadingQr }" />
-              <span>Обновить QR-код</span>
-            </button>
-            <span class="text-[10px] text-slate-500">
-              Вход в WAHA Dashboard: admin / mazory2026
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-
 
     <!-- Toggles List -->
     <div class="space-y-3">
@@ -155,7 +52,7 @@
       <div class="flex items-center gap-2">
         <Send class="w-4 h-4 text-cyan-400" />
         <h4 class="text-xs font-bold text-white uppercase tracking-wider">
-          Адресная отправка уведомления сотруднику (Django Q & Redis)
+          Адресная отправка уведомления сотруднику
         </h4>
       </div>
       <p class="text-[11px] text-slate-400 leading-relaxed">
@@ -254,7 +151,7 @@
               type="checkbox"
               class="w-4 h-4 accent-emerald-500 rounded cursor-pointer"
             />
-            <span>Продублировать в WhatsApp через WAHA</span>
+            <span>Продублировать в WhatsApp</span>
           </label>
 
           <button
@@ -264,7 +161,7 @@
             class="px-4 py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-white text-xs font-semibold shadow-[0_0_15px_rgba(6,182,212,0.4)] transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed shrink-0 flex items-center gap-1.5 justify-center"
           >
             <Send class="w-3.5 h-3.5" />
-            <span>{{ isDispatching ? 'Отправка в очередь...' : 'Отправить через Django Q' }}</span>
+            <span>{{ isDispatching ? 'Отправка...' : 'Отправить уведомление' }}</span>
           </button>
         </div>
 
@@ -297,70 +194,13 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref, watch, onMounted, onUnmounted } from 'vue'
-import { Send, QrCode, RefreshCw, Smartphone, ExternalLink } from 'lucide-vue-next'
+import { reactive, ref, watch } from 'vue'
+import { Send } from 'lucide-vue-next'
 import { useProfile } from '../../composables/useProfile'
 import { useNotifications } from '../../composables/useNotifications'
 
-const API_BASE = import.meta.env?.VITE_API_URL || '/api'
-
 const { profile, isSaving, saveMessage, updateProfile } = useProfile()
 const { dispatchNotification } = useNotifications()
-
-// WAHA QR & Connection State
-const wahaStatus = ref('SCAN_QR_CODE')
-const wahaUserPhone = ref('')
-const isQrVisible = ref(false)
-const qrBase64 = ref('')
-const isLoadingQr = ref(false)
-let wahaPollingInterval: number | null = null
-
-async function checkWahaStatus() {
-  try {
-    const res = await fetch(`${API_BASE}/whatsapp/status/`)
-    if (res.ok) {
-      const data = await res.json()
-      wahaStatus.value = data.status || 'STOPPED'
-      if (data.me?.id) {
-        wahaUserPhone.value = data.me.id.split('@')[0]
-      }
-    }
-  } catch (e) {
-    console.error('Failed to check WAHA status:', e)
-  }
-}
-
-async function refreshQr() {
-  isLoadingQr.value = true
-  try {
-    const res = await fetch(`${API_BASE}/whatsapp/qr/?format=json`)
-    if (res.ok) {
-      const data = await res.json()
-      qrBase64.value = data.qr_base64
-      wahaStatus.value = data.status
-    }
-  } catch (e) {
-    console.error('Failed to fetch WAHA QR:', e)
-  } finally {
-    isLoadingQr.value = false
-  }
-}
-
-function toggleQrView() {
-  isQrVisible.value = !isQrVisible.value
-  if (isQrVisible.value && !qrBase64.value) {
-    refreshQr()
-  }
-}
-
-onMounted(() => {
-  checkWahaStatus()
-  wahaPollingInterval = window.setInterval(checkWahaStatus, 4000)
-})
-
-onUnmounted(() => {
-  if (wahaPollingInterval) clearInterval(wahaPollingInterval)
-})
 
 const form = reactive({
   whatsapp_daily_digest: profile.value.whatsapp_daily_digest,
@@ -431,7 +271,7 @@ async function handleDispatch() {
 
     if (res.status === 'success') {
       dispatchStatusType.value = 'success'
-      dispatchStatusMessage.value = `✓ Уведомление доставлено в очередь Django Q & Redis для ${dispatchForm.phone || profile.value.phone}`
+      dispatchStatusMessage.value = `✓ Уведомление успешно отправлено для ${dispatchForm.phone || profile.value.phone}`
       dispatchForm.title = ''
       dispatchForm.message = ''
     } else {
