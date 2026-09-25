@@ -2,7 +2,7 @@ import logging
 from rest_framework.views import APIView
 from rest_framework.generics import ListAPIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework import status
 from django_q.tasks import async_task
 from django.utils import timezone
@@ -59,7 +59,7 @@ class ChatQueryView(APIView):
     2. Извлекает выверенные данные из Data Mart или первоисточники из Qdrant.
     3. Возвращает ответ и спецификацию UI-виджета для динамического рендеринга на Vue 3.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         prompt = request.data.get("prompt", "").strip()

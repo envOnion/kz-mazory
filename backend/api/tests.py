@@ -4,6 +4,7 @@ from decimal import Decimal
 from django.test import TestCase, Client
 from django.contrib.auth.models import User
 from django.utils import timezone
+from rest_framework_simplejwt.tokens import RefreshToken
 from api.models import (
     UserProfile, Company, Project, RawMessage, Commitment,
     WhatsAppConfig, AISettings, BitrixSettings
@@ -32,6 +33,9 @@ class TestApiEndpoints(TestCase):
             cost_amount=Decimal('35000000.00'),
             status='qualification'
         )
+        self.refresh = RefreshToken.for_user(self.user)
+        self.access_token = str(self.refresh.access_token)
+        self.auth_headers = {'HTTP_AUTHORIZATION': f'Bearer {self.access_token}'}
 
     def test_kpi_summary(self):
         response = self.client.get('/api/kpi/summary/')
@@ -51,11 +55,20 @@ class TestApiEndpoints(TestCase):
         self.assertGreaterEqual(len(data), 1)
         self.assertEqual(data[0]['name'], 'ЖК Тестовый Объект')
 
-    def test_chat_query_chart(self):
+    def test_chat_query_unauthorized(self):
         response = self.client.post(
             '/api/chat/query/',
             data=json.dumps({'prompt': 'Покажи график продаж'}),
             content_type='application/json'
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_chat_query_chart(self):
+        response = self.client.post(
+            '/api/chat/query/',
+            data=json.dumps({'prompt': 'Покажи график продаж'}),
+            content_type='application/json',
+            **self.auth_headers
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -65,7 +78,8 @@ class TestApiEndpoints(TestCase):
         response = self.client.post(
             '/api/chat/query/',
             data=json.dumps({'prompt': 'Какие обещания и дедлайны горят?'}),
-            content_type='application/json'
+            content_type='application/json',
+            **self.auth_headers
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -75,7 +89,8 @@ class TestApiEndpoints(TestCase):
         response = self.client.post(
             '/api/chat/query/',
             data=json.dumps({'prompt': 'Покажи воронку проектов'}),
-            content_type='application/json'
+            content_type='application/json',
+            **self.auth_headers
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
@@ -85,7 +100,8 @@ class TestApiEndpoints(TestCase):
         response = self.client.post(
             '/api/chat/query/',
             data=json.dumps({'prompt': 'Покажи KPI команды менеджеров'}),
-            content_type='application/json'
+            content_type='application/json',
+            **self.auth_headers
         )
         self.assertEqual(response.status_code, 200)
         data = response.json()
