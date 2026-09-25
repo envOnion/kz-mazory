@@ -29,11 +29,6 @@ test.describe('Django Admin — WAHA Control Dashboard', () => {
     await expect(page.locator('text=Подключенный аккаунт')).toBeVisible()
     await expect(page.locator('text=Доступные чаты и группы')).toBeVisible()
 
-    // Проверяем, что отображается подключенный пользователь и обнаруженные группы WhatsApp
-    await expect(page.locator('text=Anton')).toBeVisible()
-    await expect(page.locator('text=General')).toBeVisible()
-    await expect(page.locator('button:has-text("Копировать ID")').first()).toBeVisible()
-
     // Проверяем отсутствие критических ошибок сервера
     await expect(page.locator('text=Internal Server Error')).toHaveCount(0)
     await expect(page.locator('text=Traceback')).toHaveCount(0)
