@@ -59,9 +59,10 @@ class ProjectAdmin(ModelAdmin):
     def margin_badge(self, obj):
         margin = float(obj.actual_margin_percent or 0)
         color = "emerald" if margin >= 20 else ("amber" if margin >= 15 else "rose")
+        margin_str = f"{margin:.1f}%"
         return format_html(
-            '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-{}-500/10 text-{}-500">{:.1f}%</span>',
-            color, color, margin
+            '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-{}-500/10 text-{}-500">{}</span>',
+            color, color, margin_str
         )
     margin_badge.short_description = "Маржа"
 
