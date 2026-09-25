@@ -8,7 +8,7 @@ test.describe('Django Admin — WAHA Control Dashboard', () => {
     // 2. Если требуется логин — авторизуемся под admin
     if (page.url().includes('/admin/login/')) {
       await page.locator('input[name="username"]').fill('admin')
-      await page.locator('input[name="password"]').fill('admin2026')
+      await page.locator('input[name="password"]').fill('mazory2026')
       await page.locator('button[type="submit"], input[type="submit"]').click()
     }
 
