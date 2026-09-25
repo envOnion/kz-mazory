@@ -5,6 +5,8 @@ from django.test import TestCase, Client
 from django.contrib.auth.models import User
 from django.utils import timezone
 from rest_framework_simplejwt.tokens import RefreshToken
+from django.contrib.admin.sites import AdminSite
+from api.admin import RawMessageAdmin
 from api.models import (
     UserProfile, Company, Project, RawMessage, Commitment,
     WhatsAppConfig, AISettings, BitrixSettings
@@ -249,3 +251,38 @@ class TestBitrixIntegrationLiveSafe(TestCase):
             delete_ok = BitrixService.delete_deal(deal_id)
             self.assertTrue(delete_ok, f"BitrixService.delete_deal({deal_id}) должен успешно удалить сделку")
             logger.info("Successfully cleaned up test Bitrix deal ID: %s", deal_id)
+
+
+class TestRawMessageAdmin(TestCase):
+    def setUp(self):
+        self.site = AdminSite()
+        self.admin = RawMessageAdmin(RawMessage, self.site)
+        self.admin_user = User.objects.create_superuser(
+            username='admin_test',
+            email='admin@example.com',
+            password='admin_password_123'
+        )
+        self.client = Client()
+
+    def test_processed_badge_rendering(self):
+        msg_processed = RawMessage(content="Тестовое сообщение 1", processed=True)
+        badge_processed = self.admin.processed_badge(msg_processed)
+        self.assertIn("✓ Обработано", badge_processed)
+        self.assertIn("bg-emerald-500/10", badge_processed)
+
+        msg_pending = RawMessage(content="Тестовое сообщение 2", processed=False)
+        badge_pending = self.admin.processed_badge(msg_pending)
+        self.assertIn("Ожидает", badge_pending)
+        self.assertIn("bg-amber-500/10", badge_pending)
+
+    def test_rawmessage_changelist_view(self):
+        now = timezone.now()
+        RawMessage.objects.create(message_id="msg_001", sender_name="Иван", content="Привет", timestamp=now, processed=True)
+        RawMessage.objects.create(message_id="msg_002", sender_name="Олег", content="Запрос", timestamp=now, processed=False)
+
+        self.client.force_login(self.admin_user)
+        response = self.client.get('/admin/api/rawmessage/')
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "✓ Обработано")
+        self.assertContains(response, "Ожидает")
+

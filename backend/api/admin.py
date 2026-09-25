@@ -124,8 +124,14 @@ class RawMessageAdmin(ModelAdmin):
 
     def processed_badge(self, obj):
         if obj.processed:
-            return format_html('<span class="text-emerald-500 font-bold">✓ Обработано</span>')
-        return format_html('<span class="text-amber-500 font-bold">Ожидает</span>')
+            return format_html(
+                '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-emerald-500/10 text-emerald-500">{}</span>',
+                '✓ Обработано'
+            )
+        return format_html(
+            '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-amber-500/10 text-amber-500">{}</span>',
+            'Ожидает'
+        )
     processed_badge.short_description = "Статус обработки"
 
 
