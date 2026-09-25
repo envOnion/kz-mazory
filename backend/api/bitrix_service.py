@@ -1,9 +1,10 @@
 import logging
+import time
 from decimal import Decimal
 from typing import Dict, Any, Optional, List
 import requests
 from django.utils import timezone
-from api.models import BitrixSettings, Project, Company, UserProfile, BusinessEvent
+from api.models import BitrixSettings, Project, Company, UserProfile, BusinessEvent, BitrixDealChangeLog
 from api.deduplication import normalize_deal_name
 
 logger = logging.getLogger(__name__)
@@ -117,10 +118,48 @@ class BitrixService:
             return None
 
     @staticmethod
-    def create_deal(project_data: Dict[str, Any]) -> Optional[str]:
+    def _record_deal_log(
+        action: str,
+        bitrix_deal_id: str,
+        payload: Dict[str, Any],
+        response_data: Optional[Dict[str, Any]] = None,
+        error_message: str = "",
+        status: str = "success",
+        project: Optional[Any] = None,
+        duration_ms: int = 0,
+        triggered_by: str = "system",
+    ):
+        """
+        Сохраняет запись аудита отправленных в Bitrix24 изменений сделки.
+        Ошибки записи не прерывают основной процесс интеграции.
+        """
+        try:
+            if project is None and bitrix_deal_id:
+                project = Project.objects.filter(bitrix_id=str(bitrix_deal_id)).first()
+
+            changed_fields = list(payload.keys()) if isinstance(payload, dict) else []
+
+            BitrixDealChangeLog.objects.create(
+                project=project,
+                bitrix_deal_id=str(bitrix_deal_id or ""),
+                action=action,
+                status=status,
+                payload=payload or {},
+                response_data=response_data or {},
+                changed_fields=changed_fields,
+                error_message=error_message,
+                duration_ms=duration_ms,
+                triggered_by=triggered_by,
+            )
+        except Exception as log_err:
+            logger.error("Failed to record Bitrix deal change audit log: %s", log_err)
+
+    @staticmethod
+    def create_deal(project_data: Dict[str, Any], project: Optional[Any] = None, triggered_by: str = "system") -> Optional[str]:
         """
         Создает сделку в Bitrix24 CRM через crm.deal.add.
         Перед созданием ПРОВЕРЯЕТ наличие сделки, чтобы исключить дубли.
+        Все отправленные изменения логируются в BitrixDealChangeLog.
         """
         cfg = BitrixSettings.get_active()
         if not cfg.is_active or not cfg.auto_create_deals:
@@ -152,30 +191,83 @@ class BitrixService:
             "COMMENTS": f"Автоматически создано Mazory AI из WhatsApp чата.<br>Действие: {project_data.get('current_action') or ''}<br>Следующий шаг: {project_data.get('next_action') or ''}"
         }
 
+        t0 = time.time()
         try:
             resp = BitrixService.call("crm.deal.add", {"fields": fields})
             deal_id = str(resp.get("result"))
+            duration_ms = int((time.time() - t0) * 1000)
             logger.info("Bitrix deal successfully created with ID: %s", deal_id)
+            BitrixService._record_deal_log(
+                action="create",
+                bitrix_deal_id=deal_id,
+                payload=fields,
+                response_data=resp,
+                status="success",
+                project=project,
+                duration_ms=duration_ms,
+                triggered_by=triggered_by,
+            )
             return deal_id
         except Exception as e:
+            duration_ms = int((time.time() - t0) * 1000)
             logger.error("Failed to create deal in Bitrix: %s", e)
+            BitrixService._record_deal_log(
+                action="create",
+                bitrix_deal_id="",
+                payload=fields,
+                error_message=str(e),
+                status="error",
+                project=project,
+                duration_ms=duration_ms,
+                triggered_by=triggered_by,
+            )
             return None
 
     @staticmethod
-    def update_deal(deal_id: str, fields_to_update: Dict[str, Any]) -> bool:
+    def update_deal(
+        deal_id: str,
+        fields_to_update: Dict[str, Any],
+        project: Optional[Any] = None,
+        triggered_by: str = "system"
+    ) -> bool:
         """
         Обновляет существующую сделку в Bitrix24 CRM (crm.deal.update).
+        Все отправленные изменения логируются в BitrixDealChangeLog.
         """
+        t0 = time.time()
         try:
             resp = BitrixService.call("crm.deal.update", {
                 "id": deal_id,
                 "fields": fields_to_update
             })
             ok = bool(resp.get("result"))
+            duration_ms = int((time.time() - t0) * 1000)
             logger.info("Bitrix deal %s updated successfully: %s", deal_id, ok)
+            BitrixService._record_deal_log(
+                action="update",
+                bitrix_deal_id=str(deal_id),
+                payload=fields_to_update,
+                response_data=resp,
+                status="success" if ok else "error",
+                error_message="" if ok else "Bitrix returned false for crm.deal.update",
+                project=project,
+                duration_ms=duration_ms,
+                triggered_by=triggered_by,
+            )
             return ok
         except Exception as e:
+            duration_ms = int((time.time() - t0) * 1000)
             logger.error("Failed to update deal %s in Bitrix24: %s", deal_id, e)
+            BitrixService._record_deal_log(
+                action="update",
+                bitrix_deal_id=str(deal_id),
+                payload=fields_to_update,
+                error_message=str(e),
+                status="error",
+                project=project,
+                duration_ms=duration_ms,
+                triggered_by=triggered_by,
+            )
             return False
 
     @staticmethod

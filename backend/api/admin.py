@@ -1,13 +1,15 @@
+import json
+import requests
 from django.contrib import admin
 from django.utils.html import format_html
 from django.contrib import messages
-import requests
-from unfold.admin import ModelAdmin
+from unfold.admin import ModelAdmin, TabularInline
 from unfold.decorators import action
 
 from api.models import (
     UserProfile, Company, Project, RawMessage, Commitment,
-    FinancialRecord, BusinessEvent, WhatsAppConfig, AISettings, BitrixSettings
+    FinancialRecord, BusinessEvent, WhatsAppConfig, AISettings, BitrixSettings,
+    BitrixDealChangeLog
 )
 
 @admin.register(UserProfile)
@@ -33,6 +35,59 @@ class CompanyAdmin(ModelAdmin):
     search_fields = ('name', 'contact_person', 'phone', 'bitrix_company_id')
 
 
+class BitrixDealChangeLogInLine(TabularInline):
+    model = BitrixDealChangeLog
+    extra = 0
+    can_delete = False
+    readonly_fields = ('created_at_fmt', 'action_badge', 'status_badge', 'changed_fields_summary', 'duration_fmt', 'bitrix_deal_link')
+    fields = ('created_at_fmt', 'action_badge', 'status_badge', 'changed_fields_summary', 'duration_fmt', 'bitrix_deal_link')
+
+    def has_add_permission(self, request, obj=None):
+        return False
+
+    def created_at_fmt(self, obj):
+        return obj.created_at.strftime('%d.%m.%Y %H:%M:%S') if obj.created_at else '—'
+    created_at_fmt.short_description = "Дата и время"
+
+    def action_badge(self, obj):
+        color = "sky" if obj.action == 'create' else "indigo"
+        return format_html(
+            '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-{}-500/10 text-{}-500">{}</span>',
+            color, color, obj.get_action_display()
+        )
+    action_badge.short_description = "Действие"
+
+    def status_badge(self, obj):
+        color = "emerald" if obj.status == 'success' else "rose"
+        return format_html(
+            '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-{}-500/10 text-{}-500">{}</span>',
+            color, color, obj.get_status_display()
+        )
+    status_badge.short_description = "Статус"
+
+    def changed_fields_summary(self, obj):
+        if isinstance(obj.changed_fields, list) and obj.changed_fields:
+            fields_str = ", ".join(obj.changed_fields[:4])
+            if len(obj.changed_fields) > 4:
+                fields_str += f" (+{len(obj.changed_fields) - 4})"
+            return fields_str
+        return "—"
+    changed_fields_summary.short_description = "Измененные поля"
+
+    def duration_fmt(self, obj):
+        return f"{obj.duration_ms} мс" if obj.duration_ms else "—"
+    duration_fmt.short_description = "Длительность"
+
+    def bitrix_deal_link(self, obj):
+        if obj.bitrix_deal_id:
+            cfg = BitrixSettings.get_active()
+            base_url = cfg.webhook_url.split('/rest/')[0] if '/rest/' in cfg.webhook_url else 'https://aquakip.bitrix24.kz'
+            url = f"{base_url}/crm/deal/details/{obj.bitrix_deal_id}/"
+            return format_html('<a href="{}" target="_blank" class="text-indigo-600 font-semibold underline">#{}</a>', url, obj.bitrix_deal_id)
+        return "—"
+    bitrix_deal_link.short_description = "Bitrix24"
+
+
 @admin.register(Project)
 class ProjectAdmin(ModelAdmin):
     list_display = (
@@ -43,6 +98,7 @@ class ProjectAdmin(ModelAdmin):
     list_filter = ('source', 'needs_bitrix_sync', 'status', 'priority', 'project_type', 'manager')
     search_fields = ('name', 'normalized_name', 'contract_number', 'company__name', 'decision_maker', 'bitrix_id')
     readonly_fields = ('normalized_name', 'actual_margin_percent', 'due_amount', 'created_at', 'updated_at')
+    inlines = [BitrixDealChangeLogInLine]
 
     def contract_amount_fmt(self, obj):
         return f"{obj.contract_amount:,.2f} ₸" if obj.contract_amount else "—"
@@ -272,4 +328,90 @@ class BitrixSettingsAdmin(ModelAdmin):
             messages.success(request, f"Дедупликация завершена: найдено {groups} групп дублей, удалено {deleted} лишних сделок в Bitrix24.")
         except Exception as e:
             messages.error(request, f"Ошибка дедупликации: {e}")
+
+
+@admin.register(BitrixDealChangeLog)
+class BitrixDealChangeLogAdmin(ModelAdmin):
+    list_display = (
+        'created_at_fmt', 'bitrix_deal_link', 'project_link',
+        'action_badge', 'status_badge', 'changed_fields_summary',
+        'duration_fmt', 'triggered_by'
+    )
+    list_filter = ('status', 'action', 'created_at')
+    search_fields = ('bitrix_deal_id', 'project__name', 'error_message', 'triggered_by')
+    readonly_fields = (
+        'project', 'bitrix_deal_id', 'action', 'status', 'created_at',
+        'duration_ms', 'triggered_by', 'error_message', 'formatted_payload', 'formatted_response', 'changed_fields'
+    )
+    fields = (
+        'created_at', 'status', 'action', 'bitrix_deal_id', 'project',
+        'duration_ms', 'triggered_by', 'error_message',
+        'formatted_payload', 'formatted_response'
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def created_at_fmt(self, obj):
+        return obj.created_at.strftime('%d.%m.%Y %H:%M:%S') if obj.created_at else '—'
+    created_at_fmt.short_description = "Время отправки"
+
+    def bitrix_deal_link(self, obj):
+        if obj.bitrix_deal_id:
+            cfg = BitrixSettings.get_active()
+            base_url = cfg.webhook_url.split('/rest/')[0] if '/rest/' in cfg.webhook_url else 'https://aquakip.bitrix24.kz'
+            url = f"{base_url}/crm/deal/details/{obj.bitrix_deal_id}/"
+            return format_html('<a href="{}" target="_blank" class="text-indigo-600 font-semibold underline">#{}</a>', url, obj.bitrix_deal_id)
+        return "—"
+    bitrix_deal_link.short_description = "Сделка Bitrix24"
+
+    def project_link(self, obj):
+        if obj.project:
+            url = f"/admin/api/project/{obj.project.id}/change/"
+            return format_html('<a href="{}" class="text-indigo-600 font-semibold underline">{}</a>', url, obj.project.name)
+        return "—"
+    project_link.short_description = "Объект Mazory"
+
+    def action_badge(self, obj):
+        color = "sky" if obj.action == 'create' else "indigo"
+        return format_html(
+            '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-{}-500/10 text-{}-500">{}</span>',
+            color, color, obj.get_action_display()
+        )
+    action_badge.short_description = "Действие"
+
+    def status_badge(self, obj):
+        color = "emerald" if obj.status == 'success' else "rose"
+        return format_html(
+            '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-{}-500/10 text-{}-500">{}</span>',
+            color, color, obj.get_status_display()
+        )
+    status_badge.short_description = "Статус"
+
+    def changed_fields_summary(self, obj):
+        if isinstance(obj.changed_fields, list) and obj.changed_fields:
+            fields_str = ", ".join(obj.changed_fields[:5])
+            if len(obj.changed_fields) > 5:
+                fields_str += f" (+{len(obj.changed_fields) - 5})"
+            return fields_str
+        return "—"
+    changed_fields_summary.short_description = "Измененные поля"
+
+    def duration_fmt(self, obj):
+        return f"{obj.duration_ms} мс" if obj.duration_ms else "—"
+    duration_fmt.short_description = "Длительность"
+
+    def formatted_payload(self, obj):
+        formatted = json.dumps(obj.payload or {}, indent=2, ensure_ascii=False)
+        return format_html('<pre class="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-xs font-mono"><code>{}</code></pre>', formatted)
+    formatted_payload.short_description = "Отправленные данные (Payload)"
+
+    def formatted_response(self, obj):
+        formatted = json.dumps(obj.response_data or {}, indent=2, ensure_ascii=False)
+        return format_html('<pre class="bg-gray-900 text-gray-100 p-4 rounded-lg overflow-x-auto text-xs font-mono"><code>{}</code></pre>', formatted)
+    formatted_response.short_description = "Ответ Bitrix24 REST API"
+
 

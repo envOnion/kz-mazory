@@ -440,3 +440,46 @@ class BitrixSettings(models.Model):
         if not cfg:
             cfg = cls.objects.create()
         return cfg
+
+
+class BitrixDealChangeLog(models.Model):
+    """
+    Журнал аудита всех изменений по сделкам, отправленных в Bitrix24 CRM.
+    """
+    ACTION_CHOICES = [
+        ('create', 'Создание сделки (crm.deal.add)'),
+        ('update', 'Обновление сделки (crm.deal.update)'),
+    ]
+    STATUS_CHOICES = [
+        ('success', 'Успешно'),
+        ('error', 'Ошибка'),
+    ]
+
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bitrix_change_logs',
+        verbose_name='Объект / Сделка'
+    )
+    bitrix_deal_id = models.CharField('ID сделки в Bitrix24', max_length=64, db_index=True, blank=True, default='')
+    action = models.CharField('Действие', max_length=32, choices=ACTION_CHOICES, db_index=True)
+    status = models.CharField('Статус', max_length=32, choices=STATUS_CHOICES, default='success', db_index=True)
+    payload = models.JSONField('Отправленные данные (Payload)', default=dict, blank=True)
+    response_data = models.JSONField('Ответ Bitrix24', default=dict, blank=True)
+    changed_fields = models.JSONField('Измененные поля', default=list, blank=True)
+    error_message = models.TextField('Текст ошибки', blank=True, default='')
+    duration_ms = models.IntegerField('Длительность (мс)', default=0)
+    triggered_by = models.CharField('Инициатор / Источник', max_length=128, default='system', blank=True)
+    created_at = models.DateTimeField('Дата и время отправки', auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = 'Лог изменения сделки Bitrix24'
+        verbose_name_plural = 'Логи изменений сделок Bitrix24'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        created_str = self.created_at.strftime('%d.%m.%Y %H:%M:%S') if self.created_at else ''
+        return f"[{self.get_action_display()}] Сделка #{self.bitrix_deal_id} — {self.get_status_display()} ({created_str})"
+

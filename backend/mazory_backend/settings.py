@@ -117,16 +117,24 @@ POSTGRES_PORT = os.getenv('POSTGRES_PORT')
 if not POSTGRES_PORT:
     POSTGRES_PORT = '5432' if POSTGRES_HOST == 'postgres' else '5434'
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.postgresql',
-        'NAME': POSTGRES_DB,
-        'USER': POSTGRES_USER,
-        'PASSWORD': POSTGRES_PASSWORD,
-        'HOST': POSTGRES_HOST,
-        'PORT': POSTGRES_PORT,
+if ('test' in sys.argv or os.getenv('USE_SQLITE') == '1') and not os.getenv('FORCE_POSTGRES_TEST'):
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3' if os.getenv('USE_SQLITE') == '1' else ':memory:',
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': POSTGRES_DB,
+            'USER': POSTGRES_USER,
+            'PASSWORD': POSTGRES_PASSWORD,
+            'HOST': POSTGRES_HOST,
+            'PORT': POSTGRES_PORT,
+        }
+    }
 
 QDRANT_URL = os.getenv('QDRANT_URL')
 if not QDRANT_URL:
