@@ -63,28 +63,58 @@ def waha_dashboard_view(request):
     # If working, fetch Me and Chats
     if status == "WORKING":
         try:
-            me_res = requests.get(f"{base_url}/api/{session}/me", headers=headers, timeout=5)
+            me_res = requests.get(f"{base_url}/api/sessions/{session}/me", headers=headers, timeout=5)
             if me_res.status_code == 200:
                 me = me_res.json()
         except Exception:
             pass
 
+        # Fetch groups (reliable in NOWEB engine without store)
+        try:
+            groups_res = requests.get(f"{base_url}/api/{session}/groups", headers=headers, timeout=5)
+            if groups_res.status_code == 200:
+                g_data = groups_res.json()
+                if isinstance(g_data, dict):
+                    for gid, ginfo in g_data.items():
+                        chats.append({
+                            "id": gid,
+                            "name": ginfo.get("subject") or ginfo.get("name") or gid,
+                        })
+                elif isinstance(g_data, list):
+                    for g in g_data:
+                        chats.append({
+                            "id": g.get("id"),
+                            "name": g.get("subject") or g.get("name") or g.get("id"),
+                        })
+        except Exception:
+            pass
+
+        # Fetch chats (if store is enabled)
         try:
             chats_res = requests.get(f"{base_url}/api/{session}/chats", headers=headers, timeout=5)
             if chats_res.status_code == 200:
-                chats = chats_res.json()
-                if isinstance(chats, list):
-                    # Sort groups first
-                    chats.sort(key=lambda c: (not str(c.get("id", "")).endswith("@g.us"), c.get("name", "")))
+                c_data = chats_res.json()
+                if isinstance(c_data, list):
+                    existing_ids = {c["id"] for c in chats}
+                    for c in c_data:
+                        cid = c.get("id")
+                        if cid and cid not in existing_ids:
+                            chats.append({
+                                "id": cid,
+                                "name": c.get("name") or cid,
+                            })
         except Exception:
             pass
+
+        if chats:
+            chats.sort(key=lambda c: (not str(c.get("id", "")).endswith("@g.us"), c.get("name", "")))
 
     return render(request, "admin/waha_dashboard.html", {
         "config": config,
         "status": status,
         "qr_image": qr_image,
         "me": me,
-        "chats": chats[:30],
+        "chats": chats[:50],
     })
 
 @staff_member_required
@@ -99,6 +129,7 @@ def waha_action_view(request, action):
         "start": f"{base_url}/api/sessions/start",
         "stop": f"{base_url}/api/sessions/stop",
         "restart": f"{base_url}/api/sessions/restart",
+        "logout": f"{base_url}/api/sessions/{session}/logout",
     }
 
     target_url = url_map.get(action)
@@ -109,7 +140,17 @@ def waha_action_view(request, action):
     try:
         res = requests.post(target_url, json={"name": session}, headers=headers, timeout=10)
         if res.status_code in (200, 201):
-            messages.success(request, f"Команда '{action}' успешно отправлена в WAHA.")
+            if action == "logout":
+                config.status = "SCAN_QR_CODE"
+                config.last_qr_code = ""
+                config.save(update_fields=["status", "last_qr_code"])
+                messages.success(request, "Сессия WhatsApp сброшена (Logout). Отсканируйте новый QR-код для привязки аккаунта.")
+            elif action == "stop":
+                config.status = "STOPPED"
+                config.save(update_fields=["status"])
+                messages.success(request, "Сессия WAHA успешно остановлена.")
+            else:
+                messages.success(request, f"Команда '{action}' успешно отправлена в WAHA.")
         else:
             messages.error(request, f"Ошибка WAHA ({res.status_code}): {res.text}")
     except Exception as e:
