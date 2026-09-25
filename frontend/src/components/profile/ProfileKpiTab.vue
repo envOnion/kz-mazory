@@ -35,8 +35,9 @@
       </div>
 
       <div class="flex items-center justify-between mt-2.5 text-[11px] text-slate-400">
-        <span>Старт месяца: 0 ₽</span>
-        <span class="text-emerald-300">План перевыполнен на +4% 🔥</span>
+        <span>Старт месяца: 0 ₸</span>
+        <span class="text-emerald-300" v-if="profile.kpi_percent >= 100">План перевыполнен 🔥</span>
+        <span class="text-indigo-300" v-else>{{ profile.kpi_percent }}% плана</span>
         <span>Цель: {{ profile.monthly_target_formatted }}</span>
       </div>
     </div>
@@ -44,45 +45,47 @@
     <!-- 4 Key Stat Cards -->
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
       <div class="p-4 rounded-xl bg-[#0e1633]/70 border border-[#2d3a63]/40">
-        <div class="text-[11px] text-slate-400">Сделок закрыто</div>
+        <div class="text-[11px] text-slate-400">Сделок в работе</div>
         <div class="text-xl font-bold text-white mt-1">{{ profile.deals_count }}</div>
-        <div class="text-[10px] text-emerald-400 mt-0.5">↗ +4 к прошлой неделе</div>
+        <div class="text-[10px] text-emerald-400 mt-0.5">В текущем периоде</div>
       </div>
 
       <div class="p-4 rounded-xl bg-[#0e1633]/70 border border-[#2d3a63]/40">
         <div class="text-[11px] text-slate-400">Конверсия воронки</div>
         <div class="text-xl font-bold text-white mt-1">{{ profile.conversion_rate }}%</div>
-        <div class="text-[10px] text-emerald-400 mt-0.5">↗ Выше средней по отделу</div>
+        <div class="text-[10px] text-emerald-400 mt-0.5">По коммерческим КП</div>
       </div>
 
       <div class="p-4 rounded-xl bg-[#0e1633]/70 border border-[#2d3a63]/40">
         <div class="text-[11px] text-slate-400">Средний чек</div>
-        <div class="text-xl font-bold text-white mt-1">278 500 ₽</div>
-        <div class="text-[10px] text-slate-400 mt-0.5">По 28 договорам</div>
+        <div class="text-xl font-bold text-white mt-1">
+          {{ profile.deals_count > 0 ? (Math.round(Number(profile.current_sales) / profile.deals_count)).toLocaleString('ru-RU') + ' ₸' : '—' }}
+        </div>
+        <div class="text-[10px] text-slate-400 mt-0.5">По закрытым договорам</div>
       </div>
 
       <div class="p-4 rounded-xl bg-[#0e1633]/70 border border-[#2d3a63]/40">
         <div class="text-[11px] text-slate-400">Лидерборд</div>
-        <div class="text-xl font-bold text-amber-300 mt-1">1 место</div>
-        <div class="text-[10px] text-amber-400/80 mt-0.5">Лидер месяца 👑</div>
+        <div class="text-xl font-bold text-amber-300 mt-1">#{{ profile.rank_in_team }} место</div>
+        <div class="text-[10px] text-amber-400/80 mt-0.5">Рейтинг продаж 👑</div>
       </div>
     </div>
 
     <!-- Historical Performance -->
     <div class="p-4 rounded-2xl bg-[#0e1633]/50 border border-[#2d3a63]/40 space-y-3">
-      <div class="text-xs font-semibold text-white">Динамика за 3 месяца</div>
+      <div class="text-xs font-semibold text-white">Текущий срез продаж</div>
       <div class="space-y-2 text-xs">
         <div class="flex items-center justify-between text-slate-300">
-          <span>Сентябрь (текущий)</span>
-          <span class="font-medium text-emerald-400">104% (7 800 000 ₽)</span>
+          <span>Факт сбора оплат</span>
+          <span class="font-medium text-emerald-400">{{ profile.current_sales_formatted }}</span>
         </div>
         <div class="flex items-center justify-between text-slate-400">
-          <span>Август</span>
-          <span>98% (7 100 000 ₽)</span>
+          <span>Месячный план</span>
+          <span>{{ profile.monthly_target_formatted }}</span>
         </div>
         <div class="flex items-center justify-between text-slate-400">
-          <span>Июль</span>
-          <span>92% (6 800 000 ₽)</span>
+          <span>Остаток до выполнения плана</span>
+          <span>{{ Math.max(0, Math.round(Number(profile.monthly_target) - Number(profile.current_sales))).toLocaleString('ru-RU') }} ₸</span>
         </div>
       </div>
     </div>

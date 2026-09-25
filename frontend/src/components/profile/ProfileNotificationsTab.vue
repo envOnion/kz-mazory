@@ -302,7 +302,7 @@ import { Send, QrCode, RefreshCw, Smartphone, ExternalLink } from 'lucide-vue-ne
 import { useProfile } from '../../composables/useProfile'
 import { useNotifications } from '../../composables/useNotifications'
 
-const API_BASE = import.meta.env?.VITE_API_URL || 'http://localhost:8000/api'
+const API_BASE = import.meta.env?.VITE_API_URL || '/api'
 
 const { profile, isSaving, saveMessage, updateProfile } = useProfile()
 const { dispatchNotification } = useNotifications()

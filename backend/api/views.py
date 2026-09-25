@@ -1,13 +1,17 @@
 import logging
 from rest_framework.views import APIView
+from rest_framework.generics import ListAPIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from rest_framework import status
 from django_q.tasks import async_task
 from django.utils import timezone
+from django.db.models import Q
 from .datamart import datamart
 from .qdrant_service import qdrant_service
-from .models import Project
+from .ai_service import AIService
+from .models import Project, WhatsAppConfig
+from .serializers import ProjectSerializer
 
 logger = logging.getLogger(__name__)
 
@@ -137,58 +141,136 @@ class ChatQueryView(APIView):
                 ]
             })
 
-        # Интент 5: Поиск по контексту / переписке через Qdrant
+        # Интент 5: Поиск по контексту / переписке через Qdrant + AI Генерация ответа
         else:
-            search_results = qdrant_service.search(prompt, limit=3)
-            matched_project = Project.objects.filter(name__icontains=prompt).first()
+            search_results = qdrant_service.search(prompt, limit=5)
+            matched_projects = list(Project.objects.filter(
+                Q(name__icontains=prompt) | Q(company__name__icontains=prompt)
+            )[:5])
             
             quotes = [
                 f"«{r['payload'].get('content')}» ({r['payload'].get('sender_name', 'Чат')})"
                 for r in search_results if r.get('payload')
             ]
 
-            summary_text = f"По запросу «{prompt}» найдены следующие данные:"
-            if matched_project:
-                summary_text += f"\nОбъект: {matched_project.name}, Сумма: {float(matched_project.contract_amount):,.0f} ₸, Статус: {matched_project.get_status_display()}."
+            context_data = {
+                "user_prompt": prompt,
+                "matched_projects": [
+                    {
+                        "name": p.name,
+                        "company": p.company.name if p.company else None,
+                        "status": p.get_status_display(),
+                        "amount": float(p.contract_amount),
+                        "paid": float(p.paid_amount),
+                        "due": float(p.due_amount),
+                        "margin": float(p.actual_margin_percent),
+                        "current_action": p.current_action,
+                        "next_action": p.next_action,
+                    }
+                    for p in matched_projects
+                ],
+                "whatsapp_chat_evidence": quotes
+            }
+
+            ai_text = AIService.chat_assistant(prompt, context_data)
 
             return Response({
                 "prompt": prompt,
-                "text": summary_text,
+                "text": ai_text,
                 "quotes": quotes,
                 "widget": {
                     "type": "project_table",
                     "preset": "deal_pipeline",
-                    "title": "Результаты поиска по базе объектов",
+                    "title": "Связанные объекты и проекты",
                     "data": datamart.get_pipeline_mart()
-                }
+                } if matched_projects else None
             })
 
 
 class MessageIngestView(APIView):
     """
-    Прием нового входящего сообщения (через WhatsApp Webhook или вручную)
-    и передача события в очередь фонового воркера.
+    Прием входящих сообщений WhatsApp (от WAHA Webhook или внешних вызовов):
+    1. Распаковывает payload WAHA ({ event: 'message', payload: { ... } }) или плоский JSON.
+    2. Фильтрует входящие сообщения по WhatsAppConfig.group_jid (если мониторинг группы настроен).
+    3. Ставит событие в очередь Django Q2 на векторизацию, RAG и извлечение сделок.
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
-        content = request.data.get('content') or request.data.get('body') or ''
+        data = request.data
+        payload = data.get('payload') if isinstance(data.get('payload'), dict) else data
+
+        # Пропускаем исходящие сообщения от самого бота, если указано fromMe
+        if payload.get('fromMe') is True:
+            return Response({"status": "ignored", "reason": "outgoing_message"}, status=status.HTTP_200_OK)
+
+        content = (
+            payload.get('body')
+            or payload.get('content')
+            or data.get('content')
+            or data.get('body')
+            or ''
+        ).strip()
+
         if not content:
             return Response({"error": "Content is required"}, status=status.HTTP_400_BAD_REQUEST)
 
+        # Извлечение параметров чата и отправителя
+        chat_id = payload.get('from') or data.get('chat_id') or 'aquakip-sales'
+        sender_phone = (
+            payload.get('participant')
+            or payload.get('author')
+            or payload.get('from')
+            or data.get('sender_phone')
+            or ''
+        )
+        sender_name = (
+            payload.get('_data', {}).get('notifyName')
+            or payload.get('notifyName')
+            or data.get('sender_name')
+            or 'Коллега'
+        )
+        message_id = (
+            payload.get('id')
+            or data.get('id')
+            or f"msg-{int(timezone.now().timestamp() * 1000)}"
+        )
+
+        # Проверка соответствия настроенной группе WhatsApp в БД
+        cfg = WhatsAppConfig.get_active()
+        if cfg.is_active and cfg.group_jid and chat_id.endswith('@g.us'):
+            if chat_id != cfg.group_jid:
+                logger.info("Ignoring WAHA message from unmonitored group %s (monitored: %s)", chat_id, cfg.group_jid)
+                return Response({
+                    "status": "ignored",
+                    "reason": f"Chat {chat_id} is not configured in WhatsAppConfig"
+                }, status=status.HTTP_200_OK)
+
         message_data = {
-            "message_id": request.data.get('id') or f"msg-{int(timezone.now().timestamp() * 1000)}",
+            "message_id": message_id,
             "content": content,
-            "sender_name": request.data.get('sender_name') or request.data.get('from', 'Неизвестный'),
-            "sender_phone": request.data.get('sender_phone') or request.data.get('from', ''),
-            "chat_id": request.data.get('chat_id', 'aquakip-sales')
+            "sender_name": sender_name,
+            "sender_phone": sender_phone,
+            "chat_id": chat_id,
+            "raw_payload": data
         }
 
-        # Отправляем задачу в очередь Django Q2
+        # Отправляем задачу в очередь фонового воркера Django Q2
         task_id = async_task('api.tasks.process_incoming_message_task', message_data)
 
         return Response({
             "status": "queued",
             "task_id": task_id,
-            "message": "Событие 'поступило новое сообщение' отправлено воркеру на обработку"
+            "message_id": message_id,
+            "chat_id": chat_id,
+            "message": "Сообщение успешно поставлено в очередь на AI-обработку"
         }, status=status.HTTP_202_ACCEPTED)
+
+
+class ProjectListView(ListAPIView):
+    """
+    Реестр всех объектов и сделок Aqua Kip Engineering.
+    """
+    permission_classes = [AllowAny]
+    queryset = Project.objects.all().select_related('company', 'manager').order_by('-contract_amount')
+    serializer_class = ProjectSerializer

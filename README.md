@@ -1,91 +1,133 @@
-# Mazory — Your AI Business OS (Docker & Docker Compose)
+# Mazory — AI-Driven Sales OS & Analytics Platform
 
-Корпоративный ИИ-ассистент и аналитический дашборд для коммерческой команды компании.
+Корпоративная операционная система управления продажами и аналитики для коммерческой команды **Aqua Kip Engineering**.
 
-Вся разработка и отладка (debug) полностью изолированы в **Docker** контейнерах через **Docker Compose**, без необходимости локальной установки Python или Node.js.
+Интегрирует потоковые сообщения WhatsApp (через локальный шлюз **WAHA**), векторную базу **Qdrant**, аналитические витрины данных **Data Mart**, нейросетевые модели OpenRouter (**LFM-2.5 1024d Embeddings** и **Nemotron-3-Ultra 550b Chat**) и CRM-систему **Bitrix24**.
 
 ---
 
-## Быстрый запуск в Docker
+## 🏗 Архитектура системы
 
-Все команды выполняются из директории `mazory/`:
+- **Единая внешняя точка входа (Nginx Gateway)**:
+  - Публичные порты: `80` (HTTP) и `443` (HTTPS с автопродлением Let's Encrypt через Certbot).
+  - Единый домен для Vue 3 фронтенда (`/`), REST API (`/api/`) и Django Unfold Admin (`/admin/`).
+  - Все остальные сервисы (`postgres`, `redis`, `qdrant`, `waha`, `backend`, `qcluster`) изолированы во внутренней сети `mazory-network`.
+- **Интерфейс пользователя (Frontend)**: Vue 3 + Tailwind CSS + Lucide Icons + Canvas 2D Wave Background + Chart.js.
+  - Полностью исключены mock-данные — все показатели загружаются из живых эндпоинтов `/api/kpi/summary/`, `/api/chat/query/`, `/api/profile/`, `/api/projects/`.
+- **Django Unfold Admin**:
+  - Современная темная тема админки Unfold с фирменной символикой Mazory (логотип, favicon, брендированный сайдбар).
+  - **Центр управления WAHA (`/admin/waha-dashboard/`)**: мониторинг сессии, вывод актуального QR-кода (base64) для авторизации смартфона и просмотр списка чатов.
+  - Настройка WhatsApp группы (`WhatsAppConfig`): редактирование JID группы (`120363024823904923@g.us`) в базе PostgreSQL без правок `.env`.
+  - Настройка нейросетей (`AISettings`): управление моделями embeddings и reasoning, системными промптами и API-ключами.
+  - Настройка Bitrix24 (`BitrixSettings`): вебхук, авто-создание сделок и аудит синхронизации.
+- **Фоновый конвейер (Django Q2 Worker)**:
+  - Прием сообщений из WhatsApp через вебхук WAHA (`/api/whatsapp/webhook/`).
+  - Фильтрация по JID группы из `WhatsAppConfig`.
+  - Плотная векторизация через OpenRouter `liquid/lfm-2.5-embedding-350m:free` (1024-мерный вектор) и сохранение в Qdrant (`mazory_messages`).
+  - Семантический RAG-поиск по истории переписки и контексту существующих объектов.
+  - Извлечение сущностей через LLM `nvidia/nemotron-3-ultra-550b-a55b:free`.
+  - Автоматическая регистрация/обновление сделок в PostgreSQL (`Project`) и в **Bitrix24 CRM** (`BitrixService.create_deal`).
+  - Фиксация обязательств (`Commitment`), платежей (`FinancialRecord`) и отправка уведомлений.
+
+---
+
+## 🚀 Быстрый запуск
+
+### 1. Запуск через Docker Compose
 
 ```bash
 cd mazory
 
-# Сборка и запуск всех сервисов в фоне
+# Сборка и фоновый запуск всех сервисов
 docker compose up -d
 
-# Или с логами в реальном времени
-docker compose up
+# Проверка статуса контейнеров
+docker compose ps
 ```
 
-### Доступ к сервисам
-- **Frontend (Vue 3 + Vite HMR)**: [http://localhost:5173](http://localhost:5173)
-- **Backend API (Django REST Framework)**: [http://localhost:8000/api/kpi/summary/](http://localhost:8000/api/kpi/summary/)
-- **Django Admin**: [http://localhost:8000/admin/](http://localhost:8000/admin/)
+### 2. Доступ к интерфейсам
+- **Веб-интерфейс Mazory**: [http://localhost](http://localhost) (или ваш домен)
+- **Django Unfold Admin**: [http://localhost/admin/](http://localhost/admin/)
+- **Центр авторизации WAHA**: [http://localhost/admin/waha-dashboard/](http://localhost/admin/waha-dashboard/)
+- **REST API**: [http://localhost/api/](http://localhost/api/)
 
 ---
 
-## Режим отладки (Debugging)
+## 🔒 Настройка SSL через Certbot
 
-### 1. Просмотр логов
+Для включения HTTPS на вашем сервере (например, `crm.aquakip.kz`):
+
 ```bash
-# Логи обоих сервисов
-docker compose logs -f
+# Выполните скрипт авто-настройки:
+./scripts/setup_ssl.sh <ваш-домен> <ваш-email>
 
-# Логи только бэкенда
-docker compose logs -f backend
-
-# Логи только фронтенда
-docker compose logs -f frontend
+# Пример:
+./scripts/setup_ssl.sh crm.aquakip.kz admin@aquakip.kz
 ```
 
-### 2. Точки останова (PDB / IPDB / Breakpoints в Django)
-В `docker-compose.yml` включены флаги `stdin_open: true` и `tty: true`.
-Если в коде Django вы ставите `breakpoint()` или `import pdb; pdb.set_trace()`, просто подключитесь к интерактивной консоли контейнера:
+Скрипт автоматически:
+1. Запустит Nginx на порту 80 для прохождения ACME challenge.
+2. Запросит бесплатный SSL-сертификат у Let's Encrypt.
+3. Активирует защищенный конфигурационный файл Nginx с перенаправлением с HTTP на HTTPS (порт 443).
+4. Настроит автопродление сертификата каждые 12 часов.
+
+---
+
+## 📦 Разовая выгрузка и сидирование данных из Bitrix24
+
+В корне проекта расположен скрипт `seed_bitrix_data.py`. Он выгружает из CRM Bitrix24 пользователей, компании, сделки (`crm.deal`) и связанные смарт-процессы (договора, расчеты, платежи) и наполняет базу данных PostgreSQL.
+
+### Тестовый прогон (Dry Run):
 ```bash
-docker attach mazory-backend
+# Из папки backend:
+uv run python ../seed_bitrix_data.py --dry-run
 ```
-*(Для отключения без остановки контейнера: комбинация `Ctrl + P`, затем `Ctrl + Q`)*
 
-### 3. Выполнение команд Django (миграции, создание суперпользователя, shell)
+### Боевой импорт в PostgreSQL:
 ```bash
-# Создание миграций
-docker compose exec backend python manage.py makemigrations
+# Из папки backend:
+uv run python ../seed_bitrix_data.py
 
-# Применение миграций
+# Или внутри контейнера backend:
+docker compose exec backend python ../seed_bitrix_data.py
+```
+
+Скрипт автоматически определяет окружение (хост или докер-контейнер) и подключается к порту PostgreSQL `5434` на хосте либо `5432` внутри сети.
+
+---
+
+## ⚙️ Управление и отладка
+
+### Применение миграций и сбор статики:
+```bash
+# Миграции
 docker compose exec backend python manage.py migrate
 
-# Django Shell
-docker compose exec backend python manage.py shell
+# Сбор статических файлов темы Unfold
+docker compose exec backend python manage.py collectstatic --noinput
+```
 
-# Создание суперпользователя
+### Создание суперпользователя:
+```bash
 docker compose exec -it backend python manage.py createsuperuser
 ```
 
-### 4. Горячая перезагрузка (Hot Reload)
-- **Frontend**: Любые изменения в `frontend/src/` мгновенно подхватываются через Vite HMR (том `./frontend:/app`).
-- **Backend**: Любые изменения в `backend/` автоматически перезагружают Django dev-сервер (через StatReloader и том `./backend:/app`).
+### Просмотр логов сервисов:
+```bash
+# Логи бэкенда и фонового воркера
+docker compose logs -f backend qcluster
+
+# Логи шлюза WAHA
+docker compose logs -f waha
+
+# Логи Nginx
+docker compose logs -f nginx
+```
 
 ---
 
-## Архитектура контейнеров
+## 🧪 Безопасность при тестировании
 
-```
-mazory/
-├── docker-compose.yml       # Оркестрация frontend и backend
-├── frontend/
-│   ├── Dockerfile           # Node 22 Alpine, hot reload на порту 5173
-│   ├── .dockerignore
-│   └── src/                 # Исходный код Vue 3
-│       ├── components/      # WaveBackground (Canvas 2D), Header, ChatInput, KpiDashboardView
-│       └── composables/     # useChat.ts
-└── backend/
-    ├── Dockerfile           # Python 3.12 Slim, Django 6.1, DRF
-    ├── .dockerignore
-    ├── requirements.txt
-    ├── manage.py
-    ├── mazory_backend/      # Настройки Django с включенным CORS
-    └── api/                 # Эндпоинты /api/kpi/summary/ и /api/chat/query/
-```
+Интеграция с Bitrix24 защищена правилом безопасности:
+- При любых end-to-end тестах создаваемые тестовые сделки именуются с префиксом `[TEST_MAZORY_AUTO_DELETE]`.
+- После проверки они **немедленно удаляются** методом `BitrixService.delete_deal(deal_id)`, чтобы не загрязнять боевую CRM заказчика.

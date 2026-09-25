@@ -10,16 +10,16 @@ def get_or_create_default_profile(user):
     profile, created = UserProfile.objects.get_or_create(
         user=user,
         defaults={
-            'full_name': 'Максим Кузнецов',
-            'role': 'Старший менеджер по продажам',
-            'department': 'Департамент корпоративных продаж',
-            'email': 'm.kuznetsov@company.kz',
-            'phone': user.username if user.username.startswith('+') or user.username.isdigit() else '+7 (701) 987-65-43',
-            'monthly_target': 7500000.00,
-            'current_sales': 7800000.00,
-            'deals_count': 28,
+            'full_name': 'Камиль',
+            'role': 'Ведущий менеджер по продажам',
+            'department': 'Отдел продаж Aqua Kip',
+            'email': 'kamil@aquakip.kz',
+            'phone': user.username if (user.username.startswith('+') or user.username.isdigit()) else '+7 (701) 123-45-67',
+            'monthly_target': 50000000.00,
+            'current_sales': 31790000.00,
+            'deals_count': 15,
             'rank_in_team': 1,
-            'conversion_rate': 34.50,
+            'conversion_rate': 35.00,
             'avatar_url': 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=250&q=80'
         }
     )

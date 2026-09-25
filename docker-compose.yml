@@ -1,12 +1,42 @@
 name: mazory
 
 services:
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    container_name: mazory-nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-8080}:80"
+      - "${NGINX_SSL_PORT:-443}:443"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf
+      - ./backend/staticfiles:/app/staticfiles:ro
+      - ./backend/media:/app/media:ro
+      - ./certbot/conf:/etc/letsencrypt:ro
+      - ./certbot/www:/var/www/certbot:ro
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - mazory-network
+
+  certbot:
+    image: certbot/certbot:latest
+    container_name: mazory-certbot
+    volumes:
+      - ./certbot/conf:/etc/letsencrypt
+      - ./certbot/www:/var/www/certbot
+    entrypoint: "/bin/sh -c 'trap exit TERM; while :; do certbot renew; sleep 12h & wait $${!}; done;'"
+    networks:
+      - mazory-network
+
   redis:
     image: redis:7-alpine
     container_name: mazory-redis
     restart: unless-stopped
-    ports:
-      - "6379:6379"
+    # Port is internal to mazory-network
     volumes:
       - redis_data:/data
     networks:
@@ -20,8 +50,9 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-mazory_db}
       POSTGRES_USER: ${POSTGRES_USER:-mazory}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mazory2026}
+    # Bound to localhost only for host-level management scripts (not exposed externally)
     ports:
-      - "5434:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -36,10 +67,29 @@ services:
     image: qdrant/qdrant:v1.13.4
     container_name: mazory-qdrant
     restart: unless-stopped
-    ports:
-      - "6333:6333"
+    # Internal to mazory-network
     volumes:
       - qdrant_data:/qdrant/storage
+    networks:
+      - mazory-network
+
+  waha:
+    image: devlikeapro/waha:latest
+    platform: linux/amd64
+    container_name: mazory-waha
+    restart: unless-stopped
+    # Port 3000 is internal only. Managed solely via Django Admin (/admin/waha-dashboard/)
+    environment:
+      - WHATSAPP_DEFAULT_ENGINE=NOWEB
+      - WAHA_LOG_LEVEL=INFO
+      - WAHA_LOG_FORMAT=JSON
+      - WAHA_API_KEY=mazory-waha-key-2026
+      - WAHA_DASHBOARD_USERNAME=admin
+      - WAHA_DASHBOARD_PASSWORD=mazory2026
+      - WHATSAPP_SWAGGER_USERNAME=admin
+      - WHATSAPP_SWAGGER_PASSWORD=mazory2026
+    volumes:
+      - ./waha_sessions:/app/.sessions
     networks:
       - mazory-network
 
@@ -49,8 +99,7 @@ services:
       dockerfile: Dockerfile
     container_name: mazory-backend
     restart: unless-stopped
-    ports:
-      - "8000:8000"
+    # Port 8000 is internal to mazory-network; routed through Nginx
     volumes:
       - ./backend:/app
     environment:
@@ -66,6 +115,7 @@ services:
       - REDIS_PORT=6379
       - WAHA_API_URL=http://waha:3000
       - WAHA_API_KEY=mazory-waha-key-2026
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
     command: python manage.py runserver 0.0.0.0:8000
     stdin_open: true
     tty: true
@@ -101,6 +151,7 @@ services:
       - REDIS_PORT=6379
       - WAHA_API_URL=http://waha:3000
       - WAHA_API_KEY=mazory-waha-key-2026
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,41 +164,18 @@ services:
     networks:
       - mazory-network
 
-  waha:
-    image: devlikeapro/waha:latest
-    platform: linux/amd64
-    container_name: mazory-waha
-    restart: unless-stopped
-    ports:
-      - "3000:3000"
-    environment:
-      - WHATSAPP_DEFAULT_ENGINE=NOWEB
-      - WAHA_LOG_LEVEL=INFO
-      - WAHA_LOG_FORMAT=JSON
-      - WAHA_API_KEY=mazory-waha-key-2026
-      - WAHA_DASHBOARD_USERNAME=admin
-      - WAHA_DASHBOARD_PASSWORD=mazory2026
-      - WHATSAPP_SWAGGER_USERNAME=admin
-      - WHATSAPP_SWAGGER_PASSWORD=mazory2026
-
-    volumes:
-      - ./waha_sessions:/app/.sessions
-    networks:
-      - mazory-network
-
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: mazory-frontend
     restart: unless-stopped
-    ports:
-      - "5173:5173"
+    # Port 5173 is internal to mazory-network; routed through Nginx
     volumes:
       - ./frontend:/app
       - /app/node_modules
     environment:
-      - VITE_API_URL=http://localhost:8000/api
+      - VITE_API_URL=/api
     command: npm run dev -- --host 0.0.0.0 --port 5173
     stdin_open: true
     tty: true

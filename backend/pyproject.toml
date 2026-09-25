@@ -15,4 +15,5 @@ dependencies = [
     "numpy>=1.26.0",
     "redis>=8.1.0",
     "requests>=2.34.2",
+    "django-unfold>=0.108.0",
 ]

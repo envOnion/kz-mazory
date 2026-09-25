@@ -21,6 +21,7 @@ django==6.1.1
     #   django-cors-headers
     #   django-picklefield
     #   django-q2
+    #   django-unfold
     #   djangorestframework
     #   djangorestframework-simplejwt
 django-cors-headers==4.9.0
@@ -28,6 +29,8 @@ django-cors-headers==4.9.0
 django-picklefield==3.4.0
     # via django-q2
 django-q2==1.11.1
+    # via mazory-backend (pyproject.toml)
+django-unfold==0.108.0
     # via mazory-backend (pyproject.toml)
 djangorestframework==3.18.1
     # via

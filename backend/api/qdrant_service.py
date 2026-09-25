@@ -1,19 +1,18 @@
 import logging
 import hashlib
-import numpy as np
 from typing import List, Dict, Any, Optional
 from django.conf import settings
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest_models
+from api.models import AISettings
+from api.ai_service import AIService
 
 logger = logging.getLogger(__name__)
-
-VECTOR_SIZE = 384
 
 class QdrantService:
     """
     Интеграция с векторным хранилищем Qdrant для семантического поиска
-    сообщений и фактов в WhatsApp-переписках.
+    сообщений и фактов в WhatsApp-переписках с использованием модели эмбеддингов.
     """
     def __init__(self):
         self.url = getattr(settings, 'QDRANT_URL', 'http://qdrant:6333')
@@ -28,17 +27,36 @@ class QdrantService:
 
     def ensure_collection(self) -> bool:
         """
-        Создает коллекцию в Qdrant, если она еще не создана.
+        Создает коллекцию в Qdrant с размерностью из AISettings (по умолчанию 1024).
+        Если коллекция уже существует со старой размерностью, пересоздает ее.
         """
         try:
+            cfg = AISettings.get_active()
+            vector_size = cfg.embedding_dimension or 1024
+            
             collections = self.client.get_collections().collections
             exists = any(c.name == self.collection_name for c in collections)
+            if exists:
+                try:
+                    info = self.client.get_collection(self.collection_name)
+                    curr_size = None
+                    if hasattr(info.config.params.vectors, 'size'):
+                        curr_size = info.config.params.vectors.size
+                    elif isinstance(info.config.params.vectors, dict) and 'size' in info.config.params.vectors:
+                        curr_size = info.config.params.vectors['size']
+                    if curr_size and curr_size != vector_size:
+                        logger.warning("Recreating collection '%s' with dimension %d (was %d)", self.collection_name, vector_size, curr_size)
+                        self.client.delete_collection(self.collection_name)
+                        exists = False
+                except Exception as ex:
+                    logger.warning("Could not inspect collection %s: %s", self.collection_name, ex)
+
             if not exists:
-                logger.info("Creating Qdrant collection '%s' with vector size %d", self.collection_name, VECTOR_SIZE)
+                logger.info("Creating Qdrant collection '%s' with vector size %d", self.collection_name, vector_size)
                 self.client.create_collection(
                     collection_name=self.collection_name,
                     vectors_config=rest_models.VectorParams(
-                        size=VECTOR_SIZE,
+                        size=vector_size,
                         distance=rest_models.Distance.COSINE
                     )
                 )
@@ -47,46 +65,14 @@ class QdrantService:
             logger.error("Failed to connect or ensure Qdrant collection: %s", e)
             return False
 
-    def generate_embedding(self, text: str) -> List[float]:
-        """
-        Генерирует плотный вектор (Dense Embedding) размерности 384.
-        Использует детерминированное псевдосемантическое n-gram проецирование с l2-нормализацией,
-        обеспечивающее мгновенную работу без тяжелых внешних весов или задержек.
-        """
-        if not text:
-            return [0.0] * VECTOR_SIZE
-        
-        words = text.lower().split()
-        vector = np.zeros(VECTOR_SIZE, dtype=np.float32)
-        
-        for idx, word in enumerate(words):
-            # Хешируем каждое слово и биграммы
-            h = int(hashlib.sha256(word.encode('utf-8')).hexdigest(), 16)
-            pos = h % VECTOR_SIZE
-            weight = 1.0 + (1.0 / (idx + 1))
-            vector[pos] += weight
-
-            if idx > 0:
-                bigram = f"{words[idx-1]}_{word}"
-                bh = int(hashlib.md5(bigram.encode('utf-8')).hexdigest(), 16)
-                bpos = bh % VECTOR_SIZE
-                vector[bpos] += 1.5
-
-        # L2-нормализация для корректного косинусного расстояния
-        norm = np.linalg.norm(vector)
-        if norm > 0:
-            vector = vector / norm
-            
-        return vector.tolist()
-
     def upsert_message(self, message_id: str, content: str, payload: Dict[str, Any]) -> Optional[str]:
         """
-        Сохраняет сообщение с вектором в Qdrant.
+        Генерирует эмбеддинг через AI сервис и сохраняет сообщение в Qdrant.
         """
         try:
             self.ensure_collection()
             point_id = hashlib.md5(message_id.encode('utf-8')).hexdigest()
-            vector = self.generate_embedding(content)
+            vector = AIService.get_embedding(content)
             
             point = rest_models.PointStruct(
                 id=point_id,
@@ -103,30 +89,49 @@ class QdrantService:
             )
             return point_id
         except Exception as e:
-            logger.error("Failed to upsert point to Qdrant: %s", e)
+            logger.error("Failed to upsert message into Qdrant: %s", e)
             return None
 
-    def search(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    def search_similar(self, query: str, limit: int = 5, score_threshold: float = 0.35) -> List[Dict[str, Any]]:
         """
-        Выполняет семантический поиск по сохраненным сообщениям.
+        Семантический поиск похожих сообщений для формирования контекста RAG.
         """
         try:
             self.ensure_collection()
-            vector = self.generate_embedding(query)
-            results = self.client.search(
-                collection_name=self.collection_name,
-                query_vector=vector,
-                limit=limit
-            )
+            vector = AIService.get_embedding(query)
+            
+            if hasattr(self.client, 'query_points'):
+                res = self.client.query_points(
+                    collection_name=self.collection_name,
+                    query=vector,
+                    limit=limit,
+                    score_threshold=score_threshold
+                )
+                points = res.points if hasattr(res, 'points') else res
+            elif hasattr(self.client, 'search'):
+                points = self.client.search(
+                    collection_name=self.collection_name,
+                    query_vector=vector,
+                    limit=limit,
+                    score_threshold=score_threshold
+                )
+            else:
+                points = []
+
             return [
                 {
-                    "score": r.score,
-                    "payload": r.payload
+                    "score": getattr(hit, 'score', 0.0),
+                    "id": getattr(hit, 'id', ''),
+                    **(getattr(hit, 'payload', {}) or {})
                 }
-                for r in results
+                for hit in points
             ]
         except Exception as e:
-            logger.error("Failed to query Qdrant: %s", e)
+            logger.error("Failed to search Qdrant for '%s': %s", query, e)
             return []
+
+    def search(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """Удобный алиас для поиска по сообщениям"""
+        return self.search_similar(query, limit=limit, score_threshold=0.2)
 
 qdrant_service = QdrantService()

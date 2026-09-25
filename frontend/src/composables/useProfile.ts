@@ -1,6 +1,6 @@
 import { ref } from 'vue'
 
-const API_BASE = import.meta.env?.VITE_API_URL || 'http://localhost:8000/api'
+const API_BASE = import.meta.env?.VITE_API_URL || '/api'
 
 export interface UserProfileData {
   id: number
@@ -28,20 +28,20 @@ export interface UserProfileData {
 
 const profile = ref<UserProfileData>({
   id: 1,
-  full_name: 'Максим Кузнецов',
-  role: 'Старший менеджер по продажам',
-  department: 'Департамент корпоративных продаж',
-  email: 'm.kuznetsov@company.kz',
-  phone: '+7 (701) 987-65-43',
+  full_name: 'Камиль',
+  role: 'Ведущий менеджер по продажам',
+  department: 'Отдел продаж Aqua Kip',
+  email: 'kamil@aquakip.kz',
+  phone: '+7 (701) 123-45-67',
   avatar_url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=250&q=80',
-  monthly_target: '7500000.00',
-  monthly_target_formatted: '7 500 000 ₽',
-  current_sales: '7800000.00',
-  current_sales_formatted: '7 800 000 ₽',
-  deals_count: 28,
+  monthly_target: '50000000.00',
+  monthly_target_formatted: '50 000 000 ₸',
+  current_sales: '31790000.00',
+  current_sales_formatted: '31 790 000 ₸',
+  deals_count: 15,
   rank_in_team: 1,
-  conversion_rate: '34.50',
-  kpi_percent: 104.0,
+  conversion_rate: '35.00',
+  kpi_percent: 63.6,
   whatsapp_daily_digest: true,
   whatsapp_stalled_deals: true,
   whatsapp_critical_kpi: true,

@@ -1,7 +1,7 @@
 import { ref, onMounted } from 'vue'
 import type { ViewMode, KpiDashboardData, ChatWidget } from '../types/chat'
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000/api'
+const API_BASE = import.meta.env?.VITE_API_URL || '/api'
 
 export function useChat() {
   const currentView = ref<ViewMode>('welcome')
@@ -35,9 +35,9 @@ export function useChat() {
     managers: [],
     insight: {
       badge: 'AI-инсайт',
-      source: 'На основе витрины данных Data Mart (сбор денег, маржа, дедлайны)',
-      headline: 'Лидер по сбору денег — Жанат Бейсбаев (568.27 млн ₸).',
-      details: 'Ключевой фактор роста — крупные закрытые контракты по ПСЭМ и Top Build. По проектам с маржой ниже 15% требуется особый контроль.',
+      source: 'Витрина данных Aqua Kip (сбор оплат, маржа, SLA дедлайнов)',
+      headline: 'Загрузка актуальных данных Data Mart...',
+      details: '',
       actions: [
         { id: 'why', label: 'Почему?', icon: 'search' },
         { id: 'deals', label: 'Показать сделки', icon: 'file-text' },
