@@ -1,7 +1,10 @@
 import json
 import time
 import uuid
+import logging
 from django.core.cache import cache
+
+logger = logging.getLogger(__name__)
 
 NOTIFICATION_TTL = 86400 * 14  # 14 days
 
@@ -23,10 +26,8 @@ def format_time_ago(created_at: float) -> str:
         return f"{days} д назад"
 
 def get_redis_key(phone: str) -> str:
-    clean = phone.replace('+', '').replace(' ', '').replace('(', '').replace(')', '').replace('-', '')
-    if not clean:
-        clean = "unknown"
-    return f"mazory_notifications:{clean}"
+    clean_digits = "".join(filter(str.isdigit, phone or ""))
+    return f"mazory:notifications:{clean_digits}"
 
 def fetch_user_notifications(phone: str):
     """
@@ -34,7 +35,11 @@ def fetch_user_notifications(phone: str):
     Strictly NO mock data. If no notifications exist, returns empty list.
     """
     key = get_redis_key(phone)
-    raw = cache.get(key)
+    try:
+        raw = cache.get(key)
+    except Exception as e:
+        logger.warning("Redis cache error in fetch_user_notifications: %s", e)
+        return [], 0
     
     if raw is None:
         notifications = []
@@ -58,7 +63,10 @@ def mark_all_notifications_as_read(phone: str):
     notifications, _ = fetch_user_notifications(phone)
     for n in notifications:
         n["is_read"] = True
-    cache.set(key, json.dumps(notifications), timeout=NOTIFICATION_TTL)
+    try:
+        cache.set(key, json.dumps(notifications), timeout=NOTIFICATION_TTL)
+    except Exception as e:
+        logger.warning("Redis cache error in mark_all_notifications_as_read: %s", e)
     return notifications
 
 def push_notification_to_redis(phone: str, title: str, message: str, notif_type: str = "info"):
@@ -82,7 +90,9 @@ def push_notification_to_redis(phone: str, title: str, message: str, notif_type:
     notifications.insert(0, new_item)
     # keep max 50 items per user
     notifications = notifications[:50]
-    cache.set(key, json.dumps(notifications), timeout=NOTIFICATION_TTL)
+    try:
+        cache.set(key, json.dumps(notifications), timeout=NOTIFICATION_TTL)
+    except Exception as e:
+        logger.warning("Redis cache error in push_notification_to_redis: %s", e)
     unread_count = sum(1 for n in notifications if not n.get("is_read", False))
     return new_item, unread_count
-

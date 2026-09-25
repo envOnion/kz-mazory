@@ -13,7 +13,33 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-f7u)rp4lokiv@hgsdma!e@cb*g
 
 DEBUG = os.getenv('DEBUG', '1') == '1'
 
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',') if os.getenv('ALLOWED_HOSTS') else ['*']
+if 'ai.mazory.best' not in ALLOWED_HOSTS and '*' not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append('ai.mazory.best')
+
+# CSRF & Reverse Proxy settings (поддержка localhost, ai.mazory.best и Nginx)
+CSRF_TRUSTED_ORIGINS = [
+    'http://localhost',
+    'http://localhost:8080',
+    'http://localhost:8000',
+    'http://localhost:5173',
+    'http://127.0.0.1',
+    'http://127.0.0.1:8080',
+    'http://127.0.0.1:8000',
+    'http://127.0.0.1:5173',
+    'https://localhost',
+    'https://127.0.0.1',
+    'https://ai.mazory.best',
+    'http://ai.mazory.best',
+]
+extra_csrf = os.getenv('CSRF_TRUSTED_ORIGINS', '')
+if extra_csrf:
+    CSRF_TRUSTED_ORIGINS.extend([origin.strip() for origin in extra_csrf.split(',') if origin.strip()])
+
+# Поддержка заголовков проксирования Nginx
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+USE_X_FORWARDED_HOST = True
+USE_X_FORWARDED_PORT = True
 
 # Application definition - UNFOLD must be before django.contrib.admin
 INSTALLED_APPS = [

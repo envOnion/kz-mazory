@@ -35,8 +35,11 @@ class ApiConfig(AppConfig):
     name = 'api'
 
     def ready(self):
-        print(f"DEBUG: ApiConfig.ready() called, RUN_MAIN={os.environ.get('RUN_MAIN')}, argv={sys.argv}", flush=True)
-        # Run only once in main process of runserver or qcluster
         if os.environ.get('RUN_MAIN') == 'true' or 'qcluster' in sys.argv or 'runserver' in sys.argv:
             start_waha_watchdog()
+            try:
+                from .tasks import setup_hourly_schedule
+                setup_hourly_schedule()
+            except Exception:
+                pass
 

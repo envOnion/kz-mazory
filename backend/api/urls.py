@@ -1,5 +1,5 @@
 from django.urls import path
-from .views import KpiSummaryView, ChatQueryView, MessageIngestView, ProjectListView
+from .views import KpiSummaryView, ChatQueryView, MessageIngestView, ProjectListView, BitrixWebhookView
 from .auth_views import (
     SendVerificationCodeView,
     VerifyCodeView,
@@ -40,6 +40,8 @@ urlpatterns = [
     path('kpi/summary/', KpiSummaryView.as_view(), name='kpi-summary'),
     path('projects/', ProjectListView.as_view(), name='project-list'),
     path('chat/query/', ChatQueryView.as_view(), name='chat-query'),
+    # WhatsApp & Bitrix Webhooks
     path('messages/ingest/', MessageIngestView.as_view(), name='messages-ingest'),
     path('whatsapp/webhook/', MessageIngestView.as_view(), name='whatsapp-webhook'),
+    path('bitrix/webhook/', BitrixWebhookView.as_view(), name='bitrix-webhook'),
 ]
