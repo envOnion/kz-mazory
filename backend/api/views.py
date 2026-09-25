@@ -4,9 +4,10 @@ from rest_framework.generics import ListAPIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework import status
+import re
 from django_q.tasks import async_task
 from django.utils import timezone
-from django.db.models import Q
+from django.db.models import Q, Sum, Count
 from .datamart import datamart
 from .qdrant_service import qdrant_service
 from .ai_service import AIService
@@ -143,47 +144,145 @@ class ChatQueryView(APIView):
 
         # Интент 5: Поиск по контексту / переписке через Qdrant + AI Генерация ответа
         else:
+            # 1. Поиск по векторной базе Qdrant (цитаты и сообщения из чатов)
             search_results = qdrant_service.search(prompt, limit=5)
-            matched_projects = list(Project.objects.filter(
-                Q(name__icontains=prompt) | Q(company__name__icontains=prompt)
-            )[:5])
-            
             quotes = [
                 f"«{r['payload'].get('content')}» ({r['payload'].get('sender_name', 'Чат')})"
                 for r in search_results if r.get('payload')
             ]
 
+            # 2. Финансовые агрегаты по всему портфелю
+            agg = Project.objects.aggregate(
+                total_count=Count('id'),
+                total_amount=Sum('contract_amount'),
+                total_paid=Sum('paid_amount'),
+                total_due=Sum('due_amount')
+            )
+            total_count = agg['total_count'] or 0
+            total_amount = float(agg['total_amount'] or 0)
+            total_paid = float(agg['total_paid'] or 0)
+            total_due = float(agg['total_due'] or 0)
+
+            # Статистика по стадиям воронки
+            stages_summary = []
+            for stage_code, stage_label in Project.STATUS_CHOICES:
+                stage_qs = Project.objects.filter(status=stage_code)
+                st_count = stage_qs.count()
+                if st_count > 0:
+                    st_vol = float(stage_qs.aggregate(s=Sum('contract_amount'))['s'] or 0)
+                    stages_summary.append({
+                        "stage_code": stage_code,
+                        "stage_name": stage_label,
+                        "count": st_count,
+                        "total_amount": st_vol,
+                        "formatted_amount": f"{st_vol:,.0f} ₸".replace(',', ' ')
+                    })
+
+            portfolio_summary = {
+                "total_projects_count": total_count,
+                "total_contract_amount": total_amount,
+                "total_contract_amount_formatted": f"{total_amount:,.0f} ₸".replace(',', ' '),
+                "total_paid_amount": total_paid,
+                "total_paid_amount_formatted": f"{total_paid:,.0f} ₸".replace(',', ' '),
+                "total_due_amount": total_due,
+                "total_due_amount_formatted": f"{total_due:,.0f} ₸".replace(',', ' '),
+                "stages_breakdown": stages_summary
+            }
+
+            # 3. Интеллектуальный поиск конкретных проектов по токенам запроса
+            stop_words = {
+                "по", "в", "во", "на", "с", "со", "и", "или", "не", "для", "к", "ко", "до",
+                "от", "из", "о", "об", "обо", "за", "под", "при", "про", "что", "как", "где",
+                "когда", "кто", "все", "всех", "всем", "всему", "всего", "всеми", "посчитай",
+                "покажи", "выведи", "найди", "скажи", "какая", "какой", "какие", "какова",
+                "каком", "сколько", "сумма", "сумму", "сумме", "суммы", "договор", "договора",
+                "договоров", "договорам", "договорами", "проект", "проекта", "проекты", "проектов",
+                "проектам", "объект", "объекта", "объекты", "объектов", "объектам", "деньги",
+                "денег", "деньгам", "расчет", "рассчитай", "итог", "итого", "итоговая", "итоговую",
+                "стадия", "стадии", "стадиях", "статус", "статусы", "статусах", "компания",
+                "компании", "компаний", "клиент", "клиента", "клиенты", "клиентов", "менеджер",
+                "менеджера", "менеджеры", "менеджеров", "пожалуйста", "подскажи"
+            }
+
+            raw_tokens = [re.sub(r'[^\w\-]', '', w).lower() for w in prompt.split()]
+            meaningful_tokens = [t for t in raw_tokens if len(t) >= 3 and t not in stop_words]
+
+            matched_projects_qs = Project.objects.none()
+            if meaningful_tokens:
+                token_query = Q()
+                for t in meaningful_tokens:
+                    token_query |= Q(name__icontains=t) | Q(company__name__icontains=t)
+                matched_projects_qs = Project.objects.filter(token_query).select_related('company', 'manager').distinct()
+
+            matched_projects = list(matched_projects_qs[:10])
+
+            # Проверяем, носит ли запрос обобщенный/аналитический характер
+            is_general_analytical = (
+                len(matched_projects) == 0 or
+                any(w in prompt_lower for w in [
+                    "сумм", "договор", "итог", "всего", "денег", "общ", "статистик",
+                    "стади", "марж", "скольк", "ворон", "портфел", "сводк", "план"
+                ])
+            )
+
+            # Если объект конкретно не найден, или если запрос аналитический — передаем активный реестр
+            if not matched_projects or is_general_analytical:
+                projects_for_context = list(
+                    Project.objects.all().select_related('company', 'manager').order_by('-contract_amount')[:30]
+                )
+            else:
+                projects_for_context = matched_projects
+
             context_data = {
                 "user_prompt": prompt,
+                "portfolio_summary": portfolio_summary,
                 "matched_projects": [
                     {
+                        "id": p.id,
                         "name": p.name,
-                        "company": p.company.name if p.company else None,
+                        "company": p.company.name if p.company else "Не указано",
+                        "manager": p.manager.full_name if p.manager else "Не закреплен",
                         "status": p.get_status_display(),
-                        "amount": float(p.contract_amount),
-                        "paid": float(p.paid_amount),
-                        "due": float(p.due_amount),
-                        "margin": float(p.actual_margin_percent),
+                        "status_code": p.status,
+                        "contract_amount": float(p.contract_amount),
+                        "contract_formatted": f"{float(p.contract_amount):,.0f} ₸".replace(',', ' '),
+                        "paid_amount": float(p.paid_amount),
+                        "paid_formatted": f"{float(p.paid_amount):,.0f} ₸".replace(',', ' '),
+                        "due_amount": float(p.due_amount),
+                        "due_formatted": f"{float(p.due_amount):,.0f} ₸".replace(',', ' '),
+                        "margin": float(p.actual_margin_percent or p.target_margin_percent),
+                        "equipment": p.equipment_type,
                         "current_action": p.current_action,
                         "next_action": p.next_action,
                     }
-                    for p in matched_projects
+                    for p in projects_for_context
                 ],
                 "whatsapp_chat_evidence": quotes
             }
 
             ai_text = AIService.chat_assistant(prompt, context_data)
 
+            # Виджет таблицы отдаем, если есть проекты
+            has_projects = len(projects_for_context) > 0
+            widget = None
+            if has_projects:
+                widget_title = (
+                    "Связанные объекты и проекты"
+                    if (len(matched_projects) > 0 and not is_general_analytical)
+                    else "Воронка проектов и контроль маржи"
+                )
+                widget = {
+                    "type": "project_table",
+                    "preset": "deal_pipeline",
+                    "title": widget_title,
+                    "data": datamart.get_pipeline_mart()
+                }
+
             return Response({
                 "prompt": prompt,
                 "text": ai_text,
                 "quotes": quotes,
-                "widget": {
-                    "type": "project_table",
-                    "preset": "deal_pipeline",
-                    "title": "Связанные объекты и проекты",
-                    "data": datamart.get_pipeline_mart()
-                } if matched_projects else None
+                "widget": widget
             })
 
 

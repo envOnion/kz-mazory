@@ -69,4 +69,17 @@ test.describe('Mazory AI Business OS — E2E Сквозные сценарии',
     await expect(page.locator('text=Улугбек').first()).toBeVisible()
     await expect(page.locator('text=Камиль').first()).toBeVisible()
   })
+
+  test('6. Запрос расчета суммы договоров: AI выдает расчет с суммами в ₸ и виджетом таблицы', async ({ page }) => {
+    const chatInput = page.locator('input[placeholder*="Спросите"]')
+    await chatInput.fill('Посчитай общую сумму по всем договорам')
+    await chatInput.press('Enter')
+
+    // Ожидаем появления виджета таблицы проектов
+    await expect(page.locator('text=Воронка проектов и контроль экономики сделок')).toBeVisible({ timeout: 15000 })
+
+    // Проверяем, что ответ содержит символ валюты тенге ₸
+    const responseContainer = page.locator('main')
+    await expect(responseContainer).toContainText('₸')
+  })
 })
