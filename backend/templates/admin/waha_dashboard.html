@@ -39,6 +39,12 @@
           Остановить
         </button>
       </form>
+      <form method="post" action="{% url 'admin:waha_action' 'logout' %}" onsubmit="return confirm('Вы уверены, что хотите выйти из WhatsApp? Текущая авторизация будет сброшена, и потребуется отсканировать новый QR-код.');">
+        {% csrf_token %}
+        <button type="submit" class="px-4 py-2 text-sm font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/50 transition">
+          Выйти (Logout)
+        </button>
+      </form>
     </div>
   </div>
 
@@ -125,6 +131,12 @@
         <p class="text-sm text-gray-500 max-w-sm mt-1">
           Сервис непрерывно слушает входящие сообщения из группы «{{ config.name }}» и автоматически отправляет их на обработку AI.
         </p>
+        <form method="post" action="{% url 'admin:waha_action' 'logout' %}" onsubmit="return confirm('Вы уверены, что хотите выйти из WhatsApp? Текущая авторизация будет сброшена, и потребуется отсканировать новый QR-код.');" class="mt-4">
+          {% csrf_token %}
+          <button type="submit" class="px-3 py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 rounded-lg hover:bg-rose-100 dark:hover:bg-rose-900/50 transition">
+            Отвязать номер (сбросить сессию)
+          </button>
+        </form>
       {% else %}
         <div class="w-20 h-20 rounded-full bg-gray-500/10 text-gray-400 flex items-center justify-center mb-4">
           <svg class="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">

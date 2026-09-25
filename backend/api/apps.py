@@ -18,8 +18,8 @@ def start_waha_watchdog():
                 if res.status_code == 200:
                     default_session = res.json()
                     status = default_session.get('status')
-                    if status in ('FAILED', 'STOPPED'):
-                        print(f"\n🔄 [WAHA AUTO-HEALER] Session 'default' is {status}. Auto-restarting so QR is always active...", flush=True)
+                    if status in ('FAILED',):
+                        print(f"\n🔄 [WAHA AUTO-HEALER] Session 'default' is {status}. Auto-restarting...", flush=True)
                         requests.post(f"{waha_url}/api/sessions/default/restart", headers=headers, timeout=5)
                 elif res.status_code == 404:
                     print(f"\n🚀 [WAHA AUTO-HEALER] Session 'default' not found. Creating...", flush=True)
