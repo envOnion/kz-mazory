@@ -104,7 +104,7 @@ services:
       - ./backend:/app
     environment:
       - PYTHONUNBUFFERED=1
-      - DEBUG=1
+      - DEBUG=0
       - POSTGRES_DB=${POSTGRES_DB:-mazory_db}
       - POSTGRES_USER=${POSTGRES_USER:-mazory}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-mazory2026}
@@ -140,7 +140,7 @@ services:
       - ./backend:/app
     environment:
       - PYTHONUNBUFFERED=1
-      - DEBUG=1
+      - DEBUG=0
       - POSTGRES_DB=${POSTGRES_DB:-mazory_db}
       - POSTGRES_USER=${POSTGRES_USER:-mazory}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-mazory2026}

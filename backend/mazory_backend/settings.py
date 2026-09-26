@@ -13,9 +13,10 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-f7u)rp4lokiv@hgsdma!e@cb*g
 
 DEBUG = os.getenv('DEBUG', '1') == '1'
 
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '*').split(',') if os.getenv('ALLOWED_HOSTS') else ['*']
-if 'ai.mazory.best' not in ALLOWED_HOSTS and '*' not in ALLOWED_HOSTS:
-    ALLOWED_HOSTS.append('ai.mazory.best')
+ALLOWED_HOSTS = [h.strip() for h in os.getenv('ALLOWED_HOSTS', '*').split(',') if h.strip()]
+for h in ['ai.mazory.best', '34.70.69.38', 'backend', 'mazory-backend', 'localhost', '127.0.0.1']:
+    if h not in ALLOWED_HOSTS and '*' not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(h)
 
 # CSRF & Reverse Proxy settings (поддержка localhost, ai.mazory.best и Nginx)
 CSRF_TRUSTED_ORIGINS = [
@@ -73,7 +74,21 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-CORS_ALLOW_ALL_ORIGINS = True
+if DEBUG:
+    CORS_ALLOW_ALL_ORIGINS = True
+else:
+    CORS_ALLOW_ALL_ORIGINS = False
+    CORS_ALLOWED_ORIGINS = [
+        'https://ai.mazory.best',
+        'http://ai.mazory.best',
+        'http://localhost:5173',
+        'http://127.0.0.1:5173',
+        'http://localhost:8080',
+        'http://127.0.0.1:8080',
+    ]
+    extra_cors = os.getenv('CORS_ALLOWED_ORIGINS', '')
+    if extra_cors:
+        CORS_ALLOWED_ORIGINS.extend([origin.strip() for origin in extra_cors.split(',') if origin.strip()])
 CORS_ALLOW_CREDENTIALS = True
 
 ROOT_URLCONF = 'mazory_backend.urls'
@@ -321,6 +336,9 @@ Q_CLUSTER = {
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
+    ),
+    'DEFAULT_PERMISSION_CLASSES': (
+        'rest_framework.permissions.IsAuthenticated',
     ),
 }
 

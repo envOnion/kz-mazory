@@ -127,9 +127,14 @@ export function useAuth() {
 
   async function sendWhatsAppAlert(phone: string, message: string) {
     try {
+      const token = localStorage.getItem('mazory_access_token')
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
       const res = await fetch(`${API_BASE}/whatsapp/send/`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({ phone, message })
       })
       return await res.json()

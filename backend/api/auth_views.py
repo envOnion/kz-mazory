@@ -139,7 +139,7 @@ class SendWhatsAppView(APIView):
     """
     Triggers sending a WhatsApp message via WAHA background worker.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def post(self, request):
         phone = request.data.get("phone", "").strip()

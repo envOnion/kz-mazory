@@ -39,8 +39,12 @@ class TestApiEndpoints(TestCase):
         self.access_token = str(self.refresh.access_token)
         self.auth_headers = {'HTTP_AUTHORIZATION': f'Bearer {self.access_token}'}
 
-    def test_kpi_summary(self):
+    def test_kpi_summary_unauthorized(self):
         response = self.client.get('/api/kpi/summary/')
+        self.assertEqual(response.status_code, 401)
+
+    def test_kpi_summary_authorized(self):
+        response = self.client.get('/api/kpi/summary/', **self.auth_headers)
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertIn('category_badge', data)
@@ -49,13 +53,35 @@ class TestApiEndpoints(TestCase):
         self.assertIn('managers', data)
         self.assertIn('insight', data)
 
-    def test_project_list(self):
+    def test_project_list_unauthorized(self):
         response = self.client.get('/api/projects/')
+        self.assertEqual(response.status_code, 401)
+
+    def test_project_list_authorized(self):
+        response = self.client.get('/api/projects/', **self.auth_headers)
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(isinstance(data, list))
         self.assertGreaterEqual(len(data), 1)
         self.assertEqual(data[0]['name'], 'ЖК Тестовый Объект')
+
+    def test_whatsapp_send_unauthorized(self):
+        response = self.client.post('/api/whatsapp/send/', data={'phone': '77011234567', 'message': 'Hello'})
+        self.assertEqual(response.status_code, 401)
+
+    def test_whatsapp_send_authorized(self):
+        response = self.client.post(
+            '/api/whatsapp/send/',
+            data=json.dumps({'phone': '77011234567', 'message': 'Hello'}),
+            content_type='application/json',
+            **self.auth_headers
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['status'], 'queued')
+
+    def test_whatsapp_status_unauthorized(self):
+        response = self.client.get('/api/whatsapp/status/')
+        self.assertEqual(response.status_code, 401)
 
     def test_chat_query_unauthorized(self):
         response = self.client.post(
@@ -118,6 +144,15 @@ class TestWahaWebhookIngestion(TestCase):
             group_jid='120363024823904923@g.us',
             is_active=True
         )
+        self.waha_headers = {'HTTP_X_API_KEY': 'mazory-waha-key-2026'}
+
+    def test_waha_webhook_unauthorized(self):
+        response = self.client.post(
+            '/api/whatsapp/webhook/',
+            data=json.dumps({"event": "message", "payload": {"body": "test"}}),
+            content_type='application/json'
+        )
+        self.assertEqual(response.status_code, 401)
 
     def test_waha_nested_payload_success(self):
         payload = {
@@ -137,7 +172,8 @@ class TestWahaWebhookIngestion(TestCase):
         response = self.client.post(
             '/api/whatsapp/webhook/',
             data=json.dumps(payload),
-            content_type='application/json'
+            content_type='application/json',
+            **self.waha_headers
         )
         self.assertEqual(response.status_code, 202)
         data = response.json()
@@ -157,7 +193,8 @@ class TestWahaWebhookIngestion(TestCase):
         response = self.client.post(
             '/api/whatsapp/webhook/',
             data=json.dumps(payload),
-            content_type='application/json'
+            content_type='application/json',
+            **self.waha_headers
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['status'], 'ignored')
@@ -175,7 +212,8 @@ class TestWahaWebhookIngestion(TestCase):
         response = self.client.post(
             '/api/whatsapp/webhook/',
             data=json.dumps(payload),
-            content_type='application/json'
+            content_type='application/json',
+            **self.waha_headers
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()['status'], 'ignored')
