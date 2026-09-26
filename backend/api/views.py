@@ -106,6 +106,22 @@ class ChatQueryView(APIView):
         elif any(w in prompt_lower for w in ["обещ", "дедлайн", "напомин", "задач", "сроки", "горит", "просроч"]):
             commitments_mart = datamart.get_commitments_sla_mart()
             overdue_count = commitments_mart["overdue_count"]
+            overdue_items = [c for c in commitments_mart["commitments"] if c["status_color"] == "red"][:2]
+            today_items = [c for c in commitments_mart["commitments"] if c["status"] == "Горит сегодня"][:2]
+
+            insight_overdue = (
+                f"Критично: просрочено {overdue_count} договоренностей. Срочного внимания требуют: " +
+                "; ".join(f"{c['counterparty']} ({c['manager_name']})" for c in overdue_items) + "."
+                if overdue_items else
+                "Критичных нарушений дедлайнов нет."
+            )
+            insight_urgent = (
+                f"Горят сегодня: " +
+                "; ".join(f"{c['text'][:80]} [{c['manager_name']}]" for c in today_items) + "."
+                if today_items else
+                f"Выполнено: {commitments_mart['fulfilled_count']} обязательств успешно закрыты в срок."
+            )
+
             return Response({
                 "prompt": prompt,
                 "text": f"Сформирован реестр обещаний и обязательств. На контроле {commitments_mart['total_count']} договоренностей, из них просрочено: {overdue_count}.",
@@ -116,14 +132,30 @@ class ChatQueryView(APIView):
                     "data": commitments_mart
                 },
                 "insights": [
-                    "Критично: Квалификация 6 заводов (Coca-Cola, HOWO, VOLTREX) просрочена.",
-                    "Выполнено: Все работы по Integra закрыты, оборудование по Top Build отгружено."
+                    insight_overdue,
+                    insight_urgent
                 ]
             })
 
         # Интент 3: Воронка сделок, проекты, объекты
         elif any(w in prompt_lower for w in ["сделк", "объект", "проект", "воронк", "пайплайн", "pipeline"]):
             pipeline_mart = datamart.get_pipeline_mart()
+            low_count = pipeline_mart["margin_distribution"]["low_under_15"]
+            low_margin_projects = [p["name"] for p in pipeline_mart["projects"] if p["margin_alert"]][:2]
+            top_margin_project = max(pipeline_mart["projects"], key=lambda p: p["margin_percent"]) if pipeline_mart["projects"] else None
+
+            insight_margin_alert = (
+                f"Внимание: {low_count} сделок имеют маржу ниже 15% (в т.ч. {', '.join(low_margin_projects)}). "
+                f"Любые допработы требуют согласования генерального директора."
+                if low_count > 0 else
+                "Все текущие сделки находятся в пределах нормативной рентабельности (≥15%)."
+            )
+            insight_top_margin = (
+                f"Лучший маржинальный кейс: {top_margin_project['name']} ({top_margin_project['margin_percent']}% маржи)."
+                if top_margin_project and top_margin_project["margin_percent"] >= 20.0 else
+                "Маржинальный портфель стабилизирован."
+            )
+
             return Response({
                 "prompt": prompt,
                 "text": "Актуальная воронка проектов и распределение объектов Aqua Kip по стадиям и маржинальности.",
@@ -134,8 +166,8 @@ class ChatQueryView(APIView):
                     "data": pipeline_mart
                 },
                 "insights": [
-                    "Внимание: проекты ПСЭМ 190 и ПСЭМ 100 имеют маржу 14.0–14.4% (порог 15%). Любые допработы требуют визы генерального директора.",
-                    "Лучший маржинальный кейс: Алтын Сити (46.3% маржи)."
+                    insight_margin_alert,
+                    insight_top_margin
                 ]
             })
 
@@ -166,8 +198,8 @@ class ChatQueryView(APIView):
                 for r in search_results if r.get('payload')
             ]
 
-            # 2. Финансовые агрегаты по всему портфелю
-            agg = Project.objects.aggregate(
+            # 2. Финансовые агрегаты по всему портфелю (только проверенные)
+            agg = Project.objects.filter(is_verified=True).aggregate(
                 total_count=Count('id'),
                 total_amount=Sum('contract_amount'),
                 total_paid=Sum('paid_amount'),
@@ -178,10 +210,10 @@ class ChatQueryView(APIView):
             total_paid = float(agg['total_paid'] or 0)
             total_due = float(agg['total_due'] or 0)
 
-            # Статистика по стадиям воронки
+            # Статистика по стадиям воронки (только проверенные)
             stages_summary = []
             for stage_code, stage_label in Project.STATUS_CHOICES:
-                stage_qs = Project.objects.filter(status=stage_code)
+                stage_qs = Project.objects.filter(is_verified=True, status=stage_code)
                 st_count = stage_qs.count()
                 if st_count > 0:
                     st_vol = float(stage_qs.aggregate(s=Sum('contract_amount'))['s'] or 0)
@@ -204,7 +236,7 @@ class ChatQueryView(APIView):
                 "stages_breakdown": stages_summary
             }
 
-            # 3. Интеллектуальный поиск конкретных проектов по токенам запроса
+            # 3. Интеллектуальный поиск конкретных проектов по токенам запроса (только проверенные)
             stop_words = {
                 "по", "в", "во", "на", "с", "со", "и", "или", "не", "для", "к", "ко", "до",
                 "от", "из", "о", "об", "обо", "за", "под", "при", "про", "что", "как", "где",
@@ -231,7 +263,7 @@ class ChatQueryView(APIView):
                         Q(company__name__icontains=t) |
                         Q(manager__full_name__icontains=t)
                     )
-                matched_projects_qs = Project.objects.filter(token_query).select_related('company', 'manager').distinct()
+                matched_projects_qs = Project.objects.filter(is_verified=True).filter(token_query).select_related('company', 'manager').distinct()
 
             matched_projects = list(matched_projects_qs[:10])
 
@@ -244,10 +276,10 @@ class ChatQueryView(APIView):
                 ])
             )
 
-            # Если объект конкретно не найден, или если запрос аналитический — передаем активный реестр
+            # Если объект конкретно не найден, или если запрос аналитический — передаем активный проверенный реестр
             if not matched_projects or is_general_analytical:
                 projects_for_context = list(
-                    Project.objects.all().select_related('company', 'manager').order_by('-contract_amount')[:30]
+                    Project.objects.filter(is_verified=True).select_related('company', 'manager').order_by('-contract_amount')[:30]
                 )
             else:
                 projects_for_context = matched_projects
@@ -273,6 +305,7 @@ class ChatQueryView(APIView):
                         "equipment": p.equipment_type,
                         "current_action": p.current_action,
                         "next_action": p.next_action,
+                        "is_verified": p.is_verified,
                     }
                     for p in projects_for_context
                 ],
@@ -403,13 +436,19 @@ class MessageIngestView(APIView):
 class ProjectListView(ListAPIView):
     """
     Реестр всех объектов и сделок Aqua Kip Engineering.
-    Поддерживает фильтрацию по менеджеру ?manager=<id>.
+    Поддерживает фильтрацию по менеджеру ?manager=<id> и верификации ?is_verified=true|false.
     """
     permission_classes = [IsAuthenticated]
     serializer_class = ProjectSerializer
 
     def get_queryset(self):
         qs = Project.objects.all().select_related('company', 'manager').order_by('-contract_amount')
+        is_verified = self.request.query_params.get('is_verified')
+        if is_verified is not None:
+            if is_verified.lower() in ('true', '1'):
+                qs = qs.filter(is_verified=True)
+            elif is_verified.lower() in ('false', '0'):
+                qs = qs.filter(is_verified=False)
         manager_id = self.request.query_params.get('manager') or self.request.query_params.get('manager_id')
         if manager_id:
             try:
@@ -417,6 +456,37 @@ class ProjectListView(ListAPIView):
             except (ValueError, TypeError):
                 pass
         return qs
+
+
+class ProjectVerifyView(APIView):
+    """
+    Верификация сделки / объекта (установка флага is_verified = True).
+    При необходимости инициирует синхронизацию с Bitrix24 CRM.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk: int):
+        try:
+            project = Project.objects.get(pk=pk)
+        except Project.DoesNotExist:
+            return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
+
+        project.is_verified = True
+        project.save(update_fields=['is_verified'])
+
+        # Если сделка еще не зарегистрирована в Bitrix24 — создаем ее в CRM
+        if not project.bitrix_id:
+            async_task('api.tasks.create_bitrix_deal_task', project.id)
+        elif project.needs_bitrix_sync:
+            async_task('api.tasks.sync_single_deal_to_bitrix_task', project.id)
+
+        return Response({
+            "status": "verified",
+            "project_id": project.id,
+            "name": project.name,
+            "is_verified": True,
+            "message": f"Сделка '{project.name}' успешно проверена и включена в аналитику"
+        }, status=status.HTTP_200_OK)
 
 
 class BitrixWebhookView(APIView):

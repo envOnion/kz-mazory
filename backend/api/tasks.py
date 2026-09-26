@@ -71,6 +71,10 @@ def create_bitrix_deal_task(project_id: int):
     except Project.DoesNotExist:
         return {"status": "not_found", "project_id": project_id}
 
+    if not project.is_verified:
+        logger.info("Project #%d '%s' is not verified yet. Postponing Bitrix deal creation.", project.id, project.name)
+        return {"status": "unverified_skipped", "project_id": project.id}
+
     if project.bitrix_id:
         return {"status": "already_has_bitrix_id", "bitrix_id": project.bitrix_id}
 
@@ -115,6 +119,10 @@ def sync_single_deal_to_bitrix_task(project_id: int):
     except Project.DoesNotExist:
         return {"status": "project_not_found", "project_id": project_id}
 
+    if not project.is_verified:
+        logger.info("Project #%d '%s' is not verified yet. Postponing Bitrix sync.", project.id, project.name)
+        return {"status": "unverified_skipped", "project_id": project.id}
+
     # Если сделка еще не зарегистрирована в Bitrix24, создаем её
     if not project.bitrix_id:
         return create_bitrix_deal_task(project_id)
@@ -153,10 +161,10 @@ def sync_single_deal_to_bitrix_task(project_id: int):
         )
         BitrixService.add_timeline_comment(deal_id, comment)
 
-    # 3. Постановка задач в Bitrix24 по несинхронизированным обязательствам
+    # 3. Постановка задач в Bitrix24 по несинхронизированным обязательствам (только проверенные)
     created_tasks_count = 0
     if cfg.auto_create_tasks:
-        unassigned_commitments = project.commitments.filter(bitrix_task_id__isnull=True, status='pending')
+        unassigned_commitments = project.commitments.filter(is_verified=True, bitrix_task_id__isnull=True, status='pending')
         for comm in unassigned_commitments:
             deadline_iso = comm.deadline.isoformat() + "T18:00:00+05:00" if comm.deadline else None
             resp_id = None
@@ -243,8 +251,8 @@ def enqueue_hourly_bitrix_sync_task():
         except Exception as e:
             logger.error("Failed to pull modified deals from Bitrix24: %s", e)
 
-    # 2. PUSH накопленных обновлений из чата в Bitrix24
-    pending_ids = list(Project.objects.filter(needs_bitrix_sync=True).values_list('id', flat=True))
+    # 2. PUSH накопленных обновлений из чата в Bitrix24 (только проверенные сделки)
+    pending_ids = list(Project.objects.filter(needs_bitrix_sync=True, is_verified=True).values_list('id', flat=True))
     for pid in pending_ids:
         async_task('api.tasks.sync_single_deal_to_bitrix_task', pid)
 
@@ -322,8 +330,9 @@ def monitor_kpi_risks_and_anomalies_task():
         logger.warning("No users found to dispatch risk alerts.")
         return {"status": "no_users", "alerts_count": 0}
 
-    # 1. Проверка крупных задолженностей (> 50 млн ₸)
+    # 1. Проверка крупных задолженностей (> 50 млн ₸) (только проверенные)
     high_debt_projects = Project.objects.filter(
+        is_verified=True,
         due_amount__gte=Decimal('50000000.00')
     ).select_related('company', 'manager')
 
@@ -352,8 +361,9 @@ def monitor_kpi_risks_and_anomalies_task():
             cache.set(cache_key, True, timeout=86400)
             generated_alerts.append(title)
 
-    # 2. Проверка проектов с низкой маржинальностью (< 15%)
+    # 2. Проверка проектов с низкой маржинальностью (< 15%) (только проверенные)
     low_margin_projects = Project.objects.filter(
+        is_verified=True,
         actual_margin_percent__lt=Decimal('15.00'),
         contract_amount__gt=Decimal('0.00')
     ).select_related('company', 'manager')
@@ -383,8 +393,10 @@ def monitor_kpi_risks_and_anomalies_task():
             cache.set(cache_key, True, timeout=86400)
             generated_alerts.append(title)
 
-    # 3. Просроченные обязательства и дедлайны
+    # 3. Просроченные обязательства и дедлайны (только проверенные)
     overdue_commitments = Commitment.objects.filter(
+        is_verified=True
+    ).filter(
         Q(status='overdue') | Q(status='pending', deadline__lt=today)
     ).select_related('manager', 'project')
 
@@ -580,25 +592,23 @@ def process_incoming_message_task(message_data: dict):
                     decision_maker=facts.get("decision_maker") or "",
                     blocker=facts.get("blocker") or "",
                     priority=facts.get("priority") or "standard",
-                    needs_bitrix_sync=False
+                    needs_bitrix_sync=True,
+                    is_verified=False
                 )
 
-                # Асинхронное создание в Bitrix24 через очередь Redis
-                async_task('api.tasks.create_bitrix_deal_task', project.id)
-
-                event_title = f"Создана новая сделка: {project.name}"
+                event_title = f"Извлечена новая сделка: {project.name} (ожидает проверки)"
                 BusinessEvent.objects.create(
                     event_type="new_deal",
                     project=project,
                     manager=manager,
                     title=event_title,
-                    description=f"Сумма: {project.contract_amount:,.2f} ₸. Менеджер: {responsible_name}",
+                    description=f"Сумма: {project.contract_amount:,.2f} ₸. Менеджер: {responsible_name}. Ожидает верификации.",
                     severity="info"
                 )
-                push_notification_to_redis(sender_phone, event_title, f"Сделка {project.name} зарегистрирована в системе и отправлена в Bitrix24", "deal")
+                push_notification_to_redis(sender_phone, event_title, f"Сделка {project.name} сохранена из переписки WhatsApp и ожидает проверки перед отправкой в Bitrix24 и учетом в аналитике", "deal")
 
             elif project:
-                # Обновление существующей сделки и выставление флага needs_bitrix_sync
+                # Обновление существующей сделки и выставление флагов needs_bitrix_sync и is_verified=False
                 if facts.get("contract_amount"):
                     project.contract_amount = Decimal(str(facts["contract_amount"]))
                 if facts.get("cost_amount"):
@@ -618,10 +628,11 @@ def process_incoming_message_task(message_data: dict):
                 if manager and not project.manager:
                     project.manager = manager
                 
+                project.is_verified = False
                 project.needs_bitrix_sync = True
                 project.last_chat_activity_at = timezone.now()
                 project.save()
-                logger.info("Project #%d '%s' updated from chat and marked for Bitrix sync", project.id, project.name)
+                logger.info("Project #%d '%s' updated from chat (is_verified=False, needs_bitrix_sync=True)", project.id, project.name)
 
     # Обязательства / Обещания менеджеров (Commitment)
     next_action = facts.get("next_action")
@@ -644,7 +655,8 @@ def process_incoming_message_task(message_data: dict):
             deadline=deadline,
             status='pending',
             severity='critical' if ('срочно' in content.lower() or 'договор' in next_action.lower()) else 'medium',
-            bitrix_task_id=None
+            bitrix_task_id=None,
+            is_verified=False
         )
 
     # Финансовые записи (FinancialRecord)
@@ -656,7 +668,8 @@ def process_incoming_message_task(message_data: dict):
             payment_date=timezone.now().date(),
             payment_type='final' if 'окончательн' in content.lower() else 'milestone',
             status='received',
-            notes=f"Извлечено из отчета {sender_name}: {content[:100]}"
+            notes=f"Извлечено из отчета {sender_name}: {content[:100]}",
+            is_verified=False
         )
 
     raw_msg.processed = True

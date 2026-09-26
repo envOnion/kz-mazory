@@ -2,6 +2,7 @@ import json
 import requests
 from django.contrib import admin
 from django.utils.html import format_html
+from django.utils.safestring import mark_safe
 from django.contrib import messages
 from unfold.admin import ModelAdmin, TabularInline
 from unfold.decorators import action
@@ -91,14 +92,44 @@ class BitrixDealChangeLogInLine(TabularInline):
 @admin.register(Project)
 class ProjectAdmin(ModelAdmin):
     list_display = (
-        'name', 'source', 'company', 'manager', 'contract_amount_fmt',
+        'name', 'verified_badge', 'source', 'company', 'manager', 'contract_amount_fmt',
         'paid_amount_fmt', 'due_amount_fmt', 'margin_badge',
         'status', 'needs_bitrix_sync', 'priority', 'bitrix_link'
     )
-    list_filter = ('source', 'needs_bitrix_sync', 'status', 'priority', 'project_type', 'manager')
+    list_filter = ('is_verified', 'source', 'needs_bitrix_sync', 'status', 'priority', 'project_type', 'manager')
     search_fields = ('name', 'normalized_name', 'contract_number', 'company__name', 'decision_maker', 'bitrix_id')
     readonly_fields = ('normalized_name', 'actual_margin_percent', 'due_amount', 'created_at', 'updated_at')
     inlines = [BitrixDealChangeLogInLine]
+    actions = ['mark_as_verified', 'mark_as_unverified']
+
+    def verified_badge(self, obj):
+        if obj.is_verified:
+            return mark_safe(
+                '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-emerald-500/10 text-emerald-500">✓ Проверено</span>'
+            )
+        return mark_safe(
+            '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-amber-500/10 text-amber-500">⏳ Требует проверки</span>'
+        )
+    verified_badge.short_description = "Проверено"
+
+    @action(description="Отметить как проверенные (включить в аналитику и синхронизацию)")
+    def mark_as_verified(self, request, queryset):
+        from django_q.tasks import async_task
+        count = 0
+        for proj in queryset:
+            proj.is_verified = True
+            proj.save(update_fields=['is_verified'])
+            if not proj.bitrix_id:
+                async_task('api.tasks.create_bitrix_deal_task', proj.id)
+            elif proj.needs_bitrix_sync:
+                async_task('api.tasks.sync_single_deal_to_bitrix_task', proj.id)
+            count += 1
+        self.message_user(request, f"Успешно проверено и отправлено в обработку сделок: {count}", messages.SUCCESS)
+
+    @action(description="Снять отметку проверки (исключить из аналитики)")
+    def mark_as_unverified(self, request, queryset):
+        updated = queryset.update(is_verified=False)
+        self.message_user(request, f"Снята отметка проверки для {updated} сделок", messages.WARNING)
 
     def contract_amount_fmt(self, obj):
         return f"{obj.contract_amount:,.2f} ₸" if obj.contract_amount else "—"
@@ -134,9 +165,30 @@ class ProjectAdmin(ModelAdmin):
 
 @admin.register(Commitment)
 class CommitmentAdmin(ModelAdmin):
-    list_display = ('commitment_text_snippet', 'project', 'manager', 'deadline', 'bitrix_task_id', 'status_badge', 'severity')
-    list_filter = ('status', 'severity', 'manager')
+    list_display = ('commitment_text_snippet', 'verified_badge', 'project', 'manager', 'deadline', 'bitrix_task_id', 'status_badge', 'severity')
+    list_filter = ('is_verified', 'status', 'severity', 'manager')
     search_fields = ('commitment_text', 'counterparty_person', 'project__name', 'bitrix_task_id')
+    actions = ['mark_as_verified', 'mark_as_unverified']
+
+    def verified_badge(self, obj):
+        if obj.is_verified:
+            return mark_safe(
+                '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-emerald-500/10 text-emerald-500">✓ Проверено</span>'
+            )
+        return mark_safe(
+            '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-amber-500/10 text-amber-500">⏳ Требует проверки</span>'
+        )
+    verified_badge.short_description = "Проверено"
+
+    @action(description="Отметить как проверенные (включить в SLA)")
+    def mark_as_verified(self, request, queryset):
+        updated = queryset.update(is_verified=True)
+        self.message_user(request, f"Успешно подтверждено обязательств: {updated}", messages.SUCCESS)
+
+    @action(description="Снять отметку проверки (исключить из SLA)")
+    def mark_as_unverified(self, request, queryset):
+        updated = queryset.update(is_verified=False)
+        self.message_user(request, f"Снята отметка проверки для {updated} обязательств", messages.WARNING)
 
     def commitment_text_snippet(self, obj):
         return (obj.commitment_text[:60] + '...') if len(obj.commitment_text) > 60 else obj.commitment_text
@@ -159,9 +211,30 @@ class CommitmentAdmin(ModelAdmin):
 
 @admin.register(FinancialRecord)
 class FinancialRecordAdmin(ModelAdmin):
-    list_display = ('project', 'amount_fmt', 'payment_date', 'payment_type', 'status', 'created_at')
-    list_filter = ('status', 'payment_type', 'payment_date')
+    list_display = ('project', 'verified_badge', 'amount_fmt', 'payment_date', 'payment_type', 'status', 'created_at')
+    list_filter = ('is_verified', 'status', 'payment_type', 'payment_date')
     search_fields = ('project__name', 'notes')
+    actions = ['mark_as_verified', 'mark_as_unverified']
+
+    def verified_badge(self, obj):
+        if obj.is_verified:
+            return mark_safe(
+                '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-emerald-500/10 text-emerald-500">✓ Проверено</span>'
+            )
+        return mark_safe(
+            '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-amber-500/10 text-amber-500">⏳ Требует проверки</span>'
+        )
+    verified_badge.short_description = "Проверено"
+
+    @action(description="Отметить как проверенные (включить в план-факт оплат)")
+    def mark_as_verified(self, request, queryset):
+        updated = queryset.update(is_verified=True)
+        self.message_user(request, f"Успешно подтверждено финансовых записей: {updated}", messages.SUCCESS)
+
+    @action(description="Снять отметку проверки (исключить из плана-факта)")
+    def mark_as_unverified(self, request, queryset):
+        updated = queryset.update(is_verified=False)
+        self.message_user(request, f"Снята отметка проверки для {updated} записей оплат", messages.WARNING)
 
     def amount_fmt(self, obj):
         return f"{obj.amount:,.2f} ₸"

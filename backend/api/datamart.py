@@ -67,13 +67,14 @@ class DataMartService:
         manager_cards = []
 
         for rank, mgr in enumerate(managers, start=1):
-            # Проекты менеджера
-            mgr_projects = Project.objects.filter(manager=mgr).select_related('company')
+            # Проекты менеджера (только проверенные)
+            mgr_projects = Project.objects.filter(manager=mgr, is_verified=True).select_related('company')
             deals_count = mgr_projects.count()
             
-            # Фактические оплаты из FinancialRecord за выбранный период (если есть записи)
+            # Фактические оплаты из FinancialRecord за выбранный период (только проверенные)
             fin_qs = FinancialRecord.objects.filter(
                 project__manager=mgr,
+                is_verified=True,
                 payment_date__gte=date_from,
                 payment_date__lte=date_to,
                 status='received'
@@ -101,9 +102,10 @@ class DataMartService:
             # Средняя маржа по портфелю
             avg_margin = mgr_projects.aggregate(avg=Avg('target_margin_percent'))['avg'] or Decimal('16.80')
 
-            # Просроченные обещания
+            # Просроченные обещания (только проверенные)
             overdue_count = Commitment.objects.filter(
                 manager=mgr,
+                is_verified=True,
                 status__in=['pending', 'overdue'],
                 deadline__lt=today
             ).count()
@@ -137,6 +139,7 @@ class DataMartService:
                     "status_code": p.status,
                     "margin": float(p.actual_margin_percent or p.target_margin_percent),
                     "equipment": p.equipment_type,
+                    "is_verified": p.is_verified,
                 }
                 for p in mgr_projects.order_by('-contract_amount')[:8]
             ]
@@ -234,22 +237,25 @@ class DataMartService:
     def get_pipeline_mart() -> Dict[str, Any]:
         """
         Витрина воронки проектов, оборудования и контроля маржинальности.
+        Приоритизирует реальные коммерческие сделки с суммой договора, исключая черновики.
         """
-        projects = Project.objects.all().select_related('company', 'manager').order_by('-id')
-        
-        stages = [
-            ('lead', 'Лиды'),
-            ('qualification', 'Квалификация / ТЗ'),
-            ('proposal_sent', 'КП отправлено'),
-            ('contract_signing', 'Согласование договора'),
-            ('in_execution', 'В исполнении / Монтаж'),
-            ('completed', 'Закрытые сделки'),
-            ('stalled', 'Зависшие / Внимание')
+        all_projects = Project.objects.filter(is_verified=True)
+        valid_projects = all_projects.filter(contract_amount__gt=0).select_related('company', 'manager').order_by('-contract_amount', '-id')
+        if not valid_projects.exists():
+            valid_projects = all_projects.select_related('company', 'manager').order_by('-id')
+
+        stage_definitions = [
+            ('qualification', 'Квалификация / ТЗ', ['qualification', 'tender', 'lead', 'Переговоры']),
+            ('proposal_sent', 'КП отправлено', ['proposal_sent', 'proposal', 'КП отправлено']),
+            ('contract_signing', 'Согласование договора', ['contract_signing', 'contract_signed']),
+            ('in_execution', 'В исполнении / Монтаж', ['in_execution', 'executing', 'Исполнение']),
+            ('completed', 'Закрытые сделки', ['completed', 'deal_won']),
+            ('lost', 'Зависшие / Внимание', ['lost', 'stalled'])
         ]
         
         pipeline_stages = []
-        for code, label in stages:
-            qs = projects.filter(status=code)
+        for code, label, statuses in stage_definitions:
+            qs = all_projects.filter(status__in=statuses)
             count = qs.count()
             vol = qs.aggregate(total=Sum('contract_amount'))['total'] or Decimal('0.00')
             pipeline_stages.append({
@@ -261,9 +267,9 @@ class DataMartService:
             })
 
         # Маржинальность: низкая (<15%), нормальная (15-20%), высокая (>20%)
-        margin_low = projects.filter(target_margin_percent__lt=15.0).count()
-        margin_norm = projects.filter(target_margin_percent__gte=15.0, target_margin_percent__lte=20.0).count()
-        margin_high = projects.filter(target_margin_percent__gt=20.0).count()
+        margin_low = valid_projects.filter(target_margin_percent__lt=15.0).count()
+        margin_norm = valid_projects.filter(target_margin_percent__gte=15.0, target_margin_percent__lte=20.0).count()
+        margin_high = valid_projects.filter(target_margin_percent__gt=20.0).count()
 
         project_list = [
             {
@@ -281,9 +287,10 @@ class DataMartService:
                 "margin_alert": float(p.target_margin_percent) < 15.0,
                 "status": p.get_status_display(),
                 "priority": p.priority,
-                "equipment": p.equipment_type
+                "equipment": p.equipment_type,
+                "is_verified": p.is_verified
             }
-            for p in projects[:60]
+            for p in valid_projects[:100]
         ]
 
         return {
@@ -300,29 +307,61 @@ class DataMartService:
     def get_commitments_sla_mart() -> Dict[str, Any]:
         """
         Витрина соблюдения дедлайнов и обязательств (Commitments SLA).
+        Приоритизирует просроченные обязательства (красные) и горящие сегодня.
         """
         today = timezone.now().date()
-        all_commitments = Commitment.objects.all().select_related('manager', 'project')
+        all_commitments = Commitment.objects.filter(is_verified=True).select_related('manager', 'project', 'project__company')
 
         total = all_commitments.count()
         fulfilled = all_commitments.filter(status='fulfilled').count()
-        pending = all_commitments.filter(status='pending', deadline__gte=today).count()
-        overdue = all_commitments.filter(
+        overdue_qs = all_commitments.filter(
             Q(status='overdue') | Q(status='pending', deadline__lt=today)
-        ).count()
+        )
+        overdue = overdue_qs.count()
+        today_qs = all_commitments.filter(status='pending', deadline=today)
+        future_qs = all_commitments.filter(status='pending', deadline__gt=today)
+        pending = all_commitments.filter(status='pending', deadline__gte=today).count()
 
         slippage_rate = round((overdue / total) * 100, 1) if total > 0 else 0.0
 
+        # Сортировка:
+        # 1. Просроченные обязательства (overdue) - во главе списка с красным статусом
+        # 2. Горящие сегодня (due today)
+        # 3. Плановые в работе
+        # 4. Выполненные
+        sorted_commitments = (
+            list(overdue_qs.order_by('deadline', '-severity', 'id')) +
+            list(today_qs.order_by('-severity', 'id')) +
+            list(future_qs.order_by('deadline', 'id')) +
+            list(all_commitments.filter(status='fulfilled').order_by('-fulfilled_at', '-id'))
+        )
+
         items = []
-        for c in all_commitments.order_by('deadline', 'id')[:20]:
+        for c in sorted_commitments[:30]:
             is_overdue = c.status == 'overdue' or (c.status == 'pending' and c.deadline and c.deadline < today)
-            status_text = 'Просрочено' if is_overdue else c.get_status_display()
-            status_color = 'red' if is_overdue else ('green' if c.status == 'fulfilled' else 'yellow')
+            is_today = c.status == 'pending' and c.deadline == today
+            
+            if is_overdue:
+                status_text = 'Просрочено'
+                status_color = 'red'
+            elif c.status == 'fulfilled':
+                status_text = 'Выполнено'
+                status_color = 'green'
+            elif is_today:
+                status_text = 'Горит сегодня'
+                status_color = 'yellow'
+            else:
+                status_text = 'В работе'
+                status_color = 'yellow'
+
+            counterparty = c.counterparty_person
+            if not counterparty and c.project and c.project.company:
+                counterparty = c.project.company.name
 
             items.append({
                 "id": c.id,
                 "text": c.commitment_text,
-                "counterparty": c.counterparty_person or (c.project.company.name if c.project and c.project.company else ""),
+                "counterparty": counterparty or (c.project.company.name if c.project and c.project.company else "Не указан"),
                 "project_name": c.project.name if c.project else "Общая задача",
                 "manager_name": c.manager.full_name if c.manager else "Отдел продаж",
                 "deadline": c.deadline.isoformat() if c.deadline else None,

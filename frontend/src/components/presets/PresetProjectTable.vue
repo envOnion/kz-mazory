@@ -81,9 +81,25 @@
               </span>
             </td>
             <td class="py-3 px-3">
-              <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] bg-slate-800 text-slate-300 border border-slate-700/60">
-                {{ p.status }}
-              </span>
+              <div class="flex items-center gap-1.5 flex-wrap">
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] bg-slate-800 text-slate-300 border border-slate-700/60">
+                  {{ p.status }}
+                </span>
+                <span
+                  v-if="p.is_verified === false"
+                  class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/30"
+                  title="Ожидает проверки"
+                >
+                  ⏳ Не проверено
+                </span>
+                <span
+                  v-else-if="p.is_verified === true"
+                  class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"
+                  title="Проверено"
+                >
+                  ✓ Проверено
+                </span>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -111,6 +127,7 @@ interface ProjectItem {
   status: string
   priority: string
   equipment: string
+  is_verified?: boolean
 }
 
 interface StageItem {
