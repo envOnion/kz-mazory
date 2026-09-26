@@ -267,8 +267,8 @@ class DataMartService:
         Считает реальные суммы сделок и сбора оплат по менеджерам.
         """
         managers = UserProfile.objects.all().annotate(
-            deals_count=Count('project')
-        ).order_by('-deals_count', '-current_sales')
+            projects_cnt=Count('project')
+        ).order_by('-projects_cnt', '-current_sales')
 
         labels = []
         targets = []
