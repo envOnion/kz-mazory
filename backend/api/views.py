@@ -229,9 +229,7 @@ class ChatQueryView(APIView):
                     token_query |= (
                         Q(name__icontains=t) |
                         Q(company__name__icontains=t) |
-                        Q(manager__full_name__icontains=t) |
-                        Q(manager__first_name__icontains=t) |
-                        Q(manager__last_name__icontains=t)
+                        Q(manager__full_name__icontains=t)
                     )
                 matched_projects_qs = Project.objects.filter(token_query).select_related('company', 'manager').distinct()
 

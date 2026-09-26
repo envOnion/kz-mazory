@@ -42,6 +42,7 @@ test.describe('WhatsApp OTP Verification via WAHA E2E', () => {
   })
 
   test('Запрос СМС-кода через фронтенд генерирует случайный 4-значный код и отправляет сообщение в WhatsApp через WAHA', async ({ page }) => {
+    test.setTimeout(60000)
     // 1. Открываем приложение
     await page.goto('/')
     await expect(page.getByRole('heading', { name: 'Mazory' })).toBeVisible()

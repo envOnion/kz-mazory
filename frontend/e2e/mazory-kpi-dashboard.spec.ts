@@ -6,12 +6,17 @@ test.describe('Mazory AI — Витрина KPI, периоды, график и
     await loginWithToken(page)
     await page.goto('/')
     await expect(page).toHaveTitle(/Mazory/i)
+
+    // Кликаем по кнопке подсказки "Покажи KPI команды", чтобы перейти в режим дашборда
+    const kpiBtn = page.locator('button:has-text("Покажи KPI команды")')
+    await expect(kpiBtn).toBeVisible({ timeout: 10000 })
+    await kpiBtn.click()
+
+    // Дожидаемся появления заголовка витрины KPI
+    await expect(page.locator('h1').filter({ hasText: /KPI/i })).toBeVisible({ timeout: 15000 })
   })
 
   test('1. Начальный сводный экран: 3 сводные карточки, встроенный график Chart.js и карточки менеджеров', async ({ page }) => {
-    // 1. Проверяем заголовок витрины
-    await expect(page.locator('h1').filter({ hasText: /KPI/i })).toBeVisible({ timeout: 15000 })
-
     // 2. Проверяем наличие 3 сводных карточек
     await expect(page.locator('text=Фактический сбор оплат')).toBeVisible()
     await expect(page.locator('text=Выполнение плана сбора')).toBeVisible()

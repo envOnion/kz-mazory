@@ -235,7 +235,7 @@ class DataMartService:
         """
         Витрина воронки проектов, оборудования и контроля маржинальности.
         """
-        projects = Project.objects.all().select_related('company', 'manager')
+        projects = Project.objects.all().select_related('company', 'manager').order_by('-id')
         
         stages = [
             ('lead', 'Лиды'),
@@ -283,7 +283,7 @@ class DataMartService:
                 "priority": p.priority,
                 "equipment": p.equipment_type
             }
-            for p in projects[:25]
+            for p in projects[:60]
         ]
 
         return {
@@ -369,7 +369,7 @@ class DataMartService:
 
         return {
             "chart_type": "bar",
-            "title": f"План-факт сбора оплат ({suffix}) (млн ₸)",
+            "title": f"План-факт продаж по менеджерам — сбор оплат ({suffix}) (млн ₸)",
             "labels": labels,
             "datasets": [
                 {
