@@ -60,7 +60,16 @@ export function useChat() {
       const res = await fetch(`${API_BASE}/kpi/summary/`, { headers })
       if (res.ok) {
         const data = await res.json()
-        kpiData.value = data
+        kpiData.value = {
+          categoryBadge: data.categoryBadge || data.category_badge || 'AQUA KIP DATA MART',
+          queryTitle: data.queryTitle || data.query_title || 'KPI отдела продаж',
+          querySubtitle: data.querySubtitle || data.query_subtitle || 'Актуальные показатели коммерческой команды (тенге ₸)',
+          updatedAtText: data.updatedAtText || data.updated_at_text || '',
+          summaryMetrics: data.summaryMetrics || data.summary_metrics || [],
+          managers: data.managers || [],
+          chartData: data.chartData || data.chart_data || null,
+          insight: data.insight || kpiData.value.insight
+        }
       }
     } catch (e) {
       console.error('Failed to fetch KPI summary:', e)

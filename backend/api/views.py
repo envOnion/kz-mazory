@@ -25,19 +25,27 @@ class KpiSummaryView(APIView):
 
     def get(self, request):
         kpi_data = datamart.get_sales_kpi_mart()
+        chart_data = datamart.get_sales_chart_dataset()
         
         # Топ-перформер и аналитический инсайт
         managers = kpi_data.get("managers", [])
         top_name = managers[0]["name"] if managers else "Жанат Бейсбаев"
-        top_val = managers[0]["kpi_percent"] if managers else 99.7
+        top_val = managers[0].get("kpiPercent", managers[0].get("kpi_percent", 99.7)) if managers else 99.7
 
         response_data = {
             "category_badge": "AQUA KIP DATA MART",
+            "categoryBadge": "AQUA KIP DATA MART",
             "query_title": "KPI отдела продаж",
+            "queryTitle": "KPI отдела продаж",
             "query_subtitle": f"Показатели за {kpi_data.get('period', 'Текущий месяц')} (в тенге ₸)",
+            "querySubtitle": f"Показатели за {kpi_data.get('period', 'Текущий месяц')} (в тенге ₸)",
             "updated_at_text": f"Обновлено {timezone.now().strftime('%d.%m.%Y в %H:%M')}",
+            "updatedAtText": f"Обновлено {timezone.now().strftime('%d.%m.%Y в %H:%M')}",
             "summary_metrics": kpi_data.get("summary_metrics", []),
+            "summaryMetrics": kpi_data.get("summaryMetrics", []),
             "managers": managers,
+            "chart_data": chart_data,
+            "chartData": chart_data,
             "insight": {
                 "badge": "AI-инсайт",
                 "source": "На основе витрины данных Data Mart (сбор денег, маржа, дедлайны)",
