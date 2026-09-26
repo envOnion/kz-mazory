@@ -13,3 +13,4 @@ dist/
 waha_sessions/
 test-results/
 playwright-report/
+.env

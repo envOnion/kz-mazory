@@ -11,7 +11,9 @@ export function getOrCreateE2EToken(): string {
   }
   const commands = [
     `docker compose exec backend python manage.py shell -c "from django.contrib.auth.models import User; from rest_framework_simplejwt.tokens import RefreshToken; u, _ = User.objects.get_or_create(username='77019876543'); print('E2E_JWT:' + str(RefreshToken.for_user(u).access_token))"`,
-    `docker --context joodexpert-vm exec mazory-backend python manage.py shell -c "from django.contrib.auth.models import User; from rest_framework_simplejwt.tokens import RefreshToken; u, _ = User.objects.get_or_create(username='77019876543'); print('E2E_JWT:' + str(RefreshToken.for_user(u).access_token))"`
+    `docker --context joodexpert-vm exec mazory-backend python manage.py shell -c "from django.contrib.auth.models import User; from rest_framework_simplejwt.tokens import RefreshToken; u, _ = User.objects.get_or_create(username='77019876543'); print('E2E_JWT:' + str(RefreshToken.for_user(u).access_token))"`,
+    `uv run --project ../backend python ../backend/manage.py shell -c "from django.contrib.auth.models import User; from rest_framework_simplejwt.tokens import RefreshToken; u, _ = User.objects.get_or_create(username='77019876543'); print('E2E_JWT:' + str(RefreshToken.for_user(u).access_token))"`,
+    `python3 ../backend/manage.py shell -c "from django.contrib.auth.models import User; from rest_framework_simplejwt.tokens import RefreshToken; u, _ = User.objects.get_or_create(username='77019876543'); print('E2E_JWT:' + str(RefreshToken.for_user(u).access_token))"`
   ]
   for (const cmd of commands) {
     try {

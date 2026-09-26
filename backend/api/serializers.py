@@ -79,6 +79,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             'next_action_at',
             'decision_maker',
             'blocker',
+            'is_verified',
             'created_at',
             'updated_at'
         ]

@@ -496,6 +496,7 @@ class Command(BaseCommand):
                     next_action=facts.get("next_action") or "",
                     blocker=facts.get("blocker") or "",
                     needs_bitrix_sync=True,
+                    is_verified=False,
                     last_chat_activity_at=timezone.now()
                 )
                 BusinessEvent.objects.create(
@@ -532,6 +533,8 @@ class Command(BaseCommand):
                     project.blocker = facts["blocker"]
                     updated = True
 
+                if updated:
+                    project.is_verified = False
                 project.needs_bitrix_sync = True
                 project.last_chat_activity_at = timezone.now()
                 if manager and not project.manager:
@@ -542,7 +545,7 @@ class Command(BaseCommand):
             # В. Создание обязательств (Commitment)
             next_action = facts.get("next_action")
             deadline = facts.get("deadline") or (timezone.now().date() + timedelta(days=2))
-            if next_action and len(next_action) > 10:
+            if next_action and len(next_action) >= 25 and manager and manager.role != 'Руководство / Директор':
                 is_active = deadline >= timezone.now().date()
                 comm, created = Commitment.objects.get_or_create(
                     project=project,
@@ -551,7 +554,8 @@ class Command(BaseCommand):
                         "manager": manager,
                         "deadline": deadline,
                         "status": "pending" if is_active else "completed",
-                        "severity": "critical" if ("срочно" in raw_text.lower() or "договор" in next_action.lower()) else "medium"
+                        "severity": "critical" if ("срочно" in raw_text.lower() or "договор" in next_action.lower()) else "medium",
+                        "is_verified": False
                     }
                 )
                 if created:
@@ -567,7 +571,8 @@ class Command(BaseCommand):
                     defaults={
                         "payment_type": "milestone",
                         "status": "received",
-                        "notes": f"Зафиксировано из отчета {sender}: {raw_text[:120]}"
+                        "notes": f"Зафиксировано из отчета {sender}: {raw_text[:120]}",
+                        "is_verified": False
                     }
                 )
                 if created:

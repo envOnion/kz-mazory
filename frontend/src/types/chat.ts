@@ -21,6 +21,7 @@ export interface ManagerProjectSummary {
   status_code: string
   margin: number
   equipment: string
+  is_verified?: boolean
 }
 
 export interface ManagerKpi {

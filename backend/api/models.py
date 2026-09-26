@@ -131,6 +131,12 @@ class Project(models.Model):
     needs_bitrix_sync = models.BooleanField('Требует синхронизации с Bitrix24', default=False, db_index=True)
     last_chat_activity_at = models.DateTimeField('Время последней активности в чате', null=True, blank=True)
     last_bitrix_synced_at = models.DateTimeField('Время последней синхронизации с Bitrix24', null=True, blank=True)
+    is_verified = models.BooleanField(
+        'Проверено',
+        default=True,
+        db_index=True,
+        help_text='Подтверждена ли достоверность данных сделки. Непроверенные сделки исключаются из аналитики и синхронизации с CRM.'
+    )
 
     # Финансовые показатели (тенге ₸)
     contract_amount = models.DecimalField('Сумма Договора ₸', max_digits=14, decimal_places=2, default=0.00)
@@ -240,6 +246,12 @@ class Commitment(models.Model):
     severity = models.CharField('Срочность', max_length=16, choices=SEVERITY_CHOICES, default='medium')
     bitrix_task_id = models.CharField('ID задачи в Bitrix24', max_length=64, blank=True, null=True, db_index=True)
     fulfilled_at = models.DateTimeField(null=True, blank=True)
+    is_verified = models.BooleanField(
+        'Проверено',
+        default=True,
+        db_index=True,
+        help_text='Подтверждено ли обязательство. Непроверенные задачи не учитываются в SLA и просрочках.'
+    )
 
     class Meta:
         verbose_name = 'Обязательство / Обещание'
@@ -273,6 +285,12 @@ class FinancialRecord(models.Model):
     payment_type = models.CharField('Тип платежа', max_length=32, choices=PAYMENT_TYPE_CHOICES, default='milestone')
     status = models.CharField('Статус', max_length=32, choices=STATUS_CHOICES, default='received')
     notes = models.TextField('Комментарий / Основание', blank=True, default='')
+    is_verified = models.BooleanField(
+        'Проверено',
+        default=True,
+        db_index=True,
+        help_text='Подтвержден ли факт оплаты. Непроверенные оплаты не учитываются в сборе денег и выполнении планов.'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
