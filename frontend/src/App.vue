@@ -44,6 +44,7 @@
             :data="kpiData"
             :widget="activeWidget"
             :response-text="chatResponseText"
+            :is-loading="isGenerating"
             @select-prompt="handlePromptSubmit"
           />
 
@@ -52,6 +53,7 @@
             <ChatInput
               :suggestions="dashboardSuggestions"
               placeholder="Спросите Mazory..."
+              :disabled="isGenerating"
               @submit="handlePromptSubmit"
               @attach-file="handleAttach"
               @voice-input="handleVoice"
@@ -101,6 +103,7 @@ import { useAuth } from './composables/useAuth'
 
 const {
   currentView,
+  isGenerating,
   welcomeSuggestions,
   dashboardSuggestions,
   kpiData,

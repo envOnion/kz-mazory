@@ -16,6 +16,16 @@ class BitrixService:
         return cfg.webhook_url.rstrip('/') + '/'
 
     @staticmethod
+    def _strip_html(text: str) -> str:
+        """Удаляет HTML-теги из текстового значения перед записью в кастомные поля Bitrix24."""
+        if not text:
+            return ""
+        import re
+        clean = re.sub(r'<[^>]+>', ' ', text)
+        clean = re.sub(r'\s+', ' ', clean).strip()
+        return clean[:250]
+
+    @staticmethod
     def call(method: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         url = BitrixService.get_webhook_url() + method
         try:
@@ -196,7 +206,11 @@ class BitrixService:
             "UF_CRM_1731131779572": title,
             "UF_CRM_1778166248543": project_data.get("direction") or project_data.get("equipment_type") or "",
             "UF_CRM_1778164670507": project_data.get("deal_period") or "",
-            "COMMENTS": f"Автоматически создано Mazory AI из WhatsApp чата.<br>Действие: {project_data.get('current_action') or ''}<br>Следующий шаг: {project_data.get('next_action') or ''}"
+            "COMMENTS": (
+                f"Автоматически создано Mazory AI из WhatsApp чата.<br>"
+                f"Действие: {BitrixService._strip_html(project_data.get('current_action') or '')}<br>"
+                f"Следующий шаг: {BitrixService._strip_html(project_data.get('next_action') or '')}"
+            )
         }
 
         t0 = time.time()

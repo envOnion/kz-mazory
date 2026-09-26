@@ -72,6 +72,7 @@ export function useChat() {
   })
 
   async function handlePromptSubmit(prompt: string) {
+    if (isGenerating.value) return  // R5: prevent duplicate submissions
     const prevView = currentView.value
     isGenerating.value = true
 

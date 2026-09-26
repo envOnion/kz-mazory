@@ -15,8 +15,9 @@
         ref="inputRef"
         v-model="queryText"
         type="text"
-        :placeholder="placeholder || 'Спросите Mazory...'"
-        class="flex-1 bg-transparent text-white placeholder-slate-400/80 text-[15px] focus:outline-none px-1 tracking-wide"
+        :placeholder="props.disabled ? 'Mazory думает...' : (placeholder || 'Спросите Mazory...')"
+        :disabled="props.disabled"
+        class="flex-1 bg-transparent text-white placeholder-slate-400/80 text-[15px] focus:outline-none px-1 tracking-wide disabled:opacity-50"
       />
 
       <!-- Right Action Tools -->
@@ -45,17 +46,18 @@
         <button
           type="submit"
           class="flex items-center justify-center w-9 h-9 rounded-full bg-[#1b254b]/90 text-indigo-200 border border-indigo-500/50 hover:bg-indigo-600 hover:text-white hover:border-indigo-400 shadow-[0_0_12px_rgba(99,102,241,0.35)] active:scale-95 transition-all ml-1 disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
-          :disabled="!queryText.trim()"
+          :disabled="!queryText.trim() || props.disabled"
           title="Отправить запрос"
         >
-          <ArrowUp class="w-4 h-4 stroke-[2.5]" />
+          <Loader2 v-if="props.disabled" class="w-4 h-4 animate-spin" />
+          <ArrowUp v-else class="w-4 h-4 stroke-[2.5]" />
         </button>
       </div>
     </form>
 
     <!-- Suggestion Chips Row -->
     <div
-      v-if="suggestions && suggestions.length"
+      v-if="suggestions && suggestions.length && !props.disabled"
       class="flex flex-wrap items-center justify-center gap-2.5 mt-3 px-2"
     >
       <button
@@ -74,11 +76,12 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
-import { Sparkles, Paperclip, Mic, ArrowUp, ArrowUpRight } from 'lucide-vue-next'
+import { Sparkles, Paperclip, Mic, ArrowUp, ArrowUpRight, Loader2 } from 'lucide-vue-next'
 
-defineProps<{
+const props = defineProps<{
   placeholder?: string
   suggestions?: string[]
+  disabled?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -91,6 +94,7 @@ const queryText = ref('')
 const inputRef = ref<HTMLInputElement | null>(null)
 
 function handleSubmit() {
+  if (props.disabled) return
   const trimmed = queryText.value.trim()
   if (!trimmed) return
   emit('submit', trimmed)
@@ -98,6 +102,7 @@ function handleSubmit() {
 }
 
 function handleChipClick(chip: string) {
+  if (props.disabled) return
   const clean = chip.replace(/[↗→↑]/g, '').trim()
   emit('submit', clean)
 }
