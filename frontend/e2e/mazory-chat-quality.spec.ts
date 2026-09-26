@@ -9,33 +9,45 @@ test.describe('Mazory AI Chat Quality & UX Tests (D4 & D5)', () => {
   })
 
   test('1. Loading state & input disabled during query processing (R5)', async ({ page }) => {
-    const chatInput = page.locator('input[placeholder*="Спросите"]')
+    let unblockResponse: () => void = () => {}
+    const responseBlocked = new Promise<void>((resolve) => {
+      unblockResponse = resolve
+    })
+
+    // Блокируем ответ API до проверки UI-состояний загрузки
+    await page.route('**/api/chat/query/', async (route) => {
+      await responseBlocked
+      await route.continue()
+    })
+
+    const chatInput = page.locator('form input[type="text"]')
     await expect(chatInput).toBeVisible()
     await expect(chatInput).toBeEnabled()
 
     await chatInput.fill('Покажи воронку проектов и сделок')
 
-    // Захватываем кнопку отправки
     const submitBtn = page.locator('button[title="Отправить запрос"]')
     await expect(submitBtn).toBeEnabled()
-
-    // Кликаем отправку
     await submitBtn.click()
 
-    // Проверяем, что инпут заблокирован и показывает текст ожидания
+    // Пока запрос висит в ожидании — инпут заблокирован и показывает текст ожидания
     await expect(chatInput).toBeDisabled()
     await expect(chatInput).toHaveAttribute('placeholder', /Mazory думает\.\.\./)
 
     // Проверяем наличие спиннера (Loader2 с классом animate-spin)
     const spinner = page.locator('button[title="Отправить запрос"] .animate-spin')
-    // Либо спиннер виден, либо запрос завершается очень быстро
-    // Ожидаем завершения генерации
-    await expect(chatInput).toBeEnabled({ timeout: 25000 })
+    await expect(spinner).toBeVisible()
+
+    // Разблокируем ответ бэкенда
+    unblockResponse()
+
+    // Ожидаем появления дашборда воронки
+    await expect(page.locator('text=Воронка проектов и контроль экономики сделок')).toBeVisible({ timeout: 25000 })
   })
 
   test('2. Markdown rendering in AI response without raw markdown syntax (R4)', async ({ page }) => {
     test.setTimeout(60000)
-    const chatInput = page.locator('input[placeholder*="Спросите"]')
+    const chatInput = page.locator('form input[type="text"]')
     await chatInput.click()
     await chatInput.fill('Посчитай общую сумму по всем договорам')
     await page.locator('button[title="Отправить запрос"]').click()
@@ -61,7 +73,7 @@ test.describe('Mazory AI Chat Quality & UX Tests (D4 & D5)', () => {
       }
     })
 
-    const chatInput = page.locator('input[placeholder*="Спросите"]')
+    const chatInput = page.locator('form input[type="text"]')
     await chatInput.click()
     await chatInput.fill('Выведи график продаж по менеджерам')
 
