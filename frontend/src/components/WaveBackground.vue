@@ -321,11 +321,23 @@ onMounted(() => {
     ty = 0
   }
 
+  function onVisibilityChange() {
+    if (destroyed) return
+    if (document.hidden) {
+      cancelAnimationFrame(raf)
+      raf = 0
+    } else {
+      syncPlayback()
+    }
+  }
+
   const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onResize) : null
   if (observer) observer.observe(host)
   window.addEventListener('resize', onResize, { passive: true })
   window.addEventListener('pointermove', onPointer, { passive: true })
   document.documentElement.addEventListener('pointerleave', resetPointer, { passive: true })
+  document.addEventListener('visibilitychange', onVisibilityChange)
+  window.addEventListener('focus', onVisibilityChange)
 
   resize()
   syncPlayback()
@@ -338,6 +350,8 @@ onMounted(() => {
     window.removeEventListener('resize', onResize)
     window.removeEventListener('pointermove', onPointer)
     document.documentElement.removeEventListener('pointerleave', resetPointer)
+    document.removeEventListener('visibilitychange', onVisibilityChange)
+    window.removeEventListener('focus', onVisibilityChange)
   }
 })
 
