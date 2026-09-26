@@ -268,7 +268,7 @@ def deduplicate_bitrix_deals_task(dry_run: bool = False):
 
 def setup_hourly_schedule():
     """
-    Автоматическая регистрация расписания ежечасного запуска в Django Q2.
+    Автоматическая регистрация расписаний запуска в Django Q2.
     """
     try:
         from django_q.models import Schedule
@@ -282,8 +282,144 @@ def setup_hourly_schedule():
         )
         if created:
             logger.info("Schedule 'hourly_bitrix_crm_sync' successfully registered in Django Q2.")
+
+        sched_alerts, created_alerts = Schedule.objects.get_or_create(
+            name="hourly_kpi_risk_monitoring",
+            defaults={
+                "func": "api.tasks.monitor_kpi_risks_and_anomalies_task",
+                "schedule_type": Schedule.HOURLY,
+                "repeats": -1,
+            }
+        )
+        if created_alerts:
+            logger.info("Schedule 'hourly_kpi_risk_monitoring' successfully registered in Django Q2.")
     except Exception as exc:
-        logger.warning("Could not auto-register hourly bitrix sync schedule: %s", exc)
+        logger.warning("Could not auto-register hourly schedule: %s", exc)
+
+
+def monitor_kpi_risks_and_anomalies_task():
+    """
+    Фоновая периодическая задача Django Q2:
+    Предиктивный мониторинг финансовых и процессных рисков:
+    1. Дебиторская задолженность свыше 50 млн ₸.
+    2. Фактическая маржинальность ниже критического порога (< 15.0%).
+    3. Просроченные обязательства и дедлайны по контрольным точкам.
+    
+    Для исключения спама используется Redis-дедупликация на 24 часа.
+    Алерты доставляются в NotificationsPopover.vue через push_notification_to_redis.
+    """
+    from django.core.cache import cache
+    from django.contrib.auth.models import User
+    from .models import Project, Commitment, BusinessEvent
+    from .notifications import push_notification_to_redis
+
+    today = timezone.now().date()
+    today_str = today.isoformat()
+    generated_alerts = []
+
+    all_users = list(User.objects.values_list('username', flat=True))
+    if not all_users:
+        logger.warning("No users found to dispatch risk alerts.")
+        return {"status": "no_users", "alerts_count": 0}
+
+    # 1. Проверка крупных задолженностей (> 50 млн ₸)
+    high_debt_projects = Project.objects.filter(
+        due_amount__gte=Decimal('50000000.00')
+    ).select_related('company', 'manager')
+
+    for proj in high_debt_projects:
+        cache_key = f"mazory:risk_alert:debt:{proj.id}:{today_str}"
+        if not cache.get(cache_key):
+            title = f"⚠️ Высокая дебиторка: {proj.name}"
+            msg = (
+                f"Задолженность по объекту составляет {float(proj.due_amount):,.0f} ₸. "
+                f"Менеджер: {proj.manager.full_name if proj.manager else 'Не назначен'}. "
+                f"Требуется согласование плана платежей."
+            ).replace(',', ' ')
+            
+            BusinessEvent.objects.create(
+                event_type="high_debt",
+                project=proj,
+                manager=proj.manager,
+                title=title,
+                description=msg,
+                severity="warning"
+            )
+
+            for phone in all_users:
+                push_notification_to_redis(phone, title, msg, notif_type="warning")
+
+            cache.set(cache_key, True, timeout=86400)
+            generated_alerts.append(title)
+
+    # 2. Проверка проектов с низкой маржинальностью (< 15%)
+    low_margin_projects = Project.objects.filter(
+        actual_margin_percent__lt=Decimal('15.00'),
+        contract_amount__gt=Decimal('0.00')
+    ).select_related('company', 'manager')
+
+    for proj in low_margin_projects:
+        cache_key = f"mazory:risk_alert:margin:{proj.id}:{today_str}"
+        if not cache.get(cache_key):
+            title = f"📉 Низкая маржинальность: {proj.name}"
+            msg = (
+                f"Фактическая маржа {float(proj.actual_margin_percent):.1f}% упала ниже порога 15%. "
+                f"Сумма договора: {float(proj.contract_amount):,.0f} ₸, себестоимость: {float(proj.cost_amount):,.0f} ₸. "
+                f"Любые допработы требуют визы генерального директора."
+            ).replace(',', ' ')
+
+            BusinessEvent.objects.create(
+                event_type="low_margin",
+                project=proj,
+                manager=proj.manager,
+                title=title,
+                description=msg,
+                severity="warning"
+            )
+
+            for phone in all_users:
+                push_notification_to_redis(phone, title, msg, notif_type="warning")
+
+            cache.set(cache_key, True, timeout=86400)
+            generated_alerts.append(title)
+
+    # 3. Просроченные обязательства и дедлайны
+    overdue_commitments = Commitment.objects.filter(
+        Q(status='overdue') | Q(status='pending', deadline__lt=today)
+    ).select_related('manager', 'project')
+
+    for comm in overdue_commitments[:10]:
+        cache_key = f"mazory:risk_alert:commitment:{comm.id}:{today_str}"
+        if not cache.get(cache_key):
+            proj_name = comm.project.name if comm.project else "Общая задача"
+            title = f"⏰ Срыв дедлайна: {proj_name}"
+            msg = (
+                f"Обязательство '{comm.commitment_text}' "
+                f"({comm.counterparty_person or 'Контрагент'}) "
+                f"просрочено. Ответственный: {comm.manager.full_name if comm.manager else 'Отдел продаж'}."
+            )
+
+            BusinessEvent.objects.create(
+                event_type="overdue_deadline",
+                project=comm.project,
+                manager=comm.manager,
+                title=title,
+                description=msg,
+                severity="urgent"
+            )
+
+            for phone in all_users:
+                push_notification_to_redis(phone, title, msg, notif_type="urgent")
+
+            cache.set(cache_key, True, timeout=86400)
+            generated_alerts.append(title)
+
+    logger.info("KPI risk monitoring task completed. Generated alerts: %d", len(generated_alerts))
+    return {
+        "status": "success",
+        "generated_alerts_count": len(generated_alerts),
+        "alerts": generated_alerts
+    }
 
 def process_incoming_message_task(message_data: dict):
     """

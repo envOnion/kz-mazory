@@ -135,8 +135,8 @@ class Project(models.Model):
     # Финансовые показатели (тенге ₸)
     contract_amount = models.DecimalField('Сумма Договора ₸', max_digits=14, decimal_places=2, default=0.00)
     cost_amount = models.DecimalField('Себестоимость ₸', max_digits=14, decimal_places=2, default=0.00)
-    target_margin_percent = models.DecimalField('Плановая маржа %', max_digits=5, decimal_places=2, default=16.80)
-    actual_margin_percent = models.DecimalField('Фактическая маржа %', max_digits=5, decimal_places=2, default=0.00)
+    target_margin_percent = models.DecimalField('Плановая маржа %', max_digits=8, decimal_places=2, default=16.80)
+    actual_margin_percent = models.DecimalField('Фактическая маржа %', max_digits=8, decimal_places=2, default=0.00)
     paid_amount = models.DecimalField('Оплачено ₸', max_digits=14, decimal_places=2, default=0.00)
     due_amount = models.DecimalField('Остаток / Дебиторка ₸', max_digits=14, decimal_places=2, default=0.00)
     guarantee_amount = models.DecimalField('Гарантийные оплаты ₸', max_digits=14, decimal_places=2, default=0.00)
@@ -172,14 +172,18 @@ class Project(models.Model):
     def save(self, *args, **kwargs):
         if self.name and not self.normalized_name:
             self.normalized_name = normalize_deal_name(self.name)
-        # Автоматический пересчет маржи и дебиторки
+        # Автоматический пересчет маржи и дебиторки с защитой от переполнения Decimal(8,2)
         if self.contract_amount and self.contract_amount > 0:
             contract_dec = Decimal(str(self.contract_amount))
             cost_dec = Decimal(str(self.cost_amount)) if self.cost_amount is not None else Decimal('0.00')
             paid_dec = Decimal(str(self.paid_amount)) if self.paid_amount is not None else Decimal('0.00')
             profit = contract_dec - cost_dec
-            self.actual_margin_percent = round((profit / contract_dec) * 100, 2)
+            raw_margin = round((profit / contract_dec) * 100, 2)
+            self.actual_margin_percent = max(Decimal('-999999.99'), min(Decimal('999999.99'), raw_margin))
             self.due_amount = max(Decimal('0.00'), contract_dec - paid_dec)
+        elif self.contract_amount == 0:
+            self.actual_margin_percent = Decimal('0.00')
+            self.due_amount = Decimal('0.00')
         super().save(*args, **kwargs)
 
 

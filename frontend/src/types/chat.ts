@@ -7,8 +7,25 @@ export interface MetricSummary {
   icon: 'bar-chart' | 'target' | 'users'
 }
 
+export interface ManagerProjectSummary {
+  id: number
+  name: string
+  company: string
+  contract_amount: number
+  contract_formatted: string
+  paid_amount: number
+  paid_formatted: string
+  due_amount: number
+  due_formatted: string
+  status: string
+  status_code: string
+  margin: number
+  equipment: string
+}
+
 export interface ManagerKpi {
   id: string
+  dbId?: number
   name: string
   role: string
   avatar: string
@@ -17,9 +34,14 @@ export interface ManagerKpi {
   kpiPercent: number
   kpiBarColor: 'green' | 'yellow' | 'red'
   salesAmount: string
+  targetAmount?: number
+  targetFormatted?: string
   dealsCount: number
+  averageMargin?: number
+  overdueCommitments?: number
   trend: string
   trendPositive: boolean
+  projects?: ManagerProjectSummary[]
 }
 
 export interface QuickAction {
@@ -41,8 +63,12 @@ export interface KpiDashboardData {
   queryTitle: string
   querySubtitle: string
   updatedAtText: string
+  period?: string
+  periodCode?: string
+  periodLabel?: string
   summaryMetrics: MetricSummary[]
   managers: ManagerKpi[]
+  chartData?: any
   insight: AiInsight
 }
 

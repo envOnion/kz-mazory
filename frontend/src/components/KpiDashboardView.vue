@@ -26,10 +26,31 @@
         ></div>
       </div>
 
-      <!-- Updated timestamp badge -->
-      <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#0d162d]/60 border border-[#26355b]/40 text-xs text-slate-300 self-start md:self-auto">
-        <span class="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]"></span>
-        <span>{{ data.updatedAtText }}</span>
+      <!-- Actions: Period selector & Updated timestamp badge -->
+      <div class="flex flex-wrap items-center gap-2.5 self-start md:self-auto">
+        <!-- Period Switcher Pills -->
+        <div class="flex items-center gap-1 p-1 rounded-xl bg-[#090f22]/80 border border-[#233154]/50 text-xs">
+          <button
+            v-for="p in periodOptions"
+            :key="p.id"
+            type="button"
+            @click="$emit('changePeriod', p.id)"
+            class="px-2.5 py-1 rounded-lg font-medium transition-all duration-200 cursor-pointer"
+            :class="[
+              activePeriod === p.id
+                ? 'bg-indigo-600 text-white shadow-md shadow-indigo-500/25'
+                : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+            ]"
+          >
+            {{ p.label }}
+          </button>
+        </div>
+
+        <!-- Updated timestamp badge -->
+        <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#0d162d]/60 border border-[#26355b]/40 text-xs text-slate-300">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.8)]"></span>
+          <span>{{ data.updatedAtText }}</span>
+        </div>
       </div>
     </div>
 
@@ -86,12 +107,18 @@
           </div>
         </div>
 
-        <!-- 5-6 Managers Grid -->
+        <!-- Embedded Interactive Chart.js Plan vs Fact by Managers -->
+        <div v-if="data.chartData" class="w-full">
+          <PresetChart :data="data.chartData" />
+        </div>
+
+        <!-- 5-6 Managers Grid with Drill-Down -->
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3.5">
           <ManagerCard
             v-for="manager in data.managers"
             :key="manager.id"
             :manager="manager"
+            @select="openManagerDrillDown"
           />
         </div>
       </div>
@@ -146,13 +173,145 @@
         </div>
       </div>
     </transition>
+
+    <!-- Manager Drill-Down Modal / Drawer -->
+    <transition
+      enter-active-class="transition duration-200 ease-out"
+      enter-from-class="opacity-0 scale-95"
+      enter-to-class="opacity-100 scale-100"
+      leave-active-class="transition duration-150 ease-in"
+      leave-from-class="opacity-100 scale-100"
+      leave-to-class="opacity-0 scale-95"
+    >
+      <div
+        v-if="selectedManager"
+        class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md select-none"
+        @click.self="selectedManager = null"
+      >
+        <div class="w-full max-w-2xl max-h-[85vh] flex flex-col rounded-3xl bg-[#0c142c] border border-indigo-500/50 shadow-2xl text-slate-100 overflow-hidden">
+          <!-- Modal Header -->
+          <div class="flex items-center justify-between p-5 border-b border-slate-700/50 bg-[#090f22]/80">
+            <div class="flex items-center gap-3.5">
+              <img
+                :src="selectedManager.avatar"
+                :alt="selectedManager.name"
+                class="w-12 h-12 rounded-2xl object-cover ring-2 ring-indigo-400/60 shadow"
+              />
+              <div>
+                <div class="flex items-center gap-2">
+                  <h3 class="text-base font-bold text-white tracking-tight">{{ selectedManager.name }}</h3>
+                  <span v-if="selectedManager.isTopPerformer" class="px-2 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 text-[11px] font-semibold border border-indigo-400/30">Лидер</span>
+                </div>
+                <p class="text-xs text-slate-400 mt-0.5">{{ selectedManager.role }}</p>
+              </div>
+            </div>
+            <button
+              @click="selectedManager = null"
+              class="text-slate-400 hover:text-white p-1.5 rounded-xl hover:bg-slate-800 transition-colors"
+            >
+              ✕
+            </button>
+          </div>
+
+          <!-- Body: Manager Stats & Deals -->
+          <div class="p-5 overflow-y-auto space-y-5">
+            <!-- 4 Mini Metric Cards -->
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+              <div class="p-3 rounded-xl bg-[#131d3d]/60 border border-slate-800/80">
+                <div class="text-[10px] uppercase text-slate-400 font-semibold tracking-wider">Факт сбора</div>
+                <div class="text-sm font-bold text-white mt-1">{{ selectedManager.salesAmount }}</div>
+              </div>
+              <div class="p-3 rounded-xl bg-[#131d3d]/60 border border-slate-800/80">
+                <div class="text-[10px] uppercase text-slate-400 font-semibold tracking-wider">План сбора</div>
+                <div class="text-sm font-bold text-white mt-1">{{ selectedManager.targetFormatted || (selectedManager.targetAmount ? `${(selectedManager.targetAmount / 1e6).toFixed(1)} млн ₸` : '10 млн ₸') }}</div>
+              </div>
+              <div class="p-3 rounded-xl bg-[#131d3d]/60 border border-slate-800/80">
+                <div class="text-[10px] uppercase text-slate-400 font-semibold tracking-wider">KPI план</div>
+                <div class="text-sm font-bold mt-1" :class="selectedManager.kpiPercent >= 100 ? 'text-emerald-400' : (selectedManager.kpiPercent >= 75 ? 'text-amber-400' : 'text-rose-400')">
+                  {{ selectedManager.kpiPercent }}%
+                </div>
+              </div>
+              <div class="p-3 rounded-xl bg-[#131d3d]/60 border border-slate-800/80">
+                <div class="text-[10px] uppercase text-slate-400 font-semibold tracking-wider">Ср. маржа</div>
+                <div class="text-sm font-bold text-indigo-300 mt-1">{{ selectedManager.averageMargin || 16.8 }}%</div>
+              </div>
+            </div>
+
+            <!-- Active Projects List -->
+            <div>
+              <div class="flex items-center justify-between mb-2.5">
+                <h4 class="text-xs uppercase tracking-wider font-semibold text-slate-400">
+                  Закрепленные объекты и сделки ({{ selectedManager.projects ? selectedManager.projects.length : selectedManager.dealsCount }})
+                </h4>
+                <span v-if="selectedManager.overdueCommitments" class="text-xs text-rose-400 font-medium">
+                  {{ selectedManager.overdueCommitments }} просроченных дедлайнов
+                </span>
+              </div>
+
+              <div v-if="selectedManager.projects && selectedManager.projects.length > 0" class="divide-y divide-slate-800/60 rounded-2xl bg-[#090f22]/70 border border-slate-800 overflow-hidden">
+                <div
+                  v-for="proj in selectedManager.projects"
+                  :key="proj.id"
+                  class="p-3 hover:bg-slate-800/30 transition-colors flex items-center justify-between gap-3 text-xs"
+                >
+                  <div class="min-w-0 flex-1">
+                    <div class="font-semibold text-white truncate">{{ proj.name }}</div>
+                    <div class="text-[11px] text-slate-400 mt-0.5 truncate">{{ proj.company }} • {{ proj.status }}</div>
+                  </div>
+                  <div class="text-right shrink-0">
+                    <div class="font-bold text-white">{{ proj.contract_formatted }}</div>
+                    <div v-if="proj.due_amount > 0" class="text-[10px] text-amber-400 font-medium">
+                      Долг: {{ proj.due_formatted }}
+                    </div>
+                    <div v-else class="text-[10px] text-emerald-400 font-medium">
+                      Оплачено полностью
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div v-else class="p-4 rounded-xl bg-slate-900/40 border border-slate-800 text-center text-xs text-slate-400">
+                Нет детальных записей по объектам
+              </div>
+            </div>
+          </div>
+
+          <!-- Modal Footer with AI Quick Actions -->
+          <div class="flex flex-wrap items-center justify-between gap-2 p-4 border-t border-slate-800 bg-[#090f22]/80">
+            <div class="flex items-center gap-2">
+              <button
+                type="button"
+                @click="askAiAboutManager(selectedManager)"
+                class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-medium text-xs shadow-md transition-colors cursor-pointer"
+              >
+                <Sparkles class="w-3.5 h-3.5" />
+                <span>Спросить AI об этом менеджере</span>
+              </button>
+              <button
+                type="button"
+                @click="showManagerDeadlines(selectedManager)"
+                class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium text-xs transition-colors cursor-pointer"
+              >
+                <span>Дедлайны и задачи</span>
+              </button>
+            </div>
+            <button
+              type="button"
+              @click="selectedManager = null"
+              class="px-3.5 py-1.5 rounded-xl text-slate-400 hover:text-white text-xs font-medium cursor-pointer"
+            >
+              Закрыть
+            </button>
+          </div>
+        </div>
+      </div>
+    </transition>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { Sparkles, BarChart2, Target, Users, TrendingUp } from 'lucide-vue-next'
-import type { KpiDashboardData, ChatWidget } from '../types/chat'
+import type { KpiDashboardData, ChatWidget, ManagerKpi } from '../types/chat'
 import { useAuth } from '../composables/useAuth'
 import ManagerCard from './ManagerCard.vue'
 import AiInsightCard from './AiInsightCard.vue'
@@ -167,7 +326,40 @@ const props = defineProps<{
   widget?: ChatWidget | null
   responseText?: string
   isLoading?: boolean
+  period?: string
 }>()
+
+const emit = defineEmits<{
+  (e: 'selectPrompt', prompt: string): void
+  (e: 'changePeriod', period: string): void
+}>()
+
+const { isAuthenticated } = useAuth()
+
+const periodOptions = [
+  { id: 'this_month', label: 'Этот месяц' },
+  { id: 'last_month', label: 'Прошлый месяц' },
+  { id: 'quarter', label: 'Квартал' },
+  { id: 'year', label: 'С начала года' }
+]
+
+const activePeriod = computed(() => props.period || props.data.periodCode || 'this_month')
+
+const selectedManager = ref<ManagerKpi | null>(null)
+
+function openManagerDrillDown(manager: ManagerKpi) {
+  selectedManager.value = manager
+}
+
+function askAiAboutManager(manager: ManagerKpi) {
+  selectedManager.value = null
+  emit('selectPrompt', `Покажи детальный аналитический отчет и сделки по менеджеру ${manager.name}`)
+}
+
+function showManagerDeadlines(manager: ManagerKpi) {
+  selectedManager.value = null
+  emit('selectPrompt', `Обязательства и дедлайны менеджера ${manager.name}`)
+}
 
 const renderedResponse = computed(() => {
   const text = props.responseText || props.data.querySubtitle
@@ -175,12 +367,6 @@ const renderedResponse = computed(() => {
   const html = marked.parse(text, { breaks: true }) as string
   return DOMPurify.sanitize(html)
 })
-
-const emit = defineEmits<{
-  (e: 'selectPrompt', prompt: string): void
-}>()
-
-const { isAuthenticated } = useAuth()
 
 const activeActionModal = ref<{
   title: string

@@ -1,10 +1,11 @@
 <template>
   <div
-    class="relative flex flex-col p-4 rounded-2xl bg-[#0b1226]/80 backdrop-blur-xl border transition-all duration-300 select-none group"
+    @click="$emit('select', manager)"
+    class="relative flex flex-col p-4 rounded-2xl bg-[#0b1226]/80 backdrop-blur-xl border transition-all duration-300 select-none group cursor-pointer hover:-translate-y-1 hover:shadow-2xl active:scale-[0.99]"
     :class="[
       manager.isTopPerformer
-        ? 'border-indigo-500/70 shadow-[0_0_25px_rgba(99,102,241,0.25),inset_0_0_15px_rgba(99,102,241,0.1)] ring-1 ring-indigo-500/40'
-        : 'border-[#2d3a63]/40 hover:border-indigo-500/40 hover:bg-[#0f1733]/90 shadow-lg'
+        ? 'border-indigo-500/70 shadow-[0_0_25px_rgba(99,102,241,0.25),inset_0_0_15px_rgba(99,102,241,0.1)] ring-1 ring-indigo-500/40 hover:border-indigo-400'
+        : 'border-[#2d3a63]/40 hover:border-indigo-500/50 hover:bg-[#0f1733]/90 shadow-lg'
     ]"
   >
     <!-- Top Row: Best performer badge or empty spacer + Status dot -->
@@ -99,5 +100,9 @@ import type { ManagerKpi } from '../types/chat'
 
 defineProps<{
   manager: ManagerKpi
+}>()
+
+defineEmits<{
+  (e: 'select', manager: ManagerKpi): void
 }>()
 </script>

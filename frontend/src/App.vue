@@ -46,6 +46,8 @@
             :widget="activeWidget"
             :response-text="chatResponseText"
             :is-loading="isGenerating"
+            :period="selectedPeriod"
+            @change-period="fetchKpiData"
             @select-prompt="handlePromptSubmit"
           />
 
@@ -107,6 +109,7 @@ const {
   isGenerating,
   welcomeSuggestions,
   dashboardSuggestions,
+  selectedPeriod,
   kpiData,
   activeWidget,
   chatResponseText,

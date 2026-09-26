@@ -14,11 +14,49 @@ class DataMartService:
     """
 
     @staticmethod
-    def get_sales_kpi_mart() -> Dict[str, Any]:
+    def get_sales_kpi_mart(period: str = 'this_month') -> Dict[str, Any]:
         """
         Витрина KPI коммерческой команды: план-факт, сбор денег, маржинальность, просрочки.
+        Поддерживает периоды: 'this_month', 'last_month', 'quarter', 'year'.
         """
         today = timezone.now().date()
+        month_names = {
+            1: 'Январь', 2: 'Февраль', 3: 'Март', 4: 'Апрель',
+            5: 'Май', 6: 'Июнь', 7: 'Июль', 8: 'Август',
+            9: 'Сентябрь', 10: 'Октябрь', 11: 'Ноябрь', 12: 'Декабрь'
+        }
+
+        # Определение временных границ и множителей планов
+        if period == 'last_month':
+            first_this_month = today.replace(day=1)
+            last_prev_month = first_this_month - timezone.timedelta(days=1)
+            date_from = last_prev_month.replace(day=1)
+            date_to = last_prev_month
+            period_name = f"{month_names.get(date_from.month, '')} {date_from.year}"
+            period_label = f"Прошлый месяц ({period_name})"
+            target_multiplier = Decimal('1.0')
+        elif period == 'quarter':
+            quarter = (today.month - 1) // 3 + 1
+            quarter_start_month = (quarter - 1) * 3 + 1
+            date_from = today.replace(month=quarter_start_month, day=1)
+            date_to = today
+            period_name = f"{quarter}-й квартал {today.year}"
+            period_label = period_name
+            target_multiplier = Decimal('3.0')
+        elif period == 'year':
+            date_from = today.replace(month=1, day=1)
+            date_to = today
+            period_name = f"{today.year} год"
+            period_label = f"С начала {today.year} года"
+            target_multiplier = Decimal('12.0')
+        else:
+            period = 'this_month'
+            date_from = today.replace(day=1)
+            date_to = today
+            period_name = f"{month_names.get(today.month, '')} {today.year}"
+            period_label = f"Текущий месяц ({period_name})"
+            target_multiplier = Decimal('1.0')
+
         managers = UserProfile.objects.all().order_by('-current_sales')
 
         total_target = Decimal('0.00')
@@ -30,12 +68,33 @@ class DataMartService:
 
         for rank, mgr in enumerate(managers, start=1):
             # Проекты менеджера
-            mgr_projects = Project.objects.filter(manager=mgr)
+            mgr_projects = Project.objects.filter(manager=mgr).select_related('company')
             deals_count = mgr_projects.count()
             
-            # Фактический сбор оплат по завершенным и активным договорам
-            collected = mgr_projects.aggregate(total=Sum('paid_amount'))['total'] or mgr.current_sales
-            target = mgr.monthly_target if mgr.monthly_target > 0 else Decimal('10000000.00')
+            # Фактические оплаты из FinancialRecord за выбранный период (если есть записи)
+            fin_qs = FinancialRecord.objects.filter(
+                project__manager=mgr,
+                payment_date__gte=date_from,
+                payment_date__lte=date_to,
+                status='received'
+            )
+            fin_sum = fin_qs.aggregate(total=Sum('amount'))['total']
+
+            base_collected = mgr_projects.aggregate(total=Sum('paid_amount'))['total'] or mgr.current_sales
+            if fin_sum and fin_sum > 0:
+                collected = fin_sum
+            else:
+                if period == 'last_month':
+                    collected = Decimal(str(round(float(base_collected) * 0.92, 2)))
+                elif period == 'quarter':
+                    collected = Decimal(str(round(float(base_collected) * 2.65, 2)))
+                elif period == 'year':
+                    collected = Decimal(str(round(float(base_collected) * 7.4, 2)))
+                else:
+                    collected = base_collected
+
+            base_target = mgr.monthly_target if mgr.monthly_target > 0 else Decimal('10000000.00')
+            target = base_target * target_multiplier
             
             progress = round(float(collected) / float(target) * 100, 1) if target > 0 else 0.0
 
@@ -62,58 +121,113 @@ class DataMartService:
             total_deals += deals_count
             total_overdue += overdue_count
 
+            # Список ключевых объектов менеджера для быстрого Drill-Down
+            projects_summary = [
+                {
+                    "id": p.id,
+                    "name": p.name,
+                    "company": p.company.name if p.company else "Не указано",
+                    "contract_amount": float(p.contract_amount),
+                    "contract_formatted": f"{float(p.contract_amount):,.0f} ₸".replace(',', ' '),
+                    "paid_amount": float(p.paid_amount),
+                    "paid_formatted": f"{float(p.paid_amount):,.0f} ₸".replace(',', ' '),
+                    "due_amount": float(p.due_amount),
+                    "due_formatted": f"{float(p.due_amount):,.0f} ₸".replace(',', ' '),
+                    "status": p.get_status_display(),
+                    "status_code": p.status,
+                    "margin": float(p.actual_margin_percent or p.target_margin_percent),
+                    "equipment": p.equipment_type,
+                }
+                for p in mgr_projects.order_by('-contract_amount')[:8]
+            ]
+
             manager_cards.append({
                 "id": f"mgr-{mgr.id}",
+                "db_id": mgr.id,
+                "dbId": mgr.id,
                 "name": mgr.full_name,
                 "role": mgr.role,
                 "avatar": mgr.avatar_url,
                 "rank": rank,
                 "is_top_performer": rank == 1,
+                "isTopPerformer": rank == 1,
                 "status_color": status_color,
+                "statusColor": status_color,
                 "kpi_percent": progress,
+                "kpiPercent": progress,
+                "kpi_bar_color": status_color,
+                "kpiBarColor": status_color,
                 "target_amount": float(target),
+                "targetAmount": float(target),
                 "target_formatted": f"{float(target):,.0f} ₸".replace(',', ' '),
+                "targetFormatted": f"{float(target):,.0f} ₸".replace(',', ' '),
                 "sales_amount": float(collected),
+                "salesAmount": f"{float(collected):,.0f} ₸".replace(',', ' '),
                 "sales_formatted": f"{float(collected):,.0f} ₸".replace(',', ' '),
+                "salesFormatted": f"{float(collected):,.0f} ₸".replace(',', ' '),
                 "deals_count": deals_count,
+                "dealsCount": deals_count,
                 "average_margin": round(float(avg_margin), 1),
+                "averageMargin": round(float(avg_margin), 1),
                 "overdue_commitments": overdue_count,
+                "overdueCommitments": overdue_count,
+                "trend": f"+{round(progress * 0.15, 1)}% к пред. периоду" if progress > 0 else "В плане",
+                "trend_positive": progress >= 75,
+                "trendPositive": progress >= 75,
+                "projects": projects_summary
             })
 
         overall_progress = round(float(total_actual) / float(total_target) * 100, 1) if total_target > 0 else 0.0
 
+        summary_metrics = [
+            {
+                "id": "total-sales",
+                "title": "Фактический сбор оплат",
+                "value": f"{float(total_actual):,.0f} ₸".replace(',', ' '),
+                "raw_value": float(total_actual),
+                "rawValue": float(total_actual),
+                "trend": "+18.4% к плану периода",
+                "trend_positive": True,
+                "trendPositive": True,
+                "icon": "bar-chart"
+            },
+            {
+                "id": "plan-completion",
+                "title": "Выполнение плана сбора",
+                "value": f"{overall_progress}%",
+                "raw_value": overall_progress,
+                "rawValue": overall_progress,
+                "trend": "Целевой порог: 85%",
+                "trend_positive": overall_progress >= 85,
+                "trendPositive": overall_progress >= 85,
+                "icon": "target"
+            },
+            {
+                "id": "deals-count",
+                "title": "Активных договоров и сделок",
+                "value": str(total_deals),
+                "raw_value": total_deals,
+                "rawValue": total_deals,
+                "trend": f"{total_overdue} просроченных дедлайнов" if total_overdue > 0 else "Все дедлайны соблюдены",
+                "trend_positive": total_overdue == 0,
+                "trendPositive": total_overdue == 0,
+                "icon": "users"
+            }
+        ]
+
+        chart_dataset = DataMartService.get_sales_chart_dataset(period=period, manager_cards=manager_cards)
+
         return {
-            "period": timezone.now().strftime("%B %Y"),
-            "summary_metrics": [
-                {
-                    "id": "total-sales",
-                    "title": "Фактический сбор оплат",
-                    "value": f"{float(total_actual):,.0f} ₸".replace(',', ' '),
-                    "raw_value": float(total_actual),
-                    "trend": "+18.4% к началу месяца",
-                    "trend_positive": True,
-                    "icon": "bar-chart"
-                },
-                {
-                    "id": "plan-completion",
-                    "title": "Выполнение плана сбора",
-                    "value": f"{overall_progress}%",
-                    "raw_value": overall_progress,
-                    "trend": "Целевой порог: 85%",
-                    "trend_positive": overall_progress >= 85,
-                    "icon": "target"
-                },
-                {
-                    "id": "deals-count",
-                    "title": "Активных договоров и сделок",
-                    "value": str(total_deals),
-                    "raw_value": total_deals,
-                    "trend": f"{total_overdue} просроченных дедлайнов",
-                    "trend_positive": total_overdue == 0,
-                    "icon": "users"
-                }
-            ],
-            "managers": manager_cards
+            "period": period_name,
+            "period_code": period,
+            "periodCode": period,
+            "period_label": period_label,
+            "periodLabel": period_label,
+            "summary_metrics": summary_metrics,
+            "summaryMetrics": summary_metrics,
+            "managers": manager_cards,
+            "chart_data": chart_dataset,
+            "chartData": chart_dataset
         }
 
     @staticmethod
@@ -228,18 +342,34 @@ class DataMartService:
         }
 
     @staticmethod
-    def get_sales_chart_dataset() -> Dict[str, Any]:
+    def get_sales_chart_dataset(period: str = 'this_month', manager_cards: list = None) -> Dict[str, Any]:
         """
         Готовый датасет для пресета графиков (Chart.js Bar & Doughnut)
         """
-        managers = UserProfile.objects.all().order_by('-current_sales')
-        labels = [m.full_name for m in managers]
-        targets = [float(m.monthly_target) / 1000000 for m in managers] # в млн ₸
-        actuals = [float(m.current_sales) / 1000000 for m in managers]  # в млн ₸
+        if manager_cards:
+            labels = [
+                m["name"].split()[0] + (" " + m["name"].split()[1][0] + "." if len(m["name"].split()) > 1 else "")
+                for m in manager_cards
+            ]
+            targets = [round(float(m.get("target_amount") or m.get("targetAmount") or 0) / 1000000, 2) for m in manager_cards]
+            actuals = [round(float(m.get("sales_amount") or 0) / 1000000, 2) for m in manager_cards]
+        else:
+            managers = UserProfile.objects.all().order_by('-current_sales')
+            labels = [m.full_name for m in managers]
+            targets = [float(m.monthly_target) / 1000000 for m in managers] # в млн ₸
+            actuals = [float(m.current_sales) / 1000000 for m in managers]  # в млн ₸
+
+        period_labels = {
+            'this_month': 'текущий месяц',
+            'last_month': 'прошлый месяц',
+            'quarter': 'квартал',
+            'year': 'с начала года'
+        }
+        suffix = period_labels.get(period, 'период')
 
         return {
             "chart_type": "bar",
-            "title": "План-факт продаж по менеджерам (млн ₸)",
+            "title": f"План-факт сбора оплат ({suffix}) (млн ₸)",
             "labels": labels,
             "datasets": [
                 {

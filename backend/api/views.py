@@ -20,11 +20,13 @@ logger = logging.getLogger(__name__)
 class KpiSummaryView(APIView):
     """
     Возвращает актуальные показатели KPI команды продаж из детерминированной витрины данных (Data Mart).
+    Поддерживает фильтр ?period=this_month|last_month|quarter|year.
     """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        kpi_data = datamart.get_sales_kpi_mart()
+        period = request.query_params.get('period', 'this_month')
+        kpi_data = datamart.get_sales_kpi_mart(period=period)
         
         # Топ-перформер и аналитический инсайт
         managers = kpi_data.get("managers", [])
@@ -33,11 +35,23 @@ class KpiSummaryView(APIView):
 
         response_data = {
             "category_badge": "AQUA KIP DATA MART",
+            "categoryBadge": "AQUA KIP DATA MART",
             "query_title": "KPI отдела продаж",
-            "query_subtitle": f"Показатели за {kpi_data.get('period', 'Текущий месяц')} (в тенге ₸)",
+            "queryTitle": "KPI отдела продаж",
+            "query_subtitle": f"Показатели за {kpi_data.get('period_label') or kpi_data.get('period', 'Текущий месяц')} (в тенге ₸)",
+            "querySubtitle": f"Показатели за {kpi_data.get('period_label') or kpi_data.get('period', 'Текущий месяц')} (в тенге ₸)",
             "updated_at_text": f"Обновлено {timezone.now().strftime('%d.%m.%Y в %H:%M')}",
+            "updatedAtText": f"Обновлено {timezone.now().strftime('%d.%m.%Y в %H:%M')}",
+            "period": kpi_data.get("period"),
+            "period_code": kpi_data.get("period_code", period),
+            "periodCode": kpi_data.get("period_code", period),
+            "period_label": kpi_data.get("period_label"),
+            "periodLabel": kpi_data.get("period_label"),
             "summary_metrics": kpi_data.get("summary_metrics", []),
+            "summaryMetrics": kpi_data.get("summaryMetrics") or kpi_data.get("summary_metrics", []),
             "managers": managers,
+            "chart_data": kpi_data.get("chart_data"),
+            "chartData": kpi_data.get("chartData") or kpi_data.get("chart_data"),
             "insight": {
                 "badge": "AI-инсайт",
                 "source": "На основе витрины данных Data Mart (сбор денег, маржа, дедлайны)",
@@ -212,7 +226,13 @@ class ChatQueryView(APIView):
             if meaningful_tokens:
                 token_query = Q()
                 for t in meaningful_tokens:
-                    token_query |= Q(name__icontains=t) | Q(company__name__icontains=t)
+                    token_query |= (
+                        Q(name__icontains=t) |
+                        Q(company__name__icontains=t) |
+                        Q(manager__full_name__icontains=t) |
+                        Q(manager__first_name__icontains=t) |
+                        Q(manager__last_name__icontains=t)
+                    )
                 matched_projects_qs = Project.objects.filter(token_query).select_related('company', 'manager').distinct()
 
             matched_projects = list(matched_projects_qs[:10])
@@ -385,10 +405,20 @@ class MessageIngestView(APIView):
 class ProjectListView(ListAPIView):
     """
     Реестр всех объектов и сделок Aqua Kip Engineering.
+    Поддерживает фильтрацию по менеджеру ?manager=<id>.
     """
     permission_classes = [IsAuthenticated]
-    queryset = Project.objects.all().select_related('company', 'manager').order_by('-contract_amount')
     serializer_class = ProjectSerializer
+
+    def get_queryset(self):
+        qs = Project.objects.all().select_related('company', 'manager').order_by('-contract_amount')
+        manager_id = self.request.query_params.get('manager') or self.request.query_params.get('manager_id')
+        if manager_id:
+            try:
+                qs = qs.filter(manager_id=int(manager_id))
+            except (ValueError, TypeError):
+                pass
+        return qs
 
 
 class BitrixWebhookView(APIView):
