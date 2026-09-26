@@ -15,9 +15,15 @@
         </h1>
 
         <!-- Subtitle or Chat AI response text -->
-        <p class="text-sm md:text-base text-slate-300 mt-1 font-normal leading-relaxed">
-          {{ responseText || data.querySubtitle }}
-        </p>
+        <div v-if="isLoading" class="mt-2 space-y-2">
+          <div class="h-4 w-3/4 bg-slate-700/50 rounded animate-pulse"></div>
+          <div class="h-4 w-1/2 bg-slate-700/50 rounded animate-pulse"></div>
+        </div>
+        <div
+          v-else
+          class="text-sm md:text-base text-slate-300 mt-1 font-normal leading-relaxed prose prose-invert prose-sm max-w-none [&>ul]:list-disc [&>ul]:pl-5 [&>ol]:list-decimal [&>ol]:pl-5 [&>p]:my-1"
+          v-html="renderedResponse"
+        ></div>
       </div>
 
       <!-- Updated timestamp badge -->
@@ -144,7 +150,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
 import { Sparkles, BarChart2, Target, Users, TrendingUp } from 'lucide-vue-next'
 import type { KpiDashboardData, ChatWidget } from '../types/chat'
 import { useAuth } from '../composables/useAuth'
@@ -153,12 +159,22 @@ import AiInsightCard from './AiInsightCard.vue'
 import PresetChart from './presets/PresetChart.vue'
 import PresetCommitmentList from './presets/PresetCommitmentList.vue'
 import PresetProjectTable from './presets/PresetProjectTable.vue'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 
-defineProps<{
+const props = defineProps<{
   data: KpiDashboardData
   widget?: ChatWidget | null
   responseText?: string
+  isLoading?: boolean
 }>()
+
+const renderedResponse = computed(() => {
+  const text = props.responseText || props.data.querySubtitle
+  if (!text) return ''
+  const html = marked.parse(text, { breaks: true }) as string
+  return DOMPurify.sanitize(html)
+})
 
 const emit = defineEmits<{
   (e: 'selectPrompt', prompt: string): void

@@ -22,6 +22,7 @@
     <!-- Centered Prompt Input Bar -->
     <ChatInput
       :suggestions="suggestions"
+      :disabled="disabled"
       @submit="(query) => $emit('selectPrompt', query)"
       @attach-file="$emit('attachFile')"
       @voice-input="$emit('voiceInput')"
@@ -35,6 +36,7 @@ import ChatInput from './ChatInput.vue'
 
 defineProps<{
   suggestions: string[]
+  disabled?: boolean
 }>()
 
 defineEmits<{
