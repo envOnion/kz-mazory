@@ -26,6 +26,7 @@
         <WelcomeView
           v-if="currentView === 'welcome'"
           :suggestions="welcomeSuggestions"
+          :disabled="isGenerating"
           @select-prompt="handlePromptSubmit"
           @attach-file="handleAttach"
           @voice-input="handleVoice"
