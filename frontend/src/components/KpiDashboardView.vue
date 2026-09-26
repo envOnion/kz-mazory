@@ -58,10 +58,15 @@
         <PresetProjectTable :data="widget.data" />
       </div>
 
-      <!-- Preset 4 (Default): 3 Summary Metrics + Manager KPI Grid -->
+      <!-- Preset 4 (Default / KPI): Interactive Chart + 3 Summary Metrics + Manager KPI Grid -->
       <div v-else class="space-y-6">
+        <!-- Live Interactive Sales & Plan Chart -->
+        <div v-if="data.chartData" class="w-full">
+          <PresetChart :data="data.chartData" />
+        </div>
+
         <!-- 3 Summary Metrics Cards -->
-        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div v-if="data.summaryMetrics && data.summaryMetrics.length > 0" class="grid grid-cols-1 md:grid-cols-3 gap-4">
           <div
             v-for="metric in data.summaryMetrics"
             :key="metric.id"

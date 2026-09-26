@@ -43,6 +43,7 @@ export interface KpiDashboardData {
   updatedAtText: string
   summaryMetrics: MetricSummary[]
   managers: ManagerKpi[]
+  chartData?: any
   insight: AiInsight
 }
 

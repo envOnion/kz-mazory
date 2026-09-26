@@ -135,8 +135,8 @@ class Project(models.Model):
     # Финансовые показатели (тенге ₸)
     contract_amount = models.DecimalField('Сумма Договора ₸', max_digits=14, decimal_places=2, default=0.00)
     cost_amount = models.DecimalField('Себестоимость ₸', max_digits=14, decimal_places=2, default=0.00)
-    target_margin_percent = models.DecimalField('Плановая маржа %', max_digits=5, decimal_places=2, default=16.80)
-    actual_margin_percent = models.DecimalField('Фактическая маржа %', max_digits=5, decimal_places=2, default=0.00)
+    target_margin_percent = models.DecimalField('Плановая маржа %', max_digits=10, decimal_places=2, default=16.80)
+    actual_margin_percent = models.DecimalField('Фактическая маржа %', max_digits=10, decimal_places=2, default=0.00)
     paid_amount = models.DecimalField('Оплачено ₸', max_digits=14, decimal_places=2, default=0.00)
     due_amount = models.DecimalField('Остаток / Дебиторка ₸', max_digits=14, decimal_places=2, default=0.00)
     guarantee_amount = models.DecimalField('Гарантийные оплаты ₸', max_digits=14, decimal_places=2, default=0.00)
@@ -178,7 +178,9 @@ class Project(models.Model):
             cost_dec = Decimal(str(self.cost_amount)) if self.cost_amount is not None else Decimal('0.00')
             paid_dec = Decimal(str(self.paid_amount)) if self.paid_amount is not None else Decimal('0.00')
             profit = contract_dec - cost_dec
-            self.actual_margin_percent = round((profit / contract_dec) * 100, 2)
+            margin = round((profit / contract_dec) * 100, 2)
+            # Защита от overflow в БД (clamping в диапазон -99999999.99..99999999.99)
+            self.actual_margin_percent = max(Decimal('-99999999.99'), min(Decimal('99999999.99'), margin))
             self.due_amount = max(Decimal('0.00'), contract_dec - paid_dec)
         super().save(*args, **kwargs)
 

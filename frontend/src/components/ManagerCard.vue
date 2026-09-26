@@ -49,18 +49,18 @@
         Выполнение KPI
       </div>
       <div class="text-xl font-bold text-white tracking-tight mb-2">
-        {{ manager.kpiPercent }}%
+        {{ manager.kpiPercent ?? (manager as any).kpi_percent ?? 0 }}%
       </div>
 
       <!-- Progress bar track -->
       <div class="w-full h-1.5 rounded-full bg-[#16213e] overflow-hidden">
         <div
           class="h-full rounded-full transition-all duration-700"
-          :style="{ width: `${Math.min(100, manager.kpiPercent)}%` }"
+          :style="{ width: `${Math.min(100, manager.kpiPercent ?? (manager as any).kpi_percent ?? 0)}%` }"
           :class="{
-            'bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.7)]': manager.kpiBarColor === 'green',
-            'bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.7)]': manager.kpiBarColor === 'yellow',
-            'bg-rose-500 shadow-[0_0_10px_rgba(244,63,94,0.7)]': manager.kpiBarColor === 'red'
+            'bg-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.7)]': (manager.kpiBarColor || (manager as any).kpi_bar_color) === 'green',
+            'bg-amber-400 shadow-[0_0_10px_rgba(251,191,36,0.7)]': (manager.kpiBarColor || (manager as any).kpi_bar_color) === 'yellow',
+            'bg-rose-500 shadow-[0_0_10px_rgba(244,63,94,0.7)]': (manager.kpiBarColor || (manager as any).kpi_bar_color) === 'red' || !(manager.kpiBarColor || (manager as any).kpi_bar_color)
           }"
         ></div>
       </div>
@@ -71,23 +71,23 @@
       <div>
         <div class="text-[10px] text-slate-400 uppercase tracking-wider font-medium">Продажи</div>
         <div class="text-[13px] font-semibold text-white tracking-tight mt-0.5">
-          {{ manager.salesAmount }}
+          {{ manager.salesAmount || (manager as any).sales_formatted || '0 ₸' }}
         </div>
       </div>
       <div>
         <div class="text-[10px] text-slate-400 uppercase tracking-wider font-medium">Сделок</div>
         <div class="text-[13px] font-semibold text-white tracking-tight mt-0.5">
-          {{ manager.dealsCount }}
+          {{ manager.dealsCount ?? (manager as any).deals_count ?? 0 }}
         </div>
       </div>
     </div>
 
     <!-- Trend vs previous month -->
     <div class="mt-auto flex items-center gap-1.5 text-[11px] font-medium pt-1">
-      <TrendingUp v-if="manager.trendPositive" class="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+      <TrendingUp v-if="manager.trendPositive ?? (manager as any).trend_positive" class="w-3.5 h-3.5 text-emerald-400 shrink-0" />
       <TrendingDown v-else class="w-3.5 h-3.5 text-rose-400 shrink-0" />
-      <span :class="manager.trendPositive ? 'text-emerald-400' : 'text-rose-400'">
-        {{ manager.trend }}
+      <span :class="(manager.trendPositive ?? (manager as any).trend_positive) ? 'text-emerald-400' : 'text-rose-400'">
+        {{ manager.trend || 'В графике' }}
       </span>
     </div>
   </div>

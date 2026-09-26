@@ -49,70 +49,103 @@ class DataMartService:
                 deadline__lt=today
             ).count()
 
-            # Цветовой статус
+            # Цветовой статус и тренд
             if progress >= 100:
                 status_color = 'green'
+                kpi_bar_color = 'green'
+                trend_text = f"+{round(progress - 100, 1)}% к плану"
+                trend_positive = True
             elif progress >= 75:
                 status_color = 'yellow'
+                kpi_bar_color = 'yellow'
+                trend_text = f"{progress}% плана"
+                trend_positive = True
             else:
                 status_color = 'red'
+                kpi_bar_color = 'red'
+                trend_text = f"{round(100 - progress, 1)}% до плана"
+                trend_positive = False
 
             total_target += target
             total_actual += collected
             total_deals += deals_count
             total_overdue += overdue_count
 
+            formatted_sales = f"{float(collected):,.0f} ₸".replace(',', ' ')
+            formatted_target = f"{float(target):,.0f} ₸".replace(',', ' ')
+
             manager_cards.append({
                 "id": f"mgr-{mgr.id}",
                 "name": mgr.full_name,
-                "role": mgr.role,
-                "avatar": mgr.avatar_url,
+                "role": mgr.role or "Менеджер по продажам",
+                "avatar": mgr.avatar_url or "https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=250&q=80",
                 "rank": rank,
+                "target_amount": float(target),
+                "target_formatted": formatted_target,
+                "sales_amount": formatted_sales,
+                "sales_formatted": formatted_sales,
+                "sales_raw": float(collected),
+                "average_margin": round(float(avg_margin), 1),
+                "overdue_commitments": overdue_count,
+
+                # snake_case
                 "is_top_performer": rank == 1,
                 "status_color": status_color,
                 "kpi_percent": progress,
-                "target_amount": float(target),
-                "target_formatted": f"{float(target):,.0f} ₸".replace(',', ' '),
-                "sales_amount": float(collected),
-                "sales_formatted": f"{float(collected):,.0f} ₸".replace(',', ' '),
+                "kpi_bar_color": kpi_bar_color,
                 "deals_count": deals_count,
-                "average_margin": round(float(avg_margin), 1),
-                "overdue_commitments": overdue_count,
+                "trend": trend_text,
+                "trend_positive": trend_positive,
+
+                # camelCase для Vue 3 шаблонов
+                "isTopPerformer": rank == 1,
+                "statusColor": status_color,
+                "kpiPercent": progress,
+                "kpiBarColor": kpi_bar_color,
+                "salesAmount": formatted_sales,
+                "dealsCount": deals_count,
+                "trendPositive": trend_positive,
             })
 
         overall_progress = round(float(total_actual) / float(total_target) * 100, 1) if total_target > 0 else 0.0
 
+        summary_metrics = [
+            {
+                "id": "total-sales",
+                "title": "Фактический сбор оплат",
+                "value": f"{float(total_actual):,.0f} ₸".replace(',', ' '),
+                "raw_value": float(total_actual),
+                "trend": "+18.4% к началу месяца",
+                "trend_positive": True,
+                "trendPositive": True,
+                "icon": "bar-chart"
+            },
+            {
+                "id": "plan-completion",
+                "title": "Выполнение плана сбора",
+                "value": f"{overall_progress}%",
+                "raw_value": overall_progress,
+                "trend": "Целевой порог: 85%",
+                "trend_positive": overall_progress >= 85,
+                "trendPositive": overall_progress >= 85,
+                "icon": "target"
+            },
+            {
+                "id": "deals-count",
+                "title": "Активных договоров и сделок",
+                "value": str(total_deals),
+                "raw_value": total_deals,
+                "trend": f"{total_overdue} просроченных дедлайнов",
+                "trend_positive": total_overdue == 0,
+                "trendPositive": total_overdue == 0,
+                "icon": "users"
+            }
+        ]
+
         return {
             "period": timezone.now().strftime("%B %Y"),
-            "summary_metrics": [
-                {
-                    "id": "total-sales",
-                    "title": "Фактический сбор оплат",
-                    "value": f"{float(total_actual):,.0f} ₸".replace(',', ' '),
-                    "raw_value": float(total_actual),
-                    "trend": "+18.4% к началу месяца",
-                    "trend_positive": True,
-                    "icon": "bar-chart"
-                },
-                {
-                    "id": "plan-completion",
-                    "title": "Выполнение плана сбора",
-                    "value": f"{overall_progress}%",
-                    "raw_value": overall_progress,
-                    "trend": "Целевой порог: 85%",
-                    "trend_positive": overall_progress >= 85,
-                    "icon": "target"
-                },
-                {
-                    "id": "deals-count",
-                    "title": "Активных договоров и сделок",
-                    "value": str(total_deals),
-                    "raw_value": total_deals,
-                    "trend": f"{total_overdue} просроченных дедлайнов",
-                    "trend_positive": total_overdue == 0,
-                    "icon": "users"
-                }
-            ],
+            "summary_metrics": summary_metrics,
+            "summaryMetrics": summary_metrics,
             "managers": manager_cards
         }
 
@@ -231,11 +264,40 @@ class DataMartService:
     def get_sales_chart_dataset() -> Dict[str, Any]:
         """
         Готовый датасет для пресета графиков (Chart.js Bar & Doughnut)
+        Считает реальные суммы сделок и сбора оплат по менеджерам.
         """
-        managers = UserProfile.objects.all().order_by('-current_sales')
-        labels = [m.full_name for m in managers]
-        targets = [float(m.monthly_target) / 1000000 for m in managers] # в млн ₸
-        actuals = [float(m.current_sales) / 1000000 for m in managers]  # в млн ₸
+        managers = UserProfile.objects.all().annotate(
+            deals_count=Count('project')
+        ).order_by('-deals_count', '-current_sales')
+
+        labels = []
+        targets = []
+        actuals = []
+        contracts = []
+
+        for m in managers:
+            mgr_projects = Project.objects.filter(manager=m)
+            deals_cnt = mgr_projects.count()
+            collected = mgr_projects.aggregate(total=Sum('paid_amount'))['total'] or m.current_sales
+            contracted = mgr_projects.aggregate(total=Sum('contract_amount'))['total'] or Decimal('0.00')
+            target = m.monthly_target if m.monthly_target > 0 else Decimal('50000000.00')
+
+            # Пропускаем пустые профили без сделок и без продаж
+            if deals_cnt == 0 and float(collected) == 0 and float(contracted) == 0:
+                continue
+
+            labels.append(m.full_name)
+            targets.append(round(float(target) / 1000000, 2))
+            actuals.append(round(float(collected) / 1000000, 2))
+            contracts.append(round(float(contracted) / 1000000, 2))
+
+        # Если совсем нет данных, выводим всех менеджеров
+        if not labels:
+            for m in managers[:6]:
+                labels.append(m.full_name)
+                targets.append(round(float(m.monthly_target) / 1000000, 2))
+                actuals.append(round(float(m.current_sales) / 1000000, 2))
+                contracts.append(0.0)
 
         return {
             "chart_type": "bar",
@@ -245,16 +307,24 @@ class DataMartService:
                 {
                     "label": "План (млн ₸)",
                     "data": targets,
-                    "backgroundColor": "rgba(99, 102, 241, 0.4)",
+                    "backgroundColor": "rgba(99, 102, 241, 0.35)",
                     "borderColor": "rgba(99, 102, 241, 1)",
                     "borderWidth": 1.5,
                     "borderRadius": 6
                 },
                 {
-                    "label": "Факт сбора (млн ₸)",
+                    "label": "Сбор оплат (млн ₸)",
                     "data": actuals,
                     "backgroundColor": "rgba(16, 185, 129, 0.8)",
                     "borderColor": "rgba(16, 185, 129, 1)",
+                    "borderWidth": 1.5,
+                    "borderRadius": 6
+                },
+                {
+                    "label": "Контракты (млн ₸)",
+                    "data": contracts,
+                    "backgroundColor": "rgba(56, 189, 248, 0.6)",
+                    "borderColor": "rgba(56, 189, 248, 1)",
                     "borderWidth": 1.5,
                     "borderRadius": 6
                 }
