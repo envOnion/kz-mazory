@@ -5,7 +5,7 @@ from django.conf import settings
 from django.http import HttpResponse
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import IsAuthenticated, IsAdminUser
 from rest_framework import status
 
 WAHA_HEADERS = {"X-Api-Key": getattr(settings, "WAHA_API_KEY", "")}
@@ -15,7 +15,7 @@ class WhatsAppStatusView(APIView):
     """
     Returns live connection status of local WAHA session.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         try:
@@ -36,7 +36,7 @@ class WhatsAppQrView(APIView):
     Returns live QR code image for scanning in WhatsApp app.
     Auto-restarts session if it ended with timeout (FAILED/STOPPED).
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
     def get(self, request):
         format_type = request.query_params.get("format", "image")
@@ -81,7 +81,7 @@ class WhatsAppRestartView(APIView):
     """
     Manually restarts WAHA default session.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated, IsAdminUser]
 
     def post(self, request):
         try:

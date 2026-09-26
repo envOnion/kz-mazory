@@ -106,6 +106,7 @@ const {
   kpiData,
   activeWidget,
   chatResponseText,
+  fetchKpiData,
   handlePromptSubmit,
   goHome
 } = useChat()
@@ -136,6 +137,7 @@ function handleOpenProfile() {
 
 function handleAuthSuccess() {
   showToast('✓ Вы успешно вошли в систему')
+  fetchKpiData()
 }
 
 function handleLogout() {

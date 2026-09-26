@@ -414,6 +414,7 @@ class BitrixSettings(models.Model):
     """
     name = models.CharField('Название интеграции', max_length=128, default='AquaKip Bitrix24 Portal')
     webhook_url = models.CharField('REST Webhook URL', max_length=255, default='https://aquakip.bitrix24.kz/rest/148/71vwif5ivu5f4abk/')
+    inbound_token = models.CharField('Секретный токен входящего вебхука', max_length=128, blank=True, default='')
     is_active = models.BooleanField('Синхронизация активна', default=True)
     auto_create_deals = models.BooleanField('Авто-создание сделок в Bitrix24', default=True)
     auto_import_deals = models.BooleanField('Авто-импорт сделок из CRM в Mazory', default=True)

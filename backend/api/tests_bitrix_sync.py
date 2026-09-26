@@ -170,17 +170,28 @@ class BitrixDeduplicationAndSyncTests(TestCase):
     def test_bitrix_webhook_view(self):
         """Проверка входящего вебхука от Bitrix24."""
         client = Client()
+        BitrixSettings.objects.filter(is_active=True).update(inbound_token='test-secret-token')
         with patch('api.views.async_task') as mock_async_task:
             mock_async_task.return_value = 'task-uuid-123'
             response = client.post(
                 '/api/bitrix/webhook/',
-                data={'event': 'ONCRMDEALADD', 'data[FIELDS][ID]': '7788'}
+                data={'event': 'ONCRMDEALADD', 'data[FIELDS][ID]': '7788', 'auth[application_token]': 'test-secret-token'}
             )
             self.assertEqual(response.status_code, 200)
             data = response.json()
             self.assertEqual(data["status"], "queued")
             self.assertEqual(data["deal_id"], "7788")
             mock_async_task.assert_called_once_with('api.tasks.import_single_deal_from_bitrix_task', '7788')
+
+    def test_bitrix_webhook_forbidden_on_invalid_token(self):
+        """Проверка отклонения несанкционированного вебхука Bitrix24."""
+        client = Client()
+        BitrixSettings.objects.filter(is_active=True).update(inbound_token='test-secret-token')
+        response = client.post(
+            '/api/bitrix/webhook/',
+            data={'event': 'ONCRMDEALADD', 'data[FIELDS][ID]': '7788', 'auth[application_token]': 'wrong-token'}
+        )
+        self.assertEqual(response.status_code, 403)
 
     @patch('api.tasks.async_task')
     def test_enqueue_hourly_bitrix_sync_task(self, mock_async_task):

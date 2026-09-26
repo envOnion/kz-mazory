@@ -7,11 +7,12 @@ from rest_framework import status
 import re
 from django_q.tasks import async_task
 from django.utils import timezone
+from django.conf import settings
 from django.db.models import Q, Sum, Count
 from .datamart import datamart
 from .qdrant_service import qdrant_service
 from .ai_service import AIService
-from .models import Project, WhatsAppConfig
+from .models import Project, WhatsAppConfig, BitrixSettings
 from .serializers import ProjectSerializer
 
 logger = logging.getLogger(__name__)
@@ -20,7 +21,7 @@ class KpiSummaryView(APIView):
     """
     Возвращает актуальные показатели KPI команды продаж из детерминированной витрины данных (Data Mart).
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
 
     def get(self, request):
         kpi_data = datamart.get_sales_kpi_mart()
@@ -289,13 +290,28 @@ class ChatQueryView(APIView):
 class MessageIngestView(APIView):
     """
     Прием входящих сообщений WhatsApp (от WAHA Webhook или внешних вызовов):
-    1. Распаковывает payload WAHA ({ event: 'message', payload: { ... } }) или плоский JSON.
-    2. Фильтрует входящие сообщения по WhatsAppConfig.group_jid (если мониторинг группы настроен).
-    3. Ставит событие в очередь Django Q2 на векторизацию, RAG и извлечение сделок.
+    1. Проверяет авторизационный ключ WAHA API Key.
+    2. Распаковывает payload WAHA ({ event: 'message', payload: { ... } }) или плоский JSON.
+    3. Фильтрует входящие сообщения по WhatsAppConfig.group_jid (если мониторинг группы настроен).
+    4. Ставит событие в очередь Django Q2 на векторизацию, RAG и извлечение сделок.
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
+        # Валидация подлинности вызова вебхука WAHA
+        api_key = (
+            request.headers.get('X-Api-Key') or
+            request.query_params.get('token') or
+            request.query_params.get('api_key') or
+            (request.headers.get('Authorization', '').split('Bearer ')[-1].strip() if 'Bearer ' in request.headers.get('Authorization', '') else '')
+        )
+        expected_key = getattr(settings, 'WAHA_API_KEY', '')
+        if expected_key and api_key != expected_key:
+            return Response(
+                {"error": "Unauthorized: invalid or missing WAHA API key"},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
         data = request.data
         payload = data.get('payload') if isinstance(data.get('payload'), dict) else data
 
@@ -370,7 +386,7 @@ class ProjectListView(ListAPIView):
     """
     Реестр всех объектов и сделок Aqua Kip Engineering.
     """
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated]
     queryset = Project.objects.all().select_related('company', 'manager').order_by('-contract_amount')
     serializer_class = ProjectSerializer
 
@@ -378,12 +394,28 @@ class ProjectListView(ListAPIView):
 class BitrixWebhookView(APIView):
     """
     Входящий вебхук от Bitrix24 CRM (события ONCRMDEALADD, ONCRMDEALUPDATE):
-    1. Немедленно возвращает HTTP 200 OK (без задержек для Bitrix24).
-    2. Передает задачу импорта/обновления сделки в персистентную очередь Redis воркера Django Q2.
+    1. Проверяет секретный application token (если задан в BitrixSettings).
+    2. Немедленно возвращает HTTP 200 OK (без задержек для Bitrix24).
+    3. Передает задачу импорта/обновления сделки в персистентную очередь Redis воркера Django Q2.
     """
     permission_classes = [AllowAny]
 
     def post(self, request):
+        cfg = BitrixSettings.get_active()
+        expected_token = (cfg.inbound_token.strip() if cfg and cfg.inbound_token else '') or getattr(settings, 'BITRIX_INBOUND_TOKEN', '')
+        if expected_token:
+            incoming_token = (
+                request.data.get('auth[application_token]') or
+                (request.data.get('auth', {}).get('application_token') if isinstance(request.data.get('auth'), dict) else None) or
+                request.headers.get('X-Bitrix-Token') or
+                request.query_params.get('token')
+            )
+            if not incoming_token or incoming_token != expected_token:
+                return Response(
+                    {"error": "Forbidden: invalid Bitrix webhook application token"},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
         event = request.data.get('event') or request.query_params.get('event', '')
         deal_id = (
             request.data.get('data[FIELDS][ID]') or
