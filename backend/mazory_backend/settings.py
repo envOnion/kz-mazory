@@ -9,7 +9,7 @@ from datetime import timedelta
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-f7u)rp4lokiv@hgsdma!e@cb*g=dp!z2i)f94)07=nqs^2!ons')
+SECRET_KEY = os.getenv('SECRET_KEY') or 'django-insecure-f7u)rp4lokiv@hgsdma!e@cb*g=dp!z2i)f94)07=nqs^2!ons'
 
 DEBUG = os.getenv('DEBUG', '1') == '1'
 
@@ -255,6 +255,11 @@ UNFOLD = {
                         "title": "Входящие сообщения",
                         "icon": "forum",
                         "link": "/admin/api/rawmessage/",
+                    },
+                    {
+                        "title": "Трассировка WhatsApp → Bitrix → Итог",
+                        "icon": "account_tree",
+                        "link": "/admin/api/messageprocessingtrace/",
                     },
                 ],
             },

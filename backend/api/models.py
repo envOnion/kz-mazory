@@ -516,3 +516,98 @@ class BitrixDealChangeLog(models.Model):
         created_str = self.created_at.strftime('%d.%m.%Y %H:%M:%S') if self.created_at else ''
         return f"[{self.get_action_display()}] Сделка #{self.bitrix_deal_id} — {self.get_status_display()} ({created_str})"
 
+
+class MessageProcessingTrace(models.Model):
+    """
+    Сквозная трассировка пайплайна обработки сообщений:
+    «Входные данные WhatsApp» -> «Зависимые данные из сообщений ранее» -> «Зависимые данные из Bitrix24» -> «Итоговая запись»
+    """
+    PIPELINE_ACTION_CHOICES = [
+        ('created_deal', 'Создана новая сделка'),
+        ('updated_deal', 'Обновлена существующая сделка'),
+        ('matched_bitrix_imported', 'Импортирована сделка из Bitrix24'),
+        ('commitment_created', 'Зафиксировано обязательство'),
+        ('financial_record_created', 'Зафиксирована оплата'),
+        ('non_commercial', 'Информационное / Некоммерческое сообщение'),
+        ('error', 'Ошибка обработки'),
+    ]
+    STATUS_CHOICES = [
+        ('success', 'Успешно'),
+        ('warning', 'Требует внимания'),
+        ('error', 'Ошибка'),
+    ]
+
+    # Связи
+    raw_message = models.ForeignKey(
+        RawMessage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='traces',
+        verbose_name='Сырое сообщение WhatsApp'
+    )
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pipeline_traces',
+        verbose_name='Объект / Сделка'
+    )
+    commitment = models.ForeignKey(
+        Commitment,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pipeline_traces',
+        verbose_name='Созданное обязательство'
+    )
+    financial_record = models.ForeignKey(
+        FinancialRecord,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pipeline_traces',
+        verbose_name='Созданная запись оплаты'
+    )
+
+    # 1. Входные данные WhatsApp
+    whatsapp_message_id = models.CharField('ID сообщения WhatsApp', max_length=128, db_index=True)
+    whatsapp_chat_id = models.CharField('Чат / Группа WhatsApp', max_length=128, blank=True, default='')
+    whatsapp_sender_phone = models.CharField('Телефон отправителя', max_length=64, blank=True, default='')
+    whatsapp_sender_name = models.CharField('Имя отправителя', max_length=255, blank=True, default='')
+    whatsapp_timestamp = models.DateTimeField('Время сообщения WhatsApp', null=True, blank=True)
+    whatsapp_content = models.TextField('Текст сообщения WhatsApp')
+    whatsapp_raw_payload = models.JSONField('Сырой payload WAHA', default=dict, blank=True)
+
+    # 2. Зависимые данные из сообщений ранее
+    earlier_messages_context = models.JSONField('Найденные сообщения из истории (Qdrant RAG / Чат)', default=list, blank=True)
+    earlier_messages_count = models.IntegerField('Количество зависимых сообщений', default=0)
+
+    # 3. Зависимые данные из Bitrix24
+    bitrix_matched_deal_id = models.CharField('ID сделки в Bitrix24', max_length=64, blank=True, default='', db_index=True)
+    bitrix_deal_title = models.CharField('Название сделки в Bitrix24', max_length=255, blank=True, default='')
+    bitrix_deal_stage = models.CharField('Стадия в Bitrix24', max_length=64, blank=True, default='')
+    bitrix_deal_opportunity = models.DecimalField('Сумма сделки в Bitrix24 ₸', max_digits=14, decimal_places=2, null=True, blank=True)
+    bitrix_search_query = models.CharField('Поисковый запрос в Bitrix24', max_length=255, blank=True, default='')
+    bitrix_company_data = models.JSONField('Данные компании в Bitrix24', default=dict, blank=True)
+    bitrix_raw_deal = models.JSONField('Полные данные сделки из Bitrix24', default=dict, blank=True)
+    bitrix_known_deals_summary = models.TextField('Сводка сделок компании, переданная в AI', blank=True, default='')
+
+    # 4. Итоговая запись
+    ai_extracted_facts = models.JSONField('Извлеченные факты AI', default=dict, blank=True)
+    ai_confidence = models.FloatField('Уверенность AI (0.0 - 1.0)', default=0.0)
+    pipeline_action = models.CharField('Действие пайплайна', max_length=64, choices=PIPELINE_ACTION_CHOICES, default='non_commercial', db_index=True)
+    status = models.CharField('Статус обработки', max_length=32, choices=STATUS_CHOICES, default='success', db_index=True)
+    result_summary = models.TextField('Резюме итоговой записи', blank=True, default='')
+    created_at = models.DateTimeField('Время создания трассировки', auto_now_add=True, db_index=True)
+
+    class Meta:
+        verbose_name = 'Трассировка пайплайна'
+        verbose_name_plural = 'Трассировки пайплайна'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        created_str = self.created_at.strftime('%d.%m.%Y %H:%M:%S') if self.created_at else ''
+        return f"[{self.get_pipeline_action_display()}] {self.whatsapp_sender_name} ({created_str})"
+

@@ -97,4 +97,5 @@ class ChatQualityAndValidationTests(TestCase):
         proj = Project.objects.filter(name="ЖК Премиум Тауэр").first()
         self.assertIsNotNone(proj)
         self.assertEqual(proj.contract_amount, Decimal('42000000.00'))
-        mock_async.assert_called_once_with('api.tasks.create_bitrix_deal_task', proj.id)
+        self.assertFalse(proj.is_verified)
+        self.assertTrue(proj.needs_bitrix_sync)

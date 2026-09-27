@@ -449,7 +449,7 @@ def process_incoming_message_task(message_data: dict):
     """
     from .models import (
         RawMessage, Project, Commitment, FinancialRecord,
-        UserProfile, Company, BusinessEvent
+        UserProfile, Company, BusinessEvent, MessageProcessingTrace
     )
     from .qdrant_service import qdrant_service
     from .ai_service import AIService
@@ -536,9 +536,19 @@ def process_incoming_message_task(message_data: dict):
 
     # Проект / Сделка
     project = None
+    bitrix_matched_deal_id = ""
+    bitrix_deal_title = ""
+    bitrix_deal_stage = ""
+    bitrix_deal_opportunity = None
+    bitrix_search_query = ""
+    bitrix_company_data = {}
+    bitrix_raw_deal = {}
+    pipeline_action = "non_commercial"
+
     if object_name and object_name.strip():
         clean_obj_name = object_name.strip()
         core_name = normalize_deal_name(clean_obj_name) or clean_obj_name
+        bitrix_search_query = clean_obj_name
 
         # Блокировка Redis для предотвращения race condition
         with get_deal_lock(core_name):
@@ -551,8 +561,19 @@ def process_incoming_message_task(message_data: dict):
             if not project:
                 crm_deal = BitrixService.find_deal_by_name(clean_obj_name)
                 if crm_deal:
+                    bitrix_matched_deal_id = str(crm_deal.get("ID", ""))
+                    bitrix_deal_title = str(crm_deal.get("TITLE", ""))
+                    bitrix_deal_stage = str(crm_deal.get("STAGE_ID", ""))
+                    if crm_deal.get("OPPORTUNITY"):
+                        try:
+                            bitrix_deal_opportunity = Decimal(str(crm_deal.get("OPPORTUNITY")))
+                        except Exception:
+                            pass
+                    bitrix_raw_deal = crm_deal
+                    bitrix_company_data = {"company_id": crm_deal.get("COMPANY_ID"), "company_name": company_name}
                     logger.info("Anti-Duplicate: Found existing deal #%s in Bitrix24 for '%s'. Importing.", crm_deal.get("ID"), clean_obj_name)
                     project = BitrixService.import_or_update_deal_from_bitrix(crm_deal)
+                    pipeline_action = "matched_bitrix_imported"
 
             can_create = facts.get("can_create_deal") or (facts.get("confidence", 0) >= 0.7)
 
@@ -595,6 +616,7 @@ def process_incoming_message_task(message_data: dict):
                     needs_bitrix_sync=True,
                     is_verified=False
                 )
+                pipeline_action = "created_deal"
 
                 event_title = f"Извлечена новая сделка: {project.name} (ожидает проверки)"
                 BusinessEvent.objects.create(
@@ -632,9 +654,18 @@ def process_incoming_message_task(message_data: dict):
                 project.needs_bitrix_sync = True
                 project.last_chat_activity_at = timezone.now()
                 project.save()
+                if pipeline_action == "non_commercial":
+                    pipeline_action = "updated_deal"
+                if not bitrix_matched_deal_id and project.bitrix_id:
+                    bitrix_matched_deal_id = str(project.bitrix_id)
+                    bitrix_deal_title = project.name
+                    bitrix_deal_stage = project.status
+                    bitrix_deal_opportunity = project.contract_amount
+
                 logger.info("Project #%d '%s' updated from chat (is_verified=False, needs_bitrix_sync=True)", project.id, project.name)
 
     # Обязательства / Обещания менеджеров (Commitment)
+    created_commitment = None
     next_action = facts.get("next_action")
     if next_action and manager:
         next_action_at = facts.get("next_action_at")
@@ -647,7 +678,7 @@ def process_incoming_message_task(message_data: dict):
         else:
             deadline = timezone.now().date() + timedelta(days=2)
 
-        Commitment.objects.create(
+        created_commitment = Commitment.objects.create(
             project=project,
             manager=manager,
             source_message=raw_msg,
@@ -658,11 +689,14 @@ def process_incoming_message_task(message_data: dict):
             bitrix_task_id=None,
             is_verified=False
         )
+        if pipeline_action == "non_commercial":
+            pipeline_action = "commitment_created"
 
     # Финансовые записи (FinancialRecord)
+    created_financial_record = None
     paid_amt = facts.get("paid_amount")
     if paid_amt and float(paid_amt) > 0 and project:
-        FinancialRecord.objects.create(
+        created_financial_record = FinancialRecord.objects.create(
             project=project,
             amount=Decimal(str(paid_amt)),
             payment_date=timezone.now().date(),
@@ -671,10 +705,90 @@ def process_incoming_message_task(message_data: dict):
             notes=f"Извлечено из отчета {sender_name}: {content[:100]}",
             is_verified=False
         )
+        if pipeline_action == "non_commercial":
+            pipeline_action = "financial_record_created"
 
     raw_msg.processed = True
     raw_msg.save(update_fields=['processed'])
-    
+
+    # 6. Сохранение полной сквозной трассировки пайплайна
+    # «Входные данные WhatsApp» -> «Зависимые данные из сообщений ранее» -> «Зависимые данные из Bitrix24» -> «Итоговая запись»
+    trace_earlier_context = []
+    if similar_messages:
+        for sm in similar_messages:
+            trace_earlier_context.append({
+                "message_id": sm.get("message_id") or sm.get("id") or "",
+                "sender_name": sm.get("sender_name", ""),
+                "sender_phone": sm.get("sender_phone", ""),
+                "timestamp": str(sm.get("timestamp") or ""),
+                "content": sm.get("content", ""),
+                "score": round(float(sm.get("score", 0.0)), 4)
+            })
+
+    summary_parts = []
+    summary_parts.append(f"1. Входные данные WhatsApp: получено сообщение от {sender_name} ({sender_phone or 'без номера'}).")
+    if trace_earlier_context:
+        summary_parts.append(f"2. Сообщения ранее: найдено {len(trace_earlier_context)} зависимых сообщений в Qdrant RAG (макс. сходство: {trace_earlier_context[0]['score']}).")
+    else:
+        summary_parts.append("2. Сообщения ранее: зависимые сообщения не найдены (новое обращение).")
+
+    if bitrix_matched_deal_id:
+        summary_parts.append(f"3. Bitrix24 CRM: найдена сделка #{bitrix_matched_deal_id} «{bitrix_deal_title or (project.name if project else '')}» ({bitrix_deal_stage}).")
+    elif bitrix_search_query:
+        summary_parts.append(f"3. Bitrix24 CRM: поиск по запросу «{bitrix_search_query}» совпадений не выявил.")
+    else:
+        summary_parts.append("3. Bitrix24 CRM: объект сделки не выделен, поиск в CRM не требовался.")
+
+    if pipeline_action == "created_deal" and project:
+        summary_parts.append(f"4. Итоговая запись: создана новая сделка «{project.name}» на {project.contract_amount:,.2f} ₸ (ожидает проверки).")
+    elif pipeline_action == "matched_bitrix_imported" and project:
+        summary_parts.append(f"4. Итоговая запись: сделка «{project.name}» успешно синхронизирована из Bitrix24 CRM.")
+    elif pipeline_action == "updated_deal" and project:
+        summary_parts.append(f"4. Итоговая запись: обновлена сделка «{project.name}» (статус: {project.get_status_display()}).")
+    elif pipeline_action == "commitment_created" and created_commitment:
+        summary_parts.append(f"4. Итоговая запись: зафиксировано обязательство '{created_commitment.commitment_text[:60]}' (до {created_commitment.deadline}).")
+    elif pipeline_action == "financial_record_created" and created_financial_record:
+        summary_parts.append(f"4. Итоговая запись: зафиксирован платеж на сумму {created_financial_record.amount:,.2f} ₸.")
+    else:
+        summary_parts.append("4. Итоговая запись: сообщение носит информационный характер (коммерческие сущности не создавались).")
+
+    result_summary = "\n".join(summary_parts)
+
+    try:
+        trace, _ = MessageProcessingTrace.objects.update_or_create(
+            whatsapp_message_id=message_id,
+            defaults={
+                "raw_message": raw_msg,
+                "project": project,
+                "commitment": created_commitment,
+                "financial_record": created_financial_record,
+                "whatsapp_chat_id": chat_id,
+                "whatsapp_sender_phone": sender_phone,
+                "whatsapp_sender_name": sender_name,
+                "whatsapp_timestamp": raw_msg.timestamp,
+                "whatsapp_content": content,
+                "whatsapp_raw_payload": message_data,
+                "earlier_messages_context": trace_earlier_context,
+                "earlier_messages_count": len(trace_earlier_context),
+                "bitrix_matched_deal_id": bitrix_matched_deal_id,
+                "bitrix_deal_title": bitrix_deal_title,
+                "bitrix_deal_stage": bitrix_deal_stage,
+                "bitrix_deal_opportunity": bitrix_deal_opportunity,
+                "bitrix_search_query": bitrix_search_query,
+                "bitrix_company_data": bitrix_company_data,
+                "bitrix_raw_deal": bitrix_raw_deal,
+                "bitrix_known_deals_summary": known_deals_summary,
+                "ai_extracted_facts": facts,
+                "ai_confidence": float(facts.get("confidence") or 0.0),
+                "pipeline_action": pipeline_action,
+                "status": "success",
+                "result_summary": result_summary
+            }
+        )
+        logger.info("MessageProcessingTrace #%d saved for message %s (action: %s)", trace.id, message_id, pipeline_action)
+    except Exception as ex:
+        logger.error("Failed to save MessageProcessingTrace for %s: %s", message_id, ex)
+
     return {
         "status": "processed",
         "message_id": message_id,
