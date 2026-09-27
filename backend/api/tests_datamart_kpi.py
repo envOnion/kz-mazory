@@ -58,7 +58,7 @@ class DataMartKpiTests(TestCase):
         self.assertGreaterEqual(len(chart_data['datasets']), 2)
 
         # Факт сбора оплат должен соответствовать 45.0 млн ₸
-        fact_dataset = next(d for d in chart_data['datasets'] if 'Сбор оплат' in d['label'])
+        fact_dataset = next(d for d in chart_data['datasets'] if 'Факт сбора' in d['label'])
         idx = chart_data['labels'].index('Улугбек Тестовый')
         self.assertEqual(fact_dataset['data'][idx], 45.0)
 

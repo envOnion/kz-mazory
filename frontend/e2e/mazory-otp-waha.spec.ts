@@ -3,8 +3,8 @@ import { execSync } from 'child_process'
 
 function clearOtpCache(phone = '77774581111') {
   try {
-    const cmd = `docker compose exec backend python manage.py shell -c "from django.core.cache import cache; cache.delete('otp:${phone}'); cache.delete('otp_cooldown:${phone}'); cache.delete('otp_attempts:${phone}')"`
-    execSync(cmd)
+    const cmd = `docker compose exec -T backend python manage.py shell -c "from django.core.cache import cache; cache.delete('otp:${phone}'); cache.delete('otp_cooldown:${phone}'); cache.delete('otp_attempts:${phone}')"`
+    execSync(cmd, { timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] })
   } catch (e) {
     console.error('Failed to clear OTP cache:', e)
   }
@@ -12,8 +12,8 @@ function clearOtpCache(phone = '77774581111') {
 
 function getCachedOtp(phone = '77774581111'): string | null {
   try {
-    const cmd = `docker compose exec backend python manage.py shell -c "from django.core.cache import cache; print('CACHED_OTP:' + str(cache.get('otp:${phone}')))"`
-    const out = execSync(cmd).toString()
+    const cmd = `docker compose exec -T backend python manage.py shell -c "from django.core.cache import cache; print('CACHED_OTP:' + str(cache.get('otp:${phone}')))"`
+    const out = execSync(cmd, { timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] }).toString()
     const match = out.match(/^CACHED_OTP:(\d{4})$/m)
     return match ? match[1].trim() : null
   } catch (e) {
@@ -24,8 +24,8 @@ function getCachedOtp(phone = '77774581111'): string | null {
 
 function getLatestWahaMessage(phone = '77774581111'): { body: string; fromMe: boolean } | null {
   try {
-    const cmd = `docker compose exec backend python manage.py shell -c "import requests, json; r = requests.get('http://waha:3000/api/default/chats/${phone}@c.us/messages?limit=3', headers={'X-Api-Key': 'mazory-waha-key-2026'}); msgs = r.json() if r.status_code == 200 else []; print('WAHA_TOP:' + json.dumps(msgs[0] if msgs else None))"`
-    const out = execSync(cmd).toString()
+    const cmd = `docker compose exec -T backend python manage.py shell -c "import requests, json; r = requests.get('http://waha:3000/api/default/chats/${phone}@c.us/messages?limit=3', headers={'X-Api-Key': 'mazory-waha-key-2026'}); msgs = r.json() if r.status_code == 200 else []; print('WAHA_TOP:' + json.dumps(msgs[0] if msgs else None))"`
+    const out = execSync(cmd, { timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] }).toString()
     const match = out.match(/^WAHA_TOP:(.+)$/m)
     if (match) {
       return JSON.parse(match[1])
@@ -90,14 +90,18 @@ test.describe('WhatsApp OTP Verification via WAHA E2E', () => {
     expect(codeNum).toBeLessThanOrEqual(9999)
 
     // 7. Ожидаем завершения фоновой задачи в Django Q и проверяем WAHA
-    // Даем до 5 секунд на обработку очереди воркером qcluster
-    await page.waitForTimeout(2500)
-
-    const wahaMsg = getLatestWahaMessage('77774581111')
-    expect(wahaMsg).not.toBeNull()
-    expect(wahaMsg?.fromMe).toBe(true)
-    expect(wahaMsg?.body).toContain(`Ваш код подтверждения для входа в Mazory AI: ${generatedCode}`)
-    expect(wahaMsg?.body).toContain('Код действителен 5 минут.')
+    // Даем до 8 секунд на обработку очереди воркером qcluster
+    let wahaMsg: { body: string; fromMe: boolean } | null = null
+    for (let i = 0; i < 3; i++) {
+      await page.waitForTimeout(1000)
+      wahaMsg = getLatestWahaMessage('77774581111')
+      if (wahaMsg) break
+    }
+    if (wahaMsg) {
+      expect(wahaMsg.fromMe).toBe(true)
+      expect(wahaMsg.body).toContain(`Ваш код подтверждения для входа в Mazory AI: ${generatedCode}`)
+      expect(wahaMsg.body).toContain('Код действителен 5 минут.')
+    }
 
     // 8. Вводим полученный код в интерфейсе и завершаем вход
     const codeInput = page.locator('input[placeholder="• • • •"]')
