@@ -12,6 +12,7 @@ messages = []
 waha_sessions = {}
 waha_requests = []
 ai_requests = {"embeddings": [], "chats": []}
+crm_requests = []
 lock = threading.Lock()
 
 
@@ -28,6 +29,9 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
     def do_GET(self):
+        if self.path == "/test/crm":
+            with lock:
+                return self.reply(200, {"requests": list(crm_requests)})
         if self.path == "/test/waha":
             with lock:
                 return self.reply(200, {"requests": list(waha_requests)})
@@ -50,6 +54,26 @@ class Handler(BaseHTTPRequestHandler):
                 200, {"text": "Изолированный тестовый документ без финансовых фактов."}
             )
         data = json.loads(raw or b"{}")
+        crm_route = re.fullmatch(
+            r"/rest/1/(e2e-[A-Za-z0-9-]+)/crm\.deal\.get\.json", self.path
+        )
+        if crm_route:
+            with lock:
+                crm_requests.append(
+                    {"credential": crm_route.group(1), "deal_id": data["id"]}
+                )
+            return self.reply(
+                200,
+                {
+                    "result": {
+                        "ID": data["id"],
+                        "TITLE": "E2E CRM " + data["id"],
+                        "OPPORTUNITY": "1000",
+                        "CURRENCY_ID": "KZT",
+                        "STAGE_ID": "NEW",
+                    }
+                },
+            )
         if self.path == "/test/waha":
             with lock:
                 waha_sessions[data["name"]] = {

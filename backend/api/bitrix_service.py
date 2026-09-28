@@ -19,15 +19,17 @@ from .models import (
     Team,
 )
 from .providers import checked_url, ProviderUnavailable
+from .bitrix_config import effective_webhook_url
 
 
 class BitrixService:
     @staticmethod
     def call(method, params=None):
         cfg = BitrixSettings.get_active()
-        if not cfg.is_active or not settings.BITRIX_WEBHOOK_URL:
+        webhook_url = effective_webhook_url(cfg)
+        if not cfg.is_active or not webhook_url:
             raise ProviderUnavailable("crm_disabled")
-        url = checked_url(f"{settings.BITRIX_WEBHOOK_URL.rstrip('/')}/{method}.json")
+        url = checked_url(f"{webhook_url.rstrip('/')}/{method}.json")
         response = requests.post(
             url, json=params or {}, timeout=25, allow_redirects=False
         )

@@ -22,7 +22,7 @@ export default defineConfig({
     },
     {
       name: 'webkit',
-      testMatch: 'waha-select.spec.ts',
+      testMatch: ['waha-select.spec.ts', 'admin-lists.spec.ts'],
       use: { ...devices['Desktop Safari'] },
     },
   ],
