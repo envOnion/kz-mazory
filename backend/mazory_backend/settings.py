@@ -493,3 +493,18 @@ AI_DAILY_BUDGET_USD = Decimal(os.getenv("AI_DAILY_BUDGET_USD", "20"))
 TRUSTED_PROXY_CIDRS = [
     value for value in os.getenv("TRUSTED_PROXY_CIDRS", "").split(",") if value
 ]
+
+# Exact local-stage -> provider-stage IDs; each CRM pipeline supplies its own map.
+import json
+
+try:
+    BITRIX_STAGE_MAP = json.loads(os.getenv("BITRIX_STAGE_MAP", "") or "{}")
+    if not isinstance(BITRIX_STAGE_MAP, dict) or any(
+        not isinstance(k, str) or not isinstance(v, str) or not v
+        for k, v in BITRIX_STAGE_MAP.items()
+    ):
+        raise ValueError()
+except (ValueError, TypeError):
+    raise ImproperlyConfigured(
+        "BITRIX_STAGE_MAP must be a JSON object of stage strings"
+    ) from None

@@ -47,7 +47,11 @@ class BitrixService:
             return
         revision = ProjectRevision.objects.get(project=project, version=version)
         snapshot = revision.snapshot
+        stage = settings.BITRIX_STAGE_MAP.get(snapshot["status"])
+        if not stage:
+            raise ProviderUnavailable("crm_stage_mapping_required")
         fields = {
+            "STAGE_ID": stage,
             "TITLE": snapshot["name"],
             "OPPORTUNITY": snapshot["contract_amount"],
             "CURRENCY_ID": snapshot["currency"],
@@ -122,6 +126,7 @@ class BitrixService:
             "name": str(data.get("TITLE", ""))[:255],
             "contract_amount": str(data.get("OPPORTUNITY", "0")),
             "currency": str(data.get("CURRENCY_ID", "KZT")),
+            "external_stage": str(data.get("STAGE_ID", "")),
         }
         digest = hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest()
         content = json.dumps(clean, ensure_ascii=False)
@@ -160,6 +165,18 @@ class BitrixService:
                 "confidence": 1,
                 "uncertainties": ["Изменения CRM требуют подтверждения."],
             }
+            stages = [
+                local
+                for local, external in settings.BITRIX_STAGE_MAP.items()
+                if external == clean["external_stage"]
+                and local in dict(Project.STATUS_CHOICES)
+            ]
+            if len(stages) == 1:
+                proposed["stage"] = stages[0]
+            else:
+                proposed["uncertainties"].append(
+                    "Стадия CRM не имеет однозначного сопоставления."
+                )
             candidate = FactCandidate.objects.create(
                 trace=trace,
                 team=team,

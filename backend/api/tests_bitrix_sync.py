@@ -16,17 +16,24 @@ class BitrixSyncTests(TestCase):
         self.assertEqual(value, normalize_deal_name(value))
 
     def test_disabled_crm_creates_no_external_effect(self):
+        from api.providers import ProviderUnavailable
+
         with patch("requests.post") as post:
-            from api.providers import ProviderUnavailable
-        with self.assertRaisesRegex(ProviderUnavailable, "crm_disabled"):
-            BitrixService.sync_project(self.project.id, 1)
+            with self.assertRaisesRegex(ProviderUnavailable, "crm_disabled"):
+                BitrixService.sync_project(self.project.id, 1)
             post.assert_not_called()
 
     @patch("api.bitrix_service.BitrixService.call")
     def test_reconciliation_uses_origin_id_not_fuzzy_title(self, call):
         BitrixSettings.objects.create(is_active=True)
         call.side_effect = [{"result": [{"ID": "123"}]}, {"result": True}]
-        BitrixService.sync_project(self.project.id, 1)
+        with override_settings(
+            BITRIX_STAGE_MAP={self.project.status: "CRM_EXACT_STAGE"}
+        ):
+            BitrixService.sync_project(self.project.id, 1)
+        self.assertEqual(
+            call.call_args_list[1].args[1]["fields"]["STAGE_ID"], "CRM_EXACT_STAGE"
+        )
         self.assertEqual(
             call.call_args_list[0].args[1]["filter"]["=ORIGIN_ID"], str(self.project.id)
         )
@@ -41,6 +48,15 @@ class BitrixSyncTests(TestCase):
     def test_stale_project_revision_is_never_published(self, call):
         BitrixSettings.objects.create(is_active=True)
         BitrixService.sync_project(self.project.id, 0)
+        call.assert_not_called()
+
+    @patch("api.bitrix_service.BitrixService.call")
+    def test_missing_stage_mapping_blocks_external_write(self, call):
+        from api.providers import ProviderUnavailable
+
+        BitrixSettings.objects.create(is_active=True)
+        with self.assertRaisesRegex(ProviderUnavailable, "crm_stage_mapping_required"):
+            BitrixService.sync_project(self.project.id, 1)
         call.assert_not_called()
 
     def test_bitrix_webhook_fails_closed(self):
