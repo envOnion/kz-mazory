@@ -13,7 +13,7 @@ from api.models import UserProfile, Company, Project, RawMessage, MessageProcess
 admin_user, _ = User.objects.get_or_create(username='admin', defaults={'is_staff': True, 'is_superuser': True})
 admin_user.is_staff = True
 admin_user.is_superuser = True
-admin_user.set_password('admin2026')
+admin_user.set_password('Mazory2026Admin!')
 admin_user.save()
 
 company, _ = Company.objects.get_or_create(name='ТОО СтройХолдинг E2E')
@@ -132,8 +132,14 @@ Project.objects.filter(bitrix_id='999555').delete()
 
     if (page.url().includes('/admin/login/')) {
       await page.locator('input[name="username"]').fill('admin')
-      await page.locator('input[name="password"]').fill('admin2026')
+      await page.locator('input[name="password"]').fill('Mazory2026Admin!')
       await page.locator('button[type="submit"], input[type="submit"]').click()
+      await page.waitForTimeout(1000)
+      if (page.url().includes('/admin/login/')) {
+        await page.locator('input[name="username"]').fill('admin')
+        await page.locator('input[name="password"]').fill('admin2026')
+        await page.locator('button[type="submit"], input[type="submit"]').click()
+      }
     }
 
     // 2. Ожидаем загрузки списка /admin/api/messageprocessingtrace/

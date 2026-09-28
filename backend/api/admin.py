@@ -586,6 +586,11 @@ class BitrixDealChangeLogAdmin(ModelAdmin):
 
 @admin.register(MessageProcessingTrace)
 class MessageProcessingTraceAdmin(ModelAdmin):
+    class Media:
+        css = {
+            'all': ('mazory/css/admin_trace.css',)
+        }
+
     list_display = (
         'created_at_fmt', 'whatsapp_sender_fmt', 'whatsapp_content_snippet',
         'earlier_messages_badge', 'bitrix_matched_badge', 'pipeline_action_badge',
@@ -700,9 +705,9 @@ class MessageProcessingTraceAdmin(ModelAdmin):
 
     def result_summary_fmt(self, obj):
         lines = (obj.result_summary or "").split("\n")
-        items_html = "".join([f"<li class='py-1 flex items-start gap-2'><span class='text-indigo-500 font-bold'>•</span><span>{line}</span></li>" for line in lines if line.strip()])
+        items_html = "".join([f"<li class='py-1 flex items-start gap-2'><span class='text-indigo-500 font-bold'>•</span><span class='mazory-trace-text'>{line}</span></li>" for line in lines if line.strip()])
         return format_html(
-            '<div class="p-4 bg-gray-50 dark:bg-gray-800/50 rounded-xl border border-gray-200 dark:border-gray-700/60 font-sans text-sm text-gray-800 dark:text-gray-200"><ul class="space-y-1">{}</ul></div>',
+            '<div class="p-4 mazory-trace-card rounded-xl border font-sans text-sm mazory-trace-text shadow-sm"><ul class="space-y-1">{}</ul></div>',
             mark_safe(items_html) if items_html else mark_safe("<em>Нет текстового резюме</em>")
         )
     result_summary_fmt.short_description = "Резюме цепочки принятия решений"
@@ -772,30 +777,42 @@ class MessageProcessingTraceAdmin(ModelAdmin):
         raw_json = json.dumps(obj.whatsapp_raw_payload or {}, indent=2, ensure_ascii=False)
         ts_str = obj.whatsapp_timestamp.strftime('%d.%m.%Y %H:%M:%S') if obj.whatsapp_timestamp else '—'
         html = f"""
+        <style>
+        .mazory-trace-content {{ background-color: #ffffff !important; border: 1px solid #e2e8f0 !important; color: #0f172a !important; }}
+        html.dark .mazory-trace-content, body.dark .mazory-trace-content, .dark .mazory-trace-content {{ background-color: #0f172a !important; border-color: #334155 !important; color: #f8fafc !important; }}
+        .mazory-trace-card {{ background-color: #ffffff !important; border: 1px solid #e2e8f0 !important; color: #0f172a !important; }}
+        html.dark .mazory-trace-card, body.dark .mazory-trace-card, .dark .mazory-trace-card {{ background-color: #1e293b !important; border-color: #334155 !important; color: #f8fafc !important; }}
+        .mazory-trace-text {{ color: #0f172a !important; }}
+        html.dark .mazory-trace-text, body.dark .mazory-trace-text, .dark .mazory-trace-text {{ color: #f8fafc !important; }}
+        .mazory-trace-meta {{ color: #475569 !important; }}
+        html.dark .mazory-trace-meta, body.dark .mazory-trace-meta, .dark .mazory-trace-meta {{ color: #94a3b8 !important; }}
+        .mazory-trace-label {{ color: #64748b !important; }}
+        html.dark .mazory-trace-label, body.dark .mazory-trace-label, .dark .mazory-trace-label {{ color: #94a3b8 !important; }}
+        </style>
         <div class="p-5 rounded-xl border border-emerald-500/30 bg-emerald-50/10 dark:bg-emerald-950/10 space-y-4">
             <div class="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-emerald-500/20">
                 <div class="flex items-center gap-3">
                     <span class="p-2 rounded-lg bg-emerald-500/20 text-emerald-600 font-bold text-sm">WhatsApp</span>
                     <div>
-                        <div class="text-sm font-bold text-gray-900 dark:text-gray-100">{obj.whatsapp_sender_name}</div>
-                        <div class="text-xs text-gray-500 font-mono">{obj.whatsapp_sender_phone or 'Номер скрыт'}</div>
+                        <div class="text-sm font-bold mazory-trace-text">{obj.whatsapp_sender_name}</div>
+                        <div class="text-xs mazory-trace-meta font-mono">{obj.whatsapp_sender_phone or 'Номер скрыт'}</div>
                     </div>
                 </div>
-                <div class="text-right text-xs text-gray-500">
+                <div class="text-right text-xs mazory-trace-meta">
                     <div><b>Время получения:</b> {ts_str}</div>
-                    <div><b>Чат / Группа:</b> <span class="font-mono text-indigo-500">{obj.whatsapp_chat_id or 'sales-group'}</span></div>
-                    <div><b>Message ID:</b> <span class="font-mono text-gray-400">{obj.whatsapp_message_id}</span></div>
+                    <div><b>Чат / Группа:</b> <span class="font-mono text-indigo-500 font-semibold">{obj.whatsapp_chat_id or 'sales-group'}</span></div>
+                    <div><b>Message ID:</b> <span class="font-mono mazory-trace-label">{obj.whatsapp_message_id}</span></div>
                 </div>
             </div>
 
             <div>
-                <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Исходный текст сообщения WhatsApp:</div>
-                <div class="p-4 rounded-lg bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 text-sm text-gray-800 dark:text-gray-200 font-sans whitespace-pre-wrap leading-relaxed shadow-sm">
+                <div class="text-xs font-semibold mazory-trace-meta uppercase tracking-wider mb-1">Исходный текст сообщения WhatsApp:</div>
+                <div class="p-4 rounded-lg text-sm font-sans whitespace-pre-wrap leading-relaxed shadow-sm mazory-trace-content">
 {obj.whatsapp_content or '—'}
                 </div>
             </div>
 
-            <details class="text-xs text-gray-500 cursor-pointer pt-2">
+            <details class="text-xs mazory-trace-meta cursor-pointer pt-2">
                 <summary class="font-semibold text-emerald-600 hover:underline">Показать сырой payload сообщения (WAHA Webhook JSON)</summary>
                 <pre class="mt-2 p-3 bg-gray-950 text-gray-200 rounded-lg overflow-x-auto font-mono text-xs max-h-60"><code>{raw_json}</code></pre>
             </details>
@@ -809,7 +826,7 @@ class MessageProcessingTraceAdmin(ModelAdmin):
         messages = obj.earlier_messages_context or []
         if not messages:
             return format_html(
-                '<div class="p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50 text-sm text-gray-500">'
+                '<div class="p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50 text-sm mazory-trace-meta">'
                 'ℹ Зависимые сообщения из истории не найдены. Это первичное сообщение по данному объекту / теме.'
                 '</div>'
             )
@@ -824,20 +841,20 @@ class MessageProcessingTraceAdmin(ModelAdmin):
             content = m.get('content') or m.get('text') or ''
 
             card = f"""
-            <div class="p-3 rounded-lg bg-white dark:bg-gray-900 border border-purple-500/20 shadow-sm space-y-1.5">
+            <div class="p-3 rounded-lg mazory-trace-card border border-purple-500/20 shadow-sm space-y-1.5">
                 <div class="flex items-center justify-between text-xs">
-                    <span class="font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-1.5">
+                    <span class="font-semibold mazory-trace-text flex items-center gap-1.5">
                         <span class="w-4 h-4 rounded-full bg-purple-500/20 text-purple-600 flex items-center justify-center text-[10px] font-bold">{idx}</span>
                         {sender}
                     </span>
                     <div class="flex items-center gap-2">
-                        <span class="text-gray-400 font-mono">{ts}</span>
+                        <span class="mazory-trace-meta font-mono">{ts}</span>
                         <span class="px-2 py-0.5 rounded text-[11px] font-bold bg-{score_color}-500/10 text-{score_color}-600">
                             Сходство: {score_percent}
                         </span>
                     </div>
                 </div>
-                <div class="text-xs text-gray-600 dark:text-gray-300 font-sans whitespace-pre-wrap pl-5 border-l-2 border-purple-500/30">
+                <div class="text-xs mazory-trace-text font-sans whitespace-pre-wrap pl-5 border-l-2 border-purple-500/40">
                     {content}
                 </div>
             </div>
@@ -850,7 +867,7 @@ class MessageProcessingTraceAdmin(ModelAdmin):
                 <div class="text-xs font-semibold text-purple-600 uppercase tracking-wider">
                     Семантический поиск контекста в Qdrant RAG (найдено: {len(messages)})
                 </div>
-                <div class="text-xs text-gray-500">
+                <div class="text-xs mazory-trace-meta">
                     Модель: <span class="font-mono text-purple-600">liquid/lfm-2.5-embedding-350m (1024 dim)</span>
                 </div>
             </div>
@@ -874,7 +891,7 @@ class MessageProcessingTraceAdmin(ModelAdmin):
 
         if matched_id:
             deal_block = f"""
-            <div class="p-4 rounded-xl bg-white dark:bg-gray-900 border border-sky-500/30 shadow-sm space-y-3">
+            <div class="p-4 rounded-xl mazory-trace-card border border-sky-500/30 shadow-sm space-y-3">
                 <div class="flex items-center justify-between">
                     <div class="flex items-center gap-2">
                         <span class="px-2.5 py-1 text-xs font-bold rounded-lg bg-sky-500/20 text-sky-600">
@@ -884,29 +901,29 @@ class MessageProcessingTraceAdmin(ModelAdmin):
                             #{matched_id} — {obj.bitrix_deal_title or 'Сделка Bitrix24'} ↗
                         </a>
                     </div>
-                    <span class="text-xs font-mono text-gray-400">Стадия CRM: {obj.bitrix_deal_stage or 'PREPARATION'}</span>
+                    <span class="text-xs font-mono mazory-trace-meta">Стадия CRM: {obj.bitrix_deal_stage or 'PREPARATION'}</span>
                 </div>
 
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
-                    <div class="p-2 rounded bg-gray-50 dark:bg-gray-800">
-                        <span class="text-gray-400 block">Сумма в CRM:</span>
-                        <span class="font-bold text-gray-800 dark:text-gray-200">{opp_str}</span>
+                    <div class="p-2.5 rounded mazory-trace-content">
+                        <span class="mazory-trace-meta block text-[11px]">Сумма в CRM:</span>
+                        <span class="font-bold mazory-trace-text">{opp_str}</span>
                     </div>
-                    <div class="p-2 rounded bg-gray-50 dark:bg-gray-800">
-                        <span class="text-gray-400 block">Компания в CRM:</span>
-                        <span class="font-bold text-gray-800 dark:text-gray-200">{obj.bitrix_company_data.get('company_name') or obj.bitrix_company_data.get('TITLE') or obj.bitrix_company_data.get('name') or 'ТОО / Не привязана'}</span>
+                    <div class="p-2.5 rounded mazory-trace-content">
+                        <span class="mazory-trace-meta block text-[11px]">Компания в CRM:</span>
+                        <span class="font-bold mazory-trace-text">{obj.bitrix_company_data.get('company_name') or obj.bitrix_company_data.get('TITLE') or obj.bitrix_company_data.get('name') or 'ТОО / Не привязана'}</span>
                     </div>
-                    <div class="p-2 rounded bg-gray-50 dark:bg-gray-800">
-                        <span class="text-gray-400 block">Поисковый запрос:</span>
+                    <div class="p-2.5 rounded mazory-trace-content">
+                        <span class="mazory-trace-meta block text-[11px]">Поисковый запрос:</span>
                         <span class="font-bold text-indigo-500 font-mono truncate block">{obj.bitrix_search_query or '—'}</span>
                     </div>
-                    <div class="p-2 rounded bg-gray-50 dark:bg-gray-800">
-                        <span class="text-gray-400 block">Защита от дублей:</span>
+                    <div class="p-2.5 rounded mazory-trace-content">
+                        <span class="mazory-trace-meta block text-[11px]">Защита от дублей:</span>
                         <span class="font-bold text-emerald-600">Связана существующая</span>
                     </div>
                 </div>
 
-                <details class="text-xs text-gray-500 cursor-pointer pt-1">
+                <details class="text-xs mazory-trace-meta cursor-pointer pt-1">
                     <summary class="font-semibold text-sky-600 hover:underline">Показать сырой ответ crm.deal.list/get (JSON)</summary>
                     <pre class="mt-2 p-3 bg-gray-950 text-gray-200 rounded-lg overflow-x-auto font-mono text-xs max-h-56"><code>{raw_deal_json}</code></pre>
                 </details>
@@ -914,11 +931,11 @@ class MessageProcessingTraceAdmin(ModelAdmin):
             """
         else:
             deal_block = f"""
-            <div class="p-4 rounded-xl bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800 shadow-sm space-y-2">
+            <div class="p-4 rounded-xl mazory-trace-card border border-amber-500/30 shadow-sm space-y-2">
                 <div class="flex items-center gap-2 text-xs font-semibold text-amber-600">
                     <span>⚠ В Bitrix24 CRM сделка по объекту «{obj.bitrix_search_query or '—'}» не найдена</span>
                 </div>
-                <div class="text-xs text-gray-500">
+                <div class="text-xs mazory-trace-meta">
                     Система проверила наличие сделки через <code>BitrixService.find_deal_by_name</code> по полям TITLE и кастомным свойствам объекта.
                     Так как совпадений нет, сделка создана локально как новая и подготовлена к первичной регистрации.
                 </div>
@@ -932,16 +949,16 @@ class MessageProcessingTraceAdmin(ModelAdmin):
                 <div class="text-xs font-semibold text-sky-600 uppercase tracking-wider">
                     Состояние Bitrix24 CRM на момент обработки
                 </div>
-                <div class="text-xs text-gray-500">
+                <div class="text-xs mazory-trace-meta">
                     Webhook: <span class="font-mono text-sky-600">{cfg.name}</span>
                 </div>
             </div>
 
             {deal_block}
 
-            <details class="text-xs text-gray-500 cursor-pointer pt-1">
+            <details class="text-xs mazory-trace-meta cursor-pointer pt-1">
                 <summary class="font-semibold text-sky-600 hover:underline">Сводка известных сделок компании, переданная в контекст AI (промпт)</summary>
-                <div class="mt-2 p-3 rounded-lg bg-gray-50 dark:bg-gray-900 text-xs font-mono text-gray-700 dark:text-gray-300 max-h-48 overflow-y-auto whitespace-pre-wrap border border-gray-200 dark:border-gray-800">
+                <div class="mt-2 p-3 rounded-lg mazory-trace-content text-xs font-mono max-h-48 overflow-y-auto whitespace-pre-wrap">
 {summary_text}
                 </div>
             </details>
@@ -957,13 +974,13 @@ class MessageProcessingTraceAdmin(ModelAdmin):
         conf_pct = f"{obj.ai_confidence * 100:.0f}%"
 
         # Созданный/обновленный проект
-        project_html = "<em>Сделка не создавалась/не привязана</em>"
+        project_html = '<em class="mazory-trace-meta">Сделка не создавалась/не привязана</em>'
         if obj.project:
             p = obj.project
             p_url = f"/admin/api/project/{p.id}/change/"
             verified_badge = '<span class="text-emerald-500 font-bold">✓ Проверено</span>' if p.is_verified else '<span class="text-amber-500 font-bold">⏳ Ожидает проверки</span>'
             project_html = f"""
-            <div class="p-3 rounded-lg bg-white dark:bg-gray-900 border border-emerald-500/30 space-y-2">
+            <div class="p-3 rounded-lg mazory-trace-card border border-emerald-500/30 space-y-2">
                 <div class="flex items-center justify-between">
                     <a href="{p_url}" class="text-sm font-bold text-indigo-600 hover:underline">
                         Проект #{p.id}: {p.name} ↗
@@ -971,10 +988,10 @@ class MessageProcessingTraceAdmin(ModelAdmin):
                     {verified_badge}
                 </div>
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-                    <div><span class="text-gray-400">Сумма:</span> <b>{p.contract_amount:,.2f} ₸</b></div>
-                    <div><span class="text-gray-400">Маржа:</span> <b>{p.actual_margin_percent}%</b></div>
-                    <div><span class="text-gray-400">Статус:</span> <b>{p.get_status_display()}</b></div>
-                    <div><span class="text-gray-400">Синхр. Bitrix:</span> <b>{'Да' if p.needs_bitrix_sync else 'Актуально'}</b></div>
+                    <div><span class="mazory-trace-meta">Сумма:</span> <b class="mazory-trace-text">{p.contract_amount:,.2f} ₸</b></div>
+                    <div><span class="mazory-trace-meta">Маржа:</span> <b class="mazory-trace-text">{p.actual_margin_percent}%</b></div>
+                    <div><span class="mazory-trace-meta">Статус:</span> <b class="mazory-trace-text">{p.get_status_display()}</b></div>
+                    <div><span class="mazory-trace-meta">Синхр. Bitrix:</span> <b class="mazory-trace-text">{'Да' if p.needs_bitrix_sync else 'Актуально'}</b></div>
                 </div>
             </div>
             """
@@ -985,16 +1002,16 @@ class MessageProcessingTraceAdmin(ModelAdmin):
             c = obj.commitment
             c_url = f"/admin/api/commitment/{c.id}/change/"
             commitment_html = f"""
-            <div class="p-3 rounded-lg bg-white dark:bg-gray-900 border border-amber-500/30 space-y-1 text-xs">
+            <div class="p-3 rounded-lg mazory-trace-card border border-amber-500/30 space-y-1 text-xs">
                 <div class="flex items-center justify-between">
                     <span class="font-bold text-amber-600">Создано обязательство (SLA):</span>
                     <a href="{c_url}" class="text-indigo-600 hover:underline font-semibold">#{c.id} ↗</a>
                 </div>
-                <div class="text-gray-800 dark:text-gray-200 font-medium">«{c.commitment_text}»</div>
-                <div class="text-gray-500 flex gap-4">
-                    <span>Дедлайн: <b>{c.deadline or '—'}</b></span>
-                    <span>Статус: <b>{c.get_status_display()}</b></span>
-                    <span>Срочность: <b>{c.get_severity_display()}</b></span>
+                <div class="mazory-trace-text font-medium">«{c.commitment_text}»</div>
+                <div class="mazory-trace-meta flex gap-4">
+                    <span>Дедлайн: <b class="mazory-trace-text">{c.deadline or '—'}</b></span>
+                    <span>Статус: <b class="mazory-trace-text">{c.get_status_display()}</b></span>
+                    <span>Срочность: <b class="mazory-trace-text">{c.get_severity_display()}</b></span>
                 </div>
             </div>
             """
@@ -1005,13 +1022,13 @@ class MessageProcessingTraceAdmin(ModelAdmin):
             f = obj.financial_record
             f_url = f"/admin/api/financialrecord/{f.id}/change/"
             fin_html = f"""
-            <div class="p-3 rounded-lg bg-white dark:bg-gray-900 border border-teal-500/30 space-y-1 text-xs">
+            <div class="p-3 rounded-lg mazory-trace-card border border-teal-500/30 space-y-1 text-xs">
                 <div class="flex items-center justify-between">
                     <span class="font-bold text-teal-600">Зафиксирована финансовая запись:</span>
                     <a href="{f_url}" class="text-indigo-600 hover:underline font-semibold">#{f.id} ↗</a>
                 </div>
-                <div class="text-gray-800 dark:text-gray-200 font-medium">Сумма: <b>{f.amount:,.2f} ₸</b> ({f.get_payment_type_display()})</div>
-                <div class="text-gray-500">Дата: <b>{f.payment_date}</b> | Статус: <b>{f.get_status_display()}</b></div>
+                <div class="mazory-trace-text font-medium">Сумма: <b class="mazory-trace-text">{f.amount:,.2f} ₸</b> ({f.get_payment_type_display()})</div>
+                <div class="mazory-trace-meta">Дата: <b class="mazory-trace-text">{f.payment_date}</b> | Статус: <b class="mazory-trace-text">{f.get_status_display()}</b></div>
             </div>
             """
 
@@ -1028,52 +1045,52 @@ class MessageProcessingTraceAdmin(ModelAdmin):
 
             <!-- AI Facts table -->
             <div>
-                <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Извлеченные структурированные факты AI:</div>
+                <div class="text-xs font-semibold mazory-trace-meta uppercase tracking-wider mb-2">Извлеченные структурированные факты AI:</div>
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
-                    <div class="p-2.5 rounded bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800">
-                        <span class="text-gray-400 block">Объект:</span>
-                        <span class="font-bold text-gray-800 dark:text-gray-200">{facts.get('object_name') or '—'}</span>
+                    <div class="p-2.5 rounded mazory-trace-content">
+                        <span class="mazory-trace-meta block text-[11px]">Объект:</span>
+                        <span class="font-bold mazory-trace-text">{facts.get('object_name') or '—'}</span>
                     </div>
-                    <div class="p-2.5 rounded bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800">
-                        <span class="text-gray-400 block">Сумма договора:</span>
+                    <div class="p-2.5 rounded mazory-trace-content">
+                        <span class="mazory-trace-meta block text-[11px]">Сумма договора:</span>
                         <span class="font-bold text-emerald-600">{float(facts.get('contract_amount') or 0):,.2f} ₸</span>
                     </div>
-                    <div class="p-2.5 rounded bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800">
-                        <span class="text-gray-400 block">Оборудование:</span>
-                        <span class="font-bold text-gray-800 dark:text-gray-200">{facts.get('direction') or facts.get('equipment_type') or '—'}</span>
+                    <div class="p-2.5 rounded mazory-trace-content">
+                        <span class="mazory-trace-meta block text-[11px]">Оборудование:</span>
+                        <span class="font-bold mazory-trace-text">{facts.get('direction') or facts.get('equipment_type') or '—'}</span>
                     </div>
-                    <div class="p-2.5 rounded bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800">
-                        <span class="text-gray-400 block">Стадия:</span>
-                        <span class="font-bold text-gray-800 dark:text-gray-200">{facts.get('stage') or '—'}</span>
+                    <div class="p-2.5 rounded mazory-trace-content">
+                        <span class="mazory-trace-meta block text-[11px]">Стадия:</span>
+                        <span class="font-bold mazory-trace-text">{facts.get('stage') or '—'}</span>
                     </div>
-                    <div class="p-2.5 rounded bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800">
-                        <span class="text-gray-400 block">Следующий шаг:</span>
-                        <span class="font-bold text-gray-800 dark:text-gray-200">{facts.get('next_action') or '—'}</span>
+                    <div class="p-2.5 rounded mazory-trace-content">
+                        <span class="mazory-trace-meta block text-[11px]">Следующий шаг:</span>
+                        <span class="font-bold mazory-trace-text">{facts.get('next_action') or '—'}</span>
                     </div>
-                    <div class="p-2.5 rounded bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800">
-                        <span class="text-gray-400 block">Дедлайн:</span>
-                        <span class="font-bold text-gray-800 dark:text-gray-200">{facts.get('next_action_at') or '—'}</span>
+                    <div class="p-2.5 rounded mazory-trace-content">
+                        <span class="mazory-trace-meta block text-[11px]">Дедлайн:</span>
+                        <span class="font-bold mazory-trace-text">{facts.get('next_action_at') or '—'}</span>
                     </div>
-                    <div class="p-2.5 rounded bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800">
-                        <span class="text-gray-400 block">Компания:</span>
-                        <span class="font-bold text-gray-800 dark:text-gray-200">{facts.get('company_name') or '—'}</span>
+                    <div class="p-2.5 rounded mazory-trace-content">
+                        <span class="mazory-trace-meta block text-[11px]">Компания:</span>
+                        <span class="font-bold mazory-trace-text">{facts.get('company_name') or '—'}</span>
                     </div>
-                    <div class="p-2.5 rounded bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-800">
-                        <span class="text-gray-400 block">Приоритет:</span>
-                        <span class="font-bold text-gray-800 dark:text-gray-200">{facts.get('priority') or 'standard'}</span>
+                    <div class="p-2.5 rounded mazory-trace-content">
+                        <span class="mazory-trace-meta block text-[11px]">Приоритет:</span>
+                        <span class="font-bold mazory-trace-text">{facts.get('priority') or 'standard'}</span>
                     </div>
                 </div>
             </div>
 
             <!-- Entities created -->
             <div class="space-y-2 pt-1">
-                <div class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Связанные сущности в БД Mazory:</div>
+                <div class="text-xs font-semibold mazory-trace-meta uppercase tracking-wider">Связанные сущности в БД Mazory:</div>
                 {project_html}
                 {commitment_html}
                 {fin_html}
             </div>
 
-            <details class="text-xs text-gray-500 cursor-pointer pt-1">
+            <details class="text-xs mazory-trace-meta cursor-pointer pt-1">
                 <summary class="font-semibold text-emerald-600 hover:underline">Показать полный JSON ответ нейросети (facts)</summary>
                 <pre class="mt-2 p-3 bg-gray-950 text-gray-200 rounded-lg overflow-x-auto font-mono text-xs max-h-56"><code>{facts_json}</code></pre>
             </details>

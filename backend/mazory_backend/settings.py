@@ -6,6 +6,7 @@ from pathlib import Path
 import os
 import sys
 from datetime import timedelta
+from django.templatetags.static import static
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -207,6 +208,9 @@ UNFOLD = {
             "950": "30 27 75",
         },
     },
+    "STYLES": [
+        lambda request: static("mazory/css/admin_trace.css"),
+    ],
     "SIDEBAR": {
         "show_search": True,
         "show_all_applications": True,
