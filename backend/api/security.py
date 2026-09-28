@@ -85,10 +85,15 @@ class SecurityHeadersMiddleware:
         response["X-Request-ID"] = request.correlation_id
         response["Referrer-Policy"] = "same-origin"
         response["X-Content-Type-Options"] = "nosniff"
-        if settings.MAZORY_ENV == "production":
-            # Unfold uses inline styles/scripts; external frames/objects are never allowed.
+        admin_page = request.path.startswith("/admin/")
+        if settings.MAZORY_ENV == "production" or admin_page:
+            # Unfold's Alpine evaluates x-show expressions. Test Admin with the
+            # same CSP; keep this compatibility exception out of other routes.
+            scripts = "'self' 'unsafe-inline'"
+            if admin_page:
+                scripts += " 'unsafe-eval'"
             response["Content-Security-Policy"] = (
-                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+                f"default-src 'self'; script-src {scripts}; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
             )
         return response
 
