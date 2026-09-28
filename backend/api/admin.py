@@ -2,7 +2,8 @@ from .admin_access import ScopedReadOnlyAdmin, IntegrationAdmin, SuperuserAdmin
 import json
 import requests
 from django.contrib import admin
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
+from .plain_text import clean_context
 from django.utils.safestring import mark_safe
 from django.contrib import messages
 from unfold.admin import ModelAdmin, TabularInline
@@ -934,10 +935,11 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
 
     def stage_2_earlier_messages_card(self, obj):
         """Рендеринг Этапа 2: «Зависимые данные из сообщений ранее»"""
-        messages = obj.earlier_messages_context or []
+        messages = clean_context(obj.earlier_messages_context or [])
         if not messages:
             return format_html(
-                '<div class="p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50 text-sm mazory-trace-meta">ℹ Зависимые сообщения из истории не найдены. Это первичное сообщение по данному объекту / теме.</div>'
+                '<div class="p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50 text-sm mazory-trace-meta">{}</div>',
+                "ℹ Зависимые сообщения из истории не найдены. Это первичное сообщение по данному объекту / теме.",
             )
         cards_html = []
         for idx, m in enumerate(messages, 1):
@@ -947,10 +949,10 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
                 "emerald" if score >= 0.75 else "purple" if score >= 0.5 else "gray"
             )
             sender = m.get("sender_name") or m.get("author") or "Коллега"
-            ts = m.get("timestamp") or "—"
+            ts = m.get("timestamp") or m.get("sent_at") or "—"
             content = m.get("content") or m.get("text") or ""
             card = format_html(
-                '\n            <div class="p-3 rounded-lg mazory-trace-card border border-purple-500/20 shadow-sm space-y-1.5">\n                <div class="flex items-center justify-between text-xs">\n                    <span class="font-semibold mazory-trace-text flex items-center gap-1.5">\n                        <span class="w-4 h-4 rounded-full bg-purple-500/20 text-purple-600 flex items-center justify-center text-[10px] font-bold">{}</span>\n                        {}\n                    </span>\n                    <div class="flex items-center gap-2">\n                        <span class="mazory-trace-meta font-mono">{}</span>\n                        <span class="px-2 py-0.5 rounded text-[11px] font-bold bg-{}-500/10 text-{}-600">\n                            Сходство: {}\n                        </span>\n                    </div>\n                </div>\n                <div class="text-xs mazory-trace-text font-sans whitespace-pre-wrap pl-5 border-l-2 border-purple-500/40">\n                    {}\n                </div>\n            </div>\n            ',
+                '\n            <div class="p-3 rounded-lg mazory-trace-card border border-purple-500/20 shadow-sm space-y-1.5">\n                <div class="flex items-center justify-between text-xs">\n                    <span class="font-semibold mazory-trace-text flex items-center gap-1.5">\n                        <span class="w-4 h-4 rounded-full bg-purple-500/20 text-purple-600 flex items-center justify-center text-[10px] font-bold">{}</span>\n                        {}\n                    </span>\n                    <div class="flex items-center gap-2">\n                        <span class="mazory-trace-meta font-mono">{}</span>\n                        <span class="px-2 py-0.5 rounded text-[11px] font-bold bg-{}-500/10 text-{}-600">\n                            Сходство: {}\n                        </span>\n                    </div>\n                </div>\n                <div class="text-xs mazory-trace-text font-sans pl-5 border-l-2 border-purple-500/40" style="white-space: pre-wrap; overflow-wrap: anywhere">{}</div>\n            </div>\n            ',
                 idx,
                 sender,
                 ts,
@@ -963,7 +965,7 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
         html = format_html(
             '\n        <div class="p-5 rounded-xl border border-purple-500/30 bg-purple-50/10 dark:bg-purple-950/10 space-y-3">\n            <div class="flex items-center justify-between pb-2 border-b border-purple-500/20">\n                <div class="text-xs font-semibold text-purple-600 uppercase tracking-wider">\n                    Семантический поиск контекста в Qdrant RAG (найдено: {})\n                </div>\n                <div class="text-xs mazory-trace-meta">\n                    Модель: <span class="font-mono text-purple-600">liquid/lfm-2.5-embedding-350m (1024 dim)</span>\n                </div>\n            </div>\n            <div class="space-y-2">\n                {}\n            </div>\n        </div>\n        ',
             len(messages),
-            "".join(cards_html),
+            format_html_join("", "{}", ((card,) for card in cards_html)),
         )
         return mark_safe(html)
 
