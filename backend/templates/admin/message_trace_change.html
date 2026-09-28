@@ -1,0 +1,15 @@
+{% extends "admin/change_form.html" %}
+{% block content %}
+<div class="mb-6 p-4 border rounded-xl space-y-3">
+  <p>Попытки обработки:
+  {% for attempt in trace_attempts %}<a class="text-primary-600 mr-3" href="{% url 'admin:api_messageprocessingtrace_change' attempt.pk %}">№{{ attempt.attempt_no }} — {{ attempt.get_status_display }}</a>{% endfor %}
+  </p>
+  {% if can_reanalyse %}
+  <form method="post" action="{% url 'admin:api_messageprocessingtrace_reanalyse' original.pk %}">
+    {% csrf_token %}<input type="hidden" name="request_key" value="{{ reanalysis_request_key }}">
+    <button type="submit" class="bg-primary-600 text-white px-4 py-2 rounded-default">Повторить анализ с полной историей</button>
+  </form>
+  {% else %}<p>{{ reanalysis_unavailable }}</p>{% endif %}
+</div>
+{{ block.super }}
+{% endblock %}

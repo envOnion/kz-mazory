@@ -1,0 +1,47 @@
+<section class="mazory-trace-card border rounded-xl p-5 space-y-4" data-testid="message-context">
+  {% if current_context %}
+    <h3 class="font-semibold mazory-trace-text">История сообщений, переданная в AI</h3>
+    <p class="mazory-trace-meta">Источник: история этого чата / проекта. Попытка {{ trace.attempt_no }}.</p>
+    {% if context_prepared %}
+      <p class="font-semibold mazory-trace-text">Включено {{ context_metadata.included_messages_count }} из {{ context_metadata.available_messages_count }} сообщений</p>
+      <p class="mazory-trace-meta">Входной запрос: {{ context_metadata.input_tokens_preflight }} токенов · Резерв ответа: {{ context_metadata.completion_reserve_tokens }} · Технический запас: {{ context_metadata.safety_tokens }} · Окно: {{ context_metadata.window_tokens }}</p>
+      <p class="mazory-trace-meta">Фактический вход по данным провайдера: {% if context_metadata.input_tokens_actual != None %}{{ context_metadata.input_tokens_actual }} токенов{% else %}неизвестно{% endif %}.</p>
+      {% if context_metadata.history_complete_in_request %}
+        <p class="mazory-trace-text">Вся доступная история вошла в запрос.</p>
+      {% else %}
+        <p class="mazory-trace-text" role="status">Старые сообщения не вошли: достигнуто окно модели. Полностью исключено: {{ context_metadata.omitted_messages_count }}. Частично включено: {{ context_metadata.partial_messages_count }}.</p>
+      {% endif %}
+      {% if not context_metadata.available_messages_count %}<p class="mazory-trace-meta">В доступной истории этого чата предыдущих сообщений нет.</p>{% endif %}
+      <p class="mazory-trace-meta">Период включённой истории: {{ context_metadata.included_period.0|default_if_none:"—" }} — {{ context_metadata.included_period.1|default_if_none:"—" }}.</p>
+      {% if context_metadata.time_basis == "received_at" %}<p class="mazory-trace-meta">Время отправки неизвестно: история упорядочена по получению сообщений.</p>{% endif %}
+      {% if context_metadata.empty_messages_count %}<p class="mazory-trace-meta">Пропущено пустых после очистки сообщений: {{ context_metadata.empty_messages_count }}.</p>{% endif %}
+    {% else %}<p class="mazory-trace-meta">Контекст ещё не сформирован.</p>{% endif %}
+    {% if context_not_sent %}<p class="mazory-trace-meta">Запрос не отправлен.</p>{% endif %}
+    <p class="mazory-trace-meta">Показана история, доступная в системе. Полнота импорта внешней переписки не подтверждена.</p>
+  {% else %}
+    <h3 class="font-semibold mazory-trace-text">Исторический контекст</h3>
+    <p class="mazory-trace-text">Сохранено сообщений: {{ trace.earlier_messages_context|length }}</p>
+    <p class="mazory-trace-meta">Способ формирования и фактическая передача в AI не подтверждены. Старое заполнение могло сохранять только три фрагмента до 200 символов. Исторические оценки сходства не подтверждены и не отображаются.</p>
+    {% if not cards %}<p class="mazory-trace-meta">В записи нет читаемых фрагментов истории.</p>{% endif %}
+  {% endif %}
+  {% if context_error %}<p class="mazory-trace-text" role="alert">{{ context_error }}</p>{% endif %}
+  {% if count_mismatch %}<p class="mazory-trace-meta">Сохранённый счётчик не совпадает с количеством элементов контекста.</p>{% endif %}
+  <div class="space-y-3">
+  {% for card in cards %}
+    <article class="mazory-trace-card border rounded-lg p-3 space-y-2" data-testid="context-message">
+      <p class="font-semibold mazory-trace-text">{{ card.ordinal }}. {{ card.sender }} <span class="mazory-trace-meta">{{ card.time }}</span></p>
+      {% if card.partial %}<p class="mazory-trace-text">Показан фрагмент, вошедший в запрос. Достигнут бюджет токенов. Диапазон символов: {{ card.included_character_range.0 }}–{{ card.included_character_range.1 }} из {{ card.original_characters }}.</p>{% endif %}
+      <details {% if page_obj.paginator.count <= 5 %}open{% endif %}>
+        <summary class="cursor-pointer mazory-trace-text">Текст сообщения</summary>
+        <div class="mazory-trace-text font-sans" style="white-space: pre-wrap; overflow-wrap: anywhere">{{ card.content }}</div>
+      </details>
+      {% if card.source_url %}<a href="{{ card.source_url }}" class="text-primary-600">Полный исходник</a>{% endif %}
+    </article>
+  {% endfor %}
+  </div>
+  {% if context_full_page %}
+    {% if page_obj.has_previous %}<a class="text-primary-600 mr-4" href="?page={{ page_obj.previous_page_number }}">Предыдущие сообщения</a>{% endif %}
+    <span class="mazory-trace-meta">Страница {{ page_obj.number }} из {{ page_obj.paginator.num_pages }}</span>
+    {% if page_obj.has_next %}<a class="text-primary-600 ml-4" href="?page={{ page_obj.next_page_number }}">Следующие сообщения</a>{% endif %}
+  {% else %}<a class="text-primary-600" href="{{ context_url }}">Все сообщения и исходники ({{ page_obj.paginator.count }})</a>{% endif %}
+</section>

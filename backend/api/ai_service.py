@@ -58,6 +58,19 @@ class AIService:
                 timeout=timeout,
                 allow_redirects=False,
             )
+            if response.status_code in (400, 413, 422):
+                detail = response.text.lower()
+                if any(
+                    term in detail
+                    for term in (
+                        "context length",
+                        "context_length",
+                        "context window",
+                        "too many tokens",
+                    )
+                ):
+                    error = "provider_context_overflow"
+                    raise ProviderUnavailable(error)
             response.raise_for_status()
             data = response.json()
             succeeded = True
@@ -109,45 +122,19 @@ class AIService:
             raise ProviderUnavailable("invalid_embedding") from None
 
     @staticmethod
-    def analyze_message_with_context(
-        content,
-        sender_name,
-        context_messages,
-        known_deals_summary,
-        sent_at=None,
-        source_timezone="Asia/Almaty",
-    ):
-        cfg = AIService._config()
-        payload = {
-            "model": cfg.chat_model_name,
-            "temperature": 0,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": WORKER_PROMPT},
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        {
-                            "content": content,
-                            "sender": sender_name,
-                            "sent_at": sent_at,
-                            "timezone": source_timezone,
-                            "context": context_messages,
-                            "known_projects": known_deals_summary,
-                        },
-                        ensure_ascii=False,
-                    ),
-                },
-            ],
-        }
+    def analyze_payload(payload, provider_url):
         data = AIService._post(
-            f"{cfg.chat_provider_url.rstrip('/')}/chat/completions", payload, 45
+            f"{provider_url.rstrip('/')}/chat/completions",
+            payload,
+            (10, settings.AI_REQUEST_TIMEOUT),
         )
         try:
+            if data["choices"][0].get("finish_reason") == "length":
+                raise ProviderUnavailable("provider_output_truncated")
             result = json.loads(data["choices"][0]["message"]["content"])
             if not isinstance(result.get("facts"), list) or len(result["facts"]) > 30:
                 raise ValueError()
-            return result
+            return result, data.get("usage", {})
         except (ValueError, KeyError, TypeError):
             raise ProviderUnavailable("invalid_extraction_schema") from None
 

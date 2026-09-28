@@ -62,3 +62,12 @@ body.dark .mazory-trace-label,
 [data-theme="dark"] .mazory-trace-label {
     color: #94a3b8 !important;
 }
+
+/* Explicit CSS is needed because Unfold does not compile dynamic Tailwind classes. */
+.mazory-trace-overview {
+    background: linear-gradient(110deg, #111827, #1e1b4b, #111827) !important;
+    color: #f8fafc !important;
+}
+.mazory-trace-overview > div > div {
+    background-color: rgba(255, 255, 255, .05);
+}

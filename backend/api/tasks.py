@@ -84,7 +84,12 @@ def run_outbox(pk):
             return
         event.state, event.lease_until = (
             "processing",
-            timezone.now() + timedelta(minutes=4),
+            timezone.now()
+            + timedelta(
+                seconds=settings.AI_TASK_LEASE
+                if CLUSTERS.get(event.event_type, "ai") == "ai"
+                else 240
+            ),
         )
         event.attempt_count += 1
         event.save()
@@ -134,9 +139,19 @@ def run_outbox(pk):
             if isinstance(exc, ProviderUnavailable)
             else type(exc).__name__
         )
+        permanent = (
+            code.startswith("context_") and code != "context_model_metadata_unavailable"
+        ) or code in (
+            "provider_context_overflow",
+            "reanalysis_access_revoked",
+            "provider_output_truncated",
+            "context_request_uncertain",
+        )
         state = (
             "failed"
-            if event.attempt_count >= 3 or event.event_type in NON_IDEMPOTENT
+            if permanent
+            or event.attempt_count >= 3
+            or event.event_type in NON_IDEMPOTENT
             else "pending"
         )
         OutboxEvent.objects.filter(pk=pk).update(
@@ -289,7 +304,11 @@ def apply_delivery_ack(payload):
 def extract_message(payload):
     from .pipeline import extract_message as extract
 
-    extract(payload["raw_id"])
+    extract(
+        payload["raw_id"],
+        trace_id=payload.get("trace_id"),
+        requested_by_id=payload.get("requested_by_id"),
+    )
 
 
 def index_message(payload):

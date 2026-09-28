@@ -410,6 +410,10 @@ CACHES = {
     }
 }
 
+AI_REQUEST_TIMEOUT = int(os.getenv("AI_REQUEST_TIMEOUT", "300"))
+AI_WORKER_TIMEOUT = AI_REQUEST_TIMEOUT + 180
+AI_TASK_LEASE = AI_WORKER_TIMEOUT + 60
+
 Q_CLUSTER = {
     "name": "mazory_q",
     "workers": 2,
@@ -417,12 +421,12 @@ Q_CLUSTER = {
     "ack_failures": True,
     "ALT_CLUSTERS": {
         "delivery": {"workers": 2, "timeout": 30, "retry": 60},
-        "ai": {"workers": 2, "timeout": 180, "retry": 240},
+        "ai": {"workers": 2, "timeout": AI_WORKER_TIMEOUT, "retry": AI_TASK_LEASE + 60},
         "crm": {"workers": 1, "timeout": 90, "retry": 120},
     },
     "recycle": 500,
-    "timeout": 180,
-    "retry": 240,
+    "timeout": AI_WORKER_TIMEOUT,
+    "retry": AI_TASK_LEASE + 60,
     "sync": "test" in sys.argv,
     "redis": {
         "host": REDIS_HOST,

@@ -3,6 +3,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && useradd --create-home --uid 10001 mazory
+COPY tokenizers/manifest.json tokenizers/manifest.json
+COPY fetch_tokenizer.py .
+RUN python fetch_tokenizer.py
 COPY --chown=mazory:mazory . .
 RUN mkdir -p /app/media /app/staticfiles && chown -R mazory:mazory /app/media /app/staticfiles
 USER mazory

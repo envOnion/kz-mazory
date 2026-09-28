@@ -45,9 +45,12 @@ test('Trace cards preserve contrast and escape source HTML', async ({ page }) =>
       }
     }
 
+    await expect(page.locator('.mazory-trace-overview')).toHaveCSS('color', 'rgb(248, 250, 252)')
+    expect(await page.locator('.mazory-trace-overview').evaluate(el => getComputedStyle(el).backgroundImage)).toContain('linear-gradient')
+
     // Проверяем наличие всех 4 этапов трассировки на странице
     await expect(page.locator('text=1. Входные данные WhatsApp').first()).toBeVisible()
-    await expect(page.locator('text=2. Зависимые данные из сообщений ранее').first()).toBeVisible()
+    await expect(page.locator('text=2. История сообщений').first()).toBeVisible()
     await expect(page.locator('text=3. Зависимые данные из Bitrix24').first()).toBeVisible()
     await expect(page.locator('text=4. Итоговая запись').first()).toBeVisible()
 })
