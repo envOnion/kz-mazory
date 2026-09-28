@@ -18,4 +18,5 @@ dependencies = [
     "redis>=8.1.0",
     "requests>=2.34.2",
     "django-unfold>=0.108.0",
+    "qrcode>=8.2,<9",
 ]
