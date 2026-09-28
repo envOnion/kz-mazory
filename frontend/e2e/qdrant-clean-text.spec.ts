@@ -14,7 +14,7 @@ trace = raw.traces.order_by('-id').first()
 event = OutboxEvent.objects.filter(deduplication_key=f'index:{raw.id}').first()
 points = qdrant_service.client.retrieve(qdrant_service.collection_name, [str(uuid.uuid5(uuid.NAMESPACE_URL, f'mazory:{raw.id}'))], with_payload=True, with_vectors=False) if qdrant_service.client.collection_exists(qdrant_service.collection_name) else []
 print(json.dumps({'raw_id': raw.id, 'raw_content': raw.content, 'trace_id': trace.id if trace else None, 'context': trace.earlier_messages_context if trace else [], 'index_state': event.state if event else None, 'payload': points[0].payload if points else None}))
-`])) as { raw_id: number; raw_content: string; trace_id: number; context: { id: number; content: string; sender_name: string }[]; index_state: string; payload: { content: string; sender_name: string } | null }
+`])) as { raw_id: number; raw_content: string; trace_id: number; context: { raw_message_id: number; content: string; sender_name: string }[]; index_state: string; payload: { content: string; sender_name: string } | null }
 }
 
 test('HTML webhook → worker → clean embedding/Qdrant and readable historical context', async ({ page, request }, testInfo) => {
@@ -41,9 +41,9 @@ test('HTML webhook → worker → clean embedding/Qdrant and readable historical
   expect(states[1]!.payload?.content).toBe(encodedClean)
   expect(states[2]!.payload).toBeNull()
   const context = states[3]!.context
-  expect(context.find(item => item.id === states[0]!.raw_id)?.content).toBe(clean)
-  expect(context.find(item => item.id === states[1]!.raw_id)?.content).toBe(encodedClean)
-  expect(context.some(item => item.id === states[2]!.raw_id)).toBe(false)
+  expect(context.find(item => item.raw_message_id === states[0]!.raw_id)?.content).toBe(clean)
+  expect(context.find(item => item.raw_message_id === states[1]!.raw_id)?.content).toBe(encodedClean)
+  expect(context.some(item => item.raw_message_id === states[2]!.raw_id)).toBe(false)
   const captured = await (await request.get(`${provider}/test/ai-requests`)).json()
   expect(captured.embeddings).toContain(clean)
   expect(captured.embeddings).toContain(encodedClean)
@@ -51,7 +51,7 @@ test('HTML webhook → worker → clean embedding/Qdrant and readable historical
   expect(captured.embeddings).not.toContain(empty)
   expect(captured.embeddings).not.toContain('')
   const extraction = captured.chats.find((item: { content?: string }) => item.content === bodies[3])
-  expect(extraction.context.find((item: { id: number }) => item.id === states[0]!.raw_id).content).toBe(clean)
+  expect(extraction.context.find((item: { raw_message_id: number }) => item.raw_message_id === states[0]!.raw_id).content).toBe(clean)
 
   // Exercise retrieval too: it reloads RawMessage rather than returning payload text.
   const session = await login(page)
@@ -70,20 +70,20 @@ test('HTML webhook → worker → clean embedding/Qdrant and readable historical
   page.on('pageerror', error => errors.push(error.message))
   await adminLogin(page)
   await page.goto(`/admin/api/messageprocessingtrace/${states[3]!.trace_id}/change/`)
-  const stage = page.getByRole('group').filter({ has: page.getByRole('heading', { name: 'Этап 2: «Зависимые данные из сообщений ранее» (Qdrant RAG / Чат)', exact: true }) })
-  await expect(stage.locator('.mazory-trace-card').filter({ hasText: token })).toHaveCount(2)
+  const stage = page.getByRole('group').filter({ has: page.getByRole('heading', { name: 'Этап 2: История сообщений', exact: true }) })
+  await expect(stage.getByTestId('context-message').filter({ hasText: token })).toHaveCount(2)
   await expect(stage).not.toContainText('<div')
   await expect(stage).not.toContainText('window.__xss')
   await expect(stage).toContainText('Құжат №7')
-  await expect(stage.locator('.mazory-trace-card .font-sans').filter({ hasText: `${token} Құжат №7` })).toHaveCSS('white-space', 'pre-wrap')
+  await expect(stage.locator('[data-testid=context-message] .font-sans').filter({ hasText: `${token} Құжат №7` })).toHaveCSS('white-space', 'pre-wrap')
   expect(await page.evaluate(() => '__xss' in window)).toBe(false)
   await stage.screenshot({ path: testInfo.outputPath('stage-2-clean.png') })
 
   // A legacy trace may still hold raw HTML. Rendering must clean it without rewriting it.
   const fixture = Buffer.from(JSON.stringify([{ content: original, sender_name: '<b>Тест</b>', sent_at: '2026-09-01T12:00:00Z', score: 0.8 }, { text: encoded, author: '<i>Автор</i>', score: 0.7 }, { content: empty }])).toString('base64')
-  isolatedCommand('shell', ['--verbosity', '0', '-c', guard + `import base64,json; from api.models import MessageProcessingTrace; MessageProcessingTrace.objects.filter(pk=${states[3]!.trace_id}).update(earlier_messages_context=json.loads(base64.b64decode('${fixture}')))`])
+  isolatedCommand('shell', ['--verbosity', '0', '-c', guard + `import base64,json; from api.models import MessageProcessingTrace; MessageProcessingTrace.objects.filter(pk=${states[3]!.trace_id}).update(context_metadata={}, earlier_messages_context=json.loads(base64.b64decode('${fixture}')))`])
   await page.reload()
-  await expect(stage.locator('.mazory-trace-card')).toHaveCount(2)
+  await expect(stage.getByTestId('context-message')).toHaveCount(2)
   await expect(stage).toContainText('2026-09-01T12:00:00Z')
   await expect(stage).not.toContainText('<div')
   await expect(stage).not.toContainText('&lt;')
@@ -92,7 +92,7 @@ test('HTML webhook → worker → clean embedding/Qdrant and readable historical
   expect(readState(ids[3]!).context[0]!.content).toBe(original)
   isolatedCommand('shell', ['--verbosity', '0', '-c', guard + `from api.models import MessageProcessingTrace; MessageProcessingTrace.objects.filter(pk=${states[3]!.trace_id}).update(earlier_messages_context=[{'content': '<script>window.__xss=1</script>'}])`])
   await page.reload()
-  await expect(stage.locator('.mazory-trace-card')).toHaveCount(0)
-  await expect(stage).toContainText('Зависимые сообщения из истории не найдены')
+  await expect(stage.getByTestId('context-message')).toHaveCount(0)
+  await expect(stage).toContainText('В записи нет читаемых фрагментов истории')
   expect(errors).toEqual([])
 })

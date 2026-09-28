@@ -8,7 +8,7 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.debug import sensitive_post_parameters
 from .admin_forms import BitrixSettingsForm
 from .bitrix_config import effective_webhook_url, masked_webhook_url
-from .plain_text import clean_context
+from .trace_context_ui import badge_text, render_context, context_view_data, ERRORS
 from django.utils.safestring import mark_safe
 from django.contrib import messages
 from unfold.admin import ModelAdmin, TabularInline
@@ -201,13 +201,9 @@ class MessageProcessingTraceInLine(TabularInline):
     whatsapp_content_snippet.short_description = "Сообщение WhatsApp"
 
     def earlier_messages_badge(self, obj):
-        count = obj.earlier_messages_count or len(obj.earlier_messages_context or [])
-        return format_html(
-            '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-purple-500/10 text-purple-500">{} в RAG</span>',
-            count,
-        )
+        return badge_text(obj)
 
-    earlier_messages_badge.short_description = "История"
+    earlier_messages_badge.short_description = "Сообщений в контексте"
 
     def bitrix_matched_badge(self, obj):
         if obj.bitrix_matched_deal_id:
@@ -821,7 +817,7 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
         ),
         ("Этап 1: «Входные данные WhatsApp»", {"fields": ("stage_1_whatsapp_card",)}),
         (
-            "Этап 2: «Зависимые данные из сообщений ранее» (Qdrant RAG / Чат)",
+            "Этап 2: История сообщений",
             {"fields": ("stage_2_earlier_messages_card",)},
         ),
         (
@@ -833,7 +829,123 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
             {"fields": ("stage_4_final_record_card",)},
         ),
     )
-    actions = ["reprocess_traces"]
+    change_form_template = "admin/message_trace_change.html"
+    actions = None
+
+    def get_urls(self):
+        from django.urls import path
+
+        return [
+            path(
+                "<int:object_id>/context/",
+                self.admin_site.admin_view(self.context_view),
+                name="api_messageprocessingtrace_context",
+            ),
+            path(
+                "<int:object_id>/reanalyse/",
+                self.admin_site.admin_view(self.reanalyse_view),
+                name="api_messageprocessingtrace_reanalyse",
+            ),
+        ] + super().get_urls()
+
+    def _trace_for_request(self, request, object_id):
+        from django.shortcuts import get_object_or_404
+        from django.core.exceptions import PermissionDenied
+
+        obj = get_object_or_404(
+            self.get_queryset(request).select_related(
+                "raw_message__config__team", "raw_message__team", "raw_message__project"
+            ),
+            pk=object_id,
+        )
+        if not self.has_view_permission(request, obj):
+            raise PermissionDenied()
+        return obj
+
+    def context_view(self, request, object_id):
+        from django.template.response import TemplateResponse
+
+        obj = self._trace_for_request(request, object_id)
+        data = context_view_data(obj, request.user, request.GET.get("page", 1))
+        return TemplateResponse(
+            request,
+            "admin/message_context_page.html",
+            {
+                **self.admin_site.each_context(request),
+                **data,
+                "opts": self.model._meta,
+                "title": f"История — попытка {obj.attempt_no}",
+                "context_full_page": True,
+            },
+        )
+
+    def reanalyse_view(self, request, object_id):
+        import uuid
+        from django.http import HttpResponseNotAllowed, HttpResponseBadRequest
+        from django.shortcuts import redirect
+        from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
+        from rest_framework.exceptions import PermissionDenied
+        from .processing_attempts import schedule_reanalysis
+        from .providers import ProviderUnavailable
+
+        if request.method != "POST":
+            return HttpResponseNotAllowed(["POST"])
+        obj = self._trace_for_request(request, object_id)
+        if not obj.raw_message_id:
+            return HttpResponseBadRequest("Исходное сообщение недоступно.")
+        try:
+            key = str(uuid.UUID(request.POST.get("request_key", "")))
+        except ValueError:
+            return HttpResponseBadRequest("Некорректный идентификатор запроса.")
+        try:
+            attempt = schedule_reanalysis(obj.raw_message_id, request.user, key)
+        except PermissionDenied as exc:
+            raise DjangoPermissionDenied() from exc
+        except ProviderUnavailable as exc:
+            self.message_user(
+                request,
+                ERRORS.get(str(exc), "Повторный анализ недоступен."),
+                level=messages.ERROR,
+            )
+            return redirect("admin:api_messageprocessingtrace_change", object_id)
+        self.message_user(
+            request,
+            f"Попытка №{attempt.attempt_no} поставлена в очередь. Предыдущие результаты сохранены.",
+        )
+        return redirect("admin:api_messageprocessingtrace_change", attempt.pk)
+
+    def change_view(self, request, object_id, form_url="", extra_context=None):
+        import uuid
+        from rest_framework.exceptions import PermissionDenied
+        from .processing_attempts import require_reanalysis
+        from .providers import ProviderUnavailable
+
+        obj = self._trace_for_request(request, object_id)
+        allowed, reason = False, "Исходное сообщение недоступно."
+        if obj.raw_message_id:
+            try:
+                require_reanalysis(request.user, obj.raw_message)
+                allowed = True
+            except PermissionDenied:
+                reason = "Повторный анализ доступен руководителю с доступом к этому источнику."
+            except ProviderUnavailable as exc:
+                reason = ERRORS.get(str(exc), "Повторный анализ недоступен.")
+        return super().change_view(
+            request,
+            object_id,
+            form_url,
+            {
+                **(extra_context or {}),
+                "can_reanalyse": allowed,
+                "reanalysis_unavailable": reason,
+                "reanalysis_request_key": str(uuid.uuid4()),
+                "trace_attempts": self.get_queryset(request)
+                .filter(raw_message_id=obj.raw_message_id)
+                .order_by("attempt_no")
+                if obj.raw_message_id
+                else [obj],
+            },
+        )
 
     def has_add_permission(self, request):
         return False
@@ -895,15 +1007,12 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
     whatsapp_content_snippet.short_description = "Текст сообщения"
 
     def earlier_messages_badge(self, obj):
-        count = obj.earlier_messages_count or len(obj.earlier_messages_context or [])
-        if count > 0:
-            return format_html(
-                '<span class="mazory-admin-badge mazory-admin-badge--info">Контекст: {}</span>',
-                count,
-            )
-        return mark_safe('<span class="mazory-list-meta">Без контекста</span>')
+        return format_html(
+            '<span class="mazory-admin-badge mazory-admin-badge--info">{}</span>',
+            badge_text(obj),
+        )
 
-    earlier_messages_badge.short_description = "Сообщения ранее"
+    earlier_messages_badge.short_description = "Сообщений в контексте"
 
     def bitrix_matched_badge(self, obj):
         if obj.bitrix_matched_deal_id:
@@ -996,8 +1105,7 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
     def pipeline_overview_banner(self, obj):
         """Интерактивный 4-шаговый визуальный прогресс пайплайна"""
         s1_title = f"{obj.whatsapp_sender_name}"
-        s2_count = obj.earlier_messages_count or len(obj.earlier_messages_context or [])
-        s2_sub = f"{s2_count} сообщений в RAG" if s2_count else "Новый контекст"
+        s2_sub = badge_text(obj)
         s3_sub = (
             f"CRM #{obj.bitrix_matched_deal_id}"
             if obj.bitrix_matched_deal_id
@@ -1005,7 +1113,7 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
         )
         s4_sub = obj.get_pipeline_action_display()
         html = format_html(
-            '\n        <div class="w-full my-3 p-5 rounded-2xl bg-gradient-to-r from-gray-900 via-indigo-950 to-gray-900 text-white shadow-lg border border-indigo-900/40">\n            <div class="text-xs font-mono uppercase tracking-wider text-indigo-400 mb-3 flex items-center justify-between">\n                <span>Data Lineage Audit Trail</span>\n                <span>ID Трассировки: #{}</span>\n            </div>\n            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 relative">\n                <!-- Step 1 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-emerald-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-emerald-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-emerald-500/20 flex items-center justify-center text-xs">1</span>\n                        WhatsApp Вход\n                    </div>\n                    <div class="mt-2 text-sm font-bold truncate text-white">{}</div>\n                    <div class="text-xs text-gray-400 font-mono mt-0.5">{}</div>\n                </div>\n\n                <!-- Step 2 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-purple-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-purple-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-purple-500/20 flex items-center justify-center text-xs">2</span>\n                        Контекст ранее\n                    </div>\n                    <div class="mt-2 text-sm font-bold text-white">{}</div>\n                    <div class="text-xs text-purple-300 mt-0.5">Векторный поиск Qdrant</div>\n                </div>\n\n                <!-- Step 3 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-sky-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-sky-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-sky-500/20 flex items-center justify-center text-xs">3</span>\n                        Данные Bitrix24\n                    </div>\n                    <div class="mt-2 text-sm font-bold text-white truncate">{}</div>\n                    <div class="text-xs text-sky-300 mt-0.5 truncate">{}</div>\n                </div>\n\n                <!-- Step 4 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-amber-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-amber-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center text-xs">4</span>\n                        Итоговая запись\n                    </div>\n                    <div class="mt-2 text-sm font-bold text-white truncate">{}</div>\n                    <div class="text-xs text-amber-300 mt-0.5 truncate">{}</div>\n                </div>\n            </div>\n        </div>\n        ',
+            '\n        <div class="mazory-trace-overview w-full my-3 p-5 rounded-2xl bg-gradient-to-r from-gray-900 via-indigo-950 to-gray-900 text-white shadow-lg border border-indigo-900/40">\n            <div class="text-xs font-mono uppercase tracking-wider text-indigo-400 mb-3 flex items-center justify-between">\n                <span>Data Lineage Audit Trail</span>\n                <span>ID Трассировки: #{}</span>\n            </div>\n            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 relative">\n                <!-- Step 1 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-emerald-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-emerald-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-emerald-500/20 flex items-center justify-center text-xs">1</span>\n                        WhatsApp Вход\n                    </div>\n                    <div class="mt-2 text-sm font-bold truncate text-white">{}</div>\n                    <div class="text-xs text-gray-400 font-mono mt-0.5">{}</div>\n                </div>\n\n                <!-- Step 2 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-purple-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-purple-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-purple-500/20 flex items-center justify-center text-xs">2</span>\n                        Контекст ранее\n                    </div>\n                    <div class="mt-2 text-sm font-bold text-white">{}</div>\n                    <div class="text-xs text-purple-300 mt-0.5">Сохранённый контекст</div>\n                </div>\n\n                <!-- Step 3 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-sky-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-sky-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-sky-500/20 flex items-center justify-center text-xs">3</span>\n                        Данные Bitrix24\n                    </div>\n                    <div class="mt-2 text-sm font-bold text-white truncate">{}</div>\n                    <div class="text-xs text-sky-300 mt-0.5 truncate">{}</div>\n                </div>\n\n                <!-- Step 4 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-amber-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-amber-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center text-xs">4</span>\n                        Итоговая запись\n                    </div>\n                    <div class="mt-2 text-sm font-bold text-white truncate">{}</div>\n                    <div class="text-xs text-amber-300 mt-0.5 truncate">{}</div>\n                </div>\n            </div>\n        </div>\n        ',
             obj.id,
             s1_title,
             obj.whatsapp_sender_phone or "Прямой вебхук",
@@ -1044,44 +1152,9 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
     stage_1_whatsapp_card.short_description = "1. Входные данные WhatsApp"
 
     def stage_2_earlier_messages_card(self, obj):
-        """Рендеринг Этапа 2: «Зависимые данные из сообщений ранее»"""
-        messages = clean_context(obj.earlier_messages_context or [])
-        if not messages:
-            return format_html(
-                '<div class="p-4 rounded-xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900/50 text-sm mazory-trace-meta">{}</div>',
-                "ℹ Зависимые сообщения из истории не найдены. Это первичное сообщение по данному объекту / теме.",
-            )
-        cards_html = []
-        for idx, m in enumerate(messages, 1):
-            score = float(m.get("score", 0.0))
-            score_percent = f"{score * 100:.1f}%"
-            score_color = (
-                "emerald" if score >= 0.75 else "purple" if score >= 0.5 else "gray"
-            )
-            sender = m.get("sender_name") or m.get("author") or "Коллега"
-            ts = m.get("timestamp") or m.get("sent_at") or "—"
-            content = m.get("content") or m.get("text") or ""
-            card = format_html(
-                '\n            <div class="p-3 rounded-lg mazory-trace-card border border-purple-500/20 shadow-sm space-y-1.5">\n                <div class="flex items-center justify-between text-xs">\n                    <span class="font-semibold mazory-trace-text flex items-center gap-1.5">\n                        <span class="w-4 h-4 rounded-full bg-purple-500/20 text-purple-600 flex items-center justify-center text-[10px] font-bold">{}</span>\n                        {}\n                    </span>\n                    <div class="flex items-center gap-2">\n                        <span class="mazory-trace-meta font-mono">{}</span>\n                        <span class="px-2 py-0.5 rounded text-[11px] font-bold bg-{}-500/10 text-{}-600">\n                            Сходство: {}\n                        </span>\n                    </div>\n                </div>\n                <div class="text-xs mazory-trace-text font-sans pl-5 border-l-2 border-purple-500/40" style="white-space: pre-wrap; overflow-wrap: anywhere">{}</div>\n            </div>\n            ',
-                idx,
-                sender,
-                ts,
-                score_color,
-                score_color,
-                score_percent,
-                content,
-            )
-            cards_html.append(card)
-        html = format_html(
-            '\n        <div class="p-5 rounded-xl border border-purple-500/30 bg-purple-50/10 dark:bg-purple-950/10 space-y-3">\n            <div class="flex items-center justify-between pb-2 border-b border-purple-500/20">\n                <div class="text-xs font-semibold text-purple-600 uppercase tracking-wider">\n                    Семантический поиск контекста в Qdrant RAG (найдено: {})\n                </div>\n                <div class="text-xs mazory-trace-meta">\n                    Модель: <span class="font-mono text-purple-600">liquid/lfm-2.5-embedding-350m (1024 dim)</span>\n                </div>\n            </div>\n            <div class="space-y-2">\n                {}\n            </div>\n        </div>\n        ',
-            len(messages),
-            format_html_join("", "{}", ((card,) for card in cards_html)),
-        )
-        return mark_safe(html)
+        return mark_safe(render_context(obj))
 
-    stage_2_earlier_messages_card.short_description = (
-        "2. Зависимые данные из сообщений ранее"
-    )
+    stage_2_earlier_messages_card.short_description = "2. История сообщений"
 
     def stage_3_bitrix_card(self, obj):
         """Рендеринг Этапа 3: «Зависимые данные из Bitrix24»"""

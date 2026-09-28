@@ -1,138 +1,179 @@
-"""Durable inbox processing: immutable sources, schema-checked proposals, no business writes."""
+"""Durable extraction attempts: bounded full history, immutable audit, reviewed facts."""
 
-import hashlib
+import copy
 import json
 import re
+import uuid
+
+from django.contrib.auth.models import User
 from django.db import transaction
-from django.utils import timezone
-from rest_framework.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied, ValidationError
+
+from .ai_service import AIService, usage_event_id
+from .context_tokens import canonical_json, payload_hash
+from .deduplication import normalize_deal_name
+from .facts import FactSchema, fact_identity, json_value
+from .message_context import build_context, source_scope
 from .models import (
-    RawMessage,
-    MessageProcessingTrace,
     FactCandidate,
     FactEvidence,
-    Project,
-    UserProfile,
-    AISettings,
     OutboxEvent,
+    Project,
+    ProviderUsage,
+    RawMessage,
+    UserProfile,
 )
-from .facts import FactSchema, json_value
-from .deduplication import normalize_deal_name
-from .ai_service import AIService
+from .processing_attempts import require_reanalysis, reserve_attempt
 from .providers import ProviderUnavailable
-from .plain_text import clean_context
 
 
-def extract_message(raw_id):
-    raw = RawMessage.objects.select_related("config__team", "team", "project").get(
-        pk=raw_id
-    )
-    team = raw.config.team if raw.config_id else raw.team
-    if not team or not team.is_active:
-        return
-    if raw.source == "waha" and (not raw.config_id or not raw.config.is_active):
-        return
-    if raw.source == "attachment" and not raw.project_id:
-        return
-    if raw.processed:
-        return
-    # Context is restricted to this source chat and strictly earlier timestamps.
-    context_qs = RawMessage.objects.filter(timestamp__lt=raw.timestamp)
-    context_qs = (
-        context_qs.filter(config=raw.config)
-        if raw.config_id
-        else context_qs.filter(source=raw.source, project_id=raw.project_id)
-    )
-    context = clean_context(
-        context_qs.order_by("-timestamp").values(
-            "id", "content", "sender_name", "timestamp"
-        )[:12]
-    )
-    known = list(
-        Project.objects.filter(team=team, is_verified=True, archived=False)
-        .order_by("id")
-        .values("id", "name", "company__name")[:100]
-    )
-    trace = MessageProcessingTrace.objects.create(
-        raw_message=raw,
-        attempt_no=raw.traces.count() + 1,
-        whatsapp_message_id=raw.message_id,
-        whatsapp_chat_id=raw.chat_id,
-        whatsapp_sender_phone=raw.sender_phone,
-        whatsapp_sender_name=raw.sender_name,
-        whatsapp_timestamp=raw.timestamp if raw.sent_at_known else None,
-        whatsapp_content=raw.content,
-        earlier_messages_context=json_value(context),
-        earlier_messages_count=len(context),
-        model_version=AISettings.get_active().chat_model_name,
-        prompt_version="facts-v1",
-        status="warning",
-    )
-    try:
-        result = AIService.analyze_message_with_context(
-            raw.content,
-            raw.sender_name,
-            json_value(context),
-            known,
-            raw.timestamp.isoformat() if raw.sent_at_known else None,
-            raw.config.snapshot.get("timezone", "Asia/Almaty")
-            if raw.config_id
-            else "Asia/Almaty",
-        )
-        schema = FactSchema(data=result["facts"], many=True)
-        schema.is_valid(raise_exception=True)
-        facts = schema.validated_data
-        for fact in facts:
-            if fact["fact_type"] == "payment" and fact["payment_kind"] == "increment":
-                if re.search(
-                    r"не\s+оплат|оплатим|төленбеді|төлейміз", fact["evidence"], re.I
-                ):
-                    raise ProviderUnavailable("payment_evidence_contradiction")
-                if re.search(
-                    r"всего\s+оплачено|итого\s+оплачено|накопительн",
-                    fact["evidence"],
-                    re.I,
-                ):
-                    fact["payment_kind"] = "cumulative"
-                    fact["uncertainties"].append(
-                        "Накопительный итог не является новым платежом."
-                    )
-            if fact["evidence"] not in raw.content:
-                raise ProviderUnavailable("evidence_not_in_source")
-            if not raw.sent_at_known and fact.get("deadline_at"):
-                fact["deadline_at"] = None
-                fact["deadline_precision"] = "unknown"
+def _facts(result, raw):
+    schema = FactSchema(data=result["facts"], many=True)
+    schema.is_valid(raise_exception=True)
+    for fact in schema.validated_data:
+        if fact["fact_type"] == "payment" and fact["payment_kind"] == "increment":
+            if re.search(
+                r"не\s+оплат|оплатим|төленбеді|төлейміз", fact["evidence"], re.IGNORECASE
+            ):
+                raise ProviderUnavailable("payment_evidence_contradiction")
+            if re.search(
+                r"всего\s+оплачено|итого\s+оплачено|накопительн", fact["evidence"], re.IGNORECASE
+            ):
+                fact["payment_kind"] = "cumulative"
                 fact["uncertainties"].append(
-                    "Время исходного сообщения неизвестно: срок требует проверки."
+                    "Накопительный итог не является новым платежом."
                 )
+        if fact["evidence"] not in raw.content:
+            raise ProviderUnavailable("evidence_not_in_source")
+        if not raw.sent_at_known and fact.get("deadline_at"):
+            fact["deadline_at"], fact["deadline_precision"] = None, "unknown"
+            fact["uncertainties"].append(
+                "Время исходного сообщения неизвестно: срок требует проверки."
+            )
+    return schema.validated_data
+
+
+def _restore_request(trace):
+    payload = copy.deepcopy(trace.context_metadata["request_envelope"])
+    fixed = json.loads(payload["messages"][1]["content"])
+    fixed["context"] = trace.earlier_messages_context
+    payload["messages"][1]["content"] = canonical_json(fixed)
+    if payload_hash(payload) != trace.context_metadata["payload_sha256"]:
+        raise ProviderUnavailable("context_snapshot_mismatch")
+    return payload
+
+
+def extract_message(raw_id, trace_id=None, requested_by_id=None):
+    explicit = trace_id is not None
+    with transaction.atomic():
+        raw = (
+            RawMessage.objects.select_for_update(of=("self",))
+            .select_related("config__team", "team", "project")
+            .get(pk=raw_id)
+        )
+        if raw.processed and not explicit:
+            return
+        if explicit:
+            trace = raw.traces.get(pk=trace_id)
+        else:
+            operation = (
+                f"outbox:{usage_event_id.get()}"
+                if usage_event_id.get()
+                else f"direct:{uuid.uuid4()}"
+            )
+            trace = reserve_attempt(raw, operation)
+        if trace.status == "success":
+            return
+    try:
+        source_scope(raw)
+        if requested_by_id:
+            try:
+                require_reanalysis(User.objects.get(pk=requested_by_id), raw)
+            except (User.DoesNotExist, PermissionDenied) as exc:
+                raise ProviderUnavailable("reanalysis_access_revoked") from exc
+        cfg = AIService._config()
+        if trace.context_metadata.get("request_state") == "sent":
+            raise ProviderUnavailable("context_request_uncertain")
+        if "request_envelope" in trace.context_metadata:
+            if (
+                cfg.chat_model_name != trace.model_version
+                or cfg.chat_provider_url != trace.context_metadata["provider_url"]
+            ):
+                raise ProviderUnavailable("context_configuration_changed")
+            payload = _restore_request(trace)
+        else:
+            team = raw.config.team if raw.config_id else raw.team
+            known = json_value(
+                list(
+                    Project.objects.filter(team=team, is_verified=True, archived=False)
+                    .order_by("id")
+                    .values("id", "name", "company__name")[:100]
+                )
+            )
+            context, metadata, payload = build_context(
+                raw, cfg, known, trace.context_metadata["snapshot_max_id"]
+            )
+            envelope = copy.deepcopy(payload)
+            fixed = json.loads(envelope["messages"][1]["content"])
+            fixed.pop("context")
+            envelope["messages"][1]["content"] = canonical_json(fixed)
+            metadata.update(
+                request_envelope=envelope, provider_url=cfg.chat_provider_url
+            )
+            trace.earlier_messages_context, trace.earlier_messages_count = (
+                context,
+                len(context),
+            )
+            trace.context_metadata, trace.model_version = metadata, cfg.chat_model_name
+        trace.context_metadata["request_state"] = "sent"
+        trace.error_code = ""
+        trace.result_summary = "Запрос с сохранённой историей отправлен в AI."
+        trace.save()
+        result, usage = AIService.analyze_payload(
+            payload, trace.context_metadata["provider_url"]
+        )
+        trace.context_metadata["request_state"] = "responded"
+        value = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+        trace.context_metadata["input_tokens_actual"] = (
+            value if type(value) is int and value >= 0 else None
+        )
+        facts = _facts(result, raw)
         with transaction.atomic():
-            locked = RawMessage.objects.select_for_update().get(pk=raw_id)
-            if locked.processed:
-                trace.delete()
-                return
+            locked = (
+                RawMessage.objects.select_for_update(of=("self",))
+                .select_related("config__team", "team", "project")
+                .get(pk=raw_id)
+            )
+            source_scope(locked)
+            if requested_by_id:
+                require_reanalysis(User.objects.get(pk=requested_by_id), locked)
             if RawMessage.objects.filter(
                 source=raw.source,
                 session_name=raw.session_name,
                 message_id=raw.message_id,
                 id__gt=raw.id,
             ).exists():
-                locked.processing_state, locked.processed = "superseded", True
-                locked.save(update_fields=["processing_state", "processed"])
                 trace.status, trace.result_summary = (
                     "warning",
                     "Получена более новая редакция сообщения.",
                 )
-                trace.save(update_fields=["status", "result_summary"])
+                trace.context_metadata["request_state"] = "superseded"
+                trace.save()
+                if not explicit:
+                    locked.processing_state, locked.processed = "superseded", True
+                    locked.save(update_fields=["processing_state", "processed"])
                 return
-            # A newer edit can supersede pending proposals, never erase accepted facts.
-            older = RawMessage.objects.filter(
+            team = locked.config.team if locked.config_id else locked.team
+            origin = RawMessage.objects.filter(
                 source=raw.source,
                 session_name=raw.session_name,
                 message_id=raw.message_id,
-            ).exclude(pk=raw.pk)
-            FactCandidate.objects.filter(
-                trace__raw_message__in=older, status="pending"
-            ).update(status="superseded")
+            )
+            previous = FactCandidate.objects.filter(
+                trace__raw_message__in=origin
+            ).exclude(trace=trace)
+            accepted = list(previous.filter(status="approved"))
+            accepted_ids = {fact_identity(item.proposed_changes) for item in accepted}
             sender = (
                 UserProfile.objects.filter(
                     phone=raw.sender_phone,
@@ -144,7 +185,11 @@ def extract_message(raw_id):
                 if raw.sender_phone
                 else None
             )
+            proposed, duplicates = 0, []
             for index, fact in enumerate(facts):
+                if fact_identity(fact) in accepted_ids:
+                    duplicates.append(index)
+                    continue
                 matches = Project.objects.filter(
                     team=team,
                     archived=False,
@@ -155,8 +200,12 @@ def extract_message(raw_id):
                     if fact["object_name"] and matches.count() == 1
                     else None
                 )
+                if any(item.fact_type == fact["fact_type"] for item in accepted):
+                    fact["uncertainties"].append(
+                        "Есть ранее подтверждённый факт из этого сообщения. Проверьте, является ли предложение корректировкой."
+                    )
                 candidate, _ = FactCandidate.objects.get_or_create(
-                    source_key=f"message:{raw.id}:fact:{index}",
+                    source_key=f"message:{raw.id}:attempt:{trace.attempt_no}:fact:{index}",
                     defaults={
                         "trace": trace,
                         "project": project,
@@ -175,27 +224,61 @@ def extract_message(raw_id):
                     quote=fact["evidence"],
                     field_name="source",
                 )
+                proposed += 1
+            previous.filter(status="pending").update(status="superseded")
             locked.processed, locked.processing_state = (
                 True,
-                "needs_review" if facts else "no_facts",
+                "needs_review" if proposed else "no_facts",
             )
             locked.save(update_fields=["processed", "processing_state"])
             trace.ai_extracted_facts = json_value({"facts": facts})
-            trace.pipeline_action = "proposed_facts" if facts else "non_commercial"
+            trace.context_metadata["already_approved_fact_indices"] = duplicates
+            trace.pipeline_action = "proposed_facts" if proposed else "non_commercial"
             trace.status, trace.result_summary = (
                 "success",
-                f"Предложено фактов: {len(facts)}",
+                f"Предложено фактов: {proposed}. Уже подтверждено ранее: {len(duplicates)}.",
             )
             trace.save()
             OutboxEvent.objects.get_or_create(
                 deduplication_key=f"index:{raw.id}",
                 defaults={"event_type": "index_message", "payload": {"raw_id": raw.id}},
             )
-    except (ProviderUnavailable, ValidationError) as exc:
+    except (
+        ProviderUnavailable,
+        ValidationError,
+        PermissionDenied,
+        User.DoesNotExist,
+    ) as exc:
         trace.status, trace.pipeline_action = "error", "error"
         trace.error_code = (
-            str(exc)[:64] if isinstance(exc, ProviderUnavailable) else "invalid_schema"
+            str(exc)[:64]
+            if isinstance(exc, ProviderUnavailable)
+            else (
+                "reanalysis_access_revoked"
+                if isinstance(exc, (PermissionDenied, User.DoesNotExist))
+                else "invalid_schema"
+            )
         )
-        trace.save(update_fields=["status", "pipeline_action", "error_code"])
-        RawMessage.objects.filter(pk=raw_id).update(processing_state="failed")
+        if (
+            trace.context_metadata.get("request_state") == "sent"
+            and trace.error_code != "context_request_uncertain"
+        ):
+            trace.context_metadata["request_state"] = "failed"
+        usage = (
+            ProviderUsage.objects.filter(
+                outbox_event_id=usage_event_id.get(), operation="chat"
+            )
+            .order_by("-id")
+            .first()
+            if usage_event_id.get()
+            else None
+        )
+        if usage:
+            trace.context_metadata["input_tokens_actual"] = usage.input_tokens
+        trace.result_summary = (
+            "Обработка не завершена. Предыдущие результаты сохранены."
+        )
+        trace.save()
+        if not explicit:
+            RawMessage.objects.filter(pk=raw_id).update(processing_state="failed")
         raise ProviderUnavailable(trace.error_code) from None

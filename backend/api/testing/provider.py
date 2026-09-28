@@ -11,8 +11,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 messages = []
 waha_sessions = {}
 waha_requests = []
-ai_requests = {"embeddings": [], "chats": []}
 crm_requests = []
+ai_requests = {"embeddings": [], "chats": [], "payloads": []}
+context_options = {}
 lock = threading.Lock()
 
 
@@ -32,6 +33,30 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/test/crm":
             with lock:
                 return self.reply(200, {"requests": list(crm_requests)})
+        if self.path.endswith("/endpoints"):
+            return self.reply(
+                200,
+                {
+                    "data": {
+                        "endpoints": [
+                            {
+                                "tag": "e2e-native",
+                                "context_length": context_options.get(
+                                    "context_length", 1000000
+                                ),
+                                "max_completion_tokens": 65536,
+                                "max_prompt_tokens": None,
+                                "supported_parameters": [
+                                    "max_tokens",
+                                    "temperature",
+                                    "reasoning",
+                                    "response_format",
+                                ],
+                            }
+                        ]
+                    }
+                },
+            )
         if self.path == "/test/waha":
             with lock:
                 return self.reply(200, {"requests": list(waha_requests)})
@@ -74,6 +99,11 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 },
             )
+        if self.path == "/test/context-options":
+            with lock:
+                context_options.clear()
+                context_options.update(data)
+            return self.reply(200, {"configured": True})
         if self.path == "/test/waha":
             with lock:
                 waha_sessions[data["name"]] = {
@@ -100,7 +130,12 @@ class Handler(BaseHTTPRequestHandler):
             value = json.loads(data["messages"][-1]["content"])
             with lock:
                 ai_requests["chats"].append(value)
+                ai_requests["payloads"].append(data)
             content = value.get("content", value.get("question", ""))
+            if "SIMULATE_CONTEXT_OVERFLOW" in content:
+                return self.reply(400, {"error": "Maximum context length exceeded"})
+            if context_options.get("delay_seconds"):
+                time.sleep(min(context_options["delay_seconds"], 30))
             if "SIMULATE_AI_FAILURE" in content:
                 return self.reply(503, {"error": "fixture_unavailable"})
             if "content" not in value:
@@ -133,9 +168,13 @@ class Handler(BaseHTTPRequestHandler):
                         "uncertainties": [],
                     }
                 ]
+            from api.context_tokens import native_counter
+
+            tokens = native_counter().count_payload(data)
             return self.reply(
                 200,
                 {
+                    "usage": {"prompt_tokens": tokens, "completion_tokens": 32},
                     "choices": [
                         {
                             "message": {
@@ -144,7 +183,7 @@ class Handler(BaseHTTPRequestHandler):
                                 )
                             }
                         }
-                    ]
+                    ],
                 },
             )
         self.reply(404, {"error": "Unknown test route"})

@@ -98,6 +98,40 @@ def json_value(value):
     return value
 
 
+def fact_identity(data):
+    """Business identity within one message lineage, independent of AI confidence/quote."""
+    import json
+
+    fields = {
+        "payment": (
+            "amount",
+            "currency",
+            "payment_date",
+            "payment_kind",
+            "reverses_id",
+        ),
+        "commitment": ("commitment_text", "deadline_at", "deadline_precision"),
+        "project": (
+            "company_name",
+            "contract_amount",
+            "cost_amount",
+            "currency",
+            "stage",
+            "current_action",
+            "next_action",
+        ),
+    }
+    kind = data.get("fact_type")
+    value = {key: json_value(data.get(key)) for key in fields.get(kind, ())}
+    for key in ("amount", "contract_amount", "cost_amount"):
+        if value.get(key) is not None:
+            value[key] = str(Decimal(value[key]).normalize())
+    value.update(
+        fact_type=kind, object_name=normalize_deal_name(data.get("object_name", ""))
+    )
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
 def snapshot(project):
     fields = (
         "id",
@@ -182,6 +216,21 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
             ):
                 raise Conflict()
             before = snapshot(project) if project else {}
+            raw = candidate.trace.raw_message
+            if raw:
+                approved = FactCandidate.objects.filter(
+                    status="approved",
+                    trace__raw_message__source=raw.source,
+                    trace__raw_message__session_name=raw.session_name,
+                    trace__raw_message__message_id=raw.message_id,
+                ).exclude(pk=candidate.pk)
+                if any(
+                    fact_identity(item.proposed_changes) == fact_identity(data)
+                    for item in approved
+                ):
+                    raise Conflict(
+                        "Этот факт из исходного сообщения уже подтверждён в другой попытке."
+                    )
             old_stage = project.status if project else ""
             if candidate.fact_type == "project":
                 if project is None:

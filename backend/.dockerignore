@@ -25,3 +25,5 @@ coverage.xml
 db.sqlite3
 media/
 staticfiles/
+tokenizers/*
+!tokenizers/manifest.json

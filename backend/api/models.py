@@ -316,6 +316,15 @@ class RawMessage(models.Model):
                 name="message_source_revision_unique",
             )
         ]
+        indexes = [
+            models.Index(
+                fields=["config", "timestamp", "id"], name="raw_chat_time_idx"
+            ),
+            models.Index(
+                fields=["team", "source", "project", "timestamp", "id"],
+                name="raw_project_time_idx",
+            ),
+        ]
         verbose_name = "Сырое сообщение WhatsApp"
         verbose_name_plural = "Сырые сообщения WhatsApp"
         ordering = ["-timestamp"]
@@ -607,6 +616,39 @@ class AISettings(models.Model):
         "Chat API Key", max_length=255, blank=True, default=""
     )
     chat_temperature = models.FloatField("Temperature", default=0.2)
+    context_window_tokens = models.PositiveIntegerField(
+        "Окно контекста, токены", default=256000
+    )
+    max_completion_tokens = models.PositiveIntegerField(
+        "Резерв ответа, токены", default=8192
+    )
+    context_safety_tokens = models.PositiveIntegerField(
+        "Технический запас, токены", default=2048
+    )
+    tokenizer_id = models.CharField(
+        "Токенизатор",
+        max_length=255,
+        default="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+    )
+    tokenizer_revision = models.CharField(
+        "Версия токенизатора",
+        max_length=64,
+        default="77df655d5e9f8362164ed14dd8b48f8bce657498",
+    )
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+
+        super().clean()
+        if (
+            not self.context_window_tokens
+            or not self.max_completion_tokens
+            or self.max_completion_tokens + self.context_safety_tokens
+            >= self.context_window_tokens
+        ):
+            raise ValidationError(
+                "Окно должно превышать сумму резерва ответа и технического запаса."
+            )
 
     system_prompt_worker = models.TextField(
         "Промпт извлечения сделок из чата",
@@ -875,6 +917,12 @@ class MessageProcessingTrace(models.Model):
     earlier_messages_count = models.IntegerField(
         "Количество зависимых сообщений", default=0
     )
+    context_metadata = models.JSONField(
+        "Полнота и бюджет контекста", default=dict, blank=True
+    )
+    operation_key = models.CharField(
+        max_length=128, unique=True, null=True, blank=True, editable=False
+    )
 
     # 3. Зависимые данные из Bitrix24
     bitrix_matched_deal_id = models.CharField(
@@ -934,6 +982,13 @@ class MessageProcessingTrace(models.Model):
         verbose_name = "Трассировка пайплайна"
         verbose_name_plural = "Трассировки пайплайна"
         ordering = ["-created_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["raw_message", "attempt_no"],
+                condition=models.Q(raw_message__isnull=False),
+                name="trace_source_attempt_unique",
+            )
+        ]
 
     def __str__(self):
         created_str = (

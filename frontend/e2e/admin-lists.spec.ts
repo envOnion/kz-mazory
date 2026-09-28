@@ -11,7 +11,7 @@ from django.conf import settings
 from api.models import MessageProcessingTrace, Project, BitrixSettings
 assert settings.INTEGRATION_TEST_MODE and settings.DATABASES['default']['NAME'].endswith('_e2e')
 p = Project.objects.create(name='Алматы — длинное название объекта ' + 'БизнесЦентр' * 12, contract_amount='233000000')
-t = MessageProcessingTrace.objects.create(project=p, whatsapp_message_id='${token}', whatsapp_sender_name='Вячеслав Медведев — команда поддержки продаж', whatsapp_sender_phone='77000000000@s.whatsapp.net', whatsapp_content='Коллеги, добрый день! Подскажите по объекту: ' + 'ДлинноеСлово' * 70 + '<script>window.__layout_xss=1</script>', earlier_messages_count=3, bitrix_matched_deal_id='1498', pipeline_action='updated_deal', status='warning')
+t = MessageProcessingTrace.objects.create(project=p, whatsapp_message_id='${token}', whatsapp_sender_name='Вячеслав Медведев — команда поддержки продаж', whatsapp_sender_phone='77000000000@s.whatsapp.net', whatsapp_content='Коллеги, добрый день! Подскажите по объекту: ' + 'ДлинноеСлово' * 70 + '<script>window.__layout_xss=1</script>', earlier_messages_count=3, earlier_messages_context=[{"content": "История " + str(i)} for i in range(3)], bitrix_matched_deal_id='1498', pipeline_action='updated_deal', status='warning')
 c = BitrixSettings.objects.create(name='${token} Интеграция с длинным названием', is_active=False)
 print(json.dumps({'trace': t.id, 'project': p.id, 'config': c.id}))
 `]))
@@ -23,7 +23,7 @@ print(json.dumps({'trace': t.id, 'project': p.id, 'config': c.id}))
       await page.goto(`/admin/api/messageprocessingtrace/?q=${token}`)
       await expect(page.locator('#result_list .data-row')).toHaveCount(1)
       await expect(page.locator('#result_list thead th')).toHaveCount(5)
-      await expect(page.locator('#result_list')).toContainText('Контекст: 3')
+      await expect(page.locator('#result_list')).toContainText('Сохранено: 3')
       await expect(page.locator('#result_list')).toContainText('Требует внимания')
       await expect(page.locator('.mazory-message-preview')).toHaveCSS('color', theme === 'dark' ? 'rgb(241, 245, 249)' : 'rgb(15, 23, 42)')
       for (const width of [1920, 1366, 1024, 390]) {
