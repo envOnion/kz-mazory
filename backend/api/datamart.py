@@ -1,433 +1,688 @@
-import logging
-from decimal import Decimal
-from typing import Dict, Any, List
-from django.db.models import Sum, Count, Avg, Q
-from django.utils import timezone
-from .models import UserProfile, Project, Commitment, FinancialRecord, Company
+"""One scoped Decimal data mart for dashboards, chat, profiles and exports."""
 
-logger = logging.getLogger(__name__)
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+from zoneinfo import ZoneInfo
+from urllib.parse import urlencode
+from django.db.models import Sum, Q
+from django.utils import timezone
+from rest_framework.exceptions import ValidationError
+from . import access
+from .models import (
+    FinancialRecord,
+    SalesTarget,
+    Project,
+    Team,
+    StageTransition,
+    PaymentScheduleItem,
+    UserProfile,
+)
+
+ZERO = Decimal("0.00")
+
+
+def money(value):
+    return str((value or ZERO).quantize(Decimal(".01")))
+
+
+def formatted(value, currency="KZT"):
+    return f"{value:,.2f}".replace(",", " ") + (
+        " ₸" if currency == "KZT" else f" {currency}"
+    )
+
+
+def month_after(day):
+    return date(
+        day.year + (day.month == 12), 1 if day.month == 12 else day.month + 1, 1
+    )
+
+
+def period_bounds(period, zone="Asia/Almaty", today=None):
+    today = today or timezone.now().astimezone(ZoneInfo(zone)).date()
+    this = today.replace(day=1)
+    if period == "this_month":
+        start, end = this, month_after(this)
+    elif period == "last_month":
+        start, end = (this - timedelta(days=1)).replace(day=1), this
+    elif period == "quarter":
+        start = date(today.year, 1 + 3 * ((today.month - 1) // 3), 1)
+        end = month_after(month_after(month_after(start)))
+    elif period == "year":
+        start, end = date(today.year, 1, 1), date(today.year + 1, 1, 1)
+    else:
+        raise ValidationError("Неизвестный период.")
+    return start, end, today
+
+
+def scoped_projects(user, filters=None):
+    filters = filters or {}
+    qs = access.projects_for(user).filter(is_verified=True, version__gt=0)
+    for field in ("team_id", "manager_id", "project_id"):
+        if filters.get(field):
+            value = filters[field]
+            if not str(value).isdigit():
+                raise ValidationError("Некорректный фильтр.")
+            qs = qs.filter(**{("id" if field == "project_id" else field): int(value)})
+    currency = filters.get("currency", "KZT")
+    if currency not in ("KZT", "USD", "EUR", "RUB"):
+        raise ValidationError("Неподдерживаемая валюта.")
+    return qs.filter(currency=currency), currency
+
+
+def project_row(p):
+    margin = (
+        (p.contract_amount - p.cost_amount) / p.contract_amount * 100
+        if p.cost_confirmed and p.contract_amount
+        else None
+    )
+    paid = (
+        p.financial_records.filter(is_verified=True, status="received").aggregate(
+            s=Sum("amount")
+        )["s"]
+        or ZERO
+    )
+    due = p.contract_amount - paid
+    return {
+        "id": p.id,
+        "name": p.name,
+        "company": p.company.name if p.company else "",
+        "manager": p.manager.full_name if p.manager else "Не назначен",
+        "manager_id": p.manager_id,
+        "team_id": p.team_id,
+        "version": p.version,
+        "currency": p.currency,
+        "contract_amount": money(p.contract_amount),
+        "contract_formatted": formatted(p.contract_amount, p.currency),
+        "paid_amount": money(paid),
+        "paid_formatted": formatted(paid, p.currency),
+        "due_amount": money(due),
+        "due_formatted": formatted(due, p.currency),
+        "overpayment": money(max(ZERO, -due)),
+        "cost_amount": money(p.cost_amount) if p.cost_confirmed else None,
+        "margin_percent": round(float(margin), 2) if margin is not None else None,
+        "margin_alert": margin is not None and margin < 15,
+        "status": p.get_status_display(),
+        "status_code": p.status,
+        "priority": p.priority,
+        "equipment": p.equipment_type,
+        "is_verified": p.is_verified,
+        "current_action": p.current_action,
+        "next_action": p.next_action,
+    }
+
 
 class DataMartService:
-    """
-    Детерминированный слой витрин данных (Data Mart) для аналитики и графиков.
-    Исключает галлюцинации LLM, предоставляя точные математические агрегаты из PostgreSQL.
-    """
-
-    @staticmethod
-    def get_sales_kpi_mart(period: str = 'this_month') -> Dict[str, Any]:
-        """
-        Витрина KPI коммерческой команды: план-факт, сбор денег, маржинальность, просрочки.
-        Поддерживает периоды: 'this_month', 'last_month', 'quarter', 'year'.
-        """
-        today = timezone.now().date()
-        month_names = {
-            1: 'Январь', 2: 'Февраль', 3: 'Март', 4: 'Апрель',
-            5: 'Май', 6: 'Июнь', 7: 'Июль', 8: 'Август',
-            9: 'Сентябрь', 10: 'Октябрь', 11: 'Ноябрь', 12: 'Декабрь'
-        }
-
-        # Определение временных границ и множителей планов
-        if period == 'last_month':
-            first_this_month = today.replace(day=1)
-            last_prev_month = first_this_month - timezone.timedelta(days=1)
-            date_from = last_prev_month.replace(day=1)
-            date_to = last_prev_month
-            period_name = f"{month_names.get(date_from.month, '')} {date_from.year}"
-            period_label = f"Прошлый месяц ({period_name})"
-            target_multiplier = Decimal('1.0')
-        elif period == 'quarter':
-            quarter = (today.month - 1) // 3 + 1
-            quarter_start_month = (quarter - 1) * 3 + 1
-            date_from = today.replace(month=quarter_start_month, day=1)
-            date_to = today
-            period_name = f"{quarter}-й квартал {today.year}"
-            period_label = period_name
-            target_multiplier = Decimal('3.0')
-        elif period == 'year':
-            date_from = today.replace(month=1, day=1)
-            date_to = today
-            period_name = f"{today.year} год"
-            period_label = f"С начала {today.year} года"
-            target_multiplier = Decimal('12.0')
-        else:
-            period = 'this_month'
-            date_from = today.replace(day=1)
-            date_to = today
-            period_name = f"{month_names.get(today.month, '')} {today.year}"
-            period_label = f"Текущий месяц ({period_name})"
-            target_multiplier = Decimal('1.0')
-
-        managers = UserProfile.objects.all().order_by('-current_sales')
-
-        total_target = Decimal('0.00')
-        total_actual = Decimal('0.00')
-        total_deals = 0
-        total_overdue = 0
-
-        manager_cards = []
-
-        for rank, mgr in enumerate(managers, start=1):
-            # Проекты менеджера (только проверенные)
-            mgr_projects = Project.objects.filter(manager=mgr, is_verified=True).select_related('company')
-            deals_count = mgr_projects.count()
-            
-            # Фактические оплаты из FinancialRecord за выбранный период (только проверенные)
-            fin_qs = FinancialRecord.objects.filter(
-                project__manager=mgr,
-                is_verified=True,
-                payment_date__gte=date_from,
-                payment_date__lte=date_to,
-                status='received'
+    def get_sales_kpi_mart(self, user, period="this_month", filters=None):
+        qs, currency = scoped_projects(user, filters)
+        profile = UserProfile.objects.filter(user=user).first()
+        zone = profile.timezone if profile else "Asia/Almaty"
+        start, end, today = period_bounds(period, zone)
+        payments = FinancialRecord.objects.filter(
+            project__in=qs,
+            is_verified=True,
+            status="received",
+            currency=currency,
+            payment_date__gte=start,
+            payment_date__lt=min(end, today + timedelta(days=1)),
+        )
+        fact = payments.aggregate(s=Sum("amount"))["s"] or ZERO
+        teams = Team.objects.filter(pk__in=qs.values("team_id"))
+        if not teams.exists():
+            teams = Team.objects.filter(pk__in=access.team_ids(user))
+        complete = (
+            teams.exists()
+            and not teams.filter(
+                Q(history_complete_from__isnull=True)
+                | Q(history_complete_from__gt=start)
+            ).exists()
+        )
+        month_count = (end.year - start.year) * 12 + end.month - start.month
+        profiles = (
+            access.profiles_for(user)
+            .filter(
+                user__memberships__role="manager", user__memberships__status="active"
             )
-            fin_sum = fin_qs.aggregate(total=Sum('amount'))['total']
-
-            base_collected = mgr_projects.aggregate(total=Sum('paid_amount'))['total'] or mgr.current_sales
-            if fin_sum and fin_sum > 0:
-                collected = fin_sum
-            else:
-                if period == 'last_month':
-                    collected = Decimal(str(round(float(base_collected) * 0.92, 2)))
-                elif period == 'quarter':
-                    collected = Decimal(str(round(float(base_collected) * 2.65, 2)))
-                elif period == 'year':
-                    collected = Decimal(str(round(float(base_collected) * 7.4, 2)))
-                else:
-                    collected = base_collected
-
-            base_target = mgr.monthly_target if mgr.monthly_target > 0 else Decimal('10000000.00')
-            target = base_target * target_multiplier
-            
-            progress = round(float(collected) / float(target) * 100, 1) if target > 0 else 0.0
-
-            # Средняя маржа по портфелю
-            avg_margin = mgr_projects.aggregate(avg=Avg('target_margin_percent'))['avg'] or Decimal('16.80')
-
-            # Просроченные обещания (только проверенные)
-            overdue_count = Commitment.objects.filter(
-                manager=mgr,
-                is_verified=True,
-                status__in=['pending', 'overdue'],
-                deadline__lt=today
-            ).count()
-
-            # Цветовой статус
-            if progress >= 100:
-                status_color = 'green'
-            elif progress >= 75:
-                status_color = 'yellow'
-            else:
-                status_color = 'red'
-
-            total_target += target
-            total_actual += collected
-            total_deals += deals_count
-            total_overdue += overdue_count
-
-            # Список ключевых объектов менеджера для быстрого Drill-Down
-            projects_summary = [
+            .distinct()
+        )
+        if (filters or {}).get("manager_id"):
+            profiles = profiles.filter(pk=int(filters["manager_id"]))
+        if (filters or {}).get("team_id"):
+            profiles = profiles.filter(
+                user__memberships__team_id=int(filters["team_id"]),
+                user__memberships__status="active",
+            ).distinct()
+        targets = SalesTarget.objects.filter(
+            team__in=teams,
+            profile__in=profiles,
+            currency=currency,
+            month__gte=start,
+            month__lt=end,
+            is_active=True,
+        )
+        managers = []
+        for manager in profiles.order_by("id"):
+            own_fact = (
+                payments.filter(credited_profile=manager).aggregate(s=Sum("amount"))[
+                    "s"
+                ]
+                or ZERO
+            )
+            own_targets = targets.filter(profile=manager)
+            expected_teams = (
+                teams.filter(
+                    memberships__user=manager.user, memberships__status="active"
+                )
+                .distinct()
+                .count()
+            )
+            target = (
+                own_targets.aggregate(s=Sum("amount"))["s"]
+                if expected_teams
+                and own_targets.count() == month_count * expected_teams
+                and not (filters or {}).get("project_id")
+                else None
+            )
+            percentage = (
+                round(float(own_fact / target * 100), 2)
+                if complete and target and target > 0
+                else None
+            )
+            projects = qs.filter(manager=manager)
+            managers.append(
                 {
-                    "id": p.id,
-                    "name": p.name,
-                    "company": p.company.name if p.company else "Не указано",
-                    "contract_amount": float(p.contract_amount),
-                    "contract_formatted": f"{float(p.contract_amount):,.0f} ₸".replace(',', ' '),
-                    "paid_amount": float(p.paid_amount),
-                    "paid_formatted": f"{float(p.paid_amount):,.0f} ₸".replace(',', ' '),
-                    "due_amount": float(p.due_amount),
-                    "due_formatted": f"{float(p.due_amount):,.0f} ₸".replace(',', ' '),
-                    "status": p.get_status_display(),
-                    "status_code": p.status,
-                    "margin": float(p.actual_margin_percent or p.target_margin_percent),
-                    "equipment": p.equipment_type,
-                    "is_verified": p.is_verified,
+                    "id": manager.id,
+                    "name": manager.full_name or manager.user.username,
+                    "role": manager.role,
+                    "avatar": manager.avatar_url,
+                    "salesAmount": formatted(own_fact, currency),
+                    "fact": money(own_fact),
+                    "targetAmount": money(target) if target is not None else None,
+                    "targetFormatted": formatted(target, currency)
+                    if target is not None
+                    else "План не задан",
+                    "kpiPercent": percentage,
+                    "kpiBarColor": "green"
+                    if percentage is not None and percentage >= 100
+                    else "yellow",
+                    "statusColor": "green"
+                    if percentage is not None and percentage >= 100
+                    else "yellow",
+                    "dealsCount": projects.count(),
+                    "trend": "Полная история" if complete else "Неполная история",
+                    "trendPositive": complete,
+                    "projects": [
+                        project_row(p)
+                        for p in projects.select_related("manager", "company")[:50]
+                    ],
                 }
-                for p in mgr_projects.order_by('-contract_amount')[:8]
-            ]
-
-            manager_cards.append({
-                "id": f"mgr-{mgr.id}",
-                "db_id": mgr.id,
-                "dbId": mgr.id,
-                "name": mgr.full_name,
-                "role": mgr.role,
-                "avatar": mgr.avatar_url,
-                "rank": rank,
-                "is_top_performer": rank == 1,
-                "isTopPerformer": rank == 1,
-                "status_color": status_color,
-                "statusColor": status_color,
-                "kpi_percent": progress,
-                "kpiPercent": progress,
-                "kpi_bar_color": status_color,
-                "kpiBarColor": status_color,
-                "target_amount": float(target),
-                "targetAmount": float(target),
-                "target_formatted": f"{float(target):,.0f} ₸".replace(',', ' '),
-                "targetFormatted": f"{float(target):,.0f} ₸".replace(',', ' '),
-                "sales_amount": float(collected),
-                "salesAmount": f"{float(collected):,.0f} ₸".replace(',', ' '),
-                "sales_formatted": f"{float(collected):,.0f} ₸".replace(',', ' '),
-                "salesFormatted": f"{float(collected):,.0f} ₸".replace(',', ' '),
-                "deals_count": deals_count,
-                "dealsCount": deals_count,
-                "average_margin": round(float(avg_margin), 1),
-                "averageMargin": round(float(avg_margin), 1),
-                "overdue_commitments": overdue_count,
-                "overdueCommitments": overdue_count,
-                "trend": f"+{round(progress * 0.15, 1)}% к пред. периоду" if progress > 0 else "В плане",
-                "trend_positive": progress >= 75,
-                "trendPositive": progress >= 75,
-                "projects": projects_summary
-            })
-
-        overall_progress = round(float(total_actual) / float(total_target) * 100, 1) if total_target > 0 else 0.0
-
-        summary_metrics = [
-            {
-                "id": "total-sales",
-                "title": "Фактический сбор оплат",
-                "value": f"{float(total_actual):,.0f} ₸".replace(',', ' '),
-                "raw_value": float(total_actual),
-                "rawValue": float(total_actual),
-                "trend": "+18.4% к плану периода",
-                "trend_positive": True,
-                "trendPositive": True,
-                "icon": "bar-chart"
-            },
-            {
-                "id": "plan-completion",
-                "title": "Выполнение плана сбора",
-                "value": f"{overall_progress}%",
-                "raw_value": overall_progress,
-                "rawValue": overall_progress,
-                "trend": "Целевой порог: 85%",
-                "trend_positive": overall_progress >= 85,
-                "trendPositive": overall_progress >= 85,
-                "icon": "target"
-            },
-            {
-                "id": "deals-count",
-                "title": "Активных договоров и сделок",
-                "value": str(total_deals),
-                "raw_value": total_deals,
-                "rawValue": total_deals,
-                "trend": f"{total_overdue} просроченных дедлайнов" if total_overdue > 0 else "Все дедлайны соблюдены",
-                "trend_positive": total_overdue == 0,
-                "trendPositive": total_overdue == 0,
-                "icon": "users"
-            }
-        ]
-
-        chart_dataset = DataMartService.get_sales_chart_dataset(period=period, manager_cards=manager_cards)
-
-        return {
-            "period": period_name,
-            "period_code": period,
-            "periodCode": period,
-            "period_label": period_label,
-            "periodLabel": period_label,
-            "summary_metrics": summary_metrics,
-            "summaryMetrics": summary_metrics,
-            "managers": manager_cards,
-            "chart_data": chart_dataset,
-            "chartData": chart_dataset
-        }
-
-    @staticmethod
-    def get_pipeline_mart() -> Dict[str, Any]:
-        """
-        Витрина воронки проектов, оборудования и контроля маржинальности.
-        Приоритизирует реальные коммерческие сделки с суммой договора, исключая черновики.
-        """
-        all_projects = Project.objects.filter(is_verified=True)
-        valid_projects = all_projects.filter(contract_amount__gt=0).select_related('company', 'manager').order_by('-contract_amount', '-id')
-        if not valid_projects.exists():
-            valid_projects = all_projects.select_related('company', 'manager').order_by('-id')
-
-        stage_definitions = [
-            ('qualification', 'Квалификация / ТЗ', ['qualification', 'tender', 'lead', 'Переговоры']),
-            ('proposal_sent', 'КП отправлено', ['proposal_sent', 'proposal', 'КП отправлено']),
-            ('contract_signing', 'Согласование договора', ['contract_signing', 'contract_signed']),
-            ('in_execution', 'В исполнении / Монтаж', ['in_execution', 'executing', 'Исполнение']),
-            ('completed', 'Закрытые сделки', ['completed', 'deal_won']),
-            ('lost', 'Зависшие / Внимание', ['lost', 'stalled'])
-        ]
-        
-        pipeline_stages = []
-        for code, label, statuses in stage_definitions:
-            qs = all_projects.filter(status__in=statuses)
-            count = qs.count()
-            vol = qs.aggregate(total=Sum('contract_amount'))['total'] or Decimal('0.00')
-            pipeline_stages.append({
-                "code": code,
-                "label": label,
-                "count": count,
-                "volume": float(vol),
-                "volume_formatted": f"{float(vol):,.0f} ₸".replace(',', ' ')
-            })
-
-        # Маржинальность: низкая (<15%), нормальная (15-20%), высокая (>20%)
-        margin_low = valid_projects.filter(target_margin_percent__lt=15.0).count()
-        margin_norm = valid_projects.filter(target_margin_percent__gte=15.0, target_margin_percent__lte=20.0).count()
-        margin_high = valid_projects.filter(target_margin_percent__gt=20.0).count()
-
-        project_list = [
-            {
-                "id": p.id,
-                "name": p.name,
-                "company": p.company.name if p.company else "Не указано",
-                "manager": p.manager.full_name if p.manager else "Не закреплен",
-                "contract_amount": float(p.contract_amount),
-                "contract_formatted": f"{float(p.contract_amount):,.0f} ₸".replace(',', ' '),
-                "paid_amount": float(p.paid_amount),
-                "paid_formatted": f"{float(p.paid_amount):,.0f} ₸".replace(',', ' '),
-                "due_amount": float(p.due_amount),
-                "due_formatted": f"{float(p.due_amount):,.0f} ₸".replace(',', ' '),
-                "margin_percent": float(p.target_margin_percent),
-                "margin_alert": float(p.target_margin_percent) < 15.0,
-                "status": p.get_status_display(),
-                "priority": p.priority,
-                "equipment": p.equipment_type,
-                "is_verified": p.is_verified
-            }
-            for p in valid_projects[:100]
-        ]
-
-        return {
-            "stages": pipeline_stages,
-            "margin_distribution": {
-                "low_under_15": margin_low,
-                "norm_15_to_20": margin_norm,
-                "high_over_20": margin_high
-            },
-            "projects": project_list
-        }
-
-    @staticmethod
-    def get_commitments_sla_mart() -> Dict[str, Any]:
-        """
-        Витрина соблюдения дедлайнов и обязательств (Commitments SLA).
-        Приоритизирует просроченные обязательства (красные) и горящие сегодня.
-        """
-        today = timezone.now().date()
-        all_commitments = Commitment.objects.filter(is_verified=True).select_related('manager', 'project', 'project__company')
-
-        total = all_commitments.count()
-        fulfilled = all_commitments.filter(status='fulfilled').count()
-        overdue_qs = all_commitments.filter(
-            Q(status='overdue') | Q(status='pending', deadline__lt=today)
+            )
+        managers.sort(key=lambda row: Decimal(row["fact"]), reverse=True)
+        total_target = (
+            sum(
+                (
+                    Decimal(m["targetAmount"])
+                    for m in managers
+                    if m["targetAmount"] is not None
+                ),
+                ZERO,
+            )
+            if managers and all(m["targetAmount"] is not None for m in managers)
+            else None
         )
-        overdue = overdue_qs.count()
-        today_qs = all_commitments.filter(status='pending', deadline=today)
-        future_qs = all_commitments.filter(status='pending', deadline__gt=today)
-        pending = all_commitments.filter(status='pending', deadline__gte=today).count()
-
-        slippage_rate = round((overdue / total) * 100, 1) if total > 0 else 0.0
-
-        # Сортировка:
-        # 1. Просроченные обязательства (overdue) - во главе списка с красным статусом
-        # 2. Горящие сегодня (due today)
-        # 3. Плановые в работе
-        # 4. Выполненные
-        sorted_commitments = (
-            list(overdue_qs.order_by('deadline', '-severity', 'id')) +
-            list(today_qs.order_by('-severity', 'id')) +
-            list(future_qs.order_by('deadline', 'id')) +
-            list(all_commitments.filter(status='fulfilled').order_by('-fulfilled_at', '-id'))
-        )
-
-        items = []
-        for c in sorted_commitments[:30]:
-            is_overdue = c.status == 'overdue' or (c.status == 'pending' and c.deadline and c.deadline < today)
-            is_today = c.status == 'pending' and c.deadline == today
-            
-            if is_overdue:
-                status_text = 'Просрочено'
-                status_color = 'red'
-            elif c.status == 'fulfilled':
-                status_text = 'Выполнено'
-                status_color = 'green'
-            elif is_today:
-                status_text = 'Горит сегодня'
-                status_color = 'yellow'
-            else:
-                status_text = 'В работе'
-                status_color = 'yellow'
-
-            counterparty = c.counterparty_person
-            if not counterparty and c.project and c.project.company:
-                counterparty = c.project.company.name
-
-            items.append({
-                "id": c.id,
-                "text": c.commitment_text,
-                "counterparty": counterparty or (c.project.company.name if c.project and c.project.company else "Не указан"),
-                "project_name": c.project.name if c.project else "Общая задача",
-                "manager_name": c.manager.full_name if c.manager else "Отдел продаж",
-                "deadline": c.deadline.isoformat() if c.deadline else None,
-                "deadline_formatted": c.deadline.strftime("%d.%m.%Y") if c.deadline else "Без дедлайна",
-                "status": status_text,
-                "status_color": status_color,
-                "severity": c.severity
-            })
-
-        return {
-            "total_count": total,
-            "fulfilled_count": fulfilled,
-            "pending_count": pending,
-            "overdue_count": overdue,
-            "slippage_rate_percent": slippage_rate,
-            "commitments": items
-        }
-
-    @staticmethod
-    def get_sales_chart_dataset(period: str = 'this_month', manager_cards: list = None) -> Dict[str, Any]:
-        """
-        Готовый датасет для пресета графиков (Chart.js Bar & Doughnut)
-        """
-        if manager_cards:
-            labels = [
-                m["name"].split()[0] + (" " + m["name"].split()[1][0] + "." if len(m["name"].split()) > 1 else "")
-                for m in manager_cards
-            ]
-            targets = [round(float(m.get("target_amount") or m.get("targetAmount") or 0) / 1000000, 2) for m in manager_cards]
-            actuals = [round(float(m.get("sales_amount") or 0) / 1000000, 2) for m in manager_cards]
+        receivables = self.receivables(user, filters, today)
+        # Compare to equally elapsed days in previous period, not synthetic multipliers.
+        previous_end = start
+        if period in ("this_month", "last_month"):
+            previous_start = (start - timedelta(days=1)).replace(day=1)
+        elif period == "quarter":
+            previous_start = (
+                date(start.year - 1, 10, 1)
+                if start.month == 1
+                else date(start.year, start.month - 3, 1)
+            )
         else:
-            managers = UserProfile.objects.all().order_by('-current_sales')
-            labels = [m.full_name for m in managers]
-            targets = [float(m.monthly_target) / 1000000 for m in managers] # в млн ₸
-            actuals = [float(m.current_sales) / 1000000 for m in managers]  # в млн ₸
-
-        period_labels = {
-            'this_month': 'текущий месяц',
-            'last_month': 'прошлый месяц',
-            'quarter': 'квартал',
-            'year': 'с начала года'
-        }
-        suffix = period_labels.get(period, 'период')
-
-        return {
+            previous_start = date(start.year - 1, 1, 1)
+        days = (min(end, today + timedelta(days=1)) - start).days
+        compare_end = min(previous_end, previous_start + timedelta(days=days))
+        previous = (
+            FinancialRecord.objects.filter(
+                project__in=qs,
+                is_verified=True,
+                status="received",
+                currency=currency,
+                payment_date__gte=previous_start,
+                payment_date__lt=compare_end,
+            ).aggregate(s=Sum("amount"))["s"]
+            or ZERO
+        )
+        previous_complete = (
+            teams.exists()
+            and not teams.filter(
+                Q(history_complete_from__isnull=True)
+                | Q(history_complete_from__gt=previous_start)
+            ).exists()
+        )
+        growth = (
+            round(float((fact - previous) / previous * 100), 2)
+            if complete and previous_complete and previous
+            else None
+        )
+        title = f"{start:%d.%m.%Y} — {end - timedelta(days=1):%d.%m.%Y}"
+        trend = (
+            f"{growth:+.2f}%"
+            if growth is not None
+            else "Недостаточно данных для сравнения"
+        )
+        chart = {
+            "title": "План и факт поступлений",
             "chart_type": "bar",
-            "title": f"План-факт продаж по менеджерам — сбор оплат ({suffix}) (млн ₸)",
-            "labels": labels,
+            "labels": [m["name"] for m in managers],
+            "unit": currency,
             "datasets": [
                 {
-                    "label": "План (млн ₸)",
-                    "data": targets,
-                    "backgroundColor": "rgba(99, 102, 241, 0.4)",
-                    "borderColor": "rgba(99, 102, 241, 1)",
-                    "borderWidth": 1.5,
-                    "borderRadius": 6
+                    "label": "Подтверждённые поступления",
+                    "data": [m["fact"] for m in managers],
+                    "backgroundColor": "#34d399",
                 },
                 {
-                    "label": "Факт сбора (млн ₸)",
-                    "data": actuals,
-                    "backgroundColor": "rgba(16, 185, 129, 0.8)",
-                    "borderColor": "rgba(16, 185, 129, 1)",
-                    "borderWidth": 1.5,
-                    "borderRadius": 6
-                }
-            ]
+                    "label": "План",
+                    "data": [m["targetAmount"] for m in managers],
+                    "backgroundColor": "#818cf8",
+                },
+            ],
         }
+        return {
+            "categoryBadge": "ПОДТВЕРЖДЁННЫЕ ДАННЫЕ",
+            "queryTitle": "KPI отдела продаж",
+            "querySubtitle": f"{title} · {currency}",
+            "period": period,
+            "periodCode": period,
+            "periodLabel": title,
+            "updatedAtText": f"Обновлено {timezone.localtime():%d.%m.%Y %H:%M}",
+            "currency": currency,
+            "period_start": start.isoformat(),
+            "period_end_exclusive": end.isoformat(),
+            "timezone": zone,
+            "coverage": {
+                "status": "complete" if complete else "partial",
+                "message": "Полная история"
+                if complete
+                else "Недостаточно данных: полнота истории периода не подтверждена.",
+            },
+            "fact": money(fact),
+            "target": money(total_target) if total_target is not None else None,
+            "comparison": {
+                "start": previous_start.isoformat(),
+                "end_exclusive": compare_end.isoformat(),
+                "fact": money(previous),
+                "absolute_change": money(fact - previous)
+                if previous_complete
+                else None,
+                "percent": growth,
+                "method": "equal_elapsed_days",
+            },
+            "summaryMetrics": [
+                {
+                    "id": "receipts",
+                    "title": "Подтверждённые поступления",
+                    "value": formatted(fact, currency),
+                    "trend": trend,
+                    "trendPositive": growth is not None and growth >= 0,
+                    "icon": "bar-chart",
+                },
+                {
+                    "id": "target",
+                    "title": "План периода",
+                    "value": formatted(total_target, currency)
+                    if total_target is not None
+                    else "План не задан",
+                    "trend": "Утверждённые планы по месяцам",
+                    "trendPositive": True,
+                    "icon": "target",
+                },
+                {
+                    "id": "overdue",
+                    "title": "Просроченная дебиторка",
+                    "value": formatted(Decimal(receivables["overdue"]), currency),
+                    "trend": "По графику платежей",
+                    "trendPositive": False,
+                    "icon": "users",
+                },
+            ],
+            "managers": managers,
+            "chartData": chart,
+            "receivables": receivables,
+            "timeline": self.timeline(payments, start, end, today, currency),
+            "source_rows": list(
+                payments.order_by("payment_date", "id").values(
+                    "id",
+                    "project_id",
+                    "payment_date",
+                    "amount",
+                    "currency",
+                    "candidate_id",
+                    "credited_profile_id",
+                )[:50]
+            ),
+            "source_count": payments.count(),
+            "source_path": "/finance/payments/?"
+            + urlencode({"period": period, **(filters or {})}),
+            "definition": "Сумма подтвержденных received-операций по дате платежа, включая корректировки. Бухгалтерская выручка не рассчитывается.",
+            "forecast": self.forecast(qs, teams, currency, today, start, end),
+            "insight": {
+                "badge": "Расчёт по фактам",
+                "source": "Реестр подтверждённых платежей",
+                "headline": f"За период поступило {formatted(fact, currency)}.",
+                "details": "Учитываются доступные проекты и подтверждённые операции. "
+                + ("История полная." if complete else "Покрытие истории неполное."),
+                "actions": [],
+            },
+        }
+
+    def forecast(self, projects, teams, currency, today, start, end):
+        # Versioned, explainable baseline; forecast is never part of actual receipts.
+        current = today.replace(day=1)
+        history = current
+        for _ in range(3):
+            history = (history - timedelta(days=1)).replace(day=1)
+        if (
+            not teams.exists()
+            or teams.filter(
+                Q(history_complete_from__isnull=True)
+                | Q(history_complete_from__gt=history)
+            ).exists()
+        ):
+            return {
+                "available": False,
+                "reason": "Нужна подтверждённая полная история трёх закрытых месяцев.",
+            }
+        if start != current or end != month_after(current):
+            return {
+                "available": False,
+                "reason": "Прогноз рассчитывается только для текущего месяца.",
+            }
+        historical = (
+            FinancialRecord.objects.filter(
+                project__in=projects,
+                is_verified=True,
+                status="received",
+                currency=currency,
+                payment_date__gte=history,
+                payment_date__lt=current,
+            ).aggregate(s=Sum("amount"))["s"]
+            or ZERO
+        )
+        actual = (
+            FinancialRecord.objects.filter(
+                project__in=projects,
+                is_verified=True,
+                status="received",
+                currency=currency,
+                payment_date__gte=current,
+                payment_date__lte=today,
+            ).aggregate(s=Sum("amount"))["s"]
+            or ZERO
+        )
+        remaining = (end - today - timedelta(days=1)).days
+        forecast = actual + historical / Decimal((current - history).days) * max(
+            remaining, 0
+        )
+        return {
+            "available": True,
+            "amount": money(forecast),
+            "currency": currency,
+            "as_of": today.isoformat(),
+            "method": "daily_mean_previous_3_complete_months_v1",
+            "history_start": history.isoformat(),
+            "reason": "Факт на сегодня + средние дневные поступления трёх закрытых месяцев × оставшиеся дни. Сезонность не учитывается.",
+        }
+
+    def timeline(self, payments, start, end, today, currency):
+        rows = {
+            str(day["payment_date"]): money(day["s"])
+            for day in payments.values("payment_date").annotate(s=Sum("amount"))
+        }
+        days = [
+            start + timedelta(days=n)
+            for n in range(max(0, (min(end, today + timedelta(days=1)) - start).days))
+        ]
+        return {
+            "title": "Поступления по дням",
+            "unit": currency,
+            "labels": [d.isoformat() for d in days],
+            "datasets": [
+                {
+                    "label": "Факт",
+                    "data": [rows.get(d.isoformat(), "0.00") for d in days],
+                    "backgroundColor": "#34d399",
+                }
+            ],
+        }
+
+    def receivables(self, user, filters=None, today=None):
+        qs, currency = scoped_projects(user, filters)
+        today = today or timezone.localdate()
+        buckets = {
+            key: ZERO for key in ("not_due", "1_30", "31_60", "61_90", "over_90")
+        }
+        rows = []
+        for item in (
+            PaymentScheduleItem.objects.filter(
+                project__in=qs, is_verified=True, currency=currency
+            )
+            .annotate(paid=Sum("allocations__amount"))
+            .order_by("due_date", "id")
+        ):
+            remaining = max(ZERO, item.amount - (item.paid or ZERO))
+            age = (today - item.due_date).days
+            bucket = (
+                "not_due"
+                if age <= 0
+                else "1_30"
+                if age <= 30
+                else "31_60"
+                if age <= 60
+                else "61_90"
+                if age <= 90
+                else "over_90"
+            )
+            buckets[bucket] += remaining
+            rows.append(
+                {
+                    "id": item.id,
+                    "project_id": item.project_id,
+                    "amount": money(item.amount),
+                    "remaining": money(remaining),
+                    "due_date": item.due_date.isoformat(),
+                    "bucket": bucket,
+                }
+            )
+        return {
+            "buckets": {k: money(v) for k, v in buckets.items()},
+            "overdue": money(
+                sum((v for k, v in buckets.items() if k != "not_due"), ZERO)
+            ),
+            "rows": rows,
+            "unknown_schedule_projects": qs.exclude(
+                payment_schedule__is_verified=True
+            ).count(),
+            "currency": currency,
+        }
+
+    def get_pipeline_mart(self, user, filters=None):
+        qs, currency = scoped_projects(user, filters)
+        projects = [
+            project_row(p)
+            for p in qs.select_related("company", "manager").order_by("id")[:500]
+        ]
+        stages = []
+        for code, label in Project.STATUS_CHOICES:
+            subset = qs.filter(status=code)
+            volume = subset.aggregate(s=Sum("contract_amount"))["s"] or ZERO
+            stages.append(
+                {
+                    "code": code,
+                    "label": label,
+                    "count": subset.count(),
+                    "volume": money(volume),
+                    "volume_formatted": formatted(volume, currency),
+                }
+            )
+        known = qs.filter(cost_confirmed=True, contract_amount__gt=0).aggregate(
+            contract=Sum("contract_amount"), cost=Sum("cost_amount")
+        )
+        weighted = (
+            round(
+                float((known["contract"] - known["cost"]) / known["contract"] * 100), 2
+            )
+            if known["contract"]
+            else None
+        )
+        return {
+            "projects": projects,
+            "total_count": qs.count(),
+            "stages": stages,
+            "weighted_margin": weighted,
+            "margin_distribution": {
+                "low_under_15": sum(
+                    p["margin_percent"] is not None and p["margin_percent"] < 15
+                    for p in projects
+                ),
+                "norm_15_to_20": sum(
+                    p["margin_percent"] is not None and 15 <= p["margin_percent"] <= 20
+                    for p in projects
+                ),
+                "high_over_20": sum(
+                    p["margin_percent"] is not None and p["margin_percent"] > 20
+                    for p in projects
+                ),
+                "unknown": sum(p["margin_percent"] is None for p in projects),
+            },
+            **self.stage_analytics(qs),
+            "stage_history": list(
+                StageTransition.objects.filter(project__in=qs)
+                .order_by("effective_at")
+                .values("project_id", "from_stage", "to_stage", "effective_at")[:500]
+            ),
+        }
+
+    def stage_analytics(self, projects):
+        rows = list(
+            StageTransition.objects.filter(project__in=projects).order_by(
+                "project_id", "effective_at", "id"
+            )
+        )
+        histories = {}
+        for row in rows:
+            histories.setdefault(row.project_id, []).append(row)
+        cohort = [
+            events
+            for events in histories.values()
+            if events[0].from_stage == "" and events[0].to_stage == "lead"
+        ]
+        reached = sum(
+            any(event.to_stage == "completed" for event in events) for events in cohort
+        )
+        durations = {}
+        now = timezone.now()
+        for events in histories.values():
+            for index, event in enumerate(events):
+                finish = (
+                    events[index + 1].effective_at if index + 1 < len(events) else now
+                )
+                if event.to_stage in ("completed", "lost"):
+                    continue
+                durations.setdefault(event.to_stage, []).append(
+                    max(0, (finish - event.effective_at).total_seconds() / 86400)
+                )
+        return {
+            "conversion": {
+                "value": round(reached / len(cohort) * 100, 2) if cohort else None,
+                "cohort_size": len(cohort),
+                "completed": reached,
+                "reason": "Наблюдаемые проекты с подтверждённым входом в lead; доля когда-либо достигших completed. Незавершённые входят в знаменатель.",
+            },
+            "stage_duration_days": [
+                {
+                    "stage": stage,
+                    "mean_days": round(sum(values) / len(values), 2),
+                    "observations": len(values),
+                }
+                for stage, values in durations.items()
+            ],
+        }
+
+    def get_commitments_sla_mart(self, user, period="this_month"):
+        from .notifications import effective_deadline
+
+        start, end, today = period_bounds(period)
+        items = []
+        ontime = original_ontime = denominator = 0
+        for c in (
+            access.commitments_for(user)
+            .filter(is_verified=True)
+            .select_related("project", "manager")
+            .order_by("deadline_at", "id")[:500]
+        ):
+            deadline = effective_deadline(c)
+            overdue = (
+                c.status in ("pending", "overdue")
+                and deadline is not None
+                and deadline < timezone.now()
+            )
+            if (
+                deadline
+                and start <= deadline.date() < end
+                and c.status != "cancelled"
+                and deadline <= timezone.now()
+            ):
+                denominator += 1
+                ontime += bool(c.fulfilled_at and c.fulfilled_at <= deadline)
+                original_ontime += bool(
+                    c.fulfilled_at
+                    and c.fulfilled_at <= (c.original_deadline_at or deadline)
+                )
+            items.append(
+                {
+                    "id": c.id,
+                    "text": c.commitment_text,
+                    "project_id": c.project_id,
+                    "project_name": c.project.name if c.project else "",
+                    "manager_name": c.manager.full_name if c.manager else "Не назначен",
+                    "deadline": deadline.isoformat() if deadline else None,
+                    "deadline_formatted": timezone.localtime(deadline).strftime(
+                        "%d.%m.%Y %H:%M"
+                    )
+                    if deadline
+                    else "Срок не определён",
+                    "status_code": c.status,
+                    "status": "Просрочено" if overdue else c.get_status_display(),
+                    "status_color": "red"
+                    if overdue
+                    else "green"
+                    if c.status == "fulfilled"
+                    else "yellow",
+                    "version": c.version,
+                    "severity": c.severity,
+                    "postponed_reason": c.postponed_reason,
+                }
+            )
+        return {
+            "commitments": items,
+            "total_count": len(items),
+            "fulfilled_count": sum(c["status_code"] == "fulfilled" for c in items),
+            "overdue_count": sum(c["status_color"] == "red" for c in items),
+            "pending_count": sum(c["status_code"] == "pending" for c in items),
+            "slippage_rate_percent": round((1 - ontime / denominator) * 100, 2)
+            if denominator
+            else None,
+            "original_sla_percent": round(original_ontime / denominator * 100, 2)
+            if denominator
+            else None,
+        }
+
+    def get_sales_chart_dataset(self, user, period="this_month", filters=None):
+        return self.get_sales_kpi_mart(user, period, filters)["chartData"]
+
 
 datamart = DataMartService()

@@ -10,69 +10,136 @@ from django.templatetags.static import static
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-SECRET_KEY = os.getenv('SECRET_KEY') or 'django-insecure-f7u)rp4lokiv@hgsdma!e@cb*g=dp!z2i)f94)07=nqs^2!ons'
+from django.core.exceptions import ImproperlyConfigured
+import secrets
 
-DEBUG = os.getenv('DEBUG', '1') == '1'
-
-ALLOWED_HOSTS = [h.strip() for h in os.getenv('ALLOWED_HOSTS', '*').split(',') if h.strip()]
-for h in ['ai.mazory.best', '34.70.69.38', 'backend', 'mazory-backend', 'localhost', '127.0.0.1']:
-    if h not in ALLOWED_HOSTS and '*' not in ALLOWED_HOSTS:
-        ALLOWED_HOSTS.append(h)
+MAZORY_ENV = os.getenv("MAZORY_ENV", "development")
+TESTING = "test" in sys.argv or MAZORY_ENV == "test"
+DEBUG = MAZORY_ENV == "development" and os.getenv("DEBUG", "1") == "1"
+SECRET_KEY = os.getenv("SECRET_KEY", "")
+if not SECRET_KEY and TESTING:
+    SECRET_KEY = "isolated-test-only-key-never-valid-in-production-12345"
+elif not SECRET_KEY and MAZORY_ENV == "development":
+    key_path = BASE_DIR / ".dev-secret"
+    if not key_path.exists():
+        try:
+            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(secrets.token_urlsafe(64))
+        except FileExistsError:
+            pass
+    SECRET_KEY = key_path.read_text().strip()
+if (
+    len(SECRET_KEY) < 50
+    or SECRET_KEY.startswith("django-insecure-")
+    or (
+        MAZORY_ENV == "production"
+        and (
+            len(set(SECRET_KEY)) < 16
+            or "test-only" in SECRET_KEY
+            or "isolated-test" in SECRET_KEY
+        )
+    )
+):
+    raise ImproperlyConfigured("Set a random SECRET_KEY with at least 50 characters.")
+JWT_SIGNING_KEY = os.getenv("JWT_SIGNING_KEY", SECRET_KEY)
+if MAZORY_ENV == "production" and (
+    JWT_SIGNING_KEY == SECRET_KEY
+    or len(JWT_SIGNING_KEY) < 50
+    or len(set(JWT_SIGNING_KEY)) < 16
+    or JWT_SIGNING_KEY.startswith("django-insecure-")
+):
+    raise ImproperlyConfigured("Invalid JWT_SIGNING_KEY")
+ALLOWED_HOSTS = [
+    h.strip()
+    for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,backend").split(",")
+    if h.strip()
+]
+if MAZORY_ENV == "production" and "*" in ALLOWED_HOSTS:
+    raise ImproperlyConfigured("ALLOWED_HOSTS must be explicit")
+SECURE_SSL_REDIRECT = MAZORY_ENV == "production"
+SESSION_COOKIE_SECURE = CSRF_COOKIE_SECURE = MAZORY_ENV == "production"
+SECURE_HSTS_SECONDS = 31536000 if MAZORY_ENV == "production" else 0
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+DATA_UPLOAD_MAX_MEMORY_SIZE = 1024 * 1024
+MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024
+AUTH_REFRESH_COOKIE = "mazory_refresh"
+AUTH_COOKIE_SECURE = MAZORY_ENV == "production"
+OTP_PHONE_HOUR_LIMIT = 5
+OTP_PHONE_DAY_LIMIT = 10
+OTP_IP_HOUR_LIMIT = 30
+INTEGRATION_TEST_MODE = TESTING and os.getenv("INTEGRATION_TEST_MODE") == "1"
+ADMIN_MFA_REQUIRED = MAZORY_ENV == "production"
+MFA_ENCRYPTION_KEY = os.getenv("MFA_ENCRYPTION_KEY", "")
+if MAZORY_ENV == "production" and not MFA_ENCRYPTION_KEY:
+    raise ImproperlyConfigured("MFA_ENCRYPTION_KEY is required")
+PROVIDER_ALLOWED_HOSTS = [
+    h
+    for h in os.getenv(
+        "PROVIDER_ALLOWED_HOSTS", "openrouter.ai,aquakip.bitrix24.kz"
+    ).split(",")
+    if h
+]
 
 # CSRF & Reverse Proxy settings (поддержка localhost, ai.mazory.best и Nginx)
 CSRF_TRUSTED_ORIGINS = [
-    'http://localhost',
-    'http://localhost:8080',
-    'http://localhost:8000',
-    'http://localhost:5173',
-    'http://127.0.0.1',
-    'http://127.0.0.1:8080',
-    'http://127.0.0.1:8000',
-    'http://127.0.0.1:5173',
-    'https://localhost',
-    'https://127.0.0.1',
-    'https://ai.mazory.best',
-    'http://ai.mazory.best',
+    "http://localhost",
+    "http://localhost:8080",
+    "http://localhost:8000",
+    "http://localhost:5173",
+    "http://127.0.0.1",
+    "http://127.0.0.1:8080",
+    "http://127.0.0.1:8000",
+    "http://127.0.0.1:5173",
+    "https://localhost",
+    "https://127.0.0.1",
+    "https://ai.mazory.best",
+    "http://ai.mazory.best",
 ]
-extra_csrf = os.getenv('CSRF_TRUSTED_ORIGINS', '')
+extra_csrf = os.getenv("CSRF_TRUSTED_ORIGINS", "")
 if extra_csrf:
-    CSRF_TRUSTED_ORIGINS.extend([origin.strip() for origin in extra_csrf.split(',') if origin.strip()])
+    CSRF_TRUSTED_ORIGINS.extend(
+        [origin.strip() for origin in extra_csrf.split(",") if origin.strip()]
+    )
 
 # Поддержка заголовков проксирования Nginx
-SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 USE_X_FORWARDED_HOST = True
 USE_X_FORWARDED_PORT = True
 
 # Application definition - UNFOLD must be before django.contrib.admin
 INSTALLED_APPS = [
-    'unfold',
-    'unfold.contrib.filters',
-    'unfold.contrib.forms',
-    'unfold.contrib.inlines',
-    'django.contrib.admin',
-    'django.contrib.auth',
-    'django.contrib.contenttypes',
-    'django.contrib.sessions',
-    'django.contrib.messages',
-    'django.contrib.staticfiles',
+    "unfold",
+    "unfold.contrib.filters",
+    "unfold.contrib.forms",
+    "unfold.contrib.inlines",
+    "django.contrib.admin",
+    "django.contrib.auth",
+    "django.contrib.contenttypes",
+    "django.contrib.sessions",
+    "django.contrib.messages",
+    "django.contrib.staticfiles",
     # Third party
-    'rest_framework',
-    'rest_framework_simplejwt',
-    'corsheaders',
-    'django_q',
+    "rest_framework",
+    "rest_framework_simplejwt",
+    "corsheaders",
+    "django_q",
     # Local apps
-    'api.apps.ApiConfig',
+    "api.apps.ApiConfig",
 ]
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',
-    'django.middleware.security.SecurityMiddleware',
-    'django.contrib.sessions.middleware.SessionMiddleware',
-    'django.middleware.common.CommonMiddleware',
-    'django.middleware.csrf.CsrfViewMiddleware',
-    'django.contrib.auth.middleware.AuthenticationMiddleware',
-    'django.contrib.messages.middleware.MessageMiddleware',
-    'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    "corsheaders.middleware.CorsMiddleware",
+    "django.middleware.security.SecurityMiddleware",
+    "api.security.SecurityHeadersMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "api.mfa.AdminMFAMiddleware",
+    "django.contrib.messages.middleware.MessageMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
 if DEBUG:
@@ -80,43 +147,46 @@ if DEBUG:
 else:
     CORS_ALLOW_ALL_ORIGINS = False
     CORS_ALLOWED_ORIGINS = [
-        'https://ai.mazory.best',
-        'http://ai.mazory.best',
-        'http://localhost:5173',
-        'http://127.0.0.1:5173',
-        'http://localhost:8080',
-        'http://127.0.0.1:8080',
+        "https://ai.mazory.best",
+        "http://ai.mazory.best",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "http://localhost:8080",
+        "http://127.0.0.1:8080",
     ]
-    extra_cors = os.getenv('CORS_ALLOWED_ORIGINS', '')
+    extra_cors = os.getenv("CORS_ALLOWED_ORIGINS", "")
     if extra_cors:
-        CORS_ALLOWED_ORIGINS.extend([origin.strip() for origin in extra_cors.split(',') if origin.strip()])
+        CORS_ALLOWED_ORIGINS.extend(
+            [origin.strip() for origin in extra_cors.split(",") if origin.strip()]
+        )
 CORS_ALLOW_CREDENTIALS = True
 
-ROOT_URLCONF = 'mazory_backend.urls'
+ROOT_URLCONF = "mazory_backend.urls"
 
 TEMPLATES = [
     {
-        'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'templates'],
-        'APP_DIRS': True,
-        'OPTIONS': {
-            'context_processors': [
-                'django.template.context_processors.request',
-                'django.contrib.auth.context_processors.auth',
-                'django.contrib.messages.context_processors.messages',
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "DIRS": [BASE_DIR / "templates"],
+        "APP_DIRS": True,
+        "OPTIONS": {
+            "context_processors": [
+                "django.template.context_processors.request",
+                "django.contrib.auth.context_processors.auth",
+                "django.contrib.messages.context_processors.messages",
             ],
         },
     },
 ]
 
-WSGI_APPLICATION = 'mazory_backend.wsgi.application'
+WSGI_APPLICATION = "mazory_backend.wsgi.application"
 
 # Database
-POSTGRES_DB = os.getenv('POSTGRES_DB', 'mazory_db')
-POSTGRES_USER = os.getenv('POSTGRES_USER', 'mazory')
-POSTGRES_PASSWORD = os.getenv('POSTGRES_PASSWORD', 'mazory2026')
+POSTGRES_DB = os.getenv("POSTGRES_DB", "mazory_db")
+POSTGRES_USER = os.getenv("POSTGRES_USER", "mazory")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "")
 
 import socket
+
 
 def _can_resolve(host: str) -> bool:
     try:
@@ -125,52 +195,59 @@ def _can_resolve(host: str) -> bool:
     except Exception:
         return False
 
-POSTGRES_HOST = os.getenv('POSTGRES_HOST')
+
+POSTGRES_HOST = os.getenv("POSTGRES_HOST")
 if not POSTGRES_HOST:
-    POSTGRES_HOST = 'postgres' if _can_resolve('postgres') else '127.0.0.1'
+    POSTGRES_HOST = "postgres" if _can_resolve("postgres") else "127.0.0.1"
 
-POSTGRES_PORT = os.getenv('POSTGRES_PORT')
+POSTGRES_PORT = os.getenv("POSTGRES_PORT")
 if not POSTGRES_PORT:
-    POSTGRES_PORT = '5432' if POSTGRES_HOST == 'postgres' else '5434'
+    POSTGRES_PORT = "5432" if POSTGRES_HOST == "postgres" else "5434"
 
-if ('test' in sys.argv or os.getenv('USE_SQLITE') == '1') and not os.getenv('FORCE_POSTGRES_TEST'):
+if ("test" in sys.argv or os.getenv("USE_SQLITE") == "1") and not os.getenv(
+    "FORCE_POSTGRES_TEST"
+):
     DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3' if os.getenv('USE_SQLITE') == '1' else ':memory:',
+        "default": {
+            "ENGINE": "django.db.backends.sqlite3",
+            "NAME": BASE_DIR / "db.sqlite3"
+            if os.getenv("USE_SQLITE") == "1"
+            else ":memory:",
         }
     }
 else:
     DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.postgresql',
-            'NAME': POSTGRES_DB,
-            'USER': POSTGRES_USER,
-            'PASSWORD': POSTGRES_PASSWORD,
-            'HOST': POSTGRES_HOST,
-            'PORT': POSTGRES_PORT,
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": POSTGRES_DB,
+            "USER": POSTGRES_USER,
+            "PASSWORD": POSTGRES_PASSWORD,
+            "HOST": POSTGRES_HOST,
+            "PORT": POSTGRES_PORT,
         }
     }
 
-QDRANT_URL = os.getenv('QDRANT_URL')
+QDRANT_URL = os.getenv("QDRANT_URL")
 if not QDRANT_URL:
-    QDRANT_URL = 'http://qdrant:6333' if _can_resolve('qdrant') else 'http://127.0.0.1:6333'
+    QDRANT_URL = (
+        "http://qdrant:6333" if _can_resolve("qdrant") else "http://127.0.0.1:6333"
+    )
 
-QDRANT_COLLECTION = os.getenv('QDRANT_COLLECTION', 'mazory_messages')
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "mazory_messages")
 
 # Internationalization
-LANGUAGE_CODE = 'ru'
-TIME_ZONE = 'Asia/Almaty'
+LANGUAGE_CODE = "ru"
+TIME_ZONE = "Asia/Almaty"
 USE_I18N = True
 USE_TZ = True
 
 # Static files
-STATIC_URL = '/static/'
-STATIC_ROOT = BASE_DIR / 'staticfiles'
-STATICFILES_DIRS = [BASE_DIR / 'static']
+STATIC_URL = "/static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STATICFILES_DIRS = [BASE_DIR / "static"]
 
-MEDIA_URL = '/media/'
-MEDIA_ROOT = BASE_DIR / 'media'
+MEDIA_URL = "/private-media/"
+MEDIA_ROOT = BASE_DIR / "media"
 
 # Unfold Admin Settings
 UNFOLD = {
@@ -313,49 +390,121 @@ UNFOLD = {
     },
 }
 
-REDIS_HOST = os.getenv('REDIS_HOST')
+REDIS_HOST = os.getenv("REDIS_HOST")
 if not REDIS_HOST:
-    REDIS_HOST = 'redis' if _can_resolve('redis') else '127.0.0.1'
+    REDIS_HOST = "redis" if _can_resolve("redis") else "127.0.0.1"
 
-REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
-WAHA_API_URL = os.getenv('WAHA_API_URL', 'http://waha:3000')
-WAHA_API_KEY = os.getenv('WAHA_API_KEY', 'mazory-waha-key-2026')
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+WAHA_API_URL = os.getenv("WAHA_API_URL", "http://waha:3000")
+WAHA_API_KEY = os.getenv("WAHA_API_KEY", "")
 
 CACHES = {
-    'default': {
-        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
-        'LOCATION': f'redis://{REDIS_HOST}:{REDIS_PORT}/1',
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/1",
     }
 }
 
 Q_CLUSTER = {
-    'name': 'mazory_q',
-    'workers': 2,
-    'recycle': 500,
-    'timeout': 60,
-    'retry': 120,
-    'sync': 'test' in sys.argv,
-    'redis': {
-        'host': REDIS_HOST,
-        'port': REDIS_PORT,
-        'db': 0,
-    }
+    "name": "mazory_q",
+    "workers": 2,
+    "max_attempts": 3,
+    "ack_failures": True,
+    "ALT_CLUSTERS": {
+        "delivery": {"workers": 2, "timeout": 30, "retry": 60},
+        "ai": {"workers": 2, "timeout": 180, "retry": 240},
+        "crm": {"workers": 1, "timeout": 90, "retry": 120},
+    },
+    "recycle": 500,
+    "timeout": 180,
+    "retry": 240,
+    "sync": "test" in sys.argv,
+    "redis": {
+        "host": REDIS_HOST,
+        "port": REDIS_PORT,
+        "db": 0,
+    },
 }
 
 REST_FRAMEWORK = {
-    'DEFAULT_AUTHENTICATION_CLASSES': (
-        'rest_framework_simplejwt.authentication.JWTAuthentication',
-    ),
-    'DEFAULT_PERMISSION_CLASSES': (
-        'rest_framework.permissions.IsAuthenticated',
-    ),
+    "DEFAULT_RENDERER_CLASSES": ["api.renderers.ExactJSONRenderer"],
+    "EXCEPTION_HANDLER": "api.security.api_exception_handler",
+    "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
+    "PAGE_SIZE": 50,
+    "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.UserRateThrottle"],
+    "DEFAULT_THROTTLE_RATES": {"user": "120/min"},
+    "DEFAULT_AUTHENTICATION_CLASSES": ("api.authentication.SessionJWTAuthentication",),
+    "DEFAULT_PERMISSION_CLASSES": ("rest_framework.permissions.IsAuthenticated",),
 }
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=7),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
-    'ROTATE_REFRESH_TOKENS': False,
-    'ALGORITHM': 'HS256',
-    'SIGNING_KEY': SECRET_KEY,
-    'AUTH_HEADER_TYPES': ('Bearer',),
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=30),
+    "ROTATE_REFRESH_TOKENS": True,
+    "ALGORITHM": "HS256",
+    "SIGNING_KEY": JWT_SIGNING_KEY,
+    "AUTH_HEADER_TYPES": ("Bearer",),
 }
+
+BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL", "")
+BITRIX_INBOUND_TOKEN = os.getenv("BITRIX_INBOUND_TOKEN", "")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
+TRANSCRIPTION_URL = os.getenv("TRANSCRIPTION_URL", "")
+OCR_URL = os.getenv("OCR_URL", "")
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {"redact": {"()": "api.security.RedactFilter"}},
+    "handlers": {"console": {"class": "logging.StreamHandler", "filters": ["redact"]}},
+    "root": {"handlers": ["console"], "level": "INFO"},
+}
+if MAZORY_ENV == "production":
+    CSRF_TRUSTED_ORIGINS = [
+        x for x in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if x
+    ]
+    CORS_ALLOWED_ORIGINS = [
+        x for x in os.getenv("CORS_ALLOWED_ORIGINS", "").split(",") if x
+    ]
+    CORS_ALLOW_ALL_ORIGINS = False
+if TESTING and os.getenv("TEST_CACHE", "memory") == "memory":
+    CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+
+WAHA_WEBHOOK_SECRET = os.getenv("WAHA_WEBHOOK_SECRET", "")
+BITRIX_TEAM_ID = int(os.getenv("BITRIX_TEAM_ID", "0"))
+
+MEDIA_PROVIDER_KEY = os.getenv("MEDIA_PROVIDER_KEY", "")
+if TESTING:
+    ALLOWED_HOSTS += ["testserver", "backend"]
+SECURE_PROXY_SSL_HEADER = (
+    ("HTTP_X_FORWARDED_PROTO", "https") if MAZORY_ENV == "production" else None
+)
+
+if MAZORY_ENV == "production":
+    ALLOWED_HOSTS += ["backend"]
+    SECURE_REDIRECT_EXEMPT = [r"^api/whatsapp/webhook/$", r"^api/health/(live|ready)/$"]
+
+# Costs are provider-reported; missing prices remain unknown. Limits bound future calls.
+from decimal import Decimal
+
+AI_DAILY_REQUEST_LIMIT = int(os.getenv("AI_DAILY_REQUEST_LIMIT", "1000"))
+AI_DAILY_BUDGET_USD = Decimal(os.getenv("AI_DAILY_BUDGET_USD", "20"))
+
+TRUSTED_PROXY_CIDRS = [
+    value for value in os.getenv("TRUSTED_PROXY_CIDRS", "").split(",") if value
+]
+
+# Exact local-stage -> provider-stage IDs; each CRM pipeline supplies its own map.
+import json
+
+try:
+    BITRIX_STAGE_MAP = json.loads(os.getenv("BITRIX_STAGE_MAP", "") or "{}")
+    if not isinstance(BITRIX_STAGE_MAP, dict) or any(
+        not isinstance(k, str) or not isinstance(v, str) or not v
+        for k, v in BITRIX_STAGE_MAP.items()
+    ):
+        raise ValueError()
+except (ValueError, TypeError):
+    raise ImproperlyConfigured(
+        "BITRIX_STAGE_MAP must be a JSON object of stage strings"
+    ) from None

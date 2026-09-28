@@ -1,0 +1,11 @@
+[Unit]
+Description=Mazory encrypted database and private media backup
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mazory
+EnvironmentFile=/etc/mazory/backup.env
+ExecStart=/usr/bin/bash /opt/mazory/ops/backup.sh
+UMask=0077
+NoNewPrivileges=true

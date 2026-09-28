@@ -24,7 +24,7 @@
         <div class="p-6 rounded-3xl bg-[#0b1226]/85 backdrop-blur-xl border border-[#2d3a63]/50 shadow-2xl flex flex-col items-center text-center">
           <div class="relative mb-3.5">
             <img
-              :src="profile.avatar_url"
+              :src="profile.avatar_url" v-if="profile.avatar_url"
               :alt="profile.full_name"
               class="w-20 h-20 rounded-3xl object-cover ring-2 ring-indigo-500/60 shadow-xl"
             />
@@ -45,11 +45,11 @@
           <div class="w-full mt-5 pt-4 border-t border-slate-700/40 grid grid-cols-2 gap-2 text-left">
             <div>
               <div class="text-[10px] text-slate-400 uppercase">План продаж</div>
-              <div class="text-sm font-bold text-emerald-400 mt-0.5">{{ profile.kpi_percent }}%</div>
+              <div class="text-sm font-bold text-emerald-400 mt-0.5">{{ profile.kpi_percent === null ? 'Не определено' : `${profile.kpi_percent}%` }}</div>
             </div>
             <div>
-              <div class="text-[10px] text-slate-400 uppercase">Место в топе</div>
-              <div class="text-sm font-bold text-amber-300 mt-0.5">#{{ profile.rank_in_team }} 👑</div>
+              <div class="text-[10px] text-slate-400 uppercase">Проектов</div>
+              <div class="text-sm font-bold text-amber-300 mt-0.5">{{ profile.deals_count }}</div>
             </div>
           </div>
         </div>
@@ -165,8 +165,8 @@ const activeTabComponent = computed(() => {
   }
 })
 
-function handleLogout() {
-  logout()
+async function handleLogout() {
+  await logout()
   clearNotifications()
   emit('loggedOut')
 }

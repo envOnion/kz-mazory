@@ -5,6 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "cryptography>=46.0.0",
+    "gunicorn>=23.0.0",
     "django>=6.1.1",
     "django-cors-headers>=4.9.0",
     "django-q2>=1.11.1",

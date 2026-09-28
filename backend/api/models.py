@@ -1,27 +1,33 @@
 from decimal import Decimal
 from django.db import models
+from django.conf import settings
+from django.utils import timezone
 from django.contrib.auth.models import User
 from .deduplication import normalize_deal_name
 
+
 class UserProfile(models.Model):
-    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='profile')
-    full_name = models.CharField(max_length=255, default='Камиль')
-    role = models.CharField(max_length=255, default='Ведущий менеджер по продажам')
-    department = models.CharField(max_length=255, default='Отдел продаж Aqua Kip')
-    email = models.EmailField(blank=True, default='kamil@aquakip.kz')
-    phone = models.CharField(max_length=32, blank=True, default='+7 (701) 123-45-67')
-    avatar_url = models.URLField(
-        blank=True,
-        default='https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=250&q=80'
-    )
-    
+    user = models.OneToOneField(User, on_delete=models.PROTECT, related_name="profile")
+    full_name = models.CharField(max_length=255, default="")
+    role = models.CharField(max_length=255, default="")
+    department = models.CharField(max_length=255, default="")
+    email = models.EmailField(blank=True, default="")
+    phone = models.CharField(max_length=32, blank=True, default="")
+    avatar_url = models.URLField(blank=True, default="")
+
+    timezone = models.CharField(max_length=64, default="Asia/Almaty")
+    notification_preferences = models.JSONField(default=dict, blank=True)
+
+    # Legacy display fields; all new calculations use the approved ledger.
     # Personal Sales KPI
-    bitrix_user_id = models.CharField('Bitrix24 User ID', max_length=64, blank=True, null=True, db_index=True)
-    monthly_target = models.DecimalField(max_digits=14, decimal_places=2, default=50000000.00)
-    current_sales = models.DecimalField(max_digits=14, decimal_places=2, default=31790000.00)
-    deals_count = models.IntegerField(default=15)
-    rank_in_team = models.IntegerField(default=1)
-    conversion_rate = models.DecimalField(max_digits=5, decimal_places=2, default=35.00)
+    bitrix_user_id = models.CharField(
+        "Bitrix24 User ID", max_length=64, blank=True, null=True, db_index=True
+    )
+    monthly_target = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    current_sales = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    deals_count = models.IntegerField(default=0)
+    rank_in_team = models.IntegerField(default=0)
+    conversion_rate = models.DecimalField(max_digits=5, decimal_places=2, default=0)
 
     # WhatsApp Notifications via WAHA
     whatsapp_daily_digest = models.BooleanField(default=True)
@@ -30,18 +36,20 @@ class UserProfile(models.Model):
 
     # AI Mazory Settings
     AI_MODE_CHOICES = [
-        ('detailed', 'Подробный с аналитикой и инсайтами'),
-        ('concise', 'Лаконичный (Bullet points)'),
-        ('finance', 'Финансовый (Только цифры и таблицы)'),
+        ("detailed", "Подробный с аналитикой и инсайтами"),
+        ("concise", "Лаконичный (Bullet points)"),
+        ("finance", "Финансовый (Только цифры и таблицы)"),
     ]
-    ai_response_mode = models.CharField(max_length=32, choices=AI_MODE_CHOICES, default='detailed')
+    ai_response_mode = models.CharField(
+        max_length=32, choices=AI_MODE_CHOICES, default="detailed"
+    )
     ai_auto_suggest_next_actions = models.BooleanField(default=True)
 
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = 'Профиль пользователя'
-        verbose_name_plural = 'Профили пользователей'
+        verbose_name = "Профиль пользователя"
+        verbose_name_plural = "Профили пользователей"
 
     def __str__(self):
         return f"{self.full_name} ({self.user.username})"
@@ -49,7 +57,9 @@ class UserProfile(models.Model):
     @property
     def kpi_percent(self):
         if self.monthly_target and self.monthly_target > 0:
-            return round((float(self.current_sales) / float(self.monthly_target)) * 100, 1)
+            return round(
+                (float(self.current_sales) / float(self.monthly_target)) * 100, 1
+            )
         return 0.0
 
 
@@ -57,26 +67,31 @@ class Company(models.Model):
     """
     Контрагенты: застройщики, девелоперы, генподрядчики, проектные институты.
     """
+
     CLIENT_TYPE_CHOICES = [
-        ('private', 'Частный девелопер'),
-        ('state', 'Государственный заказчик'),
-        ('quasi_state', 'Квазигосударственный сектор'),
-        ('contractor', 'Генподрядчик / Монтажники'),
-        ('designer', 'Проектная организация'),
-        ('other', 'Прочее'),
+        ("private", "Частный девелопер"),
+        ("state", "Государственный заказчик"),
+        ("quasi_state", "Квазигосударственный сектор"),
+        ("contractor", "Генподрядчик / Монтажники"),
+        ("designer", "Проектная организация"),
+        ("other", "Прочее"),
     ]
     name = models.CharField(max_length=255, unique=True)
-    bitrix_company_id = models.CharField(max_length=64, blank=True, null=True, db_index=True)
-    client_type = models.CharField(max_length=32, choices=CLIENT_TYPE_CHOICES, default='private')
-    contact_person = models.CharField(max_length=255, blank=True, default='')
-    phone = models.CharField(max_length=64, blank=True, default='')
-    notes = models.TextField(blank=True, default='')
+    bitrix_company_id = models.CharField(
+        max_length=64, blank=True, null=True, db_index=True
+    )
+    client_type = models.CharField(
+        max_length=32, choices=CLIENT_TYPE_CHOICES, default="private"
+    )
+    contact_person = models.CharField(max_length=255, blank=True, default="")
+    phone = models.CharField(max_length=64, blank=True, default="")
+    notes = models.TextField(blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        verbose_name = 'Компания'
-        verbose_name_plural = 'Компании'
-        ordering = ['name']
+        verbose_name = "Компания"
+        verbose_name_plural = "Компании"
+        ordering = ["name"]
 
     def __str__(self):
         return self.name
@@ -86,87 +101,162 @@ class Project(models.Model):
     """
     Объекты / сделки компании Aqua Kip (соответствуют crm_deal).
     """
+
     STATUS_CHOICES = [
-        ('lead', 'Лид / Первичный контакт'),
-        ('qualification', 'Квалификация / Сбор ТЗ'),
-        ('design', 'Проектирование / Экспертиза'),
-        ('proposal_sent', 'КП отправлено'),
-        ('contract_signing', 'Согласование / Договор'),
-        ('in_execution', 'В исполнении / Производство / Монтаж'),
-        ('completed', 'Завершен / Сдан'),
-        ('stalled', 'Завис / Требует внимания'),
-        ('lost', 'Проигран / Архив'),
+        ("lead", "Лид / Первичный контакт"),
+        ("qualification", "Квалификация / Сбор ТЗ"),
+        ("design", "Проектирование / Экспертиза"),
+        ("proposal_sent", "КП отправлено"),
+        ("contract_signing", "Согласование / Договор"),
+        ("in_execution", "В исполнении / Производство / Монтаж"),
+        ("completed", "Завершен / Сдан"),
+        ("stalled", "Завис / Требует внимания"),
+        ("lost", "Проигран / Архив"),
     ]
     PROJECT_TYPE_CHOICES = [
-        ('private', 'Частный'),
-        ('state', 'Государственный'),
-        ('quasi_state', 'Квазигосударственный'),
+        ("private", "Частный"),
+        ("state", "Государственный"),
+        ("quasi_state", "Квазигосударственный"),
     ]
     PRIORITY_CHOICES = [
-        ('A+++', 'A+++ Стратегический'),
-        ('A++', 'A++ Высокий'),
-        ('A+', 'A+ Приоритетный'),
-        ('standard', 'Стандартный'),
+        ("A+++", "A+++ Стратегический"),
+        ("A++", "A++ Высокий"),
+        ("A+", "A+ Приоритетный"),
+        ("standard", "Стандартный"),
     ]
 
     SOURCE_CHOICES = [
-        ('chat', 'WhatsApp Чат'),
-        ('bitrix_crm', 'Bitrix24 CRM'),
-        ('manual', 'Ручной ввод'),
+        ("chat", "WhatsApp Чат"),
+        ("bitrix_crm", "Bitrix24 CRM"),
+        ("manual", "Ручной ввод"),
     ]
 
-    name = models.CharField('Название объекта', max_length=255, db_index=True)
-    normalized_name = models.CharField('Каноническое название для дедупликации', max_length=255, db_index=True, blank=True, default='')
-    source = models.CharField('Источник сделки', max_length=32, choices=SOURCE_CHOICES, default='chat')
-    bitrix_id = models.CharField('Bitrix24 ID сделки', max_length=64, blank=True, null=True, unique=True)
-    contract_number = models.CharField('Номер договора', max_length=255, blank=True, default='')
-    deal_period = models.CharField('Период сделки', max_length=128, blank=True, default='')
-    
-    company = models.ForeignKey(Company, on_delete=models.SET_NULL, null=True, blank=True, related_name='projects', verbose_name='Компания')
-    manager = models.ForeignKey(UserProfile, on_delete=models.SET_NULL, null=True, blank=True, related_name='projects', verbose_name='Менеджер')
-    project_type = models.CharField('Тип заказчика', max_length=32, choices=PROJECT_TYPE_CHOICES, default='private')
-    status = models.CharField('Статус сделки', max_length=64, choices=STATUS_CHOICES, default='qualification')
-    
-    # Синхронизация с Bitrix24
-    needs_bitrix_sync = models.BooleanField('Требует синхронизации с Bitrix24', default=False, db_index=True)
-    last_chat_activity_at = models.DateTimeField('Время последней активности в чате', null=True, blank=True)
-    last_bitrix_synced_at = models.DateTimeField('Время последней синхронизации с Bitrix24', null=True, blank=True)
-    is_verified = models.BooleanField(
-        'Проверено',
-        default=True,
+    name = models.CharField("Название объекта", max_length=255, db_index=True)
+    normalized_name = models.CharField(
+        "Каноническое название для дедупликации",
+        max_length=255,
         db_index=True,
-        help_text='Подтверждена ли достоверность данных сделки. Непроверенные сделки исключаются из аналитики и синхронизации с CRM.'
+        blank=True,
+        default="",
+    )
+    source = models.CharField(
+        "Источник сделки", max_length=32, choices=SOURCE_CHOICES, default="chat"
+    )
+    bitrix_id = models.CharField(
+        "Bitrix24 ID сделки", max_length=64, blank=True, null=True, unique=True
+    )
+    contract_number = models.CharField(
+        "Номер договора", max_length=255, blank=True, default=""
+    )
+    deal_period = models.CharField(
+        "Период сделки", max_length=128, blank=True, default=""
+    )
+
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="projects",
+        verbose_name="Компания",
+    )
+    manager = models.ForeignKey(
+        UserProfile,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="projects",
+        verbose_name="Менеджер",
+    )
+    project_type = models.CharField(
+        "Тип заказчика", max_length=32, choices=PROJECT_TYPE_CHOICES, default="private"
+    )
+    status = models.CharField(
+        "Статус сделки", max_length=64, choices=STATUS_CHOICES, default="qualification"
+    )
+
+    team = models.ForeignKey("Team", on_delete=models.PROTECT, null=True, blank=True)
+    version = models.PositiveIntegerField(default=0)
+    cost_confirmed = models.BooleanField(default=False)
+    currency = models.CharField(max_length=3, default="KZT")
+    archived = models.BooleanField(default=False)
+
+    # Синхронизация с Bitrix24
+    needs_bitrix_sync = models.BooleanField(
+        "Требует синхронизации с Bitrix24", default=False, db_index=True
+    )
+    last_chat_activity_at = models.DateTimeField(
+        "Время последней активности в чате", null=True, blank=True
+    )
+    last_bitrix_synced_at = models.DateTimeField(
+        "Время последней синхронизации с Bitrix24", null=True, blank=True
+    )
+    is_verified = models.BooleanField(
+        "Проверено",
+        default=False,
+        db_index=True,
+        help_text="Подтверждена ли достоверность данных сделки. Непроверенные сделки исключаются из аналитики и синхронизации с CRM.",
     )
 
     # Финансовые показатели (тенге ₸)
-    contract_amount = models.DecimalField('Сумма Договора ₸', max_digits=14, decimal_places=2, default=0.00)
-    cost_amount = models.DecimalField('Себестоимость ₸', max_digits=14, decimal_places=2, default=0.00)
-    target_margin_percent = models.DecimalField('Плановая маржа %', max_digits=10, decimal_places=2, default=16.80)
-    actual_margin_percent = models.DecimalField('Фактическая маржа %', max_digits=10, decimal_places=2, default=0.00)
-    paid_amount = models.DecimalField('Оплачено ₸', max_digits=14, decimal_places=2, default=0.00)
-    due_amount = models.DecimalField('Остаток / Дебиторка ₸', max_digits=14, decimal_places=2, default=0.00)
-    guarantee_amount = models.DecimalField('Гарантийные оплаты ₸', max_digits=14, decimal_places=2, default=0.00)
-    barter_amount = models.DecimalField('Сумма бартера ₸', max_digits=14, decimal_places=2, default=0.00)
-    avr_status = models.CharField('Накладные / АВР', max_length=64, default='Не закрыт')
+    contract_amount = models.DecimalField(
+        "Сумма Договора ₸", max_digits=14, decimal_places=2, default=0.00
+    )
+    cost_amount = models.DecimalField(
+        "Себестоимость ₸", max_digits=14, decimal_places=2, default=0.00
+    )
+    target_margin_percent = models.DecimalField(
+        "Плановая маржа %", max_digits=10, decimal_places=2, default=0
+    )
+    actual_margin_percent = models.DecimalField(
+        "Фактическая маржа %", max_digits=20, decimal_places=2, default=0.00
+    )
+    paid_amount = models.DecimalField(
+        "Оплачено ₸", max_digits=14, decimal_places=2, default=0.00
+    )
+    due_amount = models.DecimalField(
+        "Остаток / Дебиторка ₸", max_digits=14, decimal_places=2, default=0.00
+    )
+    guarantee_amount = models.DecimalField(
+        "Гарантийные оплаты ₸", max_digits=14, decimal_places=2, default=0.00
+    )
+    barter_amount = models.DecimalField(
+        "Сумма бартера ₸", max_digits=14, decimal_places=2, default=0.00
+    )
+    avr_status = models.CharField("Накладные / АВР", max_length=64, default="Не закрыт")
 
-    equipment_type = models.CharField('Оборудование', max_length=255, blank=True, default='БТП')
-    priority = models.CharField('Приоритет', max_length=16, choices=PRIORITY_CHOICES, default='standard')
-    
+    equipment_type = models.CharField(
+        "Оборудование", max_length=255, blank=True, default="БТП"
+    )
+    priority = models.CharField(
+        "Приоритет", max_length=16, choices=PRIORITY_CHOICES, default="standard"
+    )
+
     # Процессные атрибуты
-    current_action = models.TextField('Последнее действие', blank=True, default='')
-    next_action = models.TextField('Следующий шаг', blank=True, default='')
-    next_action_at = models.DateTimeField('Срок следующего действия', null=True, blank=True)
-    decision_maker = models.CharField('ЛПР', max_length=255, blank=True, default='')
-    blocker = models.TextField('Блокер / Проблема', blank=True, default='')
-    notes = models.TextField('Заметки / История', blank=True, default='')
-    
+    current_action = models.TextField("Последнее действие", blank=True, default="")
+    next_action = models.TextField("Следующий шаг", blank=True, default="")
+    next_action_at = models.DateTimeField(
+        "Срок следующего действия", null=True, blank=True
+    )
+    decision_maker = models.CharField("ЛПР", max_length=255, blank=True, default="")
+    blocker = models.TextField("Блокер / Проблема", blank=True, default="")
+    notes = models.TextField("Заметки / История", blank=True, default="")
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = 'Проект / Объект'
-        verbose_name_plural = 'Проекты / Объекты'
-        ordering = ['-contract_amount']
+        verbose_name = "Проект / Объект"
+        verbose_name_plural = "Проекты / Объекты"
+        ordering = ["-contract_amount"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["team", "normalized_name"],
+                condition=models.Q(team__isnull=False, archived=False)
+                & ~models.Q(normalized_name=""),
+                name="project_team_identity_unique",
+            )
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.get_status_display()})"
@@ -178,41 +268,57 @@ class Project(models.Model):
     def save(self, *args, **kwargs):
         if self.name and not self.normalized_name:
             self.normalized_name = normalize_deal_name(self.name)
-        # Автоматический пересчет маржи и дебиторки с защитой от переполнения Decimal(10,2)
-        if self.contract_amount and self.contract_amount > 0:
-            contract_dec = Decimal(str(self.contract_amount))
-            cost_dec = Decimal(str(self.cost_amount)) if self.cost_amount is not None else Decimal('0.00')
-            paid_dec = Decimal(str(self.paid_amount)) if self.paid_amount is not None else Decimal('0.00')
-            profit = contract_dec - cost_dec
-            margin = round((profit / contract_dec) * 100, 2)
-            # Защита от overflow в БД (clamping в диапазон -99999999.99..99999999.99)
-            self.actual_margin_percent = max(Decimal('-99999999.99'), min(Decimal('99999999.99'), margin))
-            self.due_amount = max(Decimal('0.00'), contract_dec - paid_dec)
-        elif self.contract_amount == 0:
-            self.actual_margin_percent = Decimal('0.00')
-            self.due_amount = Decimal('0.00')
+        contract = Decimal(str(self.contract_amount or 0))
+        cost = Decimal(str(self.cost_amount or 0))
+        self.actual_margin_percent = (
+            round((contract - cost) / contract * 100, 2)
+            if self.cost_confirmed and contract
+            else Decimal("0.00")
+        )
+        self.due_amount = contract - Decimal(str(self.paid_amount or 0))
         super().save(*args, **kwargs)
 
 
 class RawMessage(models.Model):
+    project = models.ForeignKey(
+        "Project", null=True, blank=True, on_delete=models.PROTECT
+    )
     """
     Сырые сообщения из WhatsApp-чатов для аудита, векторизации в Qdrant и извлечения сущностей.
     """
-    message_id = models.CharField(max_length=128, unique=True, db_index=True)
-    chat_id = models.CharField(max_length=128, blank=True, default='')
-    sender_phone = models.CharField(max_length=64, blank=True, default='')
-    sender_name = models.CharField(max_length=255, blank=True, default='')
+    team = models.ForeignKey("Team", null=True, blank=True, on_delete=models.PROTECT)
+    message_id = models.CharField(max_length=128, db_index=True)
+    source = models.CharField(max_length=32, default="waha")
+    session_name = models.CharField(max_length=64, default="default")
+    source_revision = models.CharField(max_length=64, default="0")
+    received_at = models.DateTimeField(default=timezone.now)
+    processing_state = models.CharField(
+        max_length=32, default="received", db_index=True
+    )
+    sent_at_known = models.BooleanField(default=True)
+    config = models.ForeignKey(
+        "WhatsAppConfig", null=True, blank=True, on_delete=models.PROTECT
+    )
+    chat_id = models.CharField(max_length=128, blank=True, default="")
+    sender_phone = models.CharField(max_length=64, blank=True, default="")
+    sender_name = models.CharField(max_length=255, blank=True, default="")
     timestamp = models.DateTimeField()
     content = models.TextField()
     raw_payload = models.JSONField(default=dict, blank=True)
-    qdrant_point_id = models.CharField(max_length=64, blank=True, default='')
+    qdrant_point_id = models.CharField(max_length=64, blank=True, default="")
     processed = models.BooleanField(default=False, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        verbose_name = 'Сырое сообщение WhatsApp'
-        verbose_name_plural = 'Сырые сообщения WhatsApp'
-        ordering = ['-timestamp']
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "session_name", "message_id", "source_revision"],
+                name="message_source_revision_unique",
+            )
+        ]
+        verbose_name = "Сырое сообщение WhatsApp"
+        verbose_name_plural = "Сырые сообщения WhatsApp"
+        ordering = ["-timestamp"]
 
     def __str__(self):
         return f"{self.sender_name} [{self.timestamp}]: {self.content[:40]}..."
@@ -222,41 +328,83 @@ class Commitment(models.Model):
     """
     Обещания, дедлайны и поручения, зафиксированные в коммуникациях.
     """
+
     STATUS_CHOICES = [
-        ('pending', 'В работе'),
-        ('fulfilled', 'Выполнено'),
-        ('overdue', 'Просрочено'),
-        ('cancelled', 'Отменено'),
+        ("pending", "В работе"),
+        ("fulfilled", "Выполнено"),
+        ("overdue", "Просрочено"),
+        ("cancelled", "Отменено"),
     ]
     SEVERITY_CHOICES = [
-        ('critical', 'Критический'),
-        ('medium', 'Средний'),
-        ('low', 'Низкий'),
+        ("critical", "Критический"),
+        ("medium", "Средний"),
+        ("low", "Низкий"),
     ]
 
-    project = models.ForeignKey(Project, on_delete=models.CASCADE, null=True, blank=True, related_name='commitments', verbose_name='Объект')
-    manager = models.ForeignKey(UserProfile, on_delete=models.CASCADE, null=True, blank=True, related_name='commitments', verbose_name='Менеджер')
-    source_message = models.ForeignKey(RawMessage, on_delete=models.SET_NULL, null=True, blank=True, related_name='commitments')
-    
-    counterparty_person = models.CharField('Кому обещано / ЛПР', max_length=255, blank=True, default='')
-    commitment_text = models.TextField('Суть обещания')
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="commitments",
+        verbose_name="Объект",
+    )
+    manager = models.ForeignKey(
+        UserProfile,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="commitments",
+        verbose_name="Менеджер",
+    )
+    source_message = models.ForeignKey(
+        RawMessage,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="commitments",
+    )
+
+    candidate = models.OneToOneField(
+        "FactCandidate",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="accepted_commitment",
+    )
+    version = models.PositiveIntegerField(default=1)
+    deadline_at = models.DateTimeField(null=True, blank=True)
+    deadline_precision = models.CharField(max_length=16, default="unknown")
+    original_deadline_at = models.DateTimeField(null=True, blank=True)
+    postponed_reason = models.TextField(blank=True)
+
+    counterparty_person = models.CharField(
+        "Кому обещано / ЛПР", max_length=255, blank=True, default=""
+    )
+    commitment_text = models.TextField("Суть обещания")
     promised_at = models.DateTimeField(auto_now_add=True)
-    deadline = models.DateField('Дедлайн', null=True, blank=True)
-    status = models.CharField('Статус', max_length=32, choices=STATUS_CHOICES, default='pending')
-    severity = models.CharField('Срочность', max_length=16, choices=SEVERITY_CHOICES, default='medium')
-    bitrix_task_id = models.CharField('ID задачи в Bitrix24', max_length=64, blank=True, null=True, db_index=True)
+    deadline = models.DateField("Дедлайн", null=True, blank=True)
+    status = models.CharField(
+        "Статус", max_length=32, choices=STATUS_CHOICES, default="pending"
+    )
+    severity = models.CharField(
+        "Срочность", max_length=16, choices=SEVERITY_CHOICES, default="medium"
+    )
+    bitrix_task_id = models.CharField(
+        "ID задачи в Bitrix24", max_length=64, blank=True, null=True, db_index=True
+    )
     fulfilled_at = models.DateTimeField(null=True, blank=True)
     is_verified = models.BooleanField(
-        'Проверено',
-        default=True,
+        "Проверено",
+        default=False,
         db_index=True,
-        help_text='Подтверждено ли обязательство. Непроверенные задачи не учитываются в SLA и просрочках.'
+        help_text="Подтверждено ли обязательство. Непроверенные задачи не учитываются в SLA и просрочках.",
     )
 
     class Meta:
-        verbose_name = 'Обязательство / Обещание'
-        verbose_name_plural = 'Обязательства / Обещания'
-        ordering = ['deadline', 'id']
+        verbose_name = "Обязательство / Обещание"
+        verbose_name_plural = "Обязательства / Обещания"
+        ordering = ["deadline", "id"]
 
     def __str__(self):
         return f"[{self.status}] {self.commitment_text[:50]} (до {self.deadline})"
@@ -266,37 +414,66 @@ class FinancialRecord(models.Model):
     """
     Факты оплат и финансовые движения по объектам.
     """
+
     PAYMENT_TYPE_CHOICES = [
-        ('advance', 'Аванс'),
-        ('milestone', 'Промежуточный платёж'),
-        ('final', 'Окончательный расчет'),
-        ('barter', 'Взаимозачёт / Бартер'),
-        ('debt_collection', 'Взыскание задолженности'),
+        ("advance", "Аванс"),
+        ("milestone", "Промежуточный платёж"),
+        ("final", "Окончательный расчет"),
+        ("barter", "Взаимозачёт / Бартер"),
+        ("debt_collection", "Взыскание задолженности"),
     ]
     STATUS_CHOICES = [
-        ('expected', 'Ожидается к сбору'),
-        ('received', 'Получено на расчетный счет'),
-        ('delayed', 'Задержка платежа'),
+        ("expected", "Ожидается к сбору"),
+        ("received", "Получено на расчетный счет"),
+        ("delayed", "Задержка платежа"),
     ]
 
-    project = models.ForeignKey(Project, on_delete=models.CASCADE, related_name='financial_records', verbose_name='Объект')
-    amount = models.DecimalField('Сумма ₸', max_digits=14, decimal_places=2)
-    payment_date = models.DateField('Дата платежа')
-    payment_type = models.CharField('Тип платежа', max_length=32, choices=PAYMENT_TYPE_CHOICES, default='milestone')
-    status = models.CharField('Статус', max_length=32, choices=STATUS_CHOICES, default='received')
-    notes = models.TextField('Комментарий / Основание', blank=True, default='')
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.PROTECT,
+        related_name="financial_records",
+        verbose_name="Объект",
+    )
+    candidate = models.OneToOneField(
+        "FactCandidate",
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="accepted_payment",
+    )
+    source_key = models.CharField(max_length=255, null=True, blank=True, unique=True)
+    reverses = models.ForeignKey(
+        "self", null=True, blank=True, on_delete=models.PROTECT
+    )
+    credited_profile = models.ForeignKey(
+        UserProfile,
+        null=True,
+        blank=True,
+        on_delete=models.PROTECT,
+        related_name="credited_payments",
+    )
+    currency = models.CharField(max_length=3, default="KZT")
+    amount = models.DecimalField("Сумма ₸", max_digits=14, decimal_places=2)
+    payment_date = models.DateField("Дата платежа")
+    payment_type = models.CharField(
+        "Тип платежа", max_length=32, choices=PAYMENT_TYPE_CHOICES, default="milestone"
+    )
+    status = models.CharField(
+        "Статус", max_length=32, choices=STATUS_CHOICES, default="received"
+    )
+    notes = models.TextField("Комментарий / Основание", blank=True, default="")
     is_verified = models.BooleanField(
-        'Проверено',
-        default=True,
+        "Проверено",
+        default=False,
         db_index=True,
-        help_text='Подтвержден ли факт оплаты. Непроверенные оплаты не учитываются в сборе денег и выполнении планов.'
+        help_text="Подтвержден ли факт оплаты. Непроверенные оплаты не учитываются в сборе денег и выполнении планов.",
     )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        verbose_name = 'Финансовая запись'
-        verbose_name_plural = 'Финансовые записи'
-        ordering = ['-payment_date']
+        verbose_name = "Финансовая запись"
+        verbose_name_plural = "Финансовые записи"
+        ordering = ["-payment_date"]
 
     def __str__(self):
         return f"{self.project.name}: {self.amount:,.2f} ₸ ({self.status})"
@@ -306,24 +483,44 @@ class BusinessEvent(models.Model):
     """
     Бизнес-события: изменение цены, срыв сроков, критические инциденты.
     """
+
     SEVERITY_CHOICES = [
-        ('info', 'Инфо'),
-        ('warning', 'Внимание'),
-        ('critical', 'Критично'),
+        ("info", "Инфо"),
+        ("warning", "Внимание"),
+        ("critical", "Критично"),
     ]
 
+    deduplication_key = models.CharField(
+        max_length=255, null=True, blank=True, unique=True
+    )
     event_type = models.CharField(max_length=64)
-    project = models.ForeignKey(Project, on_delete=models.CASCADE, null=True, blank=True, related_name='events', verbose_name='Объект')
-    manager = models.ForeignKey(UserProfile, on_delete=models.CASCADE, null=True, blank=True, related_name='events', verbose_name='Менеджер')
-    title = models.CharField('Заголовок', max_length=255)
-    description = models.TextField('Описание', blank=True, default='')
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="events",
+        verbose_name="Объект",
+    )
+    manager = models.ForeignKey(
+        UserProfile,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="events",
+        verbose_name="Менеджер",
+    )
+    title = models.CharField("Заголовок", max_length=255)
+    description = models.TextField("Описание", blank=True, default="")
     timestamp = models.DateTimeField(auto_now_add=True)
-    severity = models.CharField('Важность', max_length=16, choices=SEVERITY_CHOICES, default='info')
+    severity = models.CharField(
+        "Важность", max_length=16, choices=SEVERITY_CHOICES, default="info"
+    )
 
     class Meta:
-        verbose_name = 'Бизнес-событие'
-        verbose_name_plural = 'Бизнес-события'
-        ordering = ['-timestamp']
+        verbose_name = "Бизнес-событие"
+        verbose_name_plural = "Бизнес-события"
+        ordering = ["-timestamp"]
 
     def __str__(self):
         return f"[{self.severity}] {self.title}"
@@ -333,54 +530,87 @@ class BusinessEvent(models.Model):
 # Dynamic Configurations Managed via Django Admin
 # ============================================================================
 
+
 class WhatsAppConfig(models.Model):
     """
     Настройки интеграции с WAHA и отслеживаемой группы WhatsApp.
     """
-    name = models.CharField('Название чата / группы', max_length=255, default='КОМАНДА ПОДДЕРЖКИ ПРОДАЖ')
-    group_jid = models.CharField('WhatsApp Group JID', max_length=128, default='120363024823904923@g.us', help_text='Например: 120363024823904923@g.us')
-    session_name = models.CharField('Имя сессии в WAHA', max_length=64, default='default')
-    waha_api_url = models.CharField('URL WAHA API', max_length=255, default='http://waha:3000')
-    waha_api_key = models.CharField('WAHA API Key', max_length=128, default='mazory-waha-key-2026', blank=True)
-    is_active = models.BooleanField('Мониторинг активен', default=True)
-    status = models.CharField('Статус подключения', max_length=32, default='WORKING')
-    last_qr_code = models.TextField('QR-код (base64)', blank=True, default='')
+
+    team = models.ForeignKey("Team", on_delete=models.PROTECT, null=True, blank=True)
+    snapshot = models.JSONField(default=dict, blank=True)
+    name = models.CharField(
+        "Название чата / группы", max_length=255, default="КОМАНДА ПОДДЕРЖКИ ПРОДАЖ"
+    )
+    group_jid = models.CharField(
+        "WhatsApp Group JID",
+        max_length=128,
+        default="",
+        help_text="Например: 120363024823904923@g.us",
+    )
+    session_name = models.CharField(
+        "Имя сессии в WAHA", max_length=64, default="default"
+    )
+    waha_api_url = models.CharField(
+        "URL WAHA API", max_length=255, default="http://waha:3000"
+    )
+    waha_api_key = models.CharField(
+        "WAHA API Key", max_length=128, default="", blank=True
+    )
+    is_active = models.BooleanField("Мониторинг активен", default=True)
+    status = models.CharField("Статус подключения", max_length=32, default="WORKING")
+    last_qr_code = models.TextField("QR-код (base64)", blank=True, default="")
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = 'Настройка WhatsApp (WAHA)'
-        verbose_name_plural = 'Настройки WhatsApp (WAHA)'
+        verbose_name = "Настройка WhatsApp (WAHA)"
+        verbose_name_plural = "Настройки WhatsApp (WAHA)"
 
     def __str__(self):
         return f"{self.name} ({'Активен' if self.is_active else 'Выключен'})"
 
     @classmethod
     def get_active(cls):
-        cfg = cls.objects.filter(is_active=True).first()
-        if not cfg:
-            cfg = cls.objects.create()
-        return cfg
+        return cls.objects.filter(is_active=True).first() or cls(is_active=False)
 
 
 class AISettings(models.Model):
     """
     Конфигурация нейросетевых моделей (Embeddings и Chat/Reasoning) через OpenRouter.
     """
-    name = models.CharField('Конфигурация', max_length=128, default='Основная конфигурация OpenRouter')
-    
+
+    name = models.CharField(
+        "Конфигурация", max_length=128, default="Основная конфигурация OpenRouter"
+    )
+
     # Embeddings
-    embedding_provider_url = models.CharField('Embeddings Base URL', max_length=255, default='https://openrouter.ai/api/v1')
-    embedding_model_name = models.CharField('Embeddings Model', max_length=128, default='liquid/lfm-2.5-embedding-350m:free')
-    embedding_api_key = models.CharField('Embeddings API Key', max_length=255, blank=True, default='')
-    embedding_dimension = models.IntegerField('Размерность вектора', default=1024)
-    
+    embedding_provider_url = models.CharField(
+        "Embeddings Base URL", max_length=255, default="https://openrouter.ai/api/v1"
+    )
+    embedding_model_name = models.CharField(
+        "Embeddings Model", max_length=128, default="liquid/lfm-2.5-embedding-350m:free"
+    )
+    embedding_api_key = models.CharField(
+        "Embeddings API Key", max_length=255, blank=True, default=""
+    )
+    embedding_dimension = models.IntegerField("Размерность вектора", default=1024)
+
     # Chat & Reasoning
-    chat_provider_url = models.CharField('Chat Base URL', max_length=255, default='https://openrouter.ai/api/v1')
-    chat_model_name = models.CharField('Chat LLM Model', max_length=128, default='nvidia/nemotron-3-ultra-550b-a55b:free')
-    chat_api_key = models.CharField('Chat API Key', max_length=255, blank=True, default='')
-    chat_temperature = models.FloatField('Temperature', default=0.2)
-    
-    system_prompt_worker = models.TextField('Промпт извлечения сделок из чата', default="""Ты эксперт-аналитик рабочей группы продаж AquaKip.
+    chat_provider_url = models.CharField(
+        "Chat Base URL", max_length=255, default="https://openrouter.ai/api/v1"
+    )
+    chat_model_name = models.CharField(
+        "Chat LLM Model",
+        max_length=128,
+        default="nvidia/nemotron-3-ultra-550b-a55b:free",
+    )
+    chat_api_key = models.CharField(
+        "Chat API Key", max_length=255, blank=True, default=""
+    )
+    chat_temperature = models.FloatField("Temperature", default=0.2)
+
+    system_prompt_worker = models.TextField(
+        "Промпт извлечения сделок из чата",
+        default="""Ты эксперт-аналитик рабочей группы продаж AquaKip.
 Твоя задача — извлечь из сообщения КОНКРЕТНЫЕ коммерческие факты по сделкам.
 
 ОБЯЗАТЕЛЬНЫЕ ПРАВИЛА:
@@ -416,76 +646,98 @@ class AISettings(models.Model):
   "blocker": "Блокер или null",
   "priority": "A+++|A++|A+|standard",
   "can_create_deal": true|false
-}""")
-    
-    system_prompt_assistant = models.TextField('Промпт чат-ассистента для пользователей', default="""Ты аналитический ассистент Mazory AI платформы продаж AquaKip.
-Отвечай точно, структурированно, опираясь на факты из базы данных и сообщений.
-Используй тенге (₸) для сумм. Если пользователь просит графики или сравнения, возвращай данные в понятной форме.""")
+}""",
+    )
 
-    is_active = models.BooleanField('Активная конфигурация', default=True)
+    system_prompt_assistant = models.TextField(
+        "Промпт чат-ассистента для пользователей",
+        default="""Ты аналитический ассистент Mazory AI платформы продаж AquaKip.
+Отвечай точно, структурированно, опираясь на факты из базы данных и сообщений.
+Используй тенге (₸) для сумм. Если пользователь просит графики или сравнения, возвращай данные в понятной форме.""",
+    )
+
+    is_active = models.BooleanField("Активная конфигурация", default=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = 'Настройки моделей AI'
-        verbose_name_plural = 'Настройки моделей AI'
+        verbose_name = "Настройки моделей AI"
+        verbose_name_plural = "Настройки моделей AI"
 
     def __str__(self):
         return f"{self.name} ({self.chat_model_name})"
 
     @classmethod
     def get_active(cls):
-        cfg = cls.objects.filter(is_active=True).first()
-        if not cfg:
-            cfg = cls.objects.create()
-        return cfg
+        return cls.objects.filter(is_active=True).first() or cls(is_active=False)
 
 
 class BitrixSettings(models.Model):
     """
     Настройки интеграции с Bitrix24 REST API.
     """
-    name = models.CharField('Название интеграции', max_length=128, default='AquaKip Bitrix24 Portal')
-    webhook_url = models.CharField('REST Webhook URL', max_length=255, default='https://aquakip.bitrix24.kz/rest/148/71vwif5ivu5f4abk/')
-    inbound_token = models.CharField('Секретный токен входящего вебхука', max_length=128, blank=True, default='')
-    is_active = models.BooleanField('Синхронизация активна', default=True)
-    auto_create_deals = models.BooleanField('Авто-создание сделок в Bitrix24', default=True)
-    auto_import_deals = models.BooleanField('Авто-импорт сделок из CRM в Mazory', default=True)
-    hourly_sync_enabled = models.BooleanField('Ежечасная фоновая синхронизация', default=True)
-    auto_create_tasks = models.BooleanField('Создавать задачи в Bitrix24 по дедлайнам', default=True)
-    sync_timeline_comments = models.BooleanField('Публиковать саммари в таймлайн сделки', default=True)
-    deal_category_id = models.IntegerField('ID воронки сделок', default=0)
-    default_assigned_by_id = models.IntegerField('ID ответственного по умолчанию', default=1)
-    last_sync_at = models.DateTimeField('Последняя синхронизация', null=True, blank=True)
-    last_hourly_sync_at = models.DateTimeField('Время последнего запуска диспетчера', null=True, blank=True)
-    last_sync_status = models.TextField('Статус последней операции', blank=True, default='')
+
+    name = models.CharField(
+        "Название интеграции", max_length=128, default="AquaKip Bitrix24 Portal"
+    )
+    webhook_url = models.CharField("REST Webhook URL", max_length=255, default="")
+    inbound_token = models.CharField(
+        "Секретный токен входящего вебхука", max_length=128, blank=True, default=""
+    )
+    is_active = models.BooleanField("Синхронизация активна", default=True)
+    auto_create_deals = models.BooleanField(
+        "Авто-создание сделок в Bitrix24", default=True
+    )
+    auto_import_deals = models.BooleanField(
+        "Авто-импорт сделок из CRM в Mazory", default=True
+    )
+    hourly_sync_enabled = models.BooleanField(
+        "Ежечасная фоновая синхронизация", default=True
+    )
+    auto_create_tasks = models.BooleanField(
+        "Создавать задачи в Bitrix24 по дедлайнам", default=True
+    )
+    sync_timeline_comments = models.BooleanField(
+        "Публиковать саммари в таймлайн сделки", default=True
+    )
+    deal_category_id = models.IntegerField("ID воронки сделок", default=0)
+    default_assigned_by_id = models.IntegerField(
+        "ID ответственного по умолчанию", default=1
+    )
+    last_sync_at = models.DateTimeField(
+        "Последняя синхронизация", null=True, blank=True
+    )
+    last_hourly_sync_at = models.DateTimeField(
+        "Время последнего запуска диспетчера", null=True, blank=True
+    )
+    last_sync_status = models.TextField(
+        "Статус последней операции", blank=True, default=""
+    )
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = 'Настройки Bitrix24'
-        verbose_name_plural = 'Настройки Bitrix24'
+        verbose_name = "Настройки Bitrix24"
+        verbose_name_plural = "Настройки Bitrix24"
 
     def __str__(self):
         return f"{self.name} ({'Активен' if self.is_active else 'Выключен'})"
 
     @classmethod
     def get_active(cls):
-        cfg = cls.objects.filter(is_active=True).first()
-        if not cfg:
-            cfg = cls.objects.create()
-        return cfg
+        return cls.objects.filter(is_active=True).first() or cls(is_active=False)
 
 
 class BitrixDealChangeLog(models.Model):
     """
     Журнал аудита всех изменений по сделкам, отправленных в Bitrix24 CRM.
     """
+
     ACTION_CHOICES = [
-        ('create', 'Создание сделки (crm.deal.add)'),
-        ('update', 'Обновление сделки (crm.deal.update)'),
+        ("create", "Создание сделки (crm.deal.add)"),
+        ("update", "Обновление сделки (crm.deal.update)"),
     ]
     STATUS_CHOICES = [
-        ('success', 'Успешно'),
-        ('error', 'Ошибка'),
+        ("success", "Успешно"),
+        ("error", "Ошибка"),
     ]
 
     project = models.ForeignKey(
@@ -493,27 +745,45 @@ class BitrixDealChangeLog(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='bitrix_change_logs',
-        verbose_name='Объект / Сделка'
+        related_name="bitrix_change_logs",
+        verbose_name="Объект / Сделка",
     )
-    bitrix_deal_id = models.CharField('ID сделки в Bitrix24', max_length=64, db_index=True, blank=True, default='')
-    action = models.CharField('Действие', max_length=32, choices=ACTION_CHOICES, db_index=True)
-    status = models.CharField('Статус', max_length=32, choices=STATUS_CHOICES, default='success', db_index=True)
-    payload = models.JSONField('Отправленные данные (Payload)', default=dict, blank=True)
-    response_data = models.JSONField('Ответ Bitrix24', default=dict, blank=True)
-    changed_fields = models.JSONField('Измененные поля', default=list, blank=True)
-    error_message = models.TextField('Текст ошибки', blank=True, default='')
-    duration_ms = models.IntegerField('Длительность (мс)', default=0)
-    triggered_by = models.CharField('Инициатор / Источник', max_length=128, default='system', blank=True)
-    created_at = models.DateTimeField('Дата и время отправки', auto_now_add=True, db_index=True)
+    bitrix_deal_id = models.CharField(
+        "ID сделки в Bitrix24", max_length=64, db_index=True, blank=True, default=""
+    )
+    action = models.CharField(
+        "Действие", max_length=32, choices=ACTION_CHOICES, db_index=True
+    )
+    status = models.CharField(
+        "Статус",
+        max_length=32,
+        choices=STATUS_CHOICES,
+        default="success",
+        db_index=True,
+    )
+    payload = models.JSONField(
+        "Отправленные данные (Payload)", default=dict, blank=True
+    )
+    response_data = models.JSONField("Ответ Bitrix24", default=dict, blank=True)
+    changed_fields = models.JSONField("Измененные поля", default=list, blank=True)
+    error_message = models.TextField("Текст ошибки", blank=True, default="")
+    duration_ms = models.IntegerField("Длительность (мс)", default=0)
+    triggered_by = models.CharField(
+        "Инициатор / Источник", max_length=128, default="system", blank=True
+    )
+    created_at = models.DateTimeField(
+        "Дата и время отправки", auto_now_add=True, db_index=True
+    )
 
     class Meta:
-        verbose_name = 'Лог изменения сделки Bitrix24'
-        verbose_name_plural = 'Логи изменений сделок Bitrix24'
-        ordering = ['-created_at']
+        verbose_name = "Лог изменения сделки Bitrix24"
+        verbose_name_plural = "Логи изменений сделок Bitrix24"
+        ordering = ["-created_at"]
 
     def __str__(self):
-        created_str = self.created_at.strftime('%d.%m.%Y %H:%M:%S') if self.created_at else ''
+        created_str = (
+            self.created_at.strftime("%d.%m.%Y %H:%M:%S") if self.created_at else ""
+        )
         return f"[{self.get_action_display()}] Сделка #{self.bitrix_deal_id} — {self.get_status_display()} ({created_str})"
 
 
@@ -522,19 +792,20 @@ class MessageProcessingTrace(models.Model):
     Сквозная трассировка пайплайна обработки сообщений:
     «Входные данные WhatsApp» -> «Зависимые данные из сообщений ранее» -> «Зависимые данные из Bitrix24» -> «Итоговая запись»
     """
+
     PIPELINE_ACTION_CHOICES = [
-        ('created_deal', 'Создана новая сделка'),
-        ('updated_deal', 'Обновлена существующая сделка'),
-        ('matched_bitrix_imported', 'Импортирована сделка из Bitrix24'),
-        ('commitment_created', 'Зафиксировано обязательство'),
-        ('financial_record_created', 'Зафиксирована оплата'),
-        ('non_commercial', 'Информационное / Некоммерческое сообщение'),
-        ('error', 'Ошибка обработки'),
+        ("created_deal", "Создана новая сделка"),
+        ("updated_deal", "Обновлена существующая сделка"),
+        ("matched_bitrix_imported", "Импортирована сделка из Bitrix24"),
+        ("commitment_created", "Зафиксировано обязательство"),
+        ("financial_record_created", "Зафиксирована оплата"),
+        ("non_commercial", "Информационное / Некоммерческое сообщение"),
+        ("error", "Ошибка обработки"),
     ]
     STATUS_CHOICES = [
-        ('success', 'Успешно'),
-        ('warning', 'Требует внимания'),
-        ('error', 'Ошибка'),
+        ("success", "Успешно"),
+        ("warning", "Требует внимания"),
+        ("error", "Ошибка"),
     ]
 
     # Связи
@@ -543,71 +814,514 @@ class MessageProcessingTrace(models.Model):
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='traces',
-        verbose_name='Сырое сообщение WhatsApp'
+        related_name="traces",
+        verbose_name="Сырое сообщение WhatsApp",
     )
     project = models.ForeignKey(
         Project,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='pipeline_traces',
-        verbose_name='Объект / Сделка'
+        related_name="pipeline_traces",
+        verbose_name="Объект / Сделка",
     )
     commitment = models.ForeignKey(
         Commitment,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='pipeline_traces',
-        verbose_name='Созданное обязательство'
+        related_name="pipeline_traces",
+        verbose_name="Созданное обязательство",
     )
     financial_record = models.ForeignKey(
         FinancialRecord,
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
-        related_name='pipeline_traces',
-        verbose_name='Созданная запись оплаты'
+        related_name="pipeline_traces",
+        verbose_name="Созданная запись оплаты",
     )
 
+    attempt_no = models.PositiveIntegerField(default=1)
+    model_version = models.CharField(max_length=128, blank=True)
+    prompt_version = models.CharField(max_length=64, blank=True)
+    error_code = models.CharField(max_length=64, blank=True)
+
     # 1. Входные данные WhatsApp
-    whatsapp_message_id = models.CharField('ID сообщения WhatsApp', max_length=128, db_index=True)
-    whatsapp_chat_id = models.CharField('Чат / Группа WhatsApp', max_length=128, blank=True, default='')
-    whatsapp_sender_phone = models.CharField('Телефон отправителя', max_length=64, blank=True, default='')
-    whatsapp_sender_name = models.CharField('Имя отправителя', max_length=255, blank=True, default='')
-    whatsapp_timestamp = models.DateTimeField('Время сообщения WhatsApp', null=True, blank=True)
-    whatsapp_content = models.TextField('Текст сообщения WhatsApp')
-    whatsapp_raw_payload = models.JSONField('Сырой payload WAHA', default=dict, blank=True)
+    whatsapp_message_id = models.CharField(
+        "ID сообщения WhatsApp", max_length=128, db_index=True
+    )
+    whatsapp_chat_id = models.CharField(
+        "Чат / Группа WhatsApp", max_length=128, blank=True, default=""
+    )
+    whatsapp_sender_phone = models.CharField(
+        "Телефон отправителя", max_length=64, blank=True, default=""
+    )
+    whatsapp_sender_name = models.CharField(
+        "Имя отправителя", max_length=255, blank=True, default=""
+    )
+    whatsapp_timestamp = models.DateTimeField(
+        "Время сообщения WhatsApp", null=True, blank=True
+    )
+    whatsapp_content = models.TextField("Текст сообщения WhatsApp")
+    whatsapp_raw_payload = models.JSONField(
+        "Сырой payload WAHA", default=dict, blank=True
+    )
 
     # 2. Зависимые данные из сообщений ранее
-    earlier_messages_context = models.JSONField('Найденные сообщения из истории (Qdrant RAG / Чат)', default=list, blank=True)
-    earlier_messages_count = models.IntegerField('Количество зависимых сообщений', default=0)
+    earlier_messages_context = models.JSONField(
+        "Найденные сообщения из истории (Qdrant RAG / Чат)", default=list, blank=True
+    )
+    earlier_messages_count = models.IntegerField(
+        "Количество зависимых сообщений", default=0
+    )
 
     # 3. Зависимые данные из Bitrix24
-    bitrix_matched_deal_id = models.CharField('ID сделки в Bitrix24', max_length=64, blank=True, default='', db_index=True)
-    bitrix_deal_title = models.CharField('Название сделки в Bitrix24', max_length=255, blank=True, default='')
-    bitrix_deal_stage = models.CharField('Стадия в Bitrix24', max_length=64, blank=True, default='')
-    bitrix_deal_opportunity = models.DecimalField('Сумма сделки в Bitrix24 ₸', max_digits=14, decimal_places=2, null=True, blank=True)
-    bitrix_search_query = models.CharField('Поисковый запрос в Bitrix24', max_length=255, blank=True, default='')
-    bitrix_company_data = models.JSONField('Данные компании в Bitrix24', default=dict, blank=True)
-    bitrix_raw_deal = models.JSONField('Полные данные сделки из Bitrix24', default=dict, blank=True)
-    bitrix_known_deals_summary = models.TextField('Сводка сделок компании, переданная в AI', blank=True, default='')
+    bitrix_matched_deal_id = models.CharField(
+        "ID сделки в Bitrix24", max_length=64, blank=True, default="", db_index=True
+    )
+    bitrix_deal_title = models.CharField(
+        "Название сделки в Bitrix24", max_length=255, blank=True, default=""
+    )
+    bitrix_deal_stage = models.CharField(
+        "Стадия в Bitrix24", max_length=64, blank=True, default=""
+    )
+    bitrix_deal_opportunity = models.DecimalField(
+        "Сумма сделки в Bitrix24 ₸",
+        max_digits=14,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+    bitrix_search_query = models.CharField(
+        "Поисковый запрос в Bitrix24", max_length=255, blank=True, default=""
+    )
+    bitrix_company_data = models.JSONField(
+        "Данные компании в Bitrix24", default=dict, blank=True
+    )
+    bitrix_raw_deal = models.JSONField(
+        "Полные данные сделки из Bitrix24", default=dict, blank=True
+    )
+    bitrix_known_deals_summary = models.TextField(
+        "Сводка сделок компании, переданная в AI", blank=True, default=""
+    )
 
     # 4. Итоговая запись
-    ai_extracted_facts = models.JSONField('Извлеченные факты AI', default=dict, blank=True)
-    ai_confidence = models.FloatField('Уверенность AI (0.0 - 1.0)', default=0.0)
-    pipeline_action = models.CharField('Действие пайплайна', max_length=64, choices=PIPELINE_ACTION_CHOICES, default='non_commercial', db_index=True)
-    status = models.CharField('Статус обработки', max_length=32, choices=STATUS_CHOICES, default='success', db_index=True)
-    result_summary = models.TextField('Резюме итоговой записи', blank=True, default='')
-    created_at = models.DateTimeField('Время создания трассировки', auto_now_add=True, db_index=True)
+    ai_extracted_facts = models.JSONField(
+        "Извлеченные факты AI", default=dict, blank=True
+    )
+    ai_confidence = models.FloatField("Уверенность AI (0.0 - 1.0)", default=0.0)
+    pipeline_action = models.CharField(
+        "Действие пайплайна",
+        max_length=64,
+        choices=PIPELINE_ACTION_CHOICES,
+        default="non_commercial",
+        db_index=True,
+    )
+    status = models.CharField(
+        "Статус обработки",
+        max_length=32,
+        choices=STATUS_CHOICES,
+        default="success",
+        db_index=True,
+    )
+    result_summary = models.TextField("Резюме итоговой записи", blank=True, default="")
+    created_at = models.DateTimeField(
+        "Время создания трассировки", auto_now_add=True, db_index=True
+    )
 
     class Meta:
-        verbose_name = 'Трассировка пайплайна'
-        verbose_name_plural = 'Трассировки пайплайна'
-        ordering = ['-created_at']
+        verbose_name = "Трассировка пайплайна"
+        verbose_name_plural = "Трассировки пайплайна"
+        ordering = ["-created_at"]
 
     def __str__(self):
-        created_str = self.created_at.strftime('%d.%m.%Y %H:%M:%S') if self.created_at else ''
+        created_str = (
+            self.created_at.strftime("%d.%m.%Y %H:%M:%S") if self.created_at else ""
+        )
         return f"[{self.get_pipeline_action_display()}] {self.whatsapp_sender_name} ({created_str})"
 
+
+class Team(models.Model):
+    name = models.CharField(max_length=128, unique=True)
+    is_active = models.BooleanField(default=True)
+    history_complete_from = models.DateField(null=True, blank=True)
+    stalled_days = models.PositiveSmallIntegerField(default=3)
+    low_margin_percent = models.DecimalField(max_digits=5, decimal_places=2, default=15)
+    rules_version = models.PositiveIntegerField(default=1)
+
+    def __str__(self):
+        return self.name
+
+
+class TeamMembership(models.Model):
+    ROLES = [
+        (role, label)
+        for role, label in (
+            ("manager", "Менеджер"),
+            ("team_lead", "Руководитель"),
+            ("finance", "Финансист"),
+        )
+    ]
+    user = models.ForeignKey(User, on_delete=models.PROTECT, related_name="memberships")
+    team = models.ForeignKey(Team, on_delete=models.PROTECT, related_name="memberships")
+    role = models.CharField(max_length=16, choices=ROLES)
+    status = models.CharField(
+        max_length=16,
+        default="invited",
+        choices=[(s, s) for s in ("invited", "active", "revoked")],
+    )
+    invited_until = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "team", "role"], name="membership_unique"
+            )
+        ]
+
+
+class ClientProjectAccess(models.Model):
+    user = models.ForeignKey(
+        User, on_delete=models.PROTECT, related_name="client_access"
+    )
+    project = models.ForeignKey(
+        Project, on_delete=models.PROTECT, related_name="client_access"
+    )
+    status = models.CharField(
+        max_length=16,
+        default="invited",
+        choices=[(s, s) for s in ("invited", "active", "revoked")],
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "project"], name="client_project_unique"
+            )
+        ]
+
+
+class ChatAccess(models.Model):
+    user = models.ForeignKey(User, on_delete=models.PROTECT)
+    config = models.ForeignKey(
+        WhatsAppConfig, on_delete=models.PROTECT, related_name="access_grants"
+    )
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "config"], name="chat_access_unique"
+            )
+        ]
+
+
+class AuthSession(models.Model):
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="access_sessions"
+    )
+    refresh_jti_hash = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(null=True, blank=True)
+    device = models.CharField(max_length=256, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+
+
+class AdminMFA(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE)
+    encrypted_secret = models.TextField()
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    last_counter = models.BigIntegerField(default=-1)
+
+
+class FactCandidate(models.Model):
+    trace = models.ForeignKey(
+        MessageProcessingTrace, on_delete=models.PROTECT, related_name="candidates"
+    )
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="candidates",
+    )
+    team = models.ForeignKey(Team, on_delete=models.PROTECT)
+    manager = models.ForeignKey(
+        UserProfile, on_delete=models.PROTECT, null=True, blank=True
+    )
+    fact_type = models.CharField(
+        max_length=32, choices=[(s, s) for s in ("project", "payment", "commitment")]
+    )
+    proposed_changes = models.JSONField(default=dict)
+    base_project_version = models.PositiveIntegerField(null=True, blank=True)
+    status = models.CharField(
+        max_length=16,
+        default="pending",
+        db_index=True,
+        choices=[(s, s) for s in ("pending", "approved", "rejected", "superseded")],
+    )
+    source_key = models.CharField(max_length=255, unique=True)
+    confidence = models.FloatField(default=0)
+    uncertainties = models.JSONField(default=list, blank=True)
+    reviewed_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_reason = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class FactEvidence(models.Model):
+    candidate = models.ForeignKey(
+        FactCandidate, on_delete=models.PROTECT, related_name="evidence"
+    )
+    raw_message = models.ForeignKey(RawMessage, on_delete=models.PROTECT)
+    quote = models.TextField()
+    field_name = models.CharField(max_length=64, blank=True)
+
+
+class ProjectRevision(models.Model):
+    project = models.ForeignKey(
+        Project, on_delete=models.PROTECT, related_name="revisions"
+    )
+    version = models.PositiveIntegerField()
+    approved_by = models.ForeignKey(
+        User, null=True, blank=True, on_delete=models.SET_NULL
+    )
+    approved_at = models.DateTimeField(default=timezone.now)
+    snapshot = models.JSONField(default=dict)
+    source = models.CharField(max_length=32, default="review")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["project", "version"], name="project_version_unique"
+            )
+        ]
+
+
+class PaymentScheduleItem(models.Model):
+    project = models.ForeignKey(
+        Project, on_delete=models.PROTECT, related_name="payment_schedule"
+    )
+    due_date = models.DateField(db_index=True)
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    currency = models.CharField(max_length=3, default="KZT")
+    is_verified = models.BooleanField(default=False)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(amount__gt=0), name="schedule_positive"
+            )
+        ]
+
+
+class PaymentAllocation(models.Model):
+    financial_record = models.ForeignKey(
+        FinancialRecord, on_delete=models.PROTECT, related_name="allocations"
+    )
+    schedule_item = models.ForeignKey(
+        PaymentScheduleItem, on_delete=models.PROTECT, related_name="allocations"
+    )
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(amount=0), name="allocation_nonzero"
+            ),
+            models.UniqueConstraint(
+                fields=["financial_record", "schedule_item"], name="allocation_unique"
+            ),
+        ]
+
+
+class SalesTarget(models.Model):
+    team = models.ForeignKey(Team, null=True, blank=True, on_delete=models.PROTECT)
+    profile = models.ForeignKey(
+        UserProfile, on_delete=models.PROTECT, related_name="targets"
+    )
+    month = models.DateField()
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    currency = models.CharField(max_length=3, default="KZT")
+    version = models.PositiveIntegerField(default=1)
+    is_active = models.BooleanField(default=True)
+    approved_by = models.ForeignKey(User, null=True, on_delete=models.SET_NULL)
+    approved_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["team", "profile", "month", "currency", "version"],
+                name="target_version_unique",
+            ),
+            models.UniqueConstraint(
+                fields=["team", "profile", "month", "currency"],
+                condition=models.Q(is_active=True),
+                name="target_active_unique",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(amount__gte=0), name="target_nonnegative"
+            ),
+        ]
+
+
+class StageTransition(models.Model):
+    project = models.ForeignKey(
+        Project, on_delete=models.PROTECT, related_name="stage_history"
+    )
+    project_revision = models.OneToOneField(ProjectRevision, on_delete=models.PROTECT)
+    from_stage = models.CharField(max_length=64, blank=True)
+    to_stage = models.CharField(max_length=64)
+    effective_at = models.DateTimeField(default=timezone.now)
+
+
+class Notification(models.Model):
+    recipient = models.ForeignKey(
+        User, on_delete=models.PROTECT, related_name="notifications"
+    )
+    business_event = models.ForeignKey(
+        BusinessEvent, null=True, blank=True, on_delete=models.PROTECT
+    )
+    project = models.ForeignKey(
+        Project, null=True, blank=True, on_delete=models.PROTECT
+    )
+    commitment = models.ForeignKey(
+        Commitment, null=True, blank=True, on_delete=models.PROTECT
+    )
+    deduplication_key = models.CharField(max_length=255, unique=True)
+    category = models.CharField(max_length=32, default="info")
+    title = models.CharField(max_length=255)
+    message = models.TextField()
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    read_at = models.DateTimeField(null=True, blank=True)
+    acknowledged_at = models.DateTimeField(null=True, blank=True)
+
+
+class NotificationDelivery(models.Model):
+    notification = models.ForeignKey(
+        Notification, on_delete=models.PROTECT, related_name="deliveries"
+    )
+    channel = models.CharField(max_length=16, default="whatsapp")
+    attempt_no = models.PositiveIntegerField(default=1)
+    state = models.CharField(max_length=16, default="queued")
+    provider_message_id = models.CharField(max_length=255, blank=True)
+    error_code = models.CharField(max_length=64, blank=True)
+    next_attempt_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["notification", "channel", "attempt_no"],
+                name="delivery_attempt_unique",
+            )
+        ]
+
+
+class ReminderOccurrence(models.Model):
+    commitment = models.ForeignKey(Commitment, on_delete=models.PROTECT)
+    notification = models.ForeignKey(
+        Notification, null=True, blank=True, on_delete=models.PROTECT
+    )
+    recipient = models.ForeignKey(User, on_delete=models.PROTECT)
+    commitment_version = models.PositiveIntegerField()
+    rule_code = models.CharField(max_length=32)
+    rule_version = models.PositiveIntegerField(default=1)
+    scheduled_at = models.DateTimeField()
+    state = models.CharField(max_length=16, default="queued")
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=[
+                    "commitment",
+                    "commitment_version",
+                    "rule_code",
+                    "rule_version",
+                    "recipient",
+                    "scheduled_at",
+                ],
+                name="reminder_unique",
+            )
+        ]
+
+
+class OutboxEvent(models.Model):
+    business_event = models.ForeignKey(
+        BusinessEvent, null=True, blank=True, on_delete=models.PROTECT
+    )
+    event_type = models.CharField(max_length=32)
+    deduplication_key = models.CharField(max_length=255, unique=True)
+    payload = models.JSONField(default=dict)
+    state = models.CharField(max_length=16, default="pending", db_index=True)
+    attempt_count = models.PositiveIntegerField(default=0)
+    next_attempt_at = models.DateTimeField(default=timezone.now, db_index=True)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    error_code = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class AsyncOperation(models.Model):
+    requested_by = models.ForeignKey(User, on_delete=models.PROTECT)
+    operation_type = models.CharField(max_length=32, default="chat")
+    status = models.CharField(max_length=16, default="queued", db_index=True)
+    request = models.JSONField(default=dict)
+    result = models.JSONField(default=dict)
+    error_code = models.CharField(max_length=64, blank=True)
+    idempotency_key = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    access_fingerprint = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["requested_by", "idempotency_key"],
+                name="operation_request_unique",
+            )
+        ]
+
+
+class AuditEvent(models.Model):
+    actor = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL)
+    target_id = models.BigIntegerField(null=True, blank=True)
+    target_type = models.CharField(max_length=64)
+    action = models.CharField(max_length=64)
+    before_after = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        default_permissions = ("view",)
+
+
+class PrivateAttachment(models.Model):
+    uploaded_by = models.ForeignKey(User, on_delete=models.PROTECT)
+    project = models.ForeignKey(Project, on_delete=models.PROTECT)
+    file = models.FileField(upload_to="private/%Y/%m/")
+    content_type = models.CharField(max_length=128)
+    sha256 = models.CharField(max_length=64)
+    published_to_client = models.BooleanField(default=False)
+    transcript = models.TextField(blank=True)
+    state = models.CharField(max_length=16, default="queued")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class ProviderUsage(models.Model):
+    outbox_event = models.ForeignKey(
+        OutboxEvent, null=True, on_delete=models.PROTECT, related_name="provider_usage"
+    )
+    operation = models.CharField(max_length=32)
+    model_name = models.CharField(max_length=128)
+    duration_ms = models.PositiveIntegerField()
+    succeeded = models.BooleanField()
+    input_tokens = models.PositiveIntegerField(null=True)
+    output_tokens = models.PositiveIntegerField(null=True)
+    cost_usd = models.DecimalField(max_digits=14, decimal_places=8, null=True)
+    error_code = models.CharField(max_length=64, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)

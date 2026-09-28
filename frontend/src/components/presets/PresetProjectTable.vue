@@ -7,7 +7,7 @@
           <Layers class="w-4 h-4 text-indigo-400" />
           <span>Воронка проектов и контроль экономики сделок</span>
         </h3>
-        <p class="text-xs text-slate-400 mt-0.5">Портфель договоров Aqua Kip Engineering (суммы в тенге ₸)</p>
+        <p class="text-xs text-slate-400 mt-0.5">Доступные подтверждённые проекты; валюта указана у каждой суммы</p>
       </div>
 
       <!-- Margin alert summary badge -->
@@ -32,6 +32,10 @@
       </div>
     </div>
 
+    <div class="grid md:grid-cols-2 gap-4 text-sm">
+      <div><h4>Конверсия наблюдаемой когорты</h4><p>{{ data.conversion.value === null ? 'Недостаточно истории' : `${data.conversion.value}% (${data.conversion.completed}/${data.conversion.cohort_size})` }}</p><p class="text-xs text-slate-400">{{ data.conversion.reason }}</p></div>
+      <div><h4>Среднее время на стадии, дни</h4><p v-for="row in data.stage_duration_days" :key="row.stage">{{ data.stages.find(stage => stage.code === row.stage)?.label || row.stage }}: {{ row.mean_days }} ({{ row.observations }})</p></div>
+    </div>
     <!-- Table of Projects -->
     <div class="overflow-x-auto max-h-96 pr-1">
       <table class="w-full text-left border-collapse text-xs">
@@ -77,7 +81,7 @@
                 class="px-2 py-0.5 rounded-md font-bold text-[11px]"
                 :class="p.margin_alert ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40' : 'bg-slate-800 text-slate-300'"
               >
-                {{ p.margin_percent }}%
+                {{ p.margin_percent === null ? 'Нет данных' : `${p.margin_percent}%` }}
               </span>
             </td>
             <td class="py-3 px-3">
@@ -111,44 +115,6 @@
 <script setup lang="ts">
 import { Layers, AlertTriangle } from 'lucide-vue-next'
 
-interface ProjectItem {
-  id: number
-  name: string
-  company: string
-  manager: string
-  contract_amount: number
-  contract_formatted: string
-  paid_amount: number
-  paid_formatted: string
-  due_amount: number
-  due_formatted: string
-  margin_percent: number
-  margin_alert: boolean
-  status: string
-  priority: string
-  equipment: string
-  is_verified?: boolean
-}
-
-interface StageItem {
-  code: string
-  label: string
-  count: number
-  volume: number
-  volume_formatted: string
-}
-
-interface Props {
-  data: {
-    stages: StageItem[]
-    margin_distribution: {
-      low_under_15: number
-      norm_15_to_20: number
-      high_over_20: number
-    }
-    projects: ProjectItem[]
-  }
-}
-
-defineProps<Props>()
+import type { PipelineData } from '../../types/chat'
+defineProps<{ data: PipelineData }>()
 </script>

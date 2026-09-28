@@ -1,535 +1,397 @@
-import logging
-from rest_framework.views import APIView
-from rest_framework.generics import ListAPIView
-from rest_framework.response import Response
-from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework import status
-import re
-from django_q.tasks import async_task
-from django.utils import timezone
+import hashlib
+import hmac
+from datetime import datetime, timedelta, timezone as dt_timezone
 from django.conf import settings
-from django.db.models import Q, Sum, Count
-from .datamart import datamart
-from .qdrant_service import qdrant_service
-from .ai_service import AIService
-from .models import Project, WhatsAppConfig, BitrixSettings
-from .serializers import ProjectSerializer
+from django.db import transaction
+from django.utils import timezone
+from django.shortcuts import get_object_or_404
+from rest_framework import serializers
+from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.response import Response
+from rest_framework.exceptions import PermissionDenied, Throttled, ValidationError
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.throttling import UserRateThrottle
+from . import access
+from .models import (
+    RawMessage,
+    WhatsAppConfig,
+    OutboxEvent,
+    AsyncOperation,
+    NotificationDelivery,
+    BitrixSettings,
+    Project,
+    FactCandidate,
+    AuditEvent,
+)
+from .datamart import datamart, project_row, scoped_projects
+from .security import Conflict, Unavailable
 
-logger = logging.getLogger(__name__)
+
+class Filters(serializers.Serializer):
+    period = serializers.ChoiceField(
+        choices=["this_month", "last_month", "quarter", "year"], default="this_month"
+    )
+    team_id = serializers.IntegerField(min_value=1, required=False)
+    manager_id = serializers.IntegerField(min_value=1, required=False)
+    project_id = serializers.IntegerField(min_value=1, required=False)
+    currency = serializers.ChoiceField(
+        choices=["KZT", "USD", "EUR", "RUB"], default="KZT"
+    )
+
+
+def filters_for(request):
+    schema = Filters(data=request.query_params)
+    schema.is_valid(raise_exception=True)
+    return schema.validated_data
+
 
 class KpiSummaryView(APIView):
-    """
-    Возвращает актуальные показатели KPI команды продаж из детерминированной витрины данных (Data Mart).
-    Поддерживает фильтр ?period=this_month|last_month|quarter|year.
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        period = request.query_params.get('period', 'this_month')
-        kpi_data = datamart.get_sales_kpi_mart(period=period)
-        
-        # Топ-перформер и аналитический инсайт
-        managers = kpi_data.get("managers", [])
-        top_name = managers[0]["name"] if managers else "Жанат Бейсбаев"
-        top_val = managers[0]["kpi_percent"] if managers else 99.7
+        if access.is_client(request.user):
+            raise PermissionDenied()
+        filters = filters_for(request)
+        return Response(
+            datamart.get_sales_kpi_mart(request.user, filters["period"], filters)
+        )
 
-        response_data = {
-            "category_badge": "AQUA KIP DATA MART",
-            "categoryBadge": "AQUA KIP DATA MART",
-            "query_title": "KPI отдела продаж",
-            "queryTitle": "KPI отдела продаж",
-            "query_subtitle": f"Показатели за {kpi_data.get('period_label') or kpi_data.get('period', 'Текущий месяц')} (в тенге ₸)",
-            "querySubtitle": f"Показатели за {kpi_data.get('period_label') or kpi_data.get('period', 'Текущий месяц')} (в тенге ₸)",
-            "updated_at_text": f"Обновлено {timezone.now().strftime('%d.%m.%Y в %H:%M')}",
-            "updatedAtText": f"Обновлено {timezone.now().strftime('%d.%m.%Y в %H:%M')}",
-            "period": kpi_data.get("period"),
-            "period_code": kpi_data.get("period_code", period),
-            "periodCode": kpi_data.get("period_code", period),
-            "period_label": kpi_data.get("period_label"),
-            "periodLabel": kpi_data.get("period_label"),
-            "summary_metrics": kpi_data.get("summary_metrics", []),
-            "summaryMetrics": kpi_data.get("summaryMetrics") or kpi_data.get("summary_metrics", []),
-            "managers": managers,
-            "chart_data": kpi_data.get("chart_data"),
-            "chartData": kpi_data.get("chartData") or kpi_data.get("chart_data"),
-            "insight": {
-                "badge": "AI-инсайт",
-                "source": "На основе витрины данных Data Mart (сбор денег, маржа, дедлайны)",
-                "headline": f"Лидер по сбору денег — {top_name} ({top_val}% плана).",
-                "details": "Ключевой фактор роста — крупные закрытые контракты по ПСЭМ и Top Build. По проектам с маржой ниже 15% требуется особый контроль.",
-                "actions": [
-                    { "id": "why", "label": "Почему?", "icon": "search" },
-                    { "id": "deals", "label": "Показать сделки", "icon": "file-text" },
-                    { "id": "chart", "label": "Вывести график продаж", "icon": "bar-chart-2" },
-                    { "id": "commitments", "label": "Обещания и дедлайны", "icon": "clock" }
-                ]
-            }
-        }
-        return Response(response_data)
+
+class ChatInput(Filters):
+    prompt = serializers.CharField(max_length=4000)
+    idempotency_key = serializers.CharField(max_length=64)
+
+
+def create_operation(user, values, kind="chat"):
+    if (
+        AsyncOperation.objects.filter(
+            requested_by=user, status__in=["queued", "running"]
+        ).count()
+        >= 5
+    ):
+        raise Throttled(wait=15)
+    with transaction.atomic():
+        op, created = AsyncOperation.objects.get_or_create(
+            requested_by=user,
+            idempotency_key=values["idempotency_key"],
+            defaults={
+                "request": values,
+                "operation_type": kind,
+                "expires_at": timezone.now() + timedelta(hours=1),
+                "access_fingerprint": access.fingerprint(user),
+            },
+        )
+        if op.request != values or op.operation_type != kind:
+            raise Conflict("Этот ключ уже использован для другого запроса.")
+        if created:
+            OutboxEvent.objects.create(
+                event_type="operation",
+                deduplication_key=f"operation:{op.id}",
+                payload={"operation_id": op.id},
+            )
+    return op
 
 
 class ChatQueryView(APIView):
-    """
-    Интеллектуальный AI-оркестратор:
-    1. Классифицирует намерение (Intent).
-    2. Извлекает выверенные данные из Data Mart или первоисточники из Qdrant.
-    3. Возвращает ответ и спецификацию UI-виджета для динамического рендеринга на Vue 3.
-    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        prompt = request.data.get("prompt", "").strip()
-        if not prompt:
-            return Response({"error": "Prompt cannot be empty"}, status=status.HTTP_400_BAD_REQUEST)
-
-        prompt_lower = prompt.lower()
-
-        # Интент 1: График продаж / сравнение плана и факта
-        if any(w in prompt_lower for w in ["график", "диаграмм", "сравни", "chart", "бар"]):
-            chart_data = datamart.get_sales_chart_dataset()
-            return Response({
-                "prompt": prompt,
-                "text": "Построен сравнительный график выполнения плана продаж и фактического сбора денег по менеджерам.",
-                "widget": {
-                    "type": "chart",
-                    "preset": "bar_sales",
-                    "title": chart_data["title"],
-                    "data": chart_data
-                },
-                "insights": [
-                    "Жанат и Самат обеспечивают более 75% общего объема сбора оплат компании.",
-                    "Улугбек перевыполнил план сбора за счет закрытия платежа 117 млн ₸ от Top Build."
-                ]
-            })
-
-        # Интент 2: Обещания, дедлайны, напоминания, горящие задачи
-        elif any(w in prompt_lower for w in ["обещ", "дедлайн", "напомин", "задач", "сроки", "горит", "просроч"]):
-            commitments_mart = datamart.get_commitments_sla_mart()
-            overdue_count = commitments_mart["overdue_count"]
-            overdue_items = [c for c in commitments_mart["commitments"] if c["status_color"] == "red"][:2]
-            today_items = [c for c in commitments_mart["commitments"] if c["status"] == "Горит сегодня"][:2]
-
-            insight_overdue = (
-                f"Критично: просрочено {overdue_count} договоренностей. Срочного внимания требуют: " +
-                "; ".join(f"{c['counterparty']} ({c['manager_name']})" for c in overdue_items) + "."
-                if overdue_items else
-                "Критичных нарушений дедлайнов нет."
+        if access.is_client(request.user):
+            raise PermissionDenied(
+                "Клиенту доступны только опубликованные материалы в кабинете."
             )
-            insight_urgent = (
-                f"Горят сегодня: " +
-                "; ".join(f"{c['text'][:80]} [{c['manager_name']}]" for c in today_items) + "."
-                if today_items else
-                f"Выполнено: {commitments_mart['fulfilled_count']} обязательств успешно закрыты в срок."
-            )
-
-            return Response({
-                "prompt": prompt,
-                "text": f"Сформирован реестр обещаний и обязательств. На контроле {commitments_mart['total_count']} договоренностей, из них просрочено: {overdue_count}.",
-                "widget": {
-                    "type": "commitments_list",
-                    "preset": "commitments_sla",
-                    "title": "Реестр обещаний и дедлайнов (SLA контроля)",
-                    "data": commitments_mart
-                },
-                "insights": [
-                    insight_overdue,
-                    insight_urgent
-                ]
-            })
-
-        # Интент 3: Воронка сделок, проекты, объекты
-        elif any(w in prompt_lower for w in ["сделк", "объект", "проект", "воронк", "пайплайн", "pipeline"]):
-            pipeline_mart = datamart.get_pipeline_mart()
-            low_count = pipeline_mart["margin_distribution"]["low_under_15"]
-            low_margin_projects = [p["name"] for p in pipeline_mart["projects"] if p["margin_alert"]][:2]
-            top_margin_project = max(pipeline_mart["projects"], key=lambda p: p["margin_percent"]) if pipeline_mart["projects"] else None
-
-            insight_margin_alert = (
-                f"Внимание: {low_count} сделок имеют маржу ниже 15% (в т.ч. {', '.join(low_margin_projects)}). "
-                f"Любые допработы требуют согласования генерального директора."
-                if low_count > 0 else
-                "Все текущие сделки находятся в пределах нормативной рентабельности (≥15%)."
-            )
-            insight_top_margin = (
-                f"Лучший маржинальный кейс: {top_margin_project['name']} ({top_margin_project['margin_percent']}% маржи)."
-                if top_margin_project and top_margin_project["margin_percent"] >= 20.0 else
-                "Маржинальный портфель стабилизирован."
-            )
-
-            return Response({
-                "prompt": prompt,
-                "text": "Актуальная воронка проектов и распределение объектов Aqua Kip по стадиям и маржинальности.",
-                "widget": {
-                    "type": "project_table",
-                    "preset": "deal_pipeline",
-                    "title": "Воронка проектов и контроль маржи",
-                    "data": pipeline_mart
-                },
-                "insights": [
-                    insight_margin_alert,
-                    insight_top_margin
-                ]
-            })
-
-        # Интент 4: KPI менеджеров
-        elif any(w in prompt_lower for w in ["kpi", "кпи", "план", "команд", "менеджер"]):
-            kpi_mart = datamart.get_sales_kpi_mart()
-            return Response({
-                "prompt": prompt,
-                "text": "Сводка выполнения KPI коммерческой команды продаж Aqua Kip Engineering.",
-                "widget": {
-                    "type": "kpi_grid",
-                    "preset": "manager_grid",
-                    "title": "KPI отдела продаж",
-                    "data": kpi_mart
-                },
-                "insights": [
-                    "Лидер рейтинга — Жанат Бейсбаев (568.27 млн ₸).",
-                    "Камиль ведет подписание 10 МВт Vertex Garden (156 млн ₸) и согласование котельной 2 МВт Казына Парк."
-                ]
-            })
-
-        # Интент 5: Поиск по контексту / переписке через Qdrant + AI Генерация ответа
-        else:
-            # 1. Поиск по векторной базе Qdrant (цитаты и сообщения из чатов)
-            search_results = qdrant_service.search(prompt, limit=5)
-            quotes = [
-                f"«{r['payload'].get('content')}» ({r['payload'].get('sender_name', 'Чат')})"
-                for r in search_results if r.get('payload')
-            ]
-
-            # 2. Финансовые агрегаты по всему портфелю (только проверенные)
-            agg = Project.objects.filter(is_verified=True).aggregate(
-                total_count=Count('id'),
-                total_amount=Sum('contract_amount'),
-                total_paid=Sum('paid_amount'),
-                total_due=Sum('due_amount')
-            )
-            total_count = agg['total_count'] or 0
-            total_amount = float(agg['total_amount'] or 0)
-            total_paid = float(agg['total_paid'] or 0)
-            total_due = float(agg['total_due'] or 0)
-
-            # Статистика по стадиям воронки (только проверенные)
-            stages_summary = []
-            for stage_code, stage_label in Project.STATUS_CHOICES:
-                stage_qs = Project.objects.filter(is_verified=True, status=stage_code)
-                st_count = stage_qs.count()
-                if st_count > 0:
-                    st_vol = float(stage_qs.aggregate(s=Sum('contract_amount'))['s'] or 0)
-                    stages_summary.append({
-                        "stage_code": stage_code,
-                        "stage_name": stage_label,
-                        "count": st_count,
-                        "total_amount": st_vol,
-                        "formatted_amount": f"{st_vol:,.0f} ₸".replace(',', ' ')
-                    })
-
-            portfolio_summary = {
-                "total_projects_count": total_count,
-                "total_contract_amount": total_amount,
-                "total_contract_amount_formatted": f"{total_amount:,.0f} ₸".replace(',', ' '),
-                "total_paid_amount": total_paid,
-                "total_paid_amount_formatted": f"{total_paid:,.0f} ₸".replace(',', ' '),
-                "total_due_amount": total_due,
-                "total_due_amount_formatted": f"{total_due:,.0f} ₸".replace(',', ' '),
-                "stages_breakdown": stages_summary
-            }
-
-            # 3. Интеллектуальный поиск конкретных проектов по токенам запроса (только проверенные)
-            stop_words = {
-                "по", "в", "во", "на", "с", "со", "и", "или", "не", "для", "к", "ко", "до",
-                "от", "из", "о", "об", "обо", "за", "под", "при", "про", "что", "как", "где",
-                "когда", "кто", "все", "всех", "всем", "всему", "всего", "всеми", "посчитай",
-                "покажи", "выведи", "найди", "скажи", "какая", "какой", "какие", "какова",
-                "каком", "сколько", "сумма", "сумму", "сумме", "суммы", "договор", "договора",
-                "договоров", "договорам", "договорами", "проект", "проекта", "проекты", "проектов",
-                "проектам", "объект", "объекта", "объекты", "объектов", "объектам", "деньги",
-                "денег", "деньгам", "расчет", "рассчитай", "итог", "итого", "итоговая", "итоговую",
-                "стадия", "стадии", "стадиях", "статус", "статусы", "статусах", "компания",
-                "компании", "компаний", "клиент", "клиента", "клиенты", "клиентов", "менеджер",
-                "менеджера", "менеджеры", "менеджеров", "пожалуйста", "подскажи"
-            }
-
-            raw_tokens = [re.sub(r'[^\w\-]', '', w).lower() for w in prompt.split()]
-            meaningful_tokens = [t for t in raw_tokens if len(t) >= 3 and t not in stop_words]
-
-            matched_projects_qs = Project.objects.none()
-            if meaningful_tokens:
-                token_query = Q()
-                for t in meaningful_tokens:
-                    token_query |= (
-                        Q(name__icontains=t) |
-                        Q(company__name__icontains=t) |
-                        Q(manager__full_name__icontains=t)
-                    )
-                matched_projects_qs = Project.objects.filter(is_verified=True).filter(token_query).select_related('company', 'manager').distinct()
-
-            matched_projects = list(matched_projects_qs[:10])
-
-            # Проверяем, носит ли запрос обобщенный/аналитический характер
-            is_general_analytical = (
-                len(matched_projects) == 0 or
-                any(w in prompt_lower for w in [
-                    "сумм", "договор", "итог", "всего", "денег", "общ", "статистик",
-                    "стади", "марж", "скольк", "ворон", "портфел", "сводк", "план"
-                ])
-            )
-
-            # Если объект конкретно не найден, или если запрос аналитический — передаем активный проверенный реестр
-            if not matched_projects or is_general_analytical:
-                projects_for_context = list(
-                    Project.objects.filter(is_verified=True).select_related('company', 'manager').order_by('-contract_amount')[:30]
-                )
-            else:
-                projects_for_context = matched_projects
-
-            context_data = {
-                "user_prompt": prompt,
-                "portfolio_summary": portfolio_summary,
-                "matched_projects": [
-                    {
-                        "id": p.id,
-                        "name": p.name,
-                        "company": p.company.name if p.company else "Не указано",
-                        "manager": p.manager.full_name if p.manager else "Не закреплен",
-                        "status": p.get_status_display(),
-                        "status_code": p.status,
-                        "contract_amount": float(p.contract_amount),
-                        "contract_formatted": f"{float(p.contract_amount):,.0f} ₸".replace(',', ' '),
-                        "paid_amount": float(p.paid_amount),
-                        "paid_formatted": f"{float(p.paid_amount):,.0f} ₸".replace(',', ' '),
-                        "due_amount": float(p.due_amount),
-                        "due_formatted": f"{float(p.due_amount):,.0f} ₸".replace(',', ' '),
-                        "margin": float(p.actual_margin_percent or p.target_margin_percent),
-                        "equipment": p.equipment_type,
-                        "current_action": p.current_action,
-                        "next_action": p.next_action,
-                        "is_verified": p.is_verified,
-                    }
-                    for p in projects_for_context
-                ],
-                "whatsapp_chat_evidence": quotes
-            }
-
-            ai_text = AIService.chat_assistant(prompt, context_data)
-
-            # Виджет таблицы отдаем, если есть проекты
-            has_projects = len(projects_for_context) > 0
-            widget = None
-            if has_projects:
-                widget_title = (
-                    "Связанные объекты и проекты"
-                    if (len(matched_projects) > 0 and not is_general_analytical)
-                    else "Воронка проектов и контроль маржи"
-                )
-                widget = {
-                    "type": "project_table",
-                    "preset": "deal_pipeline",
-                    "title": widget_title,
-                    "data": datamart.get_pipeline_mart()
-                }
-
-            return Response({
-                "prompt": prompt,
-                "text": ai_text,
-                "quotes": quotes,
-                "widget": widget
-            })
-
-
-class MessageIngestView(APIView):
-    """
-    Прием входящих сообщений WhatsApp (от WAHA Webhook или внешних вызовов):
-    1. Проверяет авторизационный ключ WAHA API Key.
-    2. Распаковывает payload WAHA ({ event: 'message', payload: { ... } }) или плоский JSON.
-    3. Фильтрует входящие сообщения по WhatsAppConfig.group_jid (если мониторинг группы настроен).
-    4. Ставит событие в очередь Django Q2 на векторизацию, RAG и извлечение сделок.
-    """
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        # Валидация подлинности вызова вебхука WAHA
-        api_key = (
-            request.headers.get('X-Api-Key') or
-            request.query_params.get('token') or
-            request.query_params.get('api_key') or
-            (request.headers.get('Authorization', '').split('Bearer ')[-1].strip() if 'Bearer ' in request.headers.get('Authorization', '') else '')
+        schema = ChatInput(data=request.data)
+        schema.is_valid(raise_exception=True)
+        op = create_operation(request.user, schema.validated_data)
+        return Response(
+            {
+                "operation_id": op.id,
+                "status": op.status,
+                "status_url": f"/api/operations/{op.id}/",
+            },
+            status=202,
         )
-        expected_key = getattr(settings, 'WAHA_API_KEY', '')
-        if expected_key and api_key != expected_key:
+
+
+class OperationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        op = get_object_or_404(AsyncOperation, pk=pk, requested_by=request.user)
+        if (
+            op.expires_at <= timezone.now()
+            or op.access_fingerprint != access.fingerprint(request.user)
+        ):
+            op.status, op.result, op.error_code = (
+                "expired",
+                {},
+                "access_or_lifetime_changed",
+            )
+            op.save(update_fields=["status", "result", "error_code"])
+        return Response(
+            {
+                "id": op.id,
+                "status": op.status,
+                "result": op.result if op.status == "succeeded" else None,
+                "error_code": op.error_code,
+                "expires_at": op.expires_at,
+            }
+        )
+
+    def delete(self, request, pk):
+        op = get_object_or_404(AsyncOperation, pk=pk, requested_by=request.user)
+        AsyncOperation.objects.filter(
+            pk=op.id, status__in=["queued", "running"]
+        ).update(status="cancelled", result={})
+        return Response(status=204)
+
+
+class ProjectListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if access.is_client(request.user):
             return Response(
-                {"error": "Unauthorized: invalid or missing WAHA API key"},
-                status=status.HTTP_401_UNAUTHORIZED
+                {
+                    "results": list(
+                        access.projects_for(request.user, include_client=True)
+                        .filter(is_verified=True)
+                        .values("id", "name", "status", "version")
+                    )
+                }
             )
-
-        data = request.data
-        payload = data.get('payload') if isinstance(data.get('payload'), dict) else data
-
-        # Пропускаем исходящие сообщения от самого бота, если указано fromMe
-        if payload.get('fromMe') is True:
-            return Response({"status": "ignored", "reason": "outgoing_message"}, status=status.HTTP_200_OK)
-
-        content = (
-            payload.get('body')
-            or payload.get('content')
-            or data.get('content')
-            or data.get('body')
-            or ''
-        ).strip()
-
-        if not content:
-            return Response({"error": "Content is required"}, status=status.HTTP_400_BAD_REQUEST)
-
-        # Извлечение параметров чата и отправителя
-        chat_id = payload.get('from') or data.get('chat_id') or 'aquakip-sales'
-        sender_phone = (
-            payload.get('participant')
-            or payload.get('author')
-            or payload.get('from')
-            or data.get('sender_phone')
-            or ''
+        qs, _ = scoped_projects(request.user, filters_for(request))
+        paginator = PageNumberPagination()
+        page = paginator.paginate_queryset(
+            qs.select_related("company", "manager").order_by("id"), request
         )
-        sender_name = (
-            payload.get('_data', {}).get('notifyName')
-            or payload.get('notifyName')
-            or data.get('sender_name')
-            or 'Коллега'
-        )
-        message_id = (
-            payload.get('id')
-            or data.get('id')
-            or f"msg-{int(timezone.now().timestamp() * 1000)}"
-        )
-
-        # Проверка соответствия настроенной группе WhatsApp в БД
-        cfg = WhatsAppConfig.get_active()
-        if cfg.is_active and cfg.group_jid and chat_id.endswith('@g.us'):
-            if chat_id != cfg.group_jid:
-                logger.info("Ignoring WAHA message from unmonitored group %s (monitored: %s)", chat_id, cfg.group_jid)
-                return Response({
-                    "status": "ignored",
-                    "reason": f"Chat {chat_id} is not configured in WhatsAppConfig"
-                }, status=status.HTTP_200_OK)
-
-        message_data = {
-            "message_id": message_id,
-            "content": content,
-            "sender_name": sender_name,
-            "sender_phone": sender_phone,
-            "chat_id": chat_id,
-            "raw_payload": data
-        }
-
-        # Отправляем задачу в очередь фонового воркера Django Q2
-        task_id = async_task('api.tasks.process_incoming_message_task', message_data)
-
-        return Response({
-            "status": "queued",
-            "task_id": task_id,
-            "message_id": message_id,
-            "chat_id": chat_id,
-            "message": "Сообщение успешно поставлено в очередь на AI-обработку"
-        }, status=status.HTTP_202_ACCEPTED)
-
-
-class ProjectListView(ListAPIView):
-    """
-    Реестр всех объектов и сделок Aqua Kip Engineering.
-    Поддерживает фильтрацию по менеджеру ?manager=<id> и верификации ?is_verified=true|false.
-    """
-    permission_classes = [IsAuthenticated]
-    serializer_class = ProjectSerializer
-
-    def get_queryset(self):
-        qs = Project.objects.all().select_related('company', 'manager').order_by('-contract_amount')
-        is_verified = self.request.query_params.get('is_verified')
-        if is_verified is not None:
-            if is_verified.lower() in ('true', '1'):
-                qs = qs.filter(is_verified=True)
-            elif is_verified.lower() in ('false', '0'):
-                qs = qs.filter(is_verified=False)
-        manager_id = self.request.query_params.get('manager') or self.request.query_params.get('manager_id')
-        if manager_id:
-            try:
-                qs = qs.filter(manager_id=int(manager_id))
-            except (ValueError, TypeError):
-                pass
-        return qs
+        return paginator.get_paginated_response([project_row(p) for p in page])
 
 
 class ProjectVerifyView(APIView):
-    """
-    Верификация сделки / объекта (установка флага is_verified = True).
-    При необходимости инициирует синхронизацию с Bitrix24 CRM.
-    """
     permission_classes = [IsAuthenticated]
 
-    def post(self, request, pk: int):
+    def post(self, request, pk):
+        get_object_or_404(access.projects_for(request.user), pk=pk)
+        raise Conflict("Подтвердите конкретное предложение на экране проверки фактов.")
+
+
+class SourceView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        raw = get_object_or_404(access.messages_for(request.user), pk=pk)
+        return Response(
+            {
+                "id": raw.id,
+                "content": raw.content,
+                "sender_name": raw.sender_name,
+                "sent_at": raw.timestamp if raw.sent_at_known else None,
+                "received_at": raw.received_at,
+                "processing_state": raw.processing_state,
+                "revision": raw.source_revision,
+            }
+        )
+
+    def post(self, request, pk):
+        raw = get_object_or_404(access.messages_for(request.user), pk=pk)
+        access.require_team_role(request.user, raw.config.team_id, ["team_lead"])
+        with transaction.atomic():
+            raw = RawMessage.objects.select_for_update().get(pk=raw.id)
+            if raw.processing_state != "failed":
+                raise Conflict("Повтор доступен только после ошибки обработки.")
+            raw.processing_state = "received"
+            raw.save(update_fields=["processing_state"])
+            event = get_object_or_404(
+                OutboxEvent, deduplication_key=f"extract:{raw.id}"
+            )
+            if event.state in ("processing", "enqueued"):
+                raise Conflict("Обработка ещё выполняется.")
+            event.state, event.attempt_count, event.next_attempt_at = (
+                "pending",
+                0,
+                timezone.now(),
+            )
+            event.save()
+            AuditEvent.objects.create(
+                actor=request.user,
+                target_type="RawMessage",
+                target_id=raw.id,
+                action="retry",
+            )
+        return Response({"status": "queued"}, status=202)
+
+
+def verify_waha(request):
+    secret = settings.WAHA_WEBHOOK_SECRET
+    if not secret:
+        raise Unavailable("Приём вебхуков выключен.")
+    signature = request.headers.get("X-Webhook-Hmac", "")
+    if not signature or not hmac.compare_digest(
+        signature, hmac.new(secret.encode(), request.body, hashlib.sha512).hexdigest()
+    ):
+        raise PermissionDenied("Подпись вебхука недействительна.")
+
+
+class WebhookPayload(serializers.Serializer):
+    id = serializers.CharField(max_length=128)
+    body = serializers.CharField(
+        max_length=32000, required=False, allow_blank=True, default=""
+    )
+    timestamp = serializers.IntegerField(min_value=0, required=False)
+    fromMe = serializers.BooleanField(default=False)
+    participant = serializers.CharField(
+        max_length=128, required=False, allow_blank=True, allow_null=True, default=""
+    )
+    notifyName = serializers.CharField(
+        max_length=255, required=False, allow_blank=True, default=""
+    )
+    ack = serializers.IntegerField(min_value=-1, max_value=4, required=False)
+
+
+class WebhookInput(serializers.Serializer):
+    event = serializers.ChoiceField(
+        choices=["message", "message.any", "message.edited", "message.ack"]
+    )
+    session = serializers.RegexField(r"^[A-Za-z0-9_-]{1,64}$")
+    payload = WebhookPayload()
+
+    def validate(self, data):
+        original = self.initial_data.get("payload", {})
+        if data["event"] == "message.ack":
+            if "ack" not in data["payload"]:
+                raise ValidationError("Не указан статус доставки.")
+            return data
+        chat = original.get("from", "")
+        if not isinstance(chat, str) or not chat or len(chat) > 128:
+            raise ValidationError("Не указан чат.")
+        data["chat_id"] = chat
+        return data
+
+
+class WebhookThrottle(UserRateThrottle):
+    rate = "2400/min"
+    scope = "webhook"
+
+
+class MessageIngestView(APIView):
+    throttle_classes = [WebhookThrottle]
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        verify_waha(request)
+        schema = WebhookInput(data=request.data)
+        schema.is_valid(raise_exception=True)
+        data = schema.validated_data
+        payload = data["payload"]
+        if data["event"] == "message.ack":
+            if data["session"] != "default" or not payload["fromMe"]:
+                return Response({"status": "ignored"})
+            digest = hashlib.sha256(payload["id"].encode()).hexdigest()
+            OutboxEvent.objects.get_or_create(
+                deduplication_key=f"delivery_ack:{data['session']}:{digest}:{payload['ack']}",
+                defaults={
+                    "event_type": "delivery_ack",
+                    "payload": {
+                        "message_id": payload["id"],
+                        "ack": payload["ack"],
+                        "session": data["session"],
+                    },
+                },
+            )
+            return Response({"status": "accepted"}, status=202)
+        cfg = WhatsAppConfig.objects.filter(
+            session_name=data["session"],
+            group_jid=data["chat_id"],
+            is_active=True,
+            team__is_active=True,
+        ).first()
+        if not cfg:
+            raise PermissionDenied("Источник не разрешён.")
+        payload = data["payload"]
+        if payload["fromMe"] or not payload["body"].strip():
+            return Response({"status": "ignored"})
+        stamp = payload.get("timestamp")
         try:
-            project = Project.objects.get(pk=pk)
-        except Project.DoesNotExist:
-            return Response({"error": "Project not found"}, status=status.HTTP_404_NOT_FOUND)
-
-        project.is_verified = True
-        project.save(update_fields=['is_verified'])
-
-        # Если сделка еще не зарегистрирована в Bitrix24 — создаем ее в CRM
-        if not project.bitrix_id:
-            async_task('api.tasks.create_bitrix_deal_task', project.id)
-        elif project.needs_bitrix_sync:
-            async_task('api.tasks.sync_single_deal_to_bitrix_task', project.id)
-
-        return Response({
-            "status": "verified",
-            "project_id": project.id,
-            "name": project.name,
-            "is_verified": True,
-            "message": f"Сделка '{project.name}' успешно проверена и включена в аналитику"
-        }, status=status.HTTP_200_OK)
+            sent = (
+                datetime.fromtimestamp(stamp, dt_timezone.utc)
+                if stamp
+                else timezone.now()
+            )
+        except (ValueError, OverflowError, OSError):
+            raise ValidationError("Некорректное время сообщения.")
+        if sent > timezone.now() + timedelta(minutes=5):
+            raise ValidationError("Время сообщения находится в будущем.")
+        revision = hashlib.sha256(payload["body"].encode()).hexdigest()
+        sender = (payload["participant"] or "").split("@")[0]
+        with transaction.atomic():
+            raw, created = RawMessage.objects.get_or_create(
+                source="waha",
+                session_name=data["session"],
+                message_id=payload["id"],
+                source_revision=revision,
+                defaults={
+                    "config": cfg,
+                    "chat_id": data["chat_id"],
+                    "sender_phone": sender,
+                    "sender_name": payload["notifyName"],
+                    "timestamp": sent,
+                    "sent_at_known": bool(stamp),
+                    "content": payload["body"],
+                    "raw_payload": {
+                        "event": data["event"],
+                        "session": data["session"],
+                        "payload": payload,
+                    },
+                },
+            )
+            if raw.config_id != cfg.id:
+                raise Conflict("Идентификатор источника уже связан с другим чатом.")
+            if created:
+                OutboxEvent.objects.create(
+                    event_type="extract_message",
+                    deduplication_key=f"extract:{raw.id}",
+                    payload={"raw_id": raw.id},
+                )
+        return Response(
+            {"status": "queued" if created else "duplicate", "source_id": raw.id},
+            status=202 if created else 200,
+        )
 
 
 class BitrixWebhookView(APIView):
-    """
-    Входящий вебхук от Bitrix24 CRM (события ONCRMDEALADD, ONCRMDEALUPDATE):
-    1. Проверяет секретный application token (если задан в BitrixSettings).
-    2. Немедленно возвращает HTTP 200 OK (без задержек для Bitrix24).
-    3. Передает задачу импорта/обновления сделки в персистентную очередь Redis воркера Django Q2.
-    """
     permission_classes = [AllowAny]
+    authentication_classes = []
 
     def post(self, request):
-        cfg = BitrixSettings.get_active()
-        expected_token = (cfg.inbound_token.strip() if cfg and cfg.inbound_token else '') or getattr(settings, 'BITRIX_INBOUND_TOKEN', '')
-        if expected_token:
-            incoming_token = (
-                request.data.get('auth[application_token]') or
-                (request.data.get('auth', {}).get('application_token') if isinstance(request.data.get('auth'), dict) else None) or
-                request.headers.get('X-Bitrix-Token') or
-                request.query_params.get('token')
-            )
-            if not incoming_token or incoming_token != expected_token:
-                return Response(
-                    {"error": "Forbidden: invalid Bitrix webhook application token"},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-
-        event = request.data.get('event') or request.query_params.get('event', '')
-        deal_id = (
-            request.data.get('data[FIELDS][ID]') or
-            (request.data.get('data', {}).get('FIELDS', {}).get('ID') if isinstance(request.data.get('data'), dict) else None) or
-            request.data.get('id') or
-            request.query_params.get('id')
+        body = request.body
+        expected = settings.BITRIX_INBOUND_TOKEN
+        if not expected or not BitrixSettings.objects.filter(is_active=True).exists():
+            raise Unavailable("Интеграция выключена.")
+        incoming = request.headers.get("X-Bitrix-Token", "") or request.data.get(
+            "auth[application_token]", ""
         )
-
-        if not deal_id:
-            return Response({"status": "ignored", "reason": "no_deal_id"}, status=status.HTTP_200_OK)
-
-        task_id = async_task('api.tasks.import_single_deal_from_bitrix_task', str(deal_id))
-        return Response({
-            "status": "queued",
-            "event": event,
-            "deal_id": str(deal_id),
-            "task_id": task_id
-        }, status=status.HTTP_200_OK)
-
+        if not incoming and isinstance(request.data.get("auth"), dict):
+            incoming = request.data["auth"].get("application_token", "")
+        if not isinstance(incoming, str) or not hmac.compare_digest(incoming, expected):
+            raise PermissionDenied()
+        event = request.data.get("event")
+        deal_id = request.data.get("data[FIELDS][ID]")
+        if not deal_id and isinstance(request.data.get("data"), dict):
+            deal_id = request.data["data"].get("FIELDS", {}).get("ID")
+        if (
+            event not in ("ONCRMDEALADD", "ONCRMDEALUPDATE")
+            or not str(deal_id).isdigit()
+        ):
+            raise ValidationError("Неподдерживаемое событие CRM.")
+        event_key = hashlib.sha256(body).hexdigest()
+        outbox, _ = OutboxEvent.objects.get_or_create(
+            deduplication_key=f"crm_in:{event_key}",
+            defaults={
+                "event_type": "crm_import",
+                "payload": {"deal_id": str(deal_id), "event_key": event_key},
+            },
+        )
+        return Response({"status": outbox.state}, status=202)

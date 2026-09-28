@@ -1,161 +1,232 @@
 import re
-import secrets
-from django.core.cache import cache
+from django.conf import settings
 from django.contrib.auth.models import User
+from django.db import transaction
+from django.db.models import Q
+from django.middleware.csrf import CsrfViewMiddleware, get_token
+from django.utils import timezone
+from rest_framework import serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework_simplejwt.tokens import RefreshToken
-from django_q.tasks import async_task
-from .tasks import clean_phone_number
+from rest_framework.exceptions import AuthenticationFailed, PermissionDenied, Throttled
+from . import otp
+from .access import has_access, memberships, integration_allowed, is_client
+from .authentication import create_session, rotate_refresh
+from .models import (
+    AuthSession,
+    TeamMembership,
+    ClientProjectAccess,
+    UserProfile,
+    OutboxEvent,
+)
+from .security import Unavailable
 
-OTP_TTL = 300  # 5 minutes
-COOLDOWN_TTL = 45  # 45 seconds between sends
-MAX_ATTEMPTS = 5
+OTP_TTL, COOLDOWN_TTL, MAX_ATTEMPTS = otp.OTP_TTL, otp.COOLDOWN_TTL, otp.MAX_ATTEMPTS
+
+
+class PhoneInput(serializers.Serializer):
+    phone = serializers.CharField(max_length=32)
+
+    def validate_phone(self, value):
+        digits = re.sub(r"[^0-9]", "", value)
+        if len(digits) == 11 and digits.startswith("8"):
+            digits = "7" + digits[1:]
+        if not re.fullmatch(r"[1-9][0-9]{9,14}", digits):
+            raise serializers.ValidationError("Укажите корректный номер телефона.")
+        return digits
+
+
+class VerifyInput(PhoneInput):
+    code = serializers.RegexField(r"^[0-9]{4}$")
+
+
+def user_data(user):
+    profile = UserProfile.objects.filter(user=user).first()
+    roles = list(memberships(user).values_list("role", flat=True).distinct())
+    if user.is_superuser:
+        roles = ["team_lead", "finance", "admin"]
+    elif integration_allowed(user):
+        roles.append("admin")
+    if is_client(user):
+        roles.append("client")
+    return {
+        "id": user.id,
+        "username": user.username,
+        "phone": user.username,
+        "name": profile.full_name if profile else user.first_name or user.username,
+        "roles": roles,
+    }
+
+
+def auth_response(request, session, access, refresh):
+    response = Response(
+        {
+            "access": access,
+            "user": user_data(session.user),
+            "session_id": session.id,
+            "csrf_token": get_token(request._request),
+        }
+    )
+    response.set_cookie(
+        settings.AUTH_REFRESH_COOKIE,
+        refresh,
+        max_age=30 * 86400,
+        httponly=True,
+        secure=settings.AUTH_COOKIE_SECURE,
+        samesite="Lax",
+        path="/api/auth/",
+    )
+    return response
+
+
+def require_csrf(request):
+    raw = request._request
+    reason = CsrfViewMiddleware(lambda r: None).process_view(
+        raw, lambda r: None, (), {}
+    )
+    if reason:
+        raise PermissionDenied("Проверка CSRF не пройдена.")
+
 
 class SendVerificationCodeView(APIView):
     permission_classes = [AllowAny]
+    authentication_classes = []
 
     def post(self, request):
-        raw_phone = request.data.get("phone", "").strip()
-        clean = clean_phone_number(raw_phone)
-        
-        if len(clean) < 10:
-            return Response(
-                {"error": "Укажите корректный номер телефона (не менее 10 цифр)"},
-                status=status.HTTP_400_BAD_REQUEST
+        data = PhoneInput(data=request.data)
+        data.is_valid(raise_exception=True)
+        phone = data.validated_data["phone"]
+        try:
+            delivery_id = otp.issue(phone, request.META.get("REMOTE_ADDR", "unknown"))
+        except Exception:
+            raise Unavailable("Отправка кода временно недоступна.")
+        if not delivery_id:
+            raise Throttled(wait=COOLDOWN_TTL)
+        user = User.objects.filter(username=phone, is_active=True).first()
+        if user and has_access(user, invited=True):
+            OutboxEvent.objects.create(
+                event_type="otp",
+                deduplication_key=f"otp:{delivery_id}",
+                payload={"user_id": user.id, "delivery_id": delivery_id},
             )
-        
-        # Check cooldown to prevent spam
-        cooldown_key = f"otp_cooldown:{clean}"
-        if cache.get(cooldown_key):
-            return Response(
-                {"error": "Код уже отправлен. Пожалуйста, подождите перед повторной отправкой."},
-                status=status.HTTP_429_TOO_MANY_REQUESTS
-            )
-
-        # Generate secure 4-digit numeric code
-        code = f"{secrets.randbelow(9000) + 1000}"
-        
-        # Save to Redis
-        cache.set(f"otp:{clean}", code, timeout=OTP_TTL)
-        cache.set(cooldown_key, True, timeout=COOLDOWN_TTL)
-        cache.set(f"otp_attempts:{clean}", 0, timeout=OTP_TTL)
-        
-        # Enqueue background task via Django Q and Redis
-        async_task('api.tasks.send_sms_verification_code_task', clean, code)
-        
-        return Response({
-            "status": "success",
-            "message": f"Код подтверждения отправлен на номер +{clean}",
-            "phone": clean,
-            "expires_in": OTP_TTL,
-            "cooldown": COOLDOWN_TTL
-        })
-
-
-class VerifyCodeView(APIView):
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        raw_phone = request.data.get("phone", "").strip()
-        code = request.data.get("code", "").strip()
-        clean = clean_phone_number(raw_phone)
-        
-        if not clean or not code:
-            return Response(
-                {"error": "Необходимо указать номер телефона и код"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        otp_key = f"otp:{clean}"
-        attempts_key = f"otp_attempts:{clean}"
-        saved_code = cache.get(otp_key)
-
-        if not saved_code:
-            return Response(
-                {"error": "Срок действия кода истек или код не запрашивался. Запросите новый код."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        attempts = cache.get(attempts_key, 0)
-        if attempts >= MAX_ATTEMPTS:
-            cache.delete(otp_key)
-            cache.delete(attempts_key)
-            return Response(
-                {"error": "Превышено количество попыток ввода. Запросите код заново."},
-                status=status.HTTP_429_TOO_MANY_REQUESTS
-            )
-
-        if str(saved_code) != str(code):
-            cache.set(attempts_key, attempts + 1, timeout=OTP_TTL)
-            return Response(
-                {"error": f"Неверный код. Осталось попыток: {MAX_ATTEMPTS - (attempts + 1)}"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Code is valid, remove from Redis
-        cache.delete(otp_key)
-        cache.delete(attempts_key)
-
-        # Get or create user in Django
-        user, created = User.objects.get_or_create(username=clean)
-        if created:
-            user.first_name = "Сотрудник"
-            user.save()
-
-        # Issue JWT tokens
-        refresh = RefreshToken.for_user(user)
-        
-        return Response({
-            "status": "success",
-            "access": str(refresh.access_token),
-            "refresh": str(refresh),
-            "user": {
-                "id": user.id,
-                "phone": clean,
-                "name": user.first_name or "Сотрудник компании",
-                "username": user.username
+        return Response(
+            {
+                "message": "Если номеру предоставлен доступ, код будет отправлен.",
+                "expires_in": OTP_TTL,
+                "cooldown": COOLDOWN_TTL,
             }
-        })
+        )
+
+
+class PublicAuthView(APIView):
+    def get_authenticate_header(self, request):
+        return "Bearer"
+
+
+class VerifyCodeView(PublicAuthView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        data = VerifyInput(data=request.data)
+        data.is_valid(raise_exception=True)
+        phone, code = data.validated_data["phone"], data.validated_data["code"]
+        try:
+            valid = otp.verify(phone, code)
+        except Exception:
+            raise Unavailable()
+        user = User.objects.filter(username=phone, is_active=True).first()
+        if not valid or not user or not has_access(user, invited=True):
+            raise AuthenticationFailed("Код недействителен или доступ не предоставлен.")
+        with transaction.atomic():
+            TeamMembership.objects.filter(user=user, status="invited").filter(
+                Q(invited_until__isnull=True) | Q(invited_until__gt=timezone.now())
+            ).update(status="active")
+            ClientProjectAccess.objects.filter(user=user, status="invited").update(
+                status="active"
+            )
+            UserProfile.objects.get_or_create(
+                user=user, defaults={"full_name": user.first_name, "phone": phone}
+            )
+            session, access, refresh = create_session(user, request)
+        return auth_response(request, session, access, refresh)
+
+
+class RefreshView(PublicAuthView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def get(self, request):
+        return Response(
+            {
+                "csrf_token": get_token(request._request),
+                "has_session": bool(request.COOKIES.get(settings.AUTH_REFRESH_COOKIE)),
+            }
+        )
+
+    def post(self, request):
+        require_csrf(request)
+        encoded = request.COOKIES.get(settings.AUTH_REFRESH_COOKIE)
+        if not encoded:
+            raise AuthenticationFailed("Требуется вход.")
+        session, access, refresh = rotate_refresh(encoded)
+        return auth_response(request, session, access, refresh)
+
+
+class LogoutView(APIView):
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        require_csrf(request)
+        from rest_framework_simplejwt.tokens import RefreshToken
+
+        try:
+            token = RefreshToken(request.COOKIES.get(settings.AUTH_REFRESH_COOKIE, ""))
+            AuthSession.objects.filter(
+                id=token.get("sid"), user_id=token.get("user_id")
+            ).update(revoked_at=timezone.now())
+        except Exception:
+            pass
+        response = Response({"message": "Сессия завершена."})
+        response.delete_cookie(settings.AUTH_REFRESH_COOKIE, path="/api/auth/")
+        return response
+
+
+class SessionsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        return Response(
+            list(
+                AuthSession.objects.filter(
+                    user=request.user,
+                    revoked_at__isnull=True,
+                    expires_at__gt=timezone.now(),
+                ).values("id", "device", "created_at", "last_used_at", "expires_at")
+            )
+        )
+
+    def post(self, request, pk=None):
+        qs = AuthSession.objects.filter(user=request.user)
+        if pk is not None:
+            qs = qs.filter(pk=pk)
+        qs.update(revoked_at=timezone.now())
+        return Response({"message": "Сессии завершены."})
 
 
 class CurrentUserView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        user = request.user
-        return Response({
-            "id": user.id,
-            "username": user.username,
-            "phone": user.username,
-            "name": user.first_name or "Сотрудник компании",
-            "is_authenticated": True
-        })
+        return Response(user_data(request.user))
 
 
 class SendWhatsAppView(APIView):
-    """
-    Triggers sending a WhatsApp message via WAHA background worker.
-    """
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        phone = request.data.get("phone", "").strip()
-        message = request.data.get("message", "").strip()
+        from .notification_views import dispatch
 
-        if not phone or not message:
-            return Response(
-                {"error": "Поля phone и message обязательны"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        clean = clean_phone_number(phone)
-        async_task('api.tasks.send_waha_whatsapp_message_task', clean, message)
-
-        return Response({
-            "status": "queued",
-            "message": f"Сообщение для +{clean} отправлено в очередь WAHA",
-            "phone": clean
-        })
+        return dispatch(request, force_whatsapp=True)

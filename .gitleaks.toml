@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+[allowlist]
+description = "Generated dependencies, repository internals and exact Django migration dependency tuples"
+paths = ['''(^|/)(node_modules|\.venv|\.git|dist|test-results|playwright-report)/''']
+regexTarget = "line"
+regexes = ['''\("api", "[0-9]{4}_[a-z0-9_]+"\)''']

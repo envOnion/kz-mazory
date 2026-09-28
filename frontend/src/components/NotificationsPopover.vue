@@ -64,11 +64,12 @@
           <div class="flex-1 min-w-0">
             <div class="flex items-center justify-between gap-1">
               <span class="text-xs font-semibold text-white truncate">{{ item.title }}</span>
-              <span class="text-[10px] text-slate-500 shrink-0">{{ item.time }}</span>
+              <span class="text-[10px] text-slate-500 shrink-0">{{ new Date(item.created_at).toLocaleString('ru-RU') }}</span>
             </div>
             <p class="text-[11px] text-slate-300 mt-0.5 leading-snug">
               {{ item.message }}
             </p>
+            <p v-for="(delivery, index) in item.deliveries" :key="index" class="text-xs text-slate-400">WhatsApp: {{ delivery.state === 'sent' ? 'Отправлено' : delivery.state === 'delivered' ? 'Доставлено' : delivery.state === 'unknown' ? 'Результат неизвестен' : delivery.state }}</p>
           </div>
 
           <!-- Unread Dot -->
@@ -95,7 +96,7 @@
 
       <!-- Popover Footer -->
       <div class="px-4 py-2 border-t border-slate-800/60 bg-[#090f22]/50 text-[10px] text-slate-500 flex items-center justify-between">
-        <span>Адресная очередь Django Q & Redis</span>
+        <span>Ваши уведомления</span>
         <button
           type="button"
           @click="$emit('close')"

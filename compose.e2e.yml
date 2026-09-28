@@ -1,0 +1,78 @@
+name: mazory-platform-e2e
+x-env: &test-env
+  MAZORY_ENV: test
+  INTEGRATION_TEST_MODE: '1'
+  TEST_CACHE: redis
+  AI_DAILY_REQUEST_LIMIT: '100000'
+  FORCE_POSTGRES_TEST: '1'
+  POSTGRES_DB: mazory_platform_e2e
+  POSTGRES_USER: e2e
+  POSTGRES_PASSWORD: isolated-test-database
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: '5432'
+  REDIS_HOST: redis
+  REDIS_PORT: '6379'
+  QDRANT_URL: http://qdrant:6333
+  QDRANT_COLLECTION: e2e_messages
+  WAHA_API_URL: http://test-provider:9000
+  WAHA_API_KEY: isolated-test-provider
+  WAHA_WEBHOOK_SECRET: isolated-test-webhook
+  OPENROUTER_API_KEY: isolated-test-provider
+  ALLOWED_HOSTS: localhost,127.0.0.1,backend,192.168.0.193
+  OCR_URL: http://test-provider:9000/ocr
+  TRANSCRIPTION_URL: http://test-provider:9000/transcribe
+  E2E_ADMIN_PASSWORD: test-only-admin-password
+x-backend: &backend
+  image: mazory-platform-e2e-backend
+  build: ./backend
+  volumes: [e2e_private_media:/app/media]
+  environment: *test-env
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_started }
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment: { POSTGRES_DB: mazory_platform_e2e, POSTGRES_USER: e2e, POSTGRES_PASSWORD: isolated-test-database }
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U e2e -d mazory_platform_e2e']
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    tmpfs: [/var/lib/postgresql/data]
+  redis:
+    image: redis:7-alpine
+  qdrant:
+    image: qdrant/qdrant:v1.13.4
+  test-provider:
+    <<: *backend
+    command: [python, -m, api.testing.provider]
+    ports: ['${E2E_BIND_ADDRESS:-127.0.0.1}:18090:9000']
+  backend:
+    <<: *backend
+    command: [gunicorn, api.testing.wsgi:application, --bind, '0.0.0.0:8000', --workers, '2', --timeout, '30']
+    ports: ['${E2E_BIND_ADDRESS:-127.0.0.1}:18080:8000']
+  qcluster:
+    <<: *backend
+    environment:
+      <<: *test-env
+      Q_CLUSTER_NAME: ai
+    command: [python, manage.py, qcluster]
+  delivery:
+    <<: *backend
+    environment:
+      <<: *test-env
+      Q_CLUSTER_NAME: delivery
+    command: [python, manage.py, qcluster]
+  crm:
+    <<: *backend
+    environment:
+      <<: *test-env
+      Q_CLUSTER_NAME: crm
+    command: [python, manage.py, qcluster]
+  outbox:
+    <<: *backend
+    command: [python, manage.py, run_outbox]
+
+volumes:
+  e2e_private_media:

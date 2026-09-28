@@ -1,108 +1,128 @@
+from datetime import datetime, date, timedelta, timezone as tz
 from decimal import Decimal
+from unittest.mock import patch
 from django.test import TestCase
-from django.contrib.auth import get_user_model
-from rest_framework.test import APIClient
-from rest_framework import status
-from api.models import UserProfile, Project, Company
-from api.datamart import DataMartService
-
-User = get_user_model()
+from api.testing.factories import setup_case, client_for
+from api.models import (
+    FinancialRecord,
+    SalesTarget,
+    PaymentScheduleItem,
+    PaymentAllocation,
+)
+from api.datamart import datamart, period_bounds
 
 
 class DataMartKpiTests(TestCase):
     def setUp(self):
-        self.user = User.objects.create_user(username='testmanager', password='password123')
-        self.profile = UserProfile.objects.create(
-            user=self.user,
-            full_name='Улугбек Тестовый',
-            role='Менеджер по продажам',
-            bitrix_user_id='34',
-            monthly_target=Decimal('60000000.00'),
-            current_sales=Decimal('45000000.00')
+        setup_case(self)
+        self.team.history_complete_from = date(2020, 1, 1)
+        self.team.save()
+        for day, amount in (
+            (date(2026, 9, 1), "100.10"),
+            (date(2026, 9, 15), "200.20"),
+            (date(2026, 8, 5), "50.05"),
+            (date(2026, 7, 1), "-10.00"),
+            (date(2026, 1, 1), "25.00"),
+        ):
+            FinancialRecord.objects.create(
+                project=self.project,
+                credited_profile=self.manager.profile,
+                amount=Decimal(amount),
+                payment_date=day,
+                is_verified=True,
+            )
+
+    @patch(
+        "django.utils.timezone.now",
+        return_value=datetime(2026, 9, 28, 12, tzinfo=tz.utc),
+    )
+    def test_exact_periods_and_missing_targets(self, _):
+        for period, expected in [
+            ("this_month", "300.30"),
+            ("last_month", "50.05"),
+            ("quarter", "340.35"),
+            ("year", "365.35"),
+        ]:
+            mart = datamart.get_sales_kpi_mart(self.manager, period)
+            self.assertEqual(mart["fact"], expected)
+            self.assertIsNone(mart["target"])
+            self.assertEqual(
+                sum(row["amount"] for row in mart["source_rows"]), Decimal(expected)
+            )
+        SalesTarget.objects.create(
+            team=self.team,
+            profile=self.manager.profile,
+            month=date(2026, 9, 1),
+            amount=600,
+            approved_by=self.lead,
         )
-        self.company = Company.objects.create(name='ТОО ТестСтрой')
-        self.project = Project.objects.create(
-            name='Строительство БТП ЖК Тест',
-            manager=self.profile,
-            company=self.company,
-            contract_amount=Decimal('45000000.00'),
-            cost_amount=Decimal('35000000.00'),
-            paid_amount=Decimal('45000000.00'),
-            status='completed'
+        mart = datamart.get_sales_kpi_mart(self.manager)
+        self.assertEqual(mart["target"], "600.00")
+        self.assertEqual(mart["managers"][0]["kpiPercent"], 50.05)
+
+    @patch(
+        "django.utils.timezone.now",
+        return_value=datetime(2026, 9, 28, 12, tzinfo=tz.utc),
+    )
+    def test_zero_and_partial_history_are_distinct(self, _):
+        FinancialRecord.objects.all().delete()
+        mart = datamart.get_sales_kpi_mart(self.manager)
+        self.assertEqual(mart["fact"], "0.00")
+        self.assertEqual(mart["coverage"]["status"], "complete")
+        self.team.history_complete_from = None
+        self.team.save()
+        mart = datamart.get_sales_kpi_mart(self.manager)
+        self.assertEqual(mart["coverage"]["status"], "partial")
+        self.assertIsNone(mart["comparison"]["percent"])
+
+    def test_receivable_requires_due_schedule_and_uses_allocations(self):
+        today = date(2026, 9, 28)
+        overdue = PaymentScheduleItem.objects.create(
+            project=self.project,
+            amount=500,
+            due_date=today - timedelta(days=31),
+            is_verified=True,
         )
-
-        self.client = APIClient()
-        self.client.force_authenticate(user=self.user)
-
-    def test_margin_overflow_protection(self):
-        """Проверка, что экстремальные значения маржи не вызывают numeric field overflow."""
-        # 1. Огромная маржа (мизерный контракт, отрицательные затраты или аномалия)
-        p1 = Project.objects.create(
-            name='Экстремальный проект',
-            manager=self.profile,
-            contract_amount=Decimal('10.00'),
-            cost_amount=Decimal('1000000.00'), # огромный убыток
-            paid_amount=Decimal('10.00')
+        PaymentScheduleItem.objects.create(
+            project=self.project,
+            amount=200,
+            due_date=today + timedelta(days=1),
+            is_verified=True,
         )
-        p1.refresh_from_db()
-        # Маржа должна быть ограничена и успешно сохранена
-        self.assertTrue(p1.actual_margin_percent <= Decimal('0.00'))
-        self.assertTrue(p1.actual_margin_percent >= Decimal('-99999999.99'))
+        payment = FinancialRecord.objects.filter(amount__gt=0).first()
+        PaymentAllocation.objects.create(
+            financial_record=payment, schedule_item=overdue, amount=100
+        )
+        data = datamart.receivables(self.manager, today=today)
+        self.assertEqual(data["overdue"], "400.00")
+        self.assertEqual(data["buckets"]["31_60"], "400.00")
+        self.assertEqual(data["buckets"]["not_due"], "200.00")
 
-    def test_sales_chart_dataset_real_calculation(self):
-        """Проверка, что get_sales_chart_dataset возвращает реальные рассчитанные суммы."""
-        chart_data = DataMartService.get_sales_chart_dataset()
-        self.assertEqual(chart_data['chart_type'], 'bar')
-        self.assertIn('labels', chart_data)
-        self.assertIn('Улугбек Тестовый', chart_data['labels'])
-        self.assertGreaterEqual(len(chart_data['datasets']), 2)
+    def test_unknown_cost_is_not_zero_cost(self):
+        self.project.cost_confirmed = False
+        self.project.save()
+        data = datamart.get_pipeline_mart(self.manager)
+        self.assertIsNone(data["projects"][0]["margin_percent"])
+        self.assertIsNone(data["weighted_margin"])
 
-        # Факт сбора оплат должен соответствовать 45.0 млн ₸
-        fact_dataset = next(d for d in chart_data['datasets'] if 'Факт сбора' in d['label'])
-        idx = chart_data['labels'].index('Улугбек Тестовый')
-        self.assertEqual(fact_dataset['data'][idx], 45.0)
-
-    def test_sales_kpi_mart_dual_contract_keys(self):
-        """Проверка, что get_sales_kpi_mart возвращает и camelCase, и snake_case ключи для фронтенда."""
-        kpi_mart = DataMartService.get_sales_kpi_mart()
-
-        # Верхние метрики
-        self.assertIn('summary_metrics', kpi_mart)
-        self.assertIn('summaryMetrics', kpi_mart)
-        self.assertGreater(len(kpi_mart['summaryMetrics']), 0)
-        first_metric = kpi_mart['summaryMetrics'][0]
-        self.assertIn('value', first_metric)
-        self.assertIn('trendPositive', first_metric)
-
-        # Менеджеры
-        self.assertIn('managers', kpi_mart)
-        self.assertGreater(len(kpi_mart['managers']), 0)
-        mgr = kpi_mart['managers'][0]
-        # Проверяем наличие обоих стилей именования
-        self.assertIn('kpiPercent', mgr)
-        self.assertIn('kpi_percent', mgr)
-        self.assertIn('salesAmount', mgr)
-        self.assertIn('sales_amount', mgr)
-        self.assertIn('dealsCount', mgr)
-        self.assertIn('deals_count', mgr)
-        self.assertIn('statusColor', mgr)
-        self.assertIn('kpiBarColor', mgr)
-        self.assertIn('trend', mgr)
-        self.assertIn('trendPositive', mgr)
-
-        self.assertIn('₸', mgr['salesAmount'])
-        self.assertGreater(mgr['kpiPercent'], 0)
-
-    def test_kpi_summary_view_api(self):
-        """Проверка API эндпоинта /api/kpi/summary/ с включением графика и метрик."""
-        response = self.client.get('/api/kpi/summary/')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        data = response.json()
-
-        self.assertIn('chart_data', data)
-        self.assertIn('chartData', data)
-        self.assertIn('summaryMetrics', data)
-        self.assertIn('summary_metrics', data)
-        self.assertIn('managers', data)
-        self.assertGreater(len(data['managers']), 0)
-        self.assertIn('kpiPercent', data['managers'][0])
+    def test_other_currency_and_unverified_records_are_excluded(self):
+        FinancialRecord.objects.create(
+            project=self.project,
+            amount=999,
+            payment_date=date(2026, 9, 2),
+            currency="USD",
+            is_verified=True,
+        )
+        FinancialRecord.objects.create(
+            project=self.project,
+            amount=999,
+            payment_date=date(2026, 9, 2),
+            is_verified=False,
+        )
+        with patch(
+            "django.utils.timezone.now",
+            return_value=datetime(2026, 9, 28, 12, tzinfo=tz.utc),
+        ):
+            self.assertEqual(
+                datamart.get_sales_kpi_mart(self.manager)["fact"], "300.30"
+            )

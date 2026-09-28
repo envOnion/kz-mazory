@@ -68,29 +68,6 @@
 <script setup lang="ts">
 import { Clock } from 'lucide-vue-next'
 
-interface CommitmentItem {
-  id: number
-  text: string
-  counterparty?: string
-  project_name: string
-  manager_name: string
-  deadline?: string
-  deadline_formatted: string
-  status: string
-  status_color: 'red' | 'green' | 'yellow'
-  severity: string
-}
-
-interface Props {
-  data: {
-    total_count: number
-    fulfilled_count: number
-    pending_count: number
-    overdue_count: number
-    slippage_rate_percent: number
-    commitments: CommitmentItem[]
-  }
-}
-
-defineProps<Props>()
+import type { CommitmentData } from '../../types/chat'
+defineProps<{ data: CommitmentData }>()
 </script>

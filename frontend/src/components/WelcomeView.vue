@@ -1,5 +1,5 @@
 <template>
-  <div class="flex-1 flex flex-col items-center justify-center -mt-16 px-4 z-10">
+  <div class="flex-1 flex flex-col items-center justify-center px-4 z-10">
     <!-- Hero Branding -->
     <div class="flex flex-col items-center mb-8 select-none">
       <!-- Big Glowing Monogram -->

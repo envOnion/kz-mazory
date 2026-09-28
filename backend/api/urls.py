@@ -1,55 +1,101 @@
 from django.urls import path
+from .health import health
 from .views import (
     KpiSummaryView,
     ChatQueryView,
+    OperationView,
     MessageIngestView,
     ProjectListView,
     ProjectVerifyView,
-    BitrixWebhookView
+    BitrixWebhookView,
+    SourceView,
 )
 from .auth_views import (
     SendVerificationCodeView,
     VerifyCodeView,
     CurrentUserView,
-    SendWhatsAppView
+    SendWhatsAppView,
+    RefreshView,
+    LogoutView,
+    SessionsView,
 )
 from .profile_views import ProfileView
 from .notification_views import (
     NotificationListView,
     NotificationMarkAllReadView,
-    DispatchNotificationView
+    DispatchNotificationView,
+    NotificationActionView,
 )
-from .whatsapp_views import (
-    WhatsAppStatusView,
-    WhatsAppQrView,
-    WhatsAppRestartView
+from .whatsapp_views import WhatsAppStatusView, WhatsAppQrView, WhatsAppRestartView
+from .platform_views import (
+    CandidateListView,
+    CandidateReviewView,
+    CommitmentListView,
+    CommitmentActionView,
+    FinanceView,
+    PaymentScheduleView,
+    AllocationView,
+    TargetView,
+    ProjectHistoryView,
+    ExportView,
+    DirectoryView,
+    AccessAdminView,
+    OperationsHealthView,
+    PaymentListView,
+    CandidateDetailView,
+    AssignmentView,
+    ManualProposalView,
+    RetryOutboxView,
+    LegacyProjectsView,
 )
+from .attachments import AttachmentView, AttachmentDetailView
 
 urlpatterns = [
-    # Auth & Profile
-    path('auth/send-code/', SendVerificationCodeView.as_view(), name='auth-send-code'),
-    path('auth/verify-code/', VerifyCodeView.as_view(), name='auth-verify-code'),
-    path('auth/me/', CurrentUserView.as_view(), name='auth-me'),
-    path('profile/', ProfileView.as_view(), name='user-profile'),
-    
-    # Notifications (Redis + Django Q)
-    path('notifications/', NotificationListView.as_view(), name='notifications-list'),
-    path('notifications/read-all/', NotificationMarkAllReadView.as_view(), name='notifications-read-all'),
-    path('notifications/dispatch/', DispatchNotificationView.as_view(), name='notifications-dispatch'),
-
-    # WhatsApp (WAHA)
-    path('whatsapp/send/', SendWhatsAppView.as_view(), name='whatsapp-send'),
-    path('whatsapp/status/', WhatsAppStatusView.as_view(), name='whatsapp-status'),
-    path('whatsapp/qr/', WhatsAppQrView.as_view(), name='whatsapp-qr'),
-    path('whatsapp/restart/', WhatsAppRestartView.as_view(), name='whatsapp-restart'),
-    
-    # Dashboard & Chat & Projects
-    path('kpi/summary/', KpiSummaryView.as_view(), name='kpi-summary'),
-    path('projects/', ProjectListView.as_view(), name='project-list'),
-    path('projects/<int:pk>/verify/', ProjectVerifyView.as_view(), name='project-verify'),
-    path('chat/query/', ChatQueryView.as_view(), name='chat-query'),
-    # WhatsApp & Bitrix Webhooks
-    path('messages/ingest/', MessageIngestView.as_view(), name='messages-ingest'),
-    path('whatsapp/webhook/', MessageIngestView.as_view(), name='whatsapp-webhook'),
-    path('bitrix/webhook/', BitrixWebhookView.as_view(), name='bitrix-webhook'),
+    path("legacy/projects/", LegacyProjectsView.as_view()),
+    path("health/<str:mode>/", health),
+    path("auth/send-code/", SendVerificationCodeView.as_view()),
+    path("auth/verify-code/", VerifyCodeView.as_view()),
+    path("auth/me/", CurrentUserView.as_view()),
+    path("auth/refresh/", RefreshView.as_view()),
+    path("auth/logout/", LogoutView.as_view()),
+    path("auth/sessions/", SessionsView.as_view()),
+    path("auth/sessions/<int:pk>/revoke/", SessionsView.as_view()),
+    path("profile/", ProfileView.as_view()),
+    path("notifications/", NotificationListView.as_view()),
+    path("notifications/read-all/", NotificationMarkAllReadView.as_view()),
+    path("notifications/dispatch/", DispatchNotificationView.as_view()),
+    path("notifications/<int:pk>/<str:action>/", NotificationActionView.as_view()),
+    path("whatsapp/send/", SendWhatsAppView.as_view()),
+    path("whatsapp/status/", WhatsAppStatusView.as_view()),
+    path("whatsapp/qr/", WhatsAppQrView.as_view()),
+    path("whatsapp/restart/", WhatsAppRestartView.as_view()),
+    path("kpi/summary/", KpiSummaryView.as_view()),
+    path("projects/", ProjectListView.as_view()),
+    path("projects/<int:pk>/verify/", ProjectVerifyView.as_view()),
+    path("projects/<int:pk>/history/", ProjectHistoryView.as_view()),
+    path("chat/query/", ChatQueryView.as_view()),
+    path("operations/<int:pk>/", OperationView.as_view()),
+    path("messages/ingest/", MessageIngestView.as_view()),
+    path("whatsapp/webhook/", MessageIngestView.as_view()),
+    path("messages/<int:pk>/", SourceView.as_view()),
+    path("bitrix/webhook/", BitrixWebhookView.as_view()),
+    path("candidates/", CandidateListView.as_view()),
+    path("candidates/manual/", ManualProposalView.as_view()),
+    path("projects/<int:pk>/assign/", AssignmentView.as_view()),
+    path("candidates/<int:pk>/", CandidateDetailView.as_view()),
+    path("candidates/<int:pk>/review/", CandidateReviewView.as_view()),
+    path("commitments/", CommitmentListView.as_view()),
+    path("commitments/<int:pk>/action/", CommitmentActionView.as_view()),
+    path("finance/", FinanceView.as_view()),
+    path("finance/payments/", PaymentListView.as_view()),
+    path("finance/schedules/", PaymentScheduleView.as_view()),
+    path("finance/allocations/", AllocationView.as_view()),
+    path("finance/targets/", TargetView.as_view()),
+    path("exports/", ExportView.as_view()),
+    path("directory/", DirectoryView.as_view()),
+    path("outbox/<int:pk>/retry/", RetryOutboxView.as_view()),
+    path("access/", AccessAdminView.as_view()),
+    path("operations-health/", OperationsHealthView.as_view()),
+    path("attachments/", AttachmentView.as_view()),
+    path("attachments/<int:pk>/", AttachmentDetailView.as_view()),
 ]

@@ -62,13 +62,13 @@
               class="w-full py-3 rounded-xl font-medium text-sm text-white bg-indigo-600 hover:bg-indigo-500 border border-indigo-400/50 shadow-[0_0_20px_rgba(99,102,241,0.4)] disabled:opacity-50 disabled:pointer-events-none transition-all cursor-pointer flex items-center justify-center gap-2"
             >
               <span v-if="isSendingCode" class="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></span>
-              <span>{{ isSendingCode ? 'Отправка...' : 'Получить СМС-код' }}</span>
+              <span>{{ isSendingCode ? 'Отправка...' : 'Получить код' }}</span>
               <ArrowRight v-if="!isSendingCode" class="w-4 h-4" />
             </button>
           </form>
 
           <p class="text-[11px] text-slate-500 mt-5">
-            Сервис защищен сквозным шифрованием и локальной очередью Redis
+            Вход доступен приглашённым сотрудникам и клиентам.
           </p>
         </div>
 
@@ -91,7 +91,10 @@
                 ref="codeInputRef"
                 v-model="code"
                 type="text"
-                maxlength="6"
+                maxlength="4"
+                inputmode="numeric"
+                pattern="[0-9]{4}"
+                autocomplete="one-time-code"
                 placeholder="• • • •"
                 required
                 class="w-full py-3 text-center text-2xl font-mono tracking-[0.5em] rounded-xl bg-[#121c3b]/80 border border-[#354676]/60 text-white placeholder-slate-600 focus:outline-none focus:border-indigo-400 focus:shadow-[0_0_15px_rgba(99,102,241,0.3)] transition-all"
@@ -166,7 +169,7 @@ const {
 } = useAuth()
 
 const step = ref<'phone' | 'code'>('phone')
-const phone = ref('+7 (701) 987-65-43')
+const phone = ref('')
 const code = ref('')
 const phoneInputRef = ref<HTMLInputElement | null>(null)
 const codeInputRef = ref<HTMLInputElement | null>(null)
