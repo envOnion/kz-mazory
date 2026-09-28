@@ -85,6 +85,18 @@ test('Recipient notification is durable, queued through worker and does not clai
   await expect(card).toContainText('WhatsApp: Отправлено')
   await card.getByRole('button', { name: 'Подтвердить получение' }).click()
   await expect(card.getByRole('button', { name: 'Подтвердить получение' })).toHaveCount(0)
+  const captured = await (await request.get(`${provider}/test/messages`)).json()
+  const providerMessage = captured.messages.find((item: { text: string }) => item.text.startsWith(title))
+  const ackBody = JSON.stringify({ event: 'message.ack', session: 'default', payload: { id: providerMessage.id, fromMe: true, participant: null, ack: 2 } })
+  const signature = createHmac('sha512', 'isolated-test-webhook').update(ackBody).digest('hex')
+  expect((await request.post('/api/whatsapp/webhook/', { data: ackBody, headers: { 'Content-Type': 'application/json', 'X-Webhook-Hmac': signature } })).status()).toBe(202)
+  await expect.poll(async () => {
+    const data = await (await request.get('/api/notifications/', { headers: { Authorization: `Bearer ${session.access}` } })).json()
+    return data.notifications.find((item: { title: string }) => item.title === title).deliveries[0].state
+  }, { timeout: 30000 }).toBe('delivered')
+  await page.getByRole('button', { name: 'Проекты', exact: true }).click()
+  await page.getByRole('button', { name: 'Уведомления', exact: true }).click()
+  await expect(card).toContainText('WhatsApp: Доставлено')
 })
 
 test('Client cabinet hides financial internals and AI access', async ({ page, request }) => {

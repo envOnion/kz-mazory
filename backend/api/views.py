@@ -242,12 +242,12 @@ class WebhookPayload(serializers.Serializer):
     timestamp = serializers.IntegerField(min_value=0, required=False)
     fromMe = serializers.BooleanField(default=False)
     participant = serializers.CharField(
-        max_length=128, required=False, allow_blank=True, default=""
+        max_length=128, required=False, allow_blank=True, allow_null=True, default=""
     )
     notifyName = serializers.CharField(
         max_length=255, required=False, allow_blank=True, default=""
     )
-    ack = serializers.IntegerField(required=False)
+    ack = serializers.IntegerField(min_value=-1, max_value=4, required=False)
 
 
 class WebhookInput(serializers.Serializer):
@@ -259,6 +259,10 @@ class WebhookInput(serializers.Serializer):
 
     def validate(self, data):
         original = self.initial_data.get("payload", {})
+        if data["event"] == "message.ack":
+            if "ack" not in data["payload"]:
+                raise ValidationError("Не указан статус доставки.")
+            return data
         chat = original.get("from", "")
         if not isinstance(chat, str) or not chat or len(chat) > 128:
             raise ValidationError("Не указан чат.")
@@ -281,6 +285,23 @@ class MessageIngestView(APIView):
         schema = WebhookInput(data=request.data)
         schema.is_valid(raise_exception=True)
         data = schema.validated_data
+        payload = data["payload"]
+        if data["event"] == "message.ack":
+            if data["session"] != "default" or not payload["fromMe"]:
+                return Response({"status": "ignored"})
+            digest = hashlib.sha256(payload["id"].encode()).hexdigest()
+            OutboxEvent.objects.get_or_create(
+                deduplication_key=f"delivery_ack:{data['session']}:{digest}:{payload['ack']}",
+                defaults={
+                    "event_type": "delivery_ack",
+                    "payload": {
+                        "message_id": payload["id"],
+                        "ack": payload["ack"],
+                        "session": data["session"],
+                    },
+                },
+            )
+            return Response({"status": "accepted"}, status=202)
         cfg = WhatsAppConfig.objects.filter(
             session_name=data["session"],
             group_jid=data["chat_id"],
@@ -290,14 +311,6 @@ class MessageIngestView(APIView):
         if not cfg:
             raise PermissionDenied("Источник не разрешён.")
         payload = data["payload"]
-        if data["event"] == "message.ack":
-            if payload.get("ack", 0) >= 3:
-                NotificationDelivery.objects.filter(
-                    provider_message_id=payload["id"],
-                    state="sent",
-                    notification__project__team_id=cfg.team_id,
-                ).update(state="delivered")
-            return Response({"status": "accepted"})
         if payload["fromMe"] or not payload["body"].strip():
             return Response({"status": "ignored"})
         stamp = payload.get("timestamp")
@@ -312,7 +325,7 @@ class MessageIngestView(APIView):
         if sent > timezone.now() + timedelta(minutes=5):
             raise ValidationError("Время сообщения находится в будущем.")
         revision = hashlib.sha256(payload["body"].encode()).hexdigest()
-        sender = payload["participant"].split("@")[0]
+        sender = (payload["participant"] or "").split("@")[0]
         with transaction.atomic():
             raw, created = RawMessage.objects.get_or_create(
                 source="waha",

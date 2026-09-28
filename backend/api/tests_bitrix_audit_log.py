@@ -1,6 +1,6 @@
 from datetime import timedelta, datetime, timezone as dtz
 from unittest.mock import patch
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.core.cache import cache
 from django.utils import timezone
 from api.testing.factories import setup_case, client_for
@@ -167,3 +167,55 @@ class DurableDeliveryTests(TestCase):
         )
         c.refresh_from_db()
         self.assertEqual(c.status, "pending")
+
+
+class ProviderReceiptTests(TestCase):
+    def setUp(self):
+        setup_case(self)
+
+    @override_settings(WAHA_WEBHOOK_SECRET="test-ack-signature")
+    def test_signed_device_ack_updates_personal_delivery_once(self):
+        import json, hmac, hashlib
+        from api.notifications import create_notification
+        from api.models import NotificationDelivery, OutboxEvent
+        from api.tasks import run_outbox
+
+        notification = create_notification(
+            self.manager, "Title", "Text", "info", "ack-personal"
+        )
+        delivery = NotificationDelivery.objects.create(
+            notification=notification,
+            provider_message_id="true_personal_id",
+            state="sent",
+        )
+        body = json.dumps(
+            {
+                "event": "message.ack",
+                "session": "default",
+                "payload": {
+                    "id": delivery.provider_message_id,
+                    "from": "not-an-allowed-chat@c.us",
+                    "fromMe": True,
+                    "participant": None,
+                    "ack": 2,
+                },
+            }
+        ).encode()
+        signature = hmac.new(b"test-ack-signature", body, hashlib.sha512).hexdigest()
+        for _ in range(2):
+            response = self.client.post(
+                "/api/whatsapp/webhook/",
+                body,
+                content_type="application/json",
+                HTTP_X_WEBHOOK_HMAC=signature,
+            )
+            self.assertEqual(response.status_code, 202)
+        event = OutboxEvent.objects.get(event_type="delivery_ack")
+        run_outbox(event.id)
+        delivery.refresh_from_db()
+        self.assertEqual(delivery.state, "delivered")
+        self.assertFalse(
+            __import__(
+                "api.models", fromlist=["RawMessage"]
+            ).RawMessage.objects.exists()
+        )

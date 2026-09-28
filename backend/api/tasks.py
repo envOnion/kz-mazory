@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 CLUSTERS = {
     "otp": "delivery",
     "notification": "delivery",
+    "delivery_ack": "delivery",
     "crm_sync": "crm",
     "crm_import": "crm",
     "waha_control": "delivery",
@@ -92,6 +93,7 @@ def run_outbox(pk):
             "index_message": index_message,
             "otp": deliver_otp,
             "notification": deliver_notification,
+            "delivery_ack": apply_delivery_ack,
             "operation": run_operation,
             "crm_sync": sync_crm,
             "crm_import": import_crm,
@@ -252,6 +254,27 @@ def deliver_notification(payload):
         provider_id = provider_id.get("_serialized", "")
     delivery.provider_message_id, delivery.state = str(provider_id)[:255], "sent"
     delivery.save(update_fields=["provider_message_id", "state", "updated_at"])
+
+
+def apply_delivery_ack(payload):
+    # A provider receipt can arrive before the send response; durable retry preserves it.
+    if payload["session"] != "default" or payload["ack"] in (0, 1):
+        return
+    deliveries = NotificationDelivery.objects.filter(
+        provider_message_id=payload["message_id"]
+    ).exclude(provider_message_id="")
+    if not deliveries.exists():
+        raise ProviderUnavailable("delivery_receipt_waiting_for_send")
+    if payload["ack"] >= 2:
+        deliveries.filter(state__in=["sending", "sent", "unknown"]).update(
+            state="delivered", error_code="", updated_at=timezone.now()
+        )
+    elif payload["ack"] == -1:
+        deliveries.filter(state__in=["sending", "sent", "unknown"]).update(
+            state="failed",
+            error_code="provider_delivery_error",
+            updated_at=timezone.now(),
+        )
 
 
 def extract_message(payload):
