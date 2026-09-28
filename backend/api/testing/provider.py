@@ -4,10 +4,13 @@ import hashlib
 import json
 import re
 import threading
+import time
+from urllib.parse import unquote, urlsplit
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from datetime import datetime, timezone
 
 messages = []
+waha_sessions = {}
+waha_requests = []
 ai_requests = {"embeddings": [], "chats": []}
 lock = threading.Lock()
 
@@ -25,6 +28,11 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
     def do_GET(self):
+        if self.path == "/test/waha":
+            with lock:
+                return self.reply(200, {"requests": list(waha_requests)})
+        if self.waha_request("GET"):
+            return
         if self.path == "/test/messages":
             with lock:
                 return self.reply(200, {"messages": list(messages)})
@@ -42,6 +50,16 @@ class Handler(BaseHTTPRequestHandler):
                 200, {"text": "Изолированный тестовый документ без финансовых фактов."}
             )
         data = json.loads(raw or b"{}")
+        if self.path == "/test/waha":
+            with lock:
+                waha_sessions[data["name"]] = {
+                    "status": "STOPPED",
+                    "authenticated": True,
+                    **data,
+                }
+            return self.reply(200, {"status": "configured"})
+        if self.waha_request("POST"):
+            return
         if self.path == "/api/sendText":
             with lock:
                 item = {**data, "id": f"test-message-{len(messages) + 1}"}
@@ -106,6 +124,58 @@ class Handler(BaseHTTPRequestHandler):
                 },
             )
         self.reply(404, {"error": "Unknown test route"})
+
+    def waha_request(self, method):
+        path = urlsplit(self.path).path
+        session_route = re.fullmatch(
+            r"/api/sessions/([^/]+)(?:/(start|restart|stop|logout))?", path
+        )
+        qr_route = re.fullmatch(r"/api/([^/]+)/auth/qr", path)
+        if not session_route and not qr_route:
+            return False
+        name = unquote((session_route or qr_route).group(1))
+        action = (session_route.group(2) or "status") if session_route else "qr"
+        if self.headers.get("X-Api-Key") != "isolated-test-provider":
+            self.reply(403, {"error": "bad_test_key"})
+            return True
+        with lock:
+            waha_requests.append(
+                {"method": method, "path": self.path, "name": name, "action": action}
+            )
+            session = waha_sessions.get(name)
+            if session is None:
+                self.reply(404, {"error": "session_missing"})
+                return True
+            fault = session.get("faults", {}).get(action, {})
+            if fault.get("http_status"):
+                self.reply(fault["http_status"], {"error": "fixture_rejection"})
+                return True
+            if method == "POST" and action in ("start", "restart", "stop", "logout"):
+                if action == "logout":
+                    session["authenticated"] = False
+                session["status"] = (
+                    ("WORKING" if session["authenticated"] else "SCAN_QR_CODE")
+                    if action in ("start", "restart")
+                    else "STOPPED"
+                )
+            result = {
+                "name": name,
+                "status": session["status"],
+                "me": {"id": "fixture@c.us", "pushName": "E2E WhatsApp"}
+                if session["status"] == "WORKING"
+                else None,
+            }
+            if action == "qr":
+                result = {"value": "isolated-whatsapp-qr:" + name}
+        if fault.get("disconnect"):
+            self.close_connection = True
+            return True
+        time.sleep(fault.get("delay", 0))
+        try:
+            self.reply(200, result)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        return True
 
 
 if __name__ == "__main__":

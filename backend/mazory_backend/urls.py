@@ -3,31 +3,30 @@ from api.mfa import mfa_view, security_view
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
-from api.waha_admin_views import waha_dashboard_view, waha_action_view
+from api.waha_admin_views import waha_dashboard_view, waha_action_view, waha_state_view
 
 # Register custom WAHA admin views inside admin.site namespace
 _orig_admin_get_urls = admin.site.get_urls
+
+
 def _custom_admin_get_urls():
     custom_urls = [
-        path('waha-dashboard/', waha_dashboard_view, name='waha_dashboard'),
-        path('waha-action/<str:action>/', waha_action_view, name='waha_action'),
+        path("waha-dashboard/", waha_dashboard_view, name="waha_dashboard"),
+        path("waha-state/", waha_state_view, name="waha_state"),
+        path("waha-action/<str:action>/", waha_action_view, name="waha_action"),
     ]
     return custom_urls + _orig_admin_get_urls()
+
 
 admin.site.get_urls = _custom_admin_get_urls
 
 urlpatterns = [
-    path('admin/security/', security_view, name='admin-security'),
-    path('admin/security/mfa/', mfa_view, name='admin-mfa'),
-    # Custom WAHA Control Center inside Django Admin
-    path('admin/waha-dashboard/', waha_dashboard_view, name='waha_dashboard'),
-    path('admin/waha-action/<str:action>/', waha_action_view, name='waha_action'),
-    
+    path("admin/security/", security_view, name="admin-security"),
+    path("admin/security/mfa/", mfa_view, name="admin-mfa"),
     # Standard Admin
-    path('admin/', admin.site.urls),
-    
+    path("admin/", admin.site.urls),
     # API endpoints
-    path('api/', include('api.urls')),
+    path("api/", include("api.urls")),
 ]
 
 if settings.DEBUG:

@@ -1,195 +1,93 @@
-{% extends "unfold/layouts/base.html" %}
-
-{% block title %}WAHA Центр управления | Mazory AI{% endblock %}
-
+{% extends "admin/base_site.html" %}
+{% load static %}
+{% block extrahead %}
+{{ block.super }}
+<script src="{% static 'admin/js/waha-dashboard.js' %}" defer></script>
+<style>
+  .waha-panel { margin: 1rem auto; }
+  .waha-panel h2 { font-size: 1.5rem; font-weight: 700; margin-bottom: .5rem; }
+  .waha-panel p { margin: .5rem 0; }
+  .waha-actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
+  .waha-button, .waha-select { padding: .65rem 1rem; border: 1px solid #94a3b8; border-radius: .5rem; color: inherit; background: transparent; }
+  .waha-button { cursor: pointer; font-weight: 600; }
+  .waha-button:disabled { cursor: wait; opacity: .5; }
+  .waha-button:focus-visible, .waha-select:focus-visible { outline: 2px solid #6366f1; outline-offset: 2px; }
+  .waha-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; margin: 1rem 0; }
+  .waha-card { padding: 1.5rem; border-radius: .75rem; }
+  .waha-state { padding: 1rem; border: 1px solid #94a3b8; border-radius: .75rem; margin: 1rem 0; }
+  .waha-error { border-color: #ef4444; }
+  .waha-qr { width: 256px; max-width: 100%; height: auto; margin: 1rem 0; }
+</style>
+{% endblock %}
 {% block content %}
-<div class="px-4 py-6 max-w-7xl mx-auto space-y-6">
-  <!-- Header -->
-  <div class="flex items-center justify-between pb-4 border-b border-gray-200 dark:border-gray-800">
-    <div>
-      <h1 class="text-2xl font-bold tracking-tight text-gray-900 dark:text-white flex items-center gap-3">
-        <span class="p-2 rounded-lg bg-indigo-500/10 text-indigo-500">
-          <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z" />
-          </svg>
-        </span>
-        WAHA Центр управления WhatsApp
-      </h1>
-      <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-        Управление сессией WhatsApp, сканирование QR-кода и мониторинг рабочей группы без внешних интерфейсов.
-      </p>
-    </div>
-    
-    <div class="flex items-center gap-3">
-      <form method="post" action="{% url 'admin:waha_action' 'start' %}">
-        {% csrf_token %}
-        <button type="submit" class="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 shadow-sm transition">
-          Запустить сессию
-        </button>
-      </form>
-      <form method="post" action="{% url 'admin:waha_action' 'restart' %}">
-        {% csrf_token %}
-        <button type="submit" class="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-200 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 shadow-sm transition">
-          Перезапустить
-        </button>
-      </form>
-      <form method="post" action="{% url 'admin:waha_action' 'stop' %}">
-        {% csrf_token %}
-        <button type="submit" class="px-4 py-2 text-sm font-medium text-rose-600 bg-rose-50 dark:bg-rose-950/30 border border-rose-200 dark:border-rose-900 rounded-lg hover:bg-rose-100 dark:hover:bg-rose-900/50 transition">
-          Остановить
-        </button>
-      </form>
-      <form method="post" action="{% url 'admin:waha_action' 'logout' %}" onsubmit="return confirm('Вы уверены, что хотите выйти из WhatsApp? Текущая авторизация будет сброшена, и потребуется отсканировать новый QR-код.');">
-        {% csrf_token %}
-        <button type="submit" class="px-4 py-2 text-sm font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/50 transition">
-          Выйти (Logout)
-        </button>
-      </form>
-    </div>
+<section class="waha-panel" id="waha-dashboard" {% if config %}data-state-url="{% url 'admin:waha_state' %}?config_id={{ config.id }}" data-dashboard-url="{% url 'admin:waha_dashboard' %}?config_id={{ config.id }}" data-busy="{{ operation.busy|yesno:'true,false' }}"{% endif %}>
+  <h2>WAHA Центр управления WhatsApp</h2>
+  <p class="mazory-trace-meta">Управление сессией и подключение WhatsApp по QR-коду.</p>
+  {% if configs %}
+  <form method="get" action="{% url 'admin:waha_dashboard' %}">
+    <label for="waha-config">Конфигурация</label>
+    <select name="config_id" id="waha-config" class="waha-select">
+      {% for item in configs %}<option value="{{ item.id }}" {% if item.id == config.id %}selected{% endif %}>{{ item.name }} — {{ item.session_name }}</option>{% endfor %}
+    </select>
+    <button class="waha-button" type="submit">Показать</button>
+  </form>
+  {% endif %}
+  {% if error %}<p role="alert" class="waha-state waha-error">{{ error }}</p>{% endif %}
+  {% if config %}
+  <div class="waha-actions">
+    {% for action, label in actions %}
+    <form method="post" action="{% url 'admin:waha_action' action %}" data-waha-action="{{ action }}">
+      {% csrf_token %}
+      <input type="hidden" name="config_id" value="{{ config.id }}">
+      <button type="submit" class="waha-button" {% if operation.busy %}disabled{% endif %}>{{ label }}</button>
+    </form>
+    {% endfor %}
   </div>
-
-  {% if message %}
-  <div class="p-4 rounded-xl {% if message_type == 'error' %}bg-rose-500/10 text-rose-400 border border-rose-500/30{% else %}bg-emerald-500/10 text-emerald-400 border border-emerald-500/30{% endif %}">
-    {{ message }}
+  {% if operation.state %}
+  <div class="waha-state {% if operation.state == 'failed' or operation.state == 'unknown' %}waha-error{% endif %}" role="status" data-testid="waha-operation" data-state="{{ operation.state }}">
+    <strong>{{ operation.action }}: {{ operation.message }}</strong>
+    {% if operation.error %}<p>{{ operation.error }} <span class="mazory-trace-meta">({{ operation.error_code }})</span></p>{% endif %}
+    {% if operation.busy %}<p>Ожидаем ответ фонового обработчика. Повторная команда для этой сессии временно недоступна.</p>{% endif %}
   </div>
   {% endif %}
-
-  <!-- Status Cards Grid -->
-  <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-    <div class="p-6 rounded-2xl mazory-trace-card shadow-sm">
-      <div class="text-xs font-semibold uppercase tracking-wider mazory-trace-meta">Статус сессии</div>
-      <div class="mt-2 flex items-center gap-3">
-        {% if status == 'WORKING' %}
-          <span class="flex h-3 w-3 relative">
-            <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-            <span class="relative inline-flex rounded-full h-3 w-3 bg-emerald-500"></span>
-          </span>
-          <span class="text-xl font-bold text-emerald-500">ПОДКЛЮЧЕНО</span>
-        {% elif status == 'SCAN_QR_CODE' %}
-          <span class="flex h-3 w-3 rounded-full bg-amber-500"></span>
-          <span class="text-xl font-bold text-amber-500">ТРЕБУЕТСЯ QR-КОД</span>
-        {% elif status == 'STARTING' %}
-          <span class="flex h-3 w-3 rounded-full bg-blue-500"></span>
-          <span class="text-xl font-bold text-blue-500">ЗАПУСК...</span>
-        {% else %}
-          <span class="flex h-3 w-3 rounded-full bg-rose-500"></span>
-          <span class="text-xl font-bold text-rose-500">{{ status|default:"ОСТАНОВЛЕНО" }}</span>
-        {% endif %}
-      </div>
-      <div class="mt-2 text-xs mazory-trace-meta">Сессия: {{ config.session_name }} (WAHA: {{ config.waha_api_url }})</div>
+  <p id="waha-poll-error" role="status" hidden>Обновление результата приостановлено. Обновите страницу, чтобы проверить очередь; команда повторно отправлена не будет.</p>
+  <div class="waha-grid">
+    <div class="waha-card mazory-trace-card">
+      <h3>Сохранённый статус сессии</h3>
+      <p data-testid="waha-status"><strong>{{ config.status }}</strong></p>
+      <p>Сессия: {{ config.session_name }}</p>
+      <p class="mazory-trace-meta">Обновлено: {{ config.updated_at|date:"d.m.Y H:i:s" }}</p>
+      <p class="mazory-trace-meta">«Обновить статус» запрашивает состояние в WAHA через очередь.</p>
     </div>
-
-    <div class="p-6 rounded-2xl mazory-trace-card shadow-sm">
-      <div class="text-xs font-semibold uppercase tracking-wider mazory-trace-meta">Целевая группа WhatsApp</div>
-      <div class="mt-2 text-lg font-bold mazory-trace-text truncate">
-        {{ config.name }}
-      </div>
-      <div class="mt-1 font-mono text-xs text-indigo-500 truncate">
-        {{ config.group_jid }}
-      </div>
-      <div class="mt-2">
-        <a href="{% url 'admin:api_whatsappconfig_change' config.id %}" class="text-xs text-indigo-600 dark:text-indigo-400 hover:underline">
-          Изменить группу в настройках &rarr;
-        </a>
-      </div>
+    <div class="waha-card mazory-trace-card">
+      <h3>Целевая группа WhatsApp</h3>
+      <p><strong>{{ config.name }}</strong></p><p>{{ config.group_jid|default:"Группа не указана" }}</p>
+      <a href="{% url 'admin:api_whatsappconfig_change' config.id %}">Изменить настройки группы →</a>
     </div>
-
-    <div class="p-6 rounded-2xl mazory-trace-card shadow-sm">
-      <div class="text-xs font-semibold uppercase tracking-wider mazory-trace-meta">Подключенный аккаунт</div>
-      <div class="mt-2 text-lg font-bold mazory-trace-text">
-        {% if me %}{{ me.pushName|default:me.id }}{% else %}Не авторизован{% endif %}
-      </div>
-      <div class="mt-1 text-xs mazory-trace-meta">
-        JID: {% if me %}{{ me.id }}{% else %}—{% endif %}
-      </div>
+    <div class="waha-card mazory-trace-card">
+      <h3>Подключённый аккаунт</h3>
+      {% if me %}<p>{{ me.pushName|default:me.id }}</p><p>{{ me.id }}</p>{% else %}<p>Данные аккаунта не получены.</p>{% endif %}
     </div>
   </div>
-
-  <!-- QR Code & Instructions Panel -->
-  <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
-    <div class="p-6 rounded-2xl mazory-trace-card shadow-sm flex flex-col items-center justify-center text-center min-h-[380px]">
-      {% if status == 'SCAN_QR_CODE' and qr_image %}
-        <div class="p-4 bg-white rounded-2xl shadow-inner border border-gray-200">
-          <img src="{{ qr_image }}" alt="WhatsApp QR Code" class="w-64 h-64 mx-auto" />
-        </div>
-        <p class="mt-4 text-sm font-semibold mazory-trace-text">
-          Отсканируйте этот QR-код в WhatsApp на телефоне
-        </p>
-        <p class="text-xs mazory-trace-meta mt-1">
-          WhatsApp &rarr; Связанные устройства &rarr; Привязка устройства
-        </p>
-        <button onclick="window.location.reload()" class="mt-4 px-3 py-1.5 text-xs text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/40 rounded-lg hover:underline">
-          Обновить QR-код
-        </button>
-      {% elif status == 'WORKING' %}
-        <div class="w-20 h-20 rounded-full bg-emerald-500/10 text-emerald-500 flex items-center justify-center mb-4">
-          <svg class="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-          </svg>
-        </div>
-        <h3 class="text-lg font-bold mazory-trace-text">Сессия WhatsApp активна!</h3>
-        <p class="text-sm mazory-trace-meta max-w-sm mt-1">
-          Сервис непрерывно слушает входящие сообщения из группы «{{ config.name }}» и автоматически отправляет их на обработку AI.
-        </p>
-        <form method="post" action="{% url 'admin:waha_action' 'logout' %}" onsubmit="return confirm('Вы уверены, что хотите выйти из WhatsApp? Текущая авторизация будет сброшена, и потребуется отсканировать новый QR-код.');" class="mt-4">
-          {% csrf_token %}
-          <button type="submit" class="px-3 py-1.5 text-xs font-medium text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-900 rounded-lg hover:bg-rose-100 dark:hover:bg-rose-900/50 transition">
-            Отвязать номер (сбросить сессию)
-          </button>
-        </form>
-      {% else %}
-        <div class="w-20 h-20 rounded-full bg-gray-500/10 text-gray-400 flex items-center justify-center mb-4">
-          <svg class="w-10 h-10" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
-          </svg>
-        </div>
-        <h3 class="text-lg font-bold mazory-trace-text">Сессия остановлена</h3>
-        <p class="text-sm mazory-trace-meta max-w-sm mt-1">
-          Нажмите кнопку «Запустить сессию» выше, чтобы активировать подключение и получить QR-код.
-        </p>
-      {% endif %}
-    </div>
-
-    <!-- Quick Help & Groups list -->
-    <div class="p-6 rounded-2xl mazory-trace-card shadow-sm space-y-4">
-      <h3 class="text-base font-bold mazory-trace-text flex items-center gap-2">
-        <svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-        </svg>
-        Доступные чаты и группы
-      </h3>
-      <p class="text-xs mazory-trace-meta">
-        Ниже отображаются чаты, обнаруженные в подключенном аккаунте. Вы можете скопировать ID нужной группы и сохранить его в настройках.
-      </p>
-
-      <div class="max-h-64 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800 border border-gray-100 dark:border-gray-800 rounded-xl">
-        {% for chat in chats %}
-          <div class="p-3 flex items-center justify-between hover:bg-gray-50 dark:hover:bg-gray-800/50 transition">
-            <div class="min-w-0 pr-2">
-              <div class="text-xs font-semibold mazory-trace-text truncate">{{ chat.name|default:chat.id }}</div>
-              <div class="text-[10px] font-mono mazory-trace-meta truncate">{{ chat.id }}</div>
-            </div>
-            {% if chat.id == config.group_jid %}
-              <span class="px-2 py-0.5 text-[10px] font-semibold bg-emerald-500/10 text-emerald-500 rounded-full border border-emerald-500/20">
-                АКТИВНАЯ
-              </span>
-            {% else %}
-              <button onclick="navigator.clipboard.writeText('{{ chat.id }}'); alert('ID скопирован в буфер: {{ chat.id }}')" class="px-2 py-1 text-[10px] text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 transition">
-                Копировать ID
-              </button>
-            {% endif %}
-          </div>
-        {% empty %}
-          <div class="p-6 text-center text-xs mazory-trace-meta">
-            {% if status == 'WORKING' %}
-              Чаты загружаются или список пуст.
-            {% else %}
-              Авторизуйте сессию для отображения списка групп.
-            {% endif %}
-          </div>
-        {% endfor %}
-      </div>
-    </div>
+  <div class="waha-card mazory-trace-card">
+    {% if operation.busy %}
+      <p>Состояние подключения обновится после выполнения команды.</p>
+    {% elif config.status == 'SCAN_QR_CODE' %}
+      {% if qr_image %}<img class="waha-qr" src="{{ qr_image }}" alt="QR-код WhatsApp" width="256" height="256">{% endif %}
+      <p>WhatsApp → Связанные устройства → Привязка устройства.</p>
+      <p>Если QR-код не появился или устарел, нажмите «Обновить QR-код». После сканирования нажмите «Обновить статус».</p>
+    {% elif config.status == 'WORKING' %}
+      <p>Сессия WhatsApp подключена.</p>
+    {% elif config.status == 'STARTING' %}
+      <p>WAHA запускает сессию. Через несколько секунд нажмите «Обновить статус», чтобы получить QR-код или подтвердить подключение.</p>
+    {% elif config.status == 'STOPPED' %}
+      <p>Сессия остановлена. Нажмите «Запустить сессию», чтобы подключить WhatsApp.</p>
+    {% else %}
+      <p>Обновите статус для проверки подключения. При ошибке проверьте настройки и доступность WAHA.</p>
+    {% endif %}
   </div>
-</div>
+  {% else %}
+    <div class="waha-state"><p>Нет выбранной активной конфигурации WhatsApp.</p><a href="{% url 'admin:api_whatsappconfig_changelist' %}">Открыть настройки WhatsApp →</a></div>
+  {% endif %}
+</section>
 {% endblock %}

@@ -3,23 +3,27 @@
 import logging
 import random
 from datetime import timedelta
+from urllib.parse import quote
 import requests
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import transaction
-from django.db.models import Q
 from django.utils import timezone
 from django_q.tasks import async_task
 from . import access
 from .models import (
     OutboxEvent,
     NotificationDelivery,
-    AsyncOperation,
     RawMessage,
-    PrivateAttachment,
     WhatsAppConfig,
 )
 from .providers import ProviderUnavailable
+from .waha_control import ACTION_LABELS
+
+
+class WahaOutcomeUnknown(Exception):
+    pass
+
 
 logger = logging.getLogger(__name__)
 CLUSTERS = {
@@ -104,6 +108,11 @@ def run_outbox(pk):
         OutboxEvent.objects.filter(pk=pk, state="processing").update(
             state="done", error_code="", lease_until=None
         )
+    except WahaOutcomeUnknown:
+        OutboxEvent.objects.filter(pk=pk).update(
+            state="unknown", error_code="waha_outcome_unknown", lease_until=None
+        )
+        logger.warning("outbox_unknown id=%s type=%s", pk, event.event_type)
     except requests.Timeout:
         state = (
             "unknown"
@@ -333,15 +342,78 @@ def process_attachment(payload):
 def waha_control(payload):
     cfg = WhatsAppConfig.objects.get(pk=payload["config_id"], is_active=True)
     action = payload["action"]
-    if action == "restart":
-        waha_request("POST", f"/api/sessions/{cfg.session_name}/restart")
-    elif action == "qr":
-        result = waha_request("GET", f"/api/{cfg.session_name}/auth/qr?format=raw")
-        cfg.last_qr_code = result.get("value", "")
-    else:
-        result = waha_request("GET", f"/api/sessions/{cfg.session_name}")
-        cfg.status = result.get("status", "UNKNOWN")
-    cfg.save(update_fields=["last_qr_code", "status", "updated_at"])
+    if action not in ACTION_LABELS:
+        raise ProviderUnavailable("waha_invalid_action")
+    if payload.get("session_name", cfg.session_name) != cfg.session_name:
+        raise ProviderUnavailable("waha_config_changed")
+    session = quote(cfg.session_name, safe="")
+    command = action in ("start", "restart", "stop", "logout")
+    accepted = False
+
+    def save_state(status, qr="", me=None):
+        cfg.status, cfg.last_qr_code = status, qr
+        with transaction.atomic():
+            for item in (
+                WhatsAppConfig.objects.select_for_update()
+                .filter(session_name=cfg.session_name)
+                .order_by("id")
+            ):
+                item.status, item.last_qr_code = status, qr
+                item.snapshot = {**item.snapshot, "waha_me": me}
+                item.save(
+                    update_fields=["status", "last_qr_code", "snapshot", "updated_at"]
+                )
+
+    try:
+        if command:
+            waha_request("POST", f"/api/sessions/{session}/{action}")
+            accepted = True
+            save_state("UNKNOWN")
+        result = waha_request("GET", f"/api/sessions/{session}")
+        status = result.get("status") if isinstance(result, dict) else None
+        if not isinstance(status, str) or not status or len(status) > 32:
+            raise ProviderUnavailable("waha_invalid_response")
+        me = result.get("me")
+        if isinstance(me, dict) and status == "WORKING":
+            me = {
+                key: me[key]
+                for key in ("id", "pushName")
+                if isinstance(me.get(key), str)
+            }
+        else:
+            me = None
+        save_state(status, me=me)
+        if status == "SCAN_QR_CODE":
+            result = waha_request("GET", f"/api/{session}/auth/qr?format=raw")
+            value = result.get("value") if isinstance(result, dict) else None
+            if not isinstance(value, str) or not value or len(value) > 4096:
+                raise ProviderUnavailable("waha_invalid_qr")
+            save_state(status, qr=value)
+    except (requests.Timeout, requests.ConnectionError) as exc:
+        WhatsAppConfig.objects.filter(session_name=cfg.session_name).update(
+            last_qr_code=""
+        )
+        if command:
+            save_state("UNKNOWN")
+            raise WahaOutcomeUnknown() from exc
+        raise
+    except Exception as exc:
+        WhatsAppConfig.objects.filter(session_name=cfg.session_name).update(
+            last_qr_code=""
+        )
+        # A confirmed command must not be retried because its subsequent read failed.
+        if accepted or (
+            command and not isinstance(exc, (requests.HTTPError, ProviderUnavailable))
+        ):
+            if not accepted:
+                save_state("UNKNOWN")
+            raise WahaOutcomeUnknown() from exc
+        if isinstance(exc, requests.HTTPError):
+            raise ProviderUnavailable(f"waha_http_{exc.response.status_code}") from exc
+        raise
+    logger.info(
+        "waha_control_done config_id=%s action=%s status=%s", cfg.id, action, cfg.status
+    )
 
 
 def monitor_kpi_risks_and_anomalies_task():
