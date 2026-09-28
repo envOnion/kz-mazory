@@ -18,7 +18,7 @@
       if (!response.ok || response.redirected) throw new Error('State unavailable');
       const state = await response.json();
       if (!state.busy) {
-        window.location.reload();
+        window.location.replace(dashboard.dataset.dashboardUrl);
         return;
       }
       const operation = dashboard.querySelector('[data-testid="waha-operation"]');

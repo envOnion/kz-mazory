@@ -4,7 +4,7 @@
 {{ block.super }}
 <script src="{% static 'admin/js/waha-dashboard.js' %}" defer></script>
 <style>
-  .waha-panel { max-width: 80rem; margin: 1rem auto; }
+  .waha-panel { margin: 1rem auto; }
   .waha-panel h2 { font-size: 1.5rem; font-weight: 700; margin-bottom: .5rem; }
   .waha-panel p { margin: .5rem 0; }
   .waha-actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
@@ -20,7 +20,7 @@
 </style>
 {% endblock %}
 {% block content %}
-<section class="waha-panel" id="waha-dashboard" {% if config %}data-state-url="{% url 'admin:waha_state' %}?config_id={{ config.id }}" data-busy="{{ operation.busy|yesno:'true,false' }}"{% endif %}>
+<section class="waha-panel" id="waha-dashboard" {% if config %}data-state-url="{% url 'admin:waha_state' %}?config_id={{ config.id }}" data-dashboard-url="{% url 'admin:waha_dashboard' %}?config_id={{ config.id }}" data-busy="{{ operation.busy|yesno:'true,false' }}"{% endif %}>
   <h2>WAHA Центр управления WhatsApp</h2>
   <p class="mazory-trace-meta">Управление сессией и подключение WhatsApp по QR-коду.</p>
   {% if configs %}
