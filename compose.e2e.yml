@@ -17,6 +17,8 @@ x-env: &test-env
   WAHA_API_URL: http://test-provider:9000
   WAHA_API_KEY: isolated-test-provider
   WAHA_WEBHOOK_SECRET: isolated-test-webhook
+  BITRIX_WEBHOOK_URL: http://test-provider:9000/rest/1/e2e-environment/
+  BITRIX_INBOUND_TOKEN: isolated-test-bitrix-inbound
   OPENROUTER_API_KEY: isolated-test-provider
   ALLOWED_HOSTS: localhost,127.0.0.1,backend,192.168.0.193
   OCR_URL: http://test-provider:9000/ocr

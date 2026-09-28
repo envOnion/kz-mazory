@@ -3,6 +3,11 @@ import json
 import requests
 from django.contrib import admin
 from django.utils.html import format_html, format_html_join
+from django.urls import reverse
+from django.utils.decorators import method_decorator
+from django.views.decorators.debug import sensitive_post_parameters
+from .admin_forms import BitrixSettingsForm
+from .bitrix_config import effective_webhook_url, masked_webhook_url
 from .plain_text import clean_context
 from django.utils.safestring import mark_safe
 from django.contrib import messages
@@ -523,33 +528,119 @@ class AISettingsAdmin(IntegrationAdmin):
 
 @admin.register(BitrixSettings)
 class BitrixSettingsAdmin(IntegrationAdmin):
+    form = BitrixSettingsForm
+    search_fields = ("name",)
+
+    class Media:
+        css = {"all": ("mazory/css/admin_lists.css",)}
+
     list_display = (
         "name",
-        "webhook_url_masked",
-        "is_active",
-        "hourly_sync_enabled",
-        "auto_import_deals",
-        "auto_create_tasks",
+        "webhook_summary",
+        "sync_summary",
         "last_hourly_sync_at",
+    )
+    readonly_fields = (
+        "webhook_url_masked",
+        "last_sync_at",
+        "last_hourly_sync_at",
+        "last_sync_status",
         "updated_at",
     )
-    list_editable = (
-        "is_active",
-        "hourly_sync_enabled",
-        "auto_import_deals",
-        "auto_create_tasks",
+    fieldsets = (
+        (
+            "Подключение",
+            {"fields": ("name", "webhook_url_masked", "new_webhook_url", "is_active")},
+        ),
+        (
+            "Синхронизация",
+            {
+                "fields": (
+                    "hourly_sync_enabled",
+                    "auto_create_deals",
+                    "auto_import_deals",
+                    "auto_create_tasks",
+                    "sync_timeline_comments",
+                    "deal_category_id",
+                    "default_assigned_by_id",
+                )
+            },
+        ),
+        (
+            "Последние операции",
+            {
+                "fields": (
+                    "last_sync_at",
+                    "last_hourly_sync_at",
+                    "last_sync_status",
+                    "updated_at",
+                )
+            },
+        ),
     )
 
     def webhook_url_masked(self, obj):
-        if not obj.webhook_url:
-            return "—"
-        parts = obj.webhook_url.split("/")
-        if len(parts) >= 6:
-            return f"{parts[0]}//{parts[2]}/rest/.../{parts[-2][:4]}***"
-        return obj.webhook_url
+        source = "Сохранён в настройках" if obj.webhook_url else "Из окружения сервера"
+        return format_html(
+            '<div class="mazory-list-stack"><span class="mazory-webhook-address">{}</span>'
+            '<span class="mazory-list-meta">{}</span></div>',
+            masked_webhook_url(obj),
+            source if effective_webhook_url(obj) else "Укажите адрес ниже",
+        )
 
     webhook_url_masked.short_description = "Webhook"
     exclude = ("webhook_url", "inbound_token")
+
+    def get_fieldsets(self, request, obj=None):
+        fieldsets = super().get_fieldsets(request, obj)
+        if obj is not None and not self.has_change_permission(request, obj):
+            return tuple(
+                (
+                    title,
+                    {
+                        **options,
+                        "fields": tuple(
+                            field
+                            for field in options["fields"]
+                            if field != "new_webhook_url"
+                        ),
+                    },
+                )
+                for title, options in fieldsets
+            )
+        return fieldsets
+
+    @admin.display(description="Webhook")
+    def webhook_summary(self, obj):
+        return format_html(
+            '<div class="mazory-list-stack">{}<a class="mazory-list-link" href="{}">Изменить Webhook →</a></div>',
+            self.webhook_url_masked(obj),
+            reverse("admin:api_bitrixsettings_change", args=[obj.pk]),
+        )
+
+    @admin.display(description="Синхронизация")
+    def sync_summary(self, obj):
+        return format_html(
+            '<div class="mazory-list-stack"><span class="mazory-admin-badge mazory-admin-badge--{}">{}</span>{}</div>',
+            "good" if obj.is_active else "neutral",
+            "Активна" if obj.is_active else "Выключена",
+            format_html_join(
+                "",
+                '<span class="mazory-list-meta">{}: {}</span>',
+                (
+                    (label, "вкл." if enabled else "выкл.")
+                    for label, enabled in (
+                        ("Каждый час", obj.hourly_sync_enabled),
+                        ("Импорт сделок", obj.auto_import_deals),
+                        ("Задачи по дедлайнам", obj.auto_create_tasks),
+                    )
+                ),
+            ),
+        )
+
+    @method_decorator(sensitive_post_parameters("new_webhook_url"))
+    def changeform_view(self, request, object_id=None, form_url="", extra_context=None):
+        return super().changeform_view(request, object_id, form_url, extra_context)
 
 
 @admin.register(BitrixDealChangeLog)
@@ -692,18 +783,17 @@ class BitrixDealChangeLogAdmin(ScopedReadOnlyAdmin):
 @admin.register(MessageProcessingTrace)
 class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
     class Media:
-        css = {"all": ("mazory/css/admin_trace.css",)}
+        css = {"all": ("mazory/css/admin_trace.css", "mazory/css/admin_lists.css")}
 
     list_display = (
-        "created_at_fmt",
-        "whatsapp_sender_fmt",
+        "trace_source",
         "whatsapp_content_snippet",
-        "earlier_messages_badge",
-        "bitrix_matched_badge",
-        "pipeline_action_badge",
+        "trace_context",
+        "trace_result",
         "project_link",
-        "status_badge",
     )
+    list_display_links = ("trace_source",)
+    list_select_related = ("project",)
     list_filter = ("pipeline_action", "status", "created_at")
     search_fields = (
         "whatsapp_content",
@@ -753,6 +843,33 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
 
     created_at_fmt.short_description = "Время обработки"
 
+    @admin.display(description="Время / отправитель", ordering="created_at")
+    def trace_source(self, obj):
+        return format_html(
+            '<span class="mazory-list-stack"><span class="mazory-list-meta">{}</span>'
+            '<strong>{}</strong><span class="mazory-list-meta mazory-sender-id">{}</span>'
+            '<span class="mazory-list-link">Открыть трассировку →</span></span>',
+            self.created_at_fmt(obj),
+            obj.whatsapp_sender_name or "Без имени",
+            obj.whatsapp_sender_phone or "—",
+        )
+
+    @admin.display(description="Контекст / CRM")
+    def trace_context(self, obj):
+        return format_html(
+            '<div class="mazory-list-stack">{}{}</div>',
+            self.earlier_messages_badge(obj),
+            self.bitrix_matched_badge(obj),
+        )
+
+    @admin.display(description="Результат")
+    def trace_result(self, obj):
+        return format_html(
+            '<div class="mazory-list-stack">{}{}</div>',
+            self.pipeline_action_badge(obj),
+            self.status_badge(obj),
+        )
+
     def whatsapp_sender_fmt(self, obj):
         phone_part = (
             format_html(
@@ -770,8 +887,10 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
 
     def whatsapp_content_snippet(self, obj):
         text = obj.whatsapp_content or ""
-        snippet = text[:75] + "..." if len(text) > 75 else text
-        return format_html('<span title="{}">{}</span>', text, snippet)
+        snippet = text[:320] + "…" if len(text) > 320 else text
+        return format_html(
+            '<span class="mazory-message-preview">{}</span>', snippet or "Без текста"
+        )
 
     whatsapp_content_snippet.short_description = "Текст сообщения"
 
@@ -779,10 +898,10 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
         count = obj.earlier_messages_count or len(obj.earlier_messages_context or [])
         if count > 0:
             return format_html(
-                '<span class="px-2.5 py-1 text-xs font-semibold rounded-full bg-purple-500/10 text-purple-600 border border-purple-500/20">🔍 {} сондай</span>',
+                '<span class="mazory-admin-badge mazory-admin-badge--info">Контекст: {}</span>',
                 count,
             )
-        return mark_safe('<span class="text-xs text-gray-400">0 контекста</span>')
+        return mark_safe('<span class="mazory-list-meta">Без контекста</span>')
 
     earlier_messages_badge.short_description = "Сообщения ранее"
 
@@ -790,39 +909,36 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
         if obj.bitrix_matched_deal_id:
             cfg = BitrixSettings.get_active()
             base_url = (
-                cfg.webhook_url.split("/rest/")[0]
-                if "/rest/" in cfg.webhook_url
+                effective_webhook_url(cfg).split("/rest/")[0]
+                if "/rest/" in effective_webhook_url(cfg)
                 else "https://aquakip.bitrix24.kz"
             )
             url = f"{base_url}/crm/deal/details/{obj.bitrix_matched_deal_id}/"
             return format_html(
-                '<a href="{}" target="_blank" class="px-2.5 py-1 text-xs font-semibold rounded-full bg-blue-500/10 text-blue-600 border border-blue-500/20 hover:underline">CRM #{} ↗</a>',
+                '<a href="{}" target="_blank" rel="noopener noreferrer" class="mazory-admin-badge mazory-admin-badge--info">CRM #{} ↗</a>',
                 url,
                 obj.bitrix_matched_deal_id,
             )
-        return mark_safe(
-            '<span class="px-2 py-0.5 text-xs text-gray-500 bg-gray-100 dark:bg-gray-800 rounded">В CRM нет</span>'
-        )
+        return mark_safe('<span class="mazory-list-meta">В CRM нет</span>')
 
     bitrix_matched_badge.short_description = "Bitrix24 CRM"
 
     def pipeline_action_badge(self, obj):
         colors = {
-            "created_deal": ("emerald", "✓ Создана сделка"),
-            "updated_deal": ("sky", "⟳ Обновлена сделка"),
-            "matched_bitrix_imported": ("indigo", "📥 Импорт из CRM"),
-            "commitment_created": ("amber", "⏱ Обязательство"),
-            "financial_record_created": ("teal", "₸ Оплата"),
-            "non_commercial": ("gray", "ℹ Инфо-сообщение"),
-            "error": ("rose", "⚠ Ошибка"),
+            "created_deal": ("good", "Создана сделка"),
+            "updated_deal": ("info", "Обновлена сделка"),
+            "matched_bitrix_imported": ("info", "Импорт из CRM"),
+            "commitment_created": ("warn", "Обязательство"),
+            "financial_record_created": ("good", "Оплата"),
+            "non_commercial": ("neutral", "Инфо-сообщение"),
+            "proposed_facts": ("warn", "Предложены факты"),
+            "error": ("error", "Ошибка"),
         }
-        (color, label) = colors.get(
-            obj.pipeline_action, ("gray", obj.get_pipeline_action_display())
+        color, label = colors.get(
+            obj.pipeline_action, ("neutral", obj.get_pipeline_action_display())
         )
         return format_html(
-            '<span class="px-2.5 py-1 text-xs font-semibold rounded-full bg-{}-500/10 text-{}-600 border border-{}-500/20">{}</span>',
-            color,
-            color,
+            '<span class="mazory-admin-badge mazory-admin-badge--{}">{}</span>',
             color,
             label,
         )
@@ -831,31 +947,25 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
 
     def project_link(self, obj):
         if obj.project:
-            url = f"/admin/api/project/{obj.project.id}/change/"
-            verified_mark = "✓ " if obj.project.is_verified else "⏳ "
-            amt_num = float(obj.project.contract_amount or 0)
-            amt_str = f" ({amt_num:,.0f} ₸)"
             return format_html(
-                '<a href="{}" class="font-medium text-indigo-600 hover:underline">{}<span class="text-xs text-gray-500">{}</span></a>',
-                url,
-                verified_mark + obj.project.name,
-                amt_str,
+                '<a href="{}" class="mazory-list-stack mazory-list-link"><span class="mazory-project-name" title="{}">{}</span>'
+                '<span class="mazory-list-meta">{} ₸</span><span class="mazory-list-meta">{}</span></a>',
+                reverse("admin:api_project_change", args=[obj.project_id]),
+                obj.project.name,
+                obj.project.name,
+                f"{obj.project.contract_amount or 0:,.0f}",
+                "Подтверждена" if obj.project.is_verified else "Ждёт проверки",
             )
-        return mark_safe('<span class="text-xs text-gray-400">—</span>')
+        return format_html('<span class="mazory-list-meta">{}</span>', "Без сделки")
 
-    project_link.short_description = "Итоговая сделка"
+    project_link.short_description = "Сделка"
 
     def status_badge(self, obj):
-        color = (
-            "emerald"
-            if obj.status == "success"
-            else "amber"
-            if obj.status == "warning"
-            else "rose"
+        color = {"success": "good", "warning": "warn", "error": "error"}.get(
+            obj.status, "neutral"
         )
         return format_html(
-            '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-{}-500/10 text-{}-500">{}</span>',
-            color,
+            '<span class="mazory-admin-badge mazory-admin-badge--{}">{}</span>',
             color,
             obj.get_status_display(),
         )
@@ -978,8 +1088,8 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
         matched_id = obj.bitrix_matched_deal_id
         cfg = BitrixSettings.get_active()
         base_url = (
-            cfg.webhook_url.split("/rest/")[0]
-            if "/rest/" in cfg.webhook_url
+            effective_webhook_url(cfg).split("/rest/")[0]
+            if "/rest/" in effective_webhook_url(cfg)
             else "https://aquakip.bitrix24.kz"
         )
         deal_url = f"{base_url}/crm/deal/details/{matched_id}/" if matched_id else "#"

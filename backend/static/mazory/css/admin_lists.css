@@ -1,0 +1,91 @@
+/* Scoped list layouts; source text and identifiers must never size the table. */
+.model-messageprocessingtrace #changelist,
+.model-bitrixsettings #changelist { container-type: inline-size; }
+.model-messageprocessingtrace #result_list,
+.model-bitrixsettings #result_list { table-layout: fixed; }
+.model-messageprocessingtrace #result_list th,
+.model-messageprocessingtrace #result_list td,
+.model-bitrixsettings #result_list th,
+.model-bitrixsettings #result_list td {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    vertical-align: top;
+    padding: 1rem;
+    height: auto;
+}
+.model-messageprocessingtrace .column-trace_source { width: 21%; }
+.model-messageprocessingtrace .column-whatsapp_content_snippet { width: 32%; }
+.model-messageprocessingtrace .column-trace_context { width: 14%; }
+.model-messageprocessingtrace .column-trace_result { width: 17%; }
+.model-messageprocessingtrace .column-project_link { width: 16%; }
+.model-bitrixsettings .column-name { width: 23%; }
+.model-bitrixsettings .column-webhook_summary { width: 32%; }
+.model-bitrixsettings .column-sync_summary { width: 27%; }
+.model-bitrixsettings .column-last_hourly_sync_at { width: 18%; }
+.mazory-list-stack { display: flex; flex-direction: column; align-items: flex-start; gap: .375rem; min-width: 0; }
+.mazory-list-meta { color: #475569; font-size: .8125rem; font-weight: 400; }
+.mazory-list-link { color: #4338ca; font-size: .875rem; }
+a.mazory-list-link:hover { text-decoration: underline; }
+.mazory-sender-id, .mazory-webhook-address { overflow-wrap: anywhere; }
+.mazory-project-name { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.mazory-message-preview {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 4;
+    overflow: hidden;
+    line-height: 1.6;
+    white-space: pre-line;
+    color: #0f172a;
+}
+.mazory-admin-badge {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    box-sizing: border-box;
+    padding: .25rem .625rem;
+    border: 1px solid;
+    border-radius: .5rem;
+    font-size: .75rem;
+    line-height: 1.4;
+    font-weight: 600;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+.mazory-admin-badge--neutral { background: #f1f5f9; color: #334155; border-color: #cbd5e1; }
+.mazory-admin-badge--good { background: #ecfdf5; color: #065f46; border-color: #a7f3d0; }
+.mazory-admin-badge--info { background: #eff6ff; color: #1e40af; border-color: #bfdbfe; }
+.mazory-admin-badge--warn { background: #fffbeb; color: #92400e; border-color: #fde68a; }
+.mazory-admin-badge--error { background: #fff1f2; color: #9f1239; border-color: #fecdd3; }
+html.dark .mazory-list-meta { color: #94a3b8; }
+html.dark .mazory-list-link { color: #a5b4fc; }
+html.dark .mazory-message-preview { color: #f1f5f9; }
+html.dark .mazory-admin-badge--neutral { background: #1e293b; color: #e2e8f0; border-color: #475569; }
+html.dark .mazory-admin-badge--good { background: #052e24; color: #a7f3d0; border-color: #047857; }
+html.dark .mazory-admin-badge--info { background: #172554; color: #bfdbfe; border-color: #1d4ed8; }
+html.dark .mazory-admin-badge--warn { background: #451a03; color: #fde68a; border-color: #92400e; }
+html.dark .mazory-admin-badge--error { background: #4c0519; color: #fecdd3; border-color: #be123c; }
+
+/* Stacked, labelled cells keep every value accessible when the table is narrow. */
+@container (max-width: 960px) {
+    #result_list, #result_list tbody { display: block; width: 100%; }
+    #result_list thead { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+    #result_list .data-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: .5rem; }
+    #result_list .data-row > th, #result_list .data-row > td { display: block; width: auto; min-width: 0; border: 0; padding: .75rem; }
+    #result_list .field-whatsapp_content_snippet { grid-column: 1 / -1; }
+    #result_list .data-row > th::before, #result_list .data-row > td::before {
+        display: block; margin-bottom: .5rem; font-size: .75rem; font-weight: 600; color: #64748b;
+    }
+    .field-trace_source::before { content: 'Время / отправитель'; }
+    .field-whatsapp_content_snippet::before { content: 'Сообщение'; }
+    .field-trace_context::before { content: 'Контекст / CRM'; }
+    .field-trace_result::before { content: 'Результат'; }
+    .field-project_link::before { content: 'Сделка'; }
+    .field-name::before { content: 'Интеграция'; }
+    .field-webhook_summary::before { content: 'Webhook'; }
+    .field-sync_summary::before { content: 'Синхронизация'; }
+    .field-last_hourly_sync_at::before { content: 'Последний запуск'; }
+    html.dark #result_list .data-row > th::before, html.dark #result_list .data-row > td::before { color: #94a3b8; }
+}
+@container (max-width: 540px) {
+    #result_list .data-row { grid-template-columns: minmax(0, 1fr); }
+}
