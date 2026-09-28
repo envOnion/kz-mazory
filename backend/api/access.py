@@ -41,7 +41,9 @@ def has_access(user, invited=False):
             | Q(status="active")
         )
         .exists()
-        or ClientProjectAccess.objects.filter(user=user, status__in=statuses).exists()
+        or ClientProjectAccess.objects.filter(
+            user=user, status__in=statuses, project__team__is_active=True
+        ).exists()
         or (user.is_staff and user.has_perm("api.change_whatsappconfig"))
     )
 
@@ -50,7 +52,9 @@ def is_client(user):
     return (
         not user.is_superuser
         and not memberships(user).exists()
-        and ClientProjectAccess.objects.filter(user=user, status="active").exists()
+        and ClientProjectAccess.objects.filter(
+            user=user, status="active", project__team__is_active=True
+        ).exists()
     )
 
 
@@ -72,7 +76,7 @@ def projects_for(user, include_client=False):
     if include_client:
         condition |= Q(
             pk__in=ClientProjectAccess.objects.filter(
-                user=user, status="active"
+                user=user, status="active", project__team__is_active=True
             ).values("project_id")
         )
     return qs.filter(condition)
@@ -177,7 +181,9 @@ def fingerprint(user):
             memberships(user).order_by("id").values_list("team_id", "role")
         ),
         "clients": list(
-            ClientProjectAccess.objects.filter(user=user, status="active")
+            ClientProjectAccess.objects.filter(
+                user=user, status="active", project__team__is_active=True
+            )
             .order_by("project_id")
             .values_list("project_id", flat=True)
         ),

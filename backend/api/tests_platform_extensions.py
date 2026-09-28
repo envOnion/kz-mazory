@@ -31,6 +31,17 @@ class PlatformExtensionsTests(TestCase):
     def setUp(self):
         setup_case(self)
 
+    def test_disabled_team_invalidates_client_access_in_existing_session(self):
+        user = User.objects.create_user("77000000008")
+        ClientProjectAccess.objects.create(
+            user=user, project=self.project, status="active"
+        )
+        client = client_for(user)
+        self.assertEqual(client.get("/api/projects/").status_code, 200)
+        self.team.is_active = False
+        self.team.save(update_fields=["is_active"])
+        self.assertEqual(client.get("/api/projects/").status_code, 401)
+
     @patch(
         "django.utils.timezone.now",
         return_value=datetime(2026, 9, 28, 12, tzinfo=tz.utc),
