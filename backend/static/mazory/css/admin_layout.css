@@ -1,0 +1,8 @@
+/* Earlier layers take precedence for Unfold's important Tailwind utilities. */
+@layer base {
+    .max-w-2xl,
+    .\!max-w-2xl,
+    .max-w-2xl\! {
+        max-width: none !important;
+    }
+}
