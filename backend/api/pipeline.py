@@ -20,6 +20,7 @@ from .facts import FactSchema, json_value
 from .deduplication import normalize_deal_name
 from .ai_service import AIService
 from .providers import ProviderUnavailable
+from .plain_text import clean_context
 
 
 def extract_message(raw_id):
@@ -42,7 +43,7 @@ def extract_message(raw_id):
         if raw.config_id
         else context_qs.filter(source=raw.source, project_id=raw.project_id)
     )
-    context = list(
+    context = clean_context(
         context_qs.order_by("-timestamp").values(
             "id", "content", "sender_name", "timestamp"
         )[:12]

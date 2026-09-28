@@ -1,4 +1,4 @@
-name: mazory-platform-e2e
+name: ${E2E_COMPOSE_PROJECT:-mazory-platform-e2e}
 x-env: &test-env
   MAZORY_ENV: test
   INTEGRATION_TEST_MODE: '1'
@@ -23,7 +23,7 @@ x-env: &test-env
   TRANSCRIPTION_URL: http://test-provider:9000/transcribe
   E2E_ADMIN_PASSWORD: test-only-admin-password
 x-backend: &backend
-  image: mazory-platform-e2e-backend
+  image: mazory-platform-e2e-backend:${E2E_IMAGE_TAG:-latest}
   build: ./backend
   volumes: [e2e_private_media:/app/media]
   environment: *test-env
@@ -47,11 +47,11 @@ services:
   test-provider:
     <<: *backend
     command: [python, -m, api.testing.provider]
-    ports: ['${E2E_BIND_ADDRESS:-127.0.0.1}:18090:9000']
+    ports: ['${E2E_BIND_ADDRESS:-127.0.0.1}:${E2E_PROVIDER_PORT:-18090}:9000']
   backend:
     <<: *backend
     command: [gunicorn, api.testing.wsgi:application, --bind, '0.0.0.0:8000', --workers, '2', --timeout, '30']
-    ports: ['${E2E_BIND_ADDRESS:-127.0.0.1}:18080:8000']
+    ports: ['${E2E_BIND_ADDRESS:-127.0.0.1}:${E2E_BACKEND_PORT:-18080}:8000']
   qcluster:
     <<: *backend
     environment:

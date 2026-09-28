@@ -5,6 +5,7 @@ from qdrant_client import QdrantClient, models as qm
 from .models import AISettings, RawMessage
 from .ai_service import AIService
 from .providers import ProviderUnavailable
+from .plain_text import plain_text
 
 
 class QdrantService:
@@ -45,6 +46,9 @@ class QdrantService:
         return True
 
     def upsert_message(self, message_id, content, payload):
+        content = plain_text(content)
+        if not content:
+            return None
         self.ensure_collection()
         raw_id = payload["raw_message_id"]
         point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"mazory:{raw_id}"))
@@ -54,7 +58,12 @@ class QdrantService:
                 qm.PointStruct(
                     id=point_id,
                     vector=AIService.get_embedding(content),
-                    payload={"message_id": message_id, "content": content, **payload},
+                    payload={
+                        **payload,
+                        "message_id": message_id,
+                        "content": content,
+                        "sender_name": plain_text(payload.get("sender_name", "")),
+                    },
                 )
             ],
         )
@@ -69,7 +78,8 @@ class QdrantService:
         exclude_id=None,
         before=None,
     ):
-        if not config_ids:
+        query = plain_text(query)
+        if not config_ids or not query:
             return []
         self.ensure_collection()
         must = [
@@ -107,12 +117,15 @@ class QdrantService:
         for hit in hits:
             raw = sources.get((hit.payload or {}).get("raw_message_id"))
             if raw:
+                content = plain_text(raw.content)
+                if not content:
+                    continue
                 results.append(
                     {
                         "id": raw.id,
                         "message_id": raw.message_id,
-                        "content": raw.content,
-                        "sender_name": raw.sender_name,
+                        "content": content,
+                        "sender_name": plain_text(raw.sender_name),
                         "sent_at": raw.timestamp.isoformat(),
                         "score": hit.score,
                         "source_url": f"/api/messages/{raw.id}/",
