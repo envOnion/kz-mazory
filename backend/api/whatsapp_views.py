@@ -1,33 +1,41 @@
-import uuid
+from django import forms
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.exceptions import PermissionDenied
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
-from .models import WhatsAppConfig, OutboxEvent, AuditEvent
+from .models import WhatsAppConfig
 from .access import integration_allowed
+from .waha_control import enqueue_control as queue_control
+
+
+class ConfigForm(forms.Form):
+    config_id = forms.IntegerField(min_value=1, max_value=9223372036854775807)
 
 
 def config_for(request):
     if not integration_allowed(request.user):
         raise PermissionDenied()
+    form = ConfigForm(
+        request.data if request.method == "POST" else request.query_params
+    )
+    if not form.is_valid():
+        raise ValidationError(
+            {"config_id": "Укажите положительный целочисленный ID конфигурации."}
+        )
     return get_object_or_404(
         WhatsAppConfig,
         is_active=True,
-        pk=request.data.get("config_id") or request.query_params.get("config_id"),
+        pk=form.cleaned_data["config_id"],
     )
 
 
 def enqueue_control(user, config, action):
-    event = OutboxEvent.objects.create(
-        event_type="waha_control",
-        deduplication_key=f"waha:{uuid.uuid4().hex}",
-        payload={"config_id": config.id, "action": action},
-    )
-    AuditEvent.objects.create(
-        actor=user, target_type="WhatsAppConfig", target_id=config.id, action=action
-    )
-    return event
+    try:
+        return queue_control(user, config, action)
+    except DjangoValidationError as exc:
+        raise ValidationError({"error": exc.messages[0]}) from exc
 
 
 class WhatsAppStatusView(APIView):
