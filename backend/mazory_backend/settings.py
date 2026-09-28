@@ -70,7 +70,6 @@ OTP_PHONE_HOUR_LIMIT = 5
 OTP_PHONE_DAY_LIMIT = 10
 OTP_IP_HOUR_LIMIT = 30
 INTEGRATION_TEST_MODE = TESTING and os.getenv("INTEGRATION_TEST_MODE") == "1"
-ADMIN_MFA_REQUIRED = MAZORY_ENV == "production"
 MFA_ENCRYPTION_KEY = os.getenv("MFA_ENCRYPTION_KEY", "")
 if MAZORY_ENV == "production" and not MFA_ENCRYPTION_KEY:
     raise ImproperlyConfigured("MFA_ENCRYPTION_KEY is required")
@@ -292,6 +291,11 @@ UNFOLD = {
         "show_search": True,
         "show_all_applications": True,
         "navigation": [
+            {
+                "title": "Личные настройки",
+                "separator": True,
+                "items": [{"title": "Безопасность", "icon": "security", "link": "/admin/security/"}],
+            },
             {
                 "title": "Управление продажами",
                 "separator": True,

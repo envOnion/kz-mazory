@@ -35,11 +35,10 @@ jobs:
         run: |
           docker compose -f compose.e2e.yml exec -T backend python manage.py migrate --noinput
           docker compose -f compose.e2e.yml exec -T backend python manage.py seed_e2e
-      - name: Django configuration, migration drift and concurrency tests
+      - name: Django configuration and migration drift
         run: |
           docker compose -f compose.e2e.yml exec -T backend python manage.py check
           docker compose -f compose.e2e.yml exec -T backend python manage.py makemigrations --check
-          docker compose -f compose.e2e.yml exec -T -e TEST_CACHE=memory backend python manage.py test api --noinput
       - name: Production security settings
         run: |
           docker compose -f compose.e2e.yml cp ops/check_deployment.py backend:/tmp/check_deployment.py

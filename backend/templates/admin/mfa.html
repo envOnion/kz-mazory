@@ -1,13 +1,75 @@
 {% extends "admin/base_site.html" %}
+{% block extrahead %}
+{{ block.super }}
+<style>
+  .mfa-panel { max-width: 40rem; margin: 1.5rem auto; padding: 1.5rem; border-radius: .75rem; }
+  .mfa-panel h2 { font-size: 1.25rem; font-weight: 600; margin-bottom: .75rem; }
+  .mfa-panel p { margin-bottom: 1rem; line-height: 1.6; }
+  .mfa-panel label { display: block; font-weight: 500; margin-bottom: .4rem; }
+  .mfa-panel input { display: block; width: 100%; max-width: 24rem; padding: .7rem; border: 1px solid #94a3b8; border-radius: .4rem; margin-bottom: 1rem; color: inherit; background: transparent; }
+  .mfa-panel input:focus { outline: 2px solid #6366f1; outline-offset: 2px; }
+  .mfa-button { display: inline-block; padding: .7rem 1rem; border-radius: .4rem; font-weight: 600; cursor: pointer; }
+  .mfa-primary { background: #4f46e5; color: #fff; }
+  .mfa-secondary { border: 1px solid #94a3b8; }
+  .mfa-panel form + form { margin-top: .75rem; }
+  .mfa-secret { display: block; overflow-wrap: anywhere; margin: .5rem 0 1rem; font-size: 1rem; user-select: all; }
+  .mfa-qr { width: 256px; max-width: 100%; height: auto; margin: 1rem 0; border-radius: .4rem; }
+  .mfa-error { padding: .75rem; border: 1px solid #ef4444; border-radius: .4rem; }
+  .mfa-footer { margin-top: 1.5rem; padding-top: 1rem; border-top: 1px solid #94a3b8; }
+</style>
+{% endblock %}
 {% block content %}
-<div style="max-width:34rem;margin:2rem auto">
-<h1>Подтверждение входа</h1>
-{% if secret %}<p>Добавьте этот ключ в приложение-аутентификатор и подтвердите настройку кодом.</p>
-<code>{{ secret }}</code><p><a href="{{ uri }}">Открыть приложение-аутентификатор</a></p>{% endif %}
-<form method="post">{% csrf_token %}
-<label for="code">Шестизначный код</label>
-<input id="code" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code">
-<button type="submit">Подтвердить</button>
-{% if error %}<p role="alert">{{ error }}</p>{% endif %}
-</form></div>
+<section class="mfa-panel mazory-trace-card" aria-label="Безопасность аккаунта">
+  {% if challenge %}
+    <h2>Введите код из приложения</h2>
+    <p>Для этого аккаунта включена MFA. Подтвердите вход шестизначным кодом из приложения-аутентификатора.</p>
+  {% elif enabled %}
+    <h2>MFA включена</h2>
+    <p>Вход в админку защищён паролем и кодом из приложения-аутентификатора.</p>
+    <p>Чтобы отключить MFA, введите текущий пароль и новый код из приложения. Следующий вход будет только по паролю.</p>
+  {% elif secret %}
+    <h2>Подключение MFA</h2>
+    <p>1. Отсканируйте QR-код в приложении-аутентификаторе.</p>
+    <img class="mfa-qr" src="{{ qr_image }}" alt="QR-код для подключения MFA" width="256" height="256">
+    <p>Если сканирование недоступно, введите ключ вручную:</p>
+    <code class="mfa-secret" data-testid="mfa-secret">{{ secret }}</code>
+    <p>2. Введите код из приложения, чтобы включить защиту. До подтверждения MFA остаётся выключенной.</p>
+  {% else %}
+    <h2>MFA выключена</h2>
+    <p>Вы входите в админку по паролю. По желанию можно добавить второй шаг — код из приложения-аутентификатора.</p>
+    <form method="post">{% csrf_token %}
+      <button type="submit" class="mfa-button mfa-primary" name="action" value="start">Включить MFA</button>
+    </form>
+  {% endif %}
+
+  {% if error %}<p role="alert" class="mfa-error">{{ error }}</p>{% endif %}
+  {% if challenge or enabled or secret %}
+    <form method="post">{% csrf_token %}
+      {% if challenge %}
+        <input type="hidden" name="next" value="{{ next }}">
+      {% elif enabled %}
+        <input type="hidden" name="action" value="disable">
+        <label for="password">Текущий пароль</label>
+        <input type="password" id="password" name="password" required autocomplete="current-password">
+      {% else %}
+        <input type="hidden" name="action" value="confirm">
+      {% endif %}
+      <label for="code">Шестизначный код</label>
+      <input id="code" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code" aria-describedby="code-hint"{% if error %} aria-invalid="true"{% endif %}>
+      <p id="code-hint" class="mazory-trace-meta">Код меняется каждые 30 секунд. Если вы уже использовали его, дождитесь нового.</p>
+      <button type="submit" class="mfa-button mfa-primary">{% if challenge %}Подтвердить вход{% elif enabled %}Отключить MFA{% else %}Подтвердить и включить MFA{% endif %}</button>
+    </form>
+  {% endif %}
+  {% if secret %}
+    <form method="post">{% csrf_token %}
+      <button type="submit" class="mfa-button mfa-secondary" name="action" value="cancel">Отменить подключение</button>
+    </form>
+  {% endif %}
+  <div class="mfa-footer">
+    {% if not challenge %}<p><a href="{% url 'admin:index' %}">Вернуться в админку</a></p>{% endif %}
+    <form method="post" action="{% url 'admin:logout' %}">{% csrf_token %}
+      <button type="submit" class="mfa-button mfa-secondary">Выйти из аккаунта</button>
+    </form>
+  </div>
+</section>
 {% endblock %}
