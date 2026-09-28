@@ -1,0 +1,64 @@
+/* Mazory Admin High-Contrast Trace Styles */
+
+.mazory-trace-content {
+    background-color: #ffffff !important;
+    border: 1px solid #e2e8f0 !important;
+    color: #0f172a !important;
+}
+
+html.dark .mazory-trace-content,
+body.dark .mazory-trace-content,
+.dark .mazory-trace-content,
+[data-theme="dark"] .mazory-trace-content {
+    background-color: #0f172a !important;
+    border-color: #334155 !important;
+    color: #f8fafc !important;
+}
+
+.mazory-trace-card {
+    background-color: #ffffff !important;
+    border: 1px solid #e2e8f0 !important;
+    color: #0f172a !important;
+}
+
+html.dark .mazory-trace-card,
+body.dark .mazory-trace-card,
+.dark .mazory-trace-card,
+[data-theme="dark"] .mazory-trace-card {
+    background-color: #1e293b !important;
+    border-color: #334155 !important;
+    color: #f8fafc !important;
+}
+
+.mazory-trace-text {
+    color: #0f172a !important;
+}
+
+html.dark .mazory-trace-text,
+body.dark .mazory-trace-text,
+.dark .mazory-trace-text,
+[data-theme="dark"] .mazory-trace-text {
+    color: #f8fafc !important;
+}
+
+.mazory-trace-meta {
+    color: #475569 !important;
+}
+
+html.dark .mazory-trace-meta,
+body.dark .mazory-trace-meta,
+.dark .mazory-trace-meta,
+[data-theme="dark"] .mazory-trace-meta {
+    color: #94a3b8 !important;
+}
+
+.mazory-trace-label {
+    color: #64748b !important;
+}
+
+html.dark .mazory-trace-label,
+body.dark .mazory-trace-label,
+.dark .mazory-trace-label,
+[data-theme="dark"] .mazory-trace-label {
+    color: #94a3b8 !important;
+}
