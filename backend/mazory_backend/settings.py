@@ -285,6 +285,7 @@ UNFOLD = {
         },
     },
     "STYLES": [
+        lambda request: static("mazory/css/admin_layout.css"),
         lambda request: static("mazory/css/admin_trace.css"),
     ],
     "SIDEBAR": {
