@@ -1,6 +1,21 @@
 import { test, expect } from '@playwright/test'
 import { execSync } from 'child_process'
 
+async function loginAdmin(page: any, targetUrl: string) {
+  await page.goto(targetUrl)
+  if (page.url().includes('/admin/login/')) {
+    await page.locator('input[name="username"]').fill('admin')
+    await page.locator('input[name="password"]').fill('Mazory2026Admin!')
+    await page.locator('button[type="submit"], input[type="submit"]').click()
+    await page.waitForTimeout(1000)
+    if (page.url().includes('/admin/login/')) {
+      await page.locator('input[name="username"]').fill('admin')
+      await page.locator('input[name="password"]').fill('admin2026')
+      await page.locator('button[type="submit"], input[type="submit"]').click()
+    }
+  }
+}
+
 test.describe('WhatsApp Pipeline Trace — E2E Сквозные сценарии Django Admin (4 этапа)', () => {
   test.beforeAll(() => {
     // Подготовка тестовых данных: администратор, RawMessage, Project и MessageProcessingTrace
@@ -90,11 +105,17 @@ trace = MessageProcessingTrace.objects.create(
 )
 print('TRACE_SEED_SUCCESS_ID:', trace.id)
 `
-    const cmds = [
-      'docker compose -f ../docker-compose.yml exec -T backend python manage.py shell',
-      'docker compose exec -T backend python manage.py shell',
-      'ssh a_belianskii@192.168.0.193 "cd ~/projects/kz-mazory && docker compose exec -T backend python manage.py shell"',
-    ]
+    const isRemote = (process.env.PLAYWRIGHT_BASE_URL || '').includes('79.108.164.63')
+    const cmds = isRemote
+      ? [
+          'ssh a_belianskii@79.108.164.63 "docker exec -i mazory-backend python manage.py shell"',
+          'docker --context mazory exec -i mazory-backend python manage.py shell',
+        ]
+      : [
+          'docker compose -f ../docker-compose.yml exec -T backend python manage.py shell',
+          'docker compose exec -T backend python manage.py shell',
+          'ssh a_belianskii@79.108.164.63 "docker exec -i mazory-backend python manage.py shell"',
+        ]
     for (const cmd of cmds) {
       try {
         execSync(cmd, { input: pyCode, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -112,10 +133,17 @@ MessageProcessingTrace.objects.filter(whatsapp_message_id='e2e_trace_msg_01').de
 RawMessage.objects.filter(message_id='e2e_trace_msg_01').delete()
 Project.objects.filter(bitrix_id='999555').delete()
 `
-    const cmds = [
-      'docker compose -f ../docker-compose.yml exec -T backend python manage.py shell',
-      'docker compose exec -T backend python manage.py shell',
-    ]
+    const isRemote = (process.env.PLAYWRIGHT_BASE_URL || '').includes('79.108.164.63')
+    const cmds = isRemote
+      ? [
+          'ssh a_belianskii@79.108.164.63 "docker exec -i mazory-backend python manage.py shell"',
+          'docker --context mazory exec -i mazory-backend python manage.py shell',
+        ]
+      : [
+          'docker compose -f ../docker-compose.yml exec -T backend python manage.py shell',
+          'docker compose exec -T backend python manage.py shell',
+          'ssh a_belianskii@79.108.164.63 "docker exec -i mazory-backend python manage.py shell"',
+        ]
     for (const cmd of cmds) {
       try {
         execSync(cmd, { input: cleanupPy, stdio: ['pipe', 'pipe', 'pipe'] })
@@ -127,22 +155,7 @@ Project.objects.filter(bitrix_id='999555').delete()
   })
 
   test('1. Раздел трассировки в Django Admin: список, бейджи 4 этапов и фильтры', async ({ page }) => {
-    // 1. Переходим на страницу логина админки с редиректом на список трассировок
-    await page.goto('/admin/login/?next=/admin/api/messageprocessingtrace/')
-
-    if (page.url().includes('/admin/login/')) {
-      await page.locator('input[name="username"]').fill('admin')
-      await page.locator('input[name="password"]').fill('Mazory2026Admin!')
-      await page.locator('button[type="submit"], input[type="submit"]').click()
-      await page.waitForTimeout(1000)
-      if (page.url().includes('/admin/login/')) {
-        await page.locator('input[name="username"]').fill('admin')
-        await page.locator('input[name="password"]').fill('admin2026')
-        await page.locator('button[type="submit"], input[type="submit"]').click()
-      }
-    }
-
-    // 2. Ожидаем загрузки списка /admin/api/messageprocessingtrace/
+    await loginAdmin(page, '/admin/api/messageprocessingtrace/')
     await page.waitForURL('**/admin/api/messageprocessingtrace/**', { timeout: 15_000 })
 
     // Проверяем отсутствие 500 и ошибок форматирования
@@ -158,14 +171,7 @@ Project.objects.filter(bitrix_id='999555').delete()
   })
 
   test('2. Детальная карточка трассировки: визуальный 4-шаговый пайплайн и подробные блоки', async ({ page }) => {
-    await page.goto('/admin/api/messageprocessingtrace/')
-
-    if (page.url().includes('/admin/login/')) {
-      await page.locator('input[name="username"]').fill('admin')
-      await page.locator('input[name="password"]').fill('admin2026')
-      await page.locator('button[type="submit"], input[type="submit"]').click()
-      await page.waitForURL('**/admin/api/messageprocessingtrace/**', { timeout: 15_000 })
-    }
+    await loginAdmin(page, '/admin/api/messageprocessingtrace/')
 
     // Кликаем по первой записи трассировки
     const rowLink = page.locator('table tr:has-text("Ерлан Асанов") a[href*="/change/"]').first()
@@ -199,14 +205,7 @@ Project.objects.filter(bitrix_id='999555').delete()
   })
 
   test('3. Связка из списка RawMessage: отображение ссылки на цепочку трассировки', async ({ page }) => {
-    await page.goto('/admin/api/rawmessage/')
-
-    if (page.url().includes('/admin/login/')) {
-      await page.locator('input[name="username"]').fill('admin')
-      await page.locator('input[name="password"]').fill('admin2026')
-      await page.locator('button[type="submit"], input[type="submit"]').click()
-      await page.waitForURL('**/admin/api/rawmessage/**', { timeout: 15_000 })
-    }
+    await loginAdmin(page, '/admin/api/rawmessage/')
 
     // Проверяем наличие кнопки/ссылки на цепочку трассировки в таблице
     const traceBtn = page.locator('a:has-text("Цепочка")').first()
