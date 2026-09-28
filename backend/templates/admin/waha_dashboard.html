@@ -9,9 +9,17 @@
   .waha-panel p { margin: .5rem 0; }
   .waha-actions { display: flex; flex-wrap: wrap; gap: .75rem; margin: 1.5rem 0; }
   .waha-button, .waha-select { padding: .65rem 1rem; border: 1px solid #94a3b8; border-radius: .5rem; color: inherit; background: transparent; }
+  .waha-config-form { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem; }
+  .waha-select-wrap { position: relative; flex: 0 1 32rem; min-width: 0; max-width: 100%; overflow: hidden; border-radius: .5rem; }
+  .waha-select { -webkit-appearance: none; appearance: none; display: block; width: 100%; min-height: 2.875rem; padding-right: 2.75rem; font: inherit; line-height: 1.5; text-overflow: ellipsis; cursor: pointer; color: #0f172a; background-color: #fff; color-scheme: light; }
+  .waha-select-arrow { position: absolute; right: 1rem; top: 50%; width: 1rem; height: 1rem; transform: translateY(-50%); pointer-events: none; color: #475569; }
+  html.dark .waha-select { color: #f8fafc; background-color: #1e293b; border-color: #64748b; color-scheme: dark; }
+  html.dark .waha-select-arrow { color: #cbd5e1; }
+  .waha-config-form .waha-button { min-height: 2.875rem; }
   .waha-button { cursor: pointer; font-weight: 600; }
   .waha-button:disabled { cursor: wait; opacity: .5; }
   .waha-button:focus-visible, .waha-select:focus-visible { outline: 2px solid #6366f1; outline-offset: 2px; }
+  .waha-select:focus-visible { outline-offset: -2px; }
   .waha-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 1rem; margin: 1rem 0; }
   .waha-card { padding: 1.5rem; border-radius: .75rem; }
   .waha-state { padding: 1rem; border: 1px solid #94a3b8; border-radius: .75rem; margin: 1rem 0; }
@@ -24,11 +32,14 @@
   <h2>WAHA Центр управления WhatsApp</h2>
   <p class="mazory-trace-meta">Управление сессией и подключение WhatsApp по QR-коду.</p>
   {% if configs %}
-  <form method="get" action="{% url 'admin:waha_dashboard' %}">
+  <form method="get" action="{% url 'admin:waha_dashboard' %}" class="waha-config-form">
     <label for="waha-config">Конфигурация</label>
-    <select name="config_id" id="waha-config" class="waha-select">
-      {% for item in configs %}<option value="{{ item.id }}" {% if item.id == config.id %}selected{% endif %}>{{ item.name }} — {{ item.session_name }}</option>{% endfor %}
-    </select>
+    <div class="waha-select-wrap">
+      <select name="config_id" id="waha-config" class="waha-select">
+        {% for item in configs %}<option value="{{ item.id }}" {% if item.id == config.id %}selected{% endif %}>{{ item.name }} — {{ item.session_name }}</option>{% endfor %}
+      </select>
+      <svg class="waha-select-arrow" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true" focusable="false"><path d="m4 6 4 4 4-4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+    </div>
     <button class="waha-button" type="submit">Показать</button>
   </form>
   {% endif %}

@@ -20,5 +20,10 @@ export default defineConfig({
         ...(process.env.PLAYWRIGHT_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHANNEL } : {}),
       },
     },
+    {
+      name: 'webkit',
+      testMatch: 'waha-select.spec.ts',
+      use: { ...devices['Desktop Safari'] },
+    },
   ],
 })
