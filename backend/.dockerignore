@@ -18,3 +18,10 @@ coverage.xml
 *.log
 .git
 .gitignore
+
+.env
+.env.*
+.dev-secret
+db.sqlite3
+media/
+staticfiles/

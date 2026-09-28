@@ -1,0 +1,8 @@
+[Unit]
+Description=Renew and verify Mazory TLS certificates
+After=docker.service
+Requires=docker.service
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/mazory
+ExecStart=/usr/bin/bash /opt/mazory/scripts/renew_ssl.sh

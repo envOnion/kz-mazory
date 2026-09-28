@@ -1,0 +1,38 @@
+export type Role = 'manager' | 'team_lead' | 'finance' | 'admin' | 'client'
+export type Period = 'this_month' | 'last_month' | 'quarter' | 'year'
+export type Money = string
+export interface AuthUser { id: number; phone: string; name: string; username: string; roles: Role[] }
+export interface AuthResponse { access: string; user: AuthUser; session_id: number; csrf_token: string }
+export interface ApiError { error?: string; code?: string; fields?: Record<string, unknown> }
+export interface Page<T> { count: number; next: string | null; results: T[] }
+export interface Coverage { status: 'complete' | 'partial'; message: string }
+export interface Profile {
+  id: number; full_name: string; role: string; department: string; email: string; phone: string; avatar_url: string;
+  timezone: string; notification_preferences: NotificationPreferences;
+  monthly_target: Money | null; monthly_target_formatted: string; current_sales: Money; current_sales_formatted: string;
+  deals_count: number; rank_in_team: number | null; conversion_rate: string | null; kpi_percent: number | null;
+  whatsapp_daily_digest: boolean; whatsapp_stalled_deals: boolean; whatsapp_critical_kpi: boolean;
+  ai_response_mode: 'detailed' | 'concise' | 'finance'; ai_auto_suggest_next_actions: boolean; updated_at: string; coverage: Coverage
+}
+export interface NotificationPreferences { quiet_start?: string; quiet_end?: string; digest_time?: string; whatsapp?: boolean; reminder?: boolean; daily_digest?: boolean }
+export interface NotificationItem { id: number; title: string; message: string; type: string; created_at: string; is_read: boolean; acknowledged: boolean; project_id: number | null; commitment_id: number | null; deliveries: Delivery[] }
+export interface Delivery { state: string; channel: string; updated_at: string; error_code: string }
+export interface DispatchNotificationPayload { recipient_id: number; project_id?: number; title: string; message: string; type?: string; send_whatsapp?: boolean }
+export interface Session { id: number; device: string; created_at: string; last_used_at: string; expires_at: string }
+export interface Candidate { id: number; project_id: number | null; project_name: string; team_id: number; manager_id: number | null; fact_type: string; proposed_changes: Record<string, unknown>; status: string; base_version: number; current_version: number; confidence: number; uncertainties: string[]; evidence: Evidence[]; review_reason: string; created_at: string }
+export interface Evidence { id: number; quote: string; source_id: number; source_url: string }
+export interface Source { id: number; content: string; sender_name: string; sent_at: string | null; received_at: string; processing_state: string; revision: string }
+export interface Directory { teams: { id: number; name: string; history_complete_from: string | null }[]; profiles: { id: number; user_id: number; full_name: string }[]; projects: { id: number; name: string; version: number; currency: string; team_id: number }[] }
+export interface Payment { id: number; project_id: number; amount: Money; currency: string; payment_date: string; candidate_id: number | null; reverses_id: number | null; credited_profile_id: number | null }
+export interface ScheduleRow { id: number; project_id: number; amount: Money; remaining: Money; due_date: string; bucket: string }
+export interface Receivables { buckets: Record<string, Money>; overdue: Money; rows: ScheduleRow[]; unknown_schedule_projects: number; currency: string }
+export interface Target { id: number; team_id: number; profile_id: number; month: string; amount: Money; currency: string; version: number }
+export interface Finance { payments: Payment[]; targets: Target[]; receivables: Receivables }
+export interface Attachment { id: number; project_id: number; content_type: string; state: string; published_to_client: boolean; created_at: string }
+export interface ExportResult { filename: string; content: string; coverage: Coverage }
+export interface Operation<T> { id: number; status: 'queued' | 'running' | 'succeeded' | 'failed' | 'expired' | 'cancelled'; result: T | null; error_code: string; expires_at: string }
+export interface OperationReceipt { operation_id: number; status: string }
+export interface Health { ai_last_24h: { requests: number; cost_usd: Money | null; unknown_cost_requests: number; failed_requests: number; mean_duration_ms: number | null }; outbox: { event_type: string; state: string; count: number }[]; oldest_pending_seconds: number; errors: { id: number; event_type: string; state: string; error_code: string; attempt_count: number }[] }
+export interface KpiFilters { team_id?: number; manager_id?: number; project_id?: number; currency?: string }
+
+export interface LegacyProject { id: number; name: string; team_id: number | null; contract_amount: Money; legacy_paid_amount: Money; currency: string }

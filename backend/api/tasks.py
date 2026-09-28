@@ -1,797 +1,361 @@
-import re
+"""Only workers contact providers. PostgreSQL outbox survives Redis loss."""
+
 import logging
-import requests
-from decimal import Decimal
+import random
 from datetime import timedelta
+import requests
 from django.conf import settings
-from django.utils import timezone
+from django.contrib.auth.models import User
+from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 from django_q.tasks import async_task
-from .deduplication import normalize_deal_name, get_deal_lock
+from . import access
+from .models import (
+    OutboxEvent,
+    NotificationDelivery,
+    AsyncOperation,
+    RawMessage,
+    PrivateAttachment,
+    WhatsAppConfig,
+)
+from .providers import ProviderUnavailable
 
 logger = logging.getLogger(__name__)
+CLUSTERS = {
+    "otp": "delivery",
+    "notification": "delivery",
+    "crm_sync": "crm",
+    "crm_import": "crm",
+    "waha_control": "delivery",
+}
+NON_IDEMPOTENT = {"otp", "notification", "waha_control"}
 
-def clean_phone_number(phone: str) -> str:
-    """Нормализация телефонного номера к цифрам без знаков."""
-    digits = re.sub(r'\D', '', phone or '')
-    if len(digits) == 11 and digits.startswith('8'):
-        digits = '7' + digits[1:]
-    return digits
 
-def send_waha_whatsapp_message_task(phone_or_group: str, text: str, session: str = "default"):
-    """
-    Отправка WhatsApp сообщения через локальный контейнер WAHA (devlikeapro/waha).
-    """
-    from .models import WhatsAppConfig
-    cfg = WhatsAppConfig.get_active()
-    
-    clean_target = phone_or_group
-    if not clean_target.endswith('@g.us') and not clean_target.endswith('@c.us'):
-        clean_target = f"{clean_phone_number(phone_or_group)}@c.us"
-        
-    waha_url = f"{cfg.waha_api_url.rstrip('/')}/api/sendText"
-    payload = {
-        "chatId": clean_target,
-        "text": text,
-        "session": cfg.session_name or session or "default"
-    }
-    
-    headers = {"Content-Type": "application/json"}
-    if cfg.waha_api_key:
-        headers["X-Api-Key"] = cfg.waha_api_key
-
-    try:
-        response = requests.post(waha_url, json=payload, headers=headers, timeout=10)
-        if response.status_code in (200, 201):
-            return {"status": "delivered", "response": response.json()}
-        return {"status": "error", "code": response.status_code, "detail": response.text}
-    except Exception as exc:
-        logger.error("Failed to send WhatsApp message via WAHA: %s", exc)
-        return {"status": "error", "detail": str(exc)}
-
-def send_sms_verification_code_task(phone: str, code: str):
-    """
-    Фоновый воркер Django Q2: Отправка случайного 4-значного OTP-кода подтверждения через WhatsApp (WAHA).
-    """
-    clean = clean_phone_number(phone)
-    text = f"Ваш код подтверждения для входа в Mazory AI: {code}\nКод действителен 5 минут."
-    logger.info("Отправка OTP-кода подтверждения на номер %s через WAHA", clean)
-    return send_waha_whatsapp_message_task(clean, text)
-
-def create_bitrix_deal_task(project_id: int):
-    """
-    Асинхронный воркер Django Q2: Регистрация новой сделки в Bitrix24.
-    Выполняется изолированно, исключая блокировку вебхуков.
-    """
-    from .models import Project, BusinessEvent
-    from .bitrix_service import BitrixService
-
-    try:
-        project = Project.objects.get(id=project_id)
-    except Project.DoesNotExist:
-        return {"status": "not_found", "project_id": project_id}
-
-    if not project.is_verified:
-        logger.info("Project #%d '%s' is not verified yet. Postponing Bitrix deal creation.", project.id, project.name)
-        return {"status": "unverified_skipped", "project_id": project.id}
-
-    if project.bitrix_id:
-        return {"status": "already_has_bitrix_id", "bitrix_id": project.bitrix_id}
-
-    bitrix_id = BitrixService.create_deal({
-        "name": project.name,
-        "contract_amount": project.contract_amount,
-        "direction": project.equipment_type,
-        "deal_period": project.deal_period,
-        "status": project.status,
-        "current_action": project.current_action,
-        "next_action": project.next_action,
-        "assigned_by_id": project.manager.bitrix_user_id if project.manager and project.manager.bitrix_user_id else None
-    }, project=project, triggered_by="qcluster_create_deal_task")
-
-    if bitrix_id:
-        project.bitrix_id = bitrix_id
-        project.last_bitrix_synced_at = timezone.now()
-        project.needs_bitrix_sync = False
-        project.save(update_fields=['bitrix_id', 'last_bitrix_synced_at', 'needs_bitrix_sync'])
-        logger.info("Project #%d '%s' linked to Bitrix24 deal #%s", project.id, project.name, bitrix_id)
-        return {"status": "created", "bitrix_id": bitrix_id}
-
-    return {"status": "failed_to_create_in_bitrix"}
-
-def sync_single_deal_to_bitrix_task(project_id: int):
-    """
-    Атомарная асинхронная задача в очереди Redis воркеров qcluster:
-    1. Обновляет сделку в Bitrix24 (crm.deal.update).
-    2. Добавляет саммари в таймлайн (crm.timeline.comment.add).
-    3. Создает задачи по выявленным дедлайнам (tasks.task.add).
-    4. Сбрасывает флаг needs_bitrix_sync.
-    """
-    from .models import Project, BitrixSettings
-    from .bitrix_service import BitrixService
-
-    cfg = BitrixSettings.get_active()
-    if not cfg.is_active:
-        return {"status": "bitrix_integration_disabled"}
-
-    try:
-        project = Project.objects.get(id=project_id)
-    except Project.DoesNotExist:
-        return {"status": "project_not_found", "project_id": project_id}
-
-    if not project.is_verified:
-        logger.info("Project #%d '%s' is not verified yet. Postponing Bitrix sync.", project.id, project.name)
-        return {"status": "unverified_skipped", "project_id": project.id}
-
-    # Если сделка еще не зарегистрирована в Bitrix24, создаем её
-    if not project.bitrix_id:
-        return create_bitrix_deal_task(project_id)
-
-    deal_id = project.bitrix_id
-
-    # 1. Обновление полей сделки (R3: санитизация HTML в текстовых полях)
-    clean_action = BitrixService._strip_html(project.current_action or '')
-    clean_next = BitrixService._strip_html(project.next_action or '')
-    clean_blocker = BitrixService._strip_html(project.blocker or '')
-    update_fields = {
-        "OPPORTUNITY": float(project.contract_amount or 0.0),
-        "STAGE_ID": BitrixService.status_to_stage(project.status),
-        "UF_CRM_1731131779572": project.name,
-        "UF_CRM_1778166248543": project.equipment_type or "",
-        "UF_CRM_1778164670507": project.deal_period or "",
-        "COMMENTS": (
-            f"<b>Актуальное состояние от Mazory AI:</b><br>"
-            f"Статус: {project.get_status_display()}<br>"
-            f"Текущее действие: {clean_action or '—'}<br>"
-            f"Следующий шаг: {clean_next or '—'}<br>"
-            f"Блокер: {clean_blocker or '—'}"
-        )
-    }
-    BitrixService.update_deal(deal_id, update_fields, project=project, triggered_by="qcluster_sync_single_deal_task")
-
-    # 2. Публикация сводки в таймлайн
-    if cfg.sync_timeline_comments and (project.current_action or project.next_action or project.blocker):
-        next_deadline_str = f" (срок: {project.next_action_at.strftime('%d.%m.%Y')})" if project.next_action_at else ""
-        comment = (
-            f"🤖 <b>[Mazory AI] Сводка из WhatsApp за прошедший час:</b><br>"
-            f"• <b>Последнее действие:</b> {project.current_action or '—'}<br>"
-            f"• <b>Следующий шаг:</b> {project.next_action or '—'}{next_deadline_str}<br>"
-            f"• <b>Блокер / Риск:</b> {project.blocker or 'Отсутствует'}<br>"
-            f"• <b>Оплачено:</b> {project.paid_amount:,.2f} ₸ (Остаток к сбору: {project.due_amount:,.2f} ₸)"
-        )
-        BitrixService.add_timeline_comment(deal_id, comment)
-
-    # 3. Постановка задач в Bitrix24 по несинхронизированным обязательствам (только проверенные)
-    created_tasks_count = 0
-    if cfg.auto_create_tasks:
-        unassigned_commitments = project.commitments.filter(is_verified=True, bitrix_task_id__isnull=True, status='pending')
-        for comm in unassigned_commitments:
-            deadline_iso = comm.deadline.isoformat() + "T18:00:00+05:00" if comm.deadline else None
-            resp_id = None
-            if comm.manager and comm.manager.bitrix_user_id and comm.manager.bitrix_user_id.isdigit():
-                resp_id = int(comm.manager.bitrix_user_id)
-
-            task_title = f"[Mazory] {comm.commitment_text[:90]}"
-            task_desc = (
-                f"<b>Обязательство зафиксировано из переписки WhatsApp</b><br>"
-                f"Объект: {project.name}<br>"
-                f"Суть задачи: {comm.commitment_text}<br>"
-                f"Дедлайн: {comm.deadline or 'Не указан'}<br>"
-                f"Срочность: {comm.get_severity_display()}"
-            )
-            task_id = BitrixService.create_task(
-                title=task_title,
-                description=task_desc,
-                deadline_iso=deadline_iso,
-                responsible_id=resp_id,
-                deal_id=deal_id
-            )
-            if task_id:
-                comm.bitrix_task_id = task_id
-                comm.save(update_fields=['bitrix_task_id'])
-                created_tasks_count += 1
-
-    # 4. Сброс флага
-    project.needs_bitrix_sync = False
-    project.last_bitrix_synced_at = timezone.now()
-    project.save(update_fields=['needs_bitrix_sync', 'last_bitrix_synced_at'])
-
-    return {
-        "status": "synced",
-        "project_id": project.id,
-        "bitrix_id": deal_id,
-        "created_tasks_count": created_tasks_count
-    }
-
-def import_single_deal_from_bitrix_task(deal_id: str):
-    """
-    Асинхронный воркер импорта сделки из Bitrix24 (например, по вебхуку ONCRMDEALADD).
-    """
-    from .bitrix_service import BitrixService
-    deal_data = BitrixService.get_deal(deal_id)
-    if deal_data:
-        proj = BitrixService.import_or_update_deal_from_bitrix(deal_data)
-        return {"status": "imported", "project_id": proj.id if proj else None, "deal_id": deal_id}
-    return {"status": "not_found", "deal_id": deal_id}
-
-def enqueue_hourly_bitrix_sync_task():
-    """
-    Диспетчер периодической синхронизации (раз в час через Schedule.HOURLY):
-    1. Reconciliation loop: сверка и подтягивание новых/измененных сделок из Bitrix24.
-    2. Поиск всех Project с needs_bitrix_sync=True и раскладка по очереди Redis.
-    """
-    from .models import Project, BitrixSettings
-    from .bitrix_service import BitrixService
-
-    cfg = BitrixSettings.get_active()
-    if not cfg.is_active or not cfg.hourly_sync_enabled:
-        logger.info("Bitrix hourly sync is disabled in settings. Skipping.")
-        return {"status": "disabled"}
-
-    logger.info("Starting hourly Bitrix CRM sync dispatcher...")
-
-    # 1. Страховочный PULL новых/измененных сделок из CRM
-    imported_from_crm = 0
-    if cfg.auto_import_deals:
+def dispatch_outbox(limit=100):
+    now = timezone.now()
+    # A crash after a non-idempotent HTTP request has an unknown external outcome.
+    expired = OutboxEvent.objects.filter(state="processing", lease_until__lte=now)
+    for item in expired.filter(event_type__in=NON_IDEMPOTENT):
+        with transaction.atomic():
+            if OutboxEvent.objects.filter(
+                pk=item.id, state="processing", lease_until__lte=now
+            ).update(state="unknown", error_code="worker_interrupted"):
+                if item.event_type == "notification":
+                    NotificationDelivery.objects.filter(
+                        pk=item.payload["delivery_id"], state="sending"
+                    ).update(state="unknown", error_code="worker_interrupted")
+    expired.exclude(event_type__in=NON_IDEMPOTENT).update(state="pending")
+    OutboxEvent.objects.filter(state="enqueued", lease_until__lte=now).update(
+        state="pending"
+    )
+    ids = list(
+        OutboxEvent.objects.filter(state="pending", next_attempt_at__lte=now)
+        .order_by("id")
+        .values_list("id", flat=True)[:limit]
+    )
+    for pk in ids:
+        with transaction.atomic():
+            event = OutboxEvent.objects.select_for_update().get(pk=pk)
+            if event.state != "pending":
+                continue
+            event.state, event.lease_until = "enqueued", now + timedelta(minutes=5)
+            event.save(update_fields=["state", "lease_until"])
         try:
-            # Получаем свежие сделки из Bitrix24 (последние 50)
-            deals = BitrixService.fetch_all_paged("crm.deal.list", {
-                "order": {"DATE_MODIFY": "DESC"},
-                "select": ["ID", "TITLE", "OPPORTUNITY", "STAGE_ID", "COMPANY_ID", "ASSIGNED_BY_ID",
-                           "UF_CRM_1778164670507", "UF_CRM_1731131779572", "UF_CRM_1778166248543",
-                           "DATE_CREATE", "MODIFY_BY_ID"],
-                "limit": 50
-            })
-            for d in deals:
-                bx_id = str(d.get("ID"))
-                # Если такой сделки нет у нас в базе - импортируем
-                if not Project.objects.filter(bitrix_id=bx_id).exists():
-                    BitrixService.import_or_update_deal_from_bitrix(d)
-                    imported_from_crm += 1
-        except Exception as e:
-            logger.error("Failed to pull modified deals from Bitrix24: %s", e)
+            async_task(
+                "api.tasks.run_outbox", pk, cluster=CLUSTERS.get(event.event_type, "ai")
+            )
+        except Exception:
+            OutboxEvent.objects.filter(pk=pk, state="enqueued").update(
+                state="pending", error_code="broker_unavailable"
+            )
+    return len(ids)
 
-    # 2. PUSH накопленных обновлений из чата в Bitrix24 (только проверенные сделки)
-    pending_ids = list(Project.objects.filter(needs_bitrix_sync=True, is_verified=True).values_list('id', flat=True))
-    for pid in pending_ids:
-        async_task('api.tasks.sync_single_deal_to_bitrix_task', pid)
 
-    cfg.last_hourly_sync_at = timezone.now()
-    cfg.last_sync_status = f"Успешно: импортировано {imported_from_crm} сделок из CRM, отправлено {len(pending_ids)} задач в очередь Redis"
-    cfg.save(update_fields=['last_hourly_sync_at', 'last_sync_status'])
+def run_outbox(pk):
+    with transaction.atomic():
+        event = OutboxEvent.objects.select_for_update().get(pk=pk)
+        if event.state not in ("pending", "enqueued"):
+            return
+        event.state, event.lease_until = (
+            "processing",
+            timezone.now() + timedelta(minutes=4),
+        )
+        event.attempt_count += 1
+        event.save()
+    from .ai_service import usage_event_id
 
-    logger.info("Hourly sync dispatcher completed. Enqueued %d deals, imported %d from CRM.", len(pending_ids), imported_from_crm)
-    return {
-        "status": "enqueued",
-        "pending_deals_count": len(pending_ids),
-        "imported_from_crm_count": imported_from_crm
-    }
-
-def deduplicate_bitrix_deals_task(dry_run: bool = False):
-    """
-    Фоновая задача очистки дубликатов в Bitrix24.
-    """
-    from .bitrix_service import BitrixService
-    return BitrixService.clean_duplicate_deals(dry_run=dry_run)
-
-def setup_hourly_schedule():
-    """
-    Автоматическая регистрация расписаний запуска в Django Q2.
-    """
+    context_token = usage_event_id.set(event.id)
     try:
-        from django_q.models import Schedule
-        sched, created = Schedule.objects.get_or_create(
-            name="hourly_bitrix_crm_sync",
-            defaults={
-                "func": "api.tasks.enqueue_hourly_bitrix_sync_task",
-                "schedule_type": Schedule.HOURLY,
-                "repeats": -1,
-            }
+        handlers = {
+            "extract_message": extract_message,
+            "index_message": index_message,
+            "otp": deliver_otp,
+            "notification": deliver_notification,
+            "operation": run_operation,
+            "crm_sync": sync_crm,
+            "crm_import": import_crm,
+            "attachment": process_attachment,
+            "waha_control": waha_control,
+        }
+        handlers[event.event_type](event.payload)
+        OutboxEvent.objects.filter(pk=pk, state="processing").update(
+            state="done", error_code="", lease_until=None
         )
-        if created:
-            logger.info("Schedule 'hourly_bitrix_crm_sync' successfully registered in Django Q2.")
-
-        sched_alerts, created_alerts = Schedule.objects.get_or_create(
-            name="hourly_kpi_risk_monitoring",
-            defaults={
-                "func": "api.tasks.monitor_kpi_risks_and_anomalies_task",
-                "schedule_type": Schedule.HOURLY,
-                "repeats": -1,
-            }
+    except requests.Timeout:
+        state = (
+            "unknown"
+            if event.event_type in NON_IDEMPOTENT or event.event_type == "crm_sync"
+            else ("failed" if event.attempt_count >= 3 else "pending")
         )
-        if created_alerts:
-            logger.info("Schedule 'hourly_kpi_risk_monitoring' successfully registered in Django Q2.")
+        OutboxEvent.objects.filter(pk=pk).update(
+            state=state,
+            error_code="provider_timeout",
+            next_attempt_at=timezone.now() + timedelta(minutes=2),
+        )
+        if event.event_type == "notification":
+            NotificationDelivery.objects.filter(pk=event.payload["delivery_id"]).update(
+                state="unknown", error_code="provider_timeout"
+            )
     except Exception as exc:
-        logger.warning("Could not auto-register hourly schedule: %s", exc)
+        code = (
+            str(exc)[:64]
+            if isinstance(exc, ProviderUnavailable)
+            else type(exc).__name__
+        )
+        state = (
+            "failed"
+            if event.attempt_count >= 3 or event.event_type in NON_IDEMPOTENT
+            else "pending"
+        )
+        OutboxEvent.objects.filter(pk=pk).update(
+            state=state,
+            error_code=code,
+            next_attempt_at=timezone.now()
+            + timedelta(seconds=30 * 2**event.attempt_count + random.randint(0, 15)),
+        )
+        if event.event_type == "notification":
+            NotificationDelivery.objects.filter(pk=event.payload["delivery_id"]).update(
+                state="failed", error_code=code
+            )
+        logger.warning(
+            "outbox_failure id=%s type=%s code=%s", pk, event.event_type, code
+        )
+
+    finally:
+        usage_event_id.reset(context_token)
+
+
+def waha_request(method, path, data=None, timeout=15):
+    if not settings.WAHA_API_KEY:
+        raise ProviderUnavailable("waha_not_configured")
+    response = requests.request(
+        method,
+        settings.WAHA_API_URL.rstrip("/") + path,
+        json=data,
+        headers={"X-Api-Key": settings.WAHA_API_KEY},
+        timeout=timeout,
+        allow_redirects=False,
+    )
+    response.raise_for_status()
+    return response.json() if response.content else {}
+
+
+def send_waha_whatsapp_message_task(phone_or_group, text, session="default"):
+    chat_id = (
+        phone_or_group
+        if "@" in phone_or_group
+        else "".join(x for x in phone_or_group if x.isdigit()) + "@c.us"
+    )
+    return waha_request(
+        "POST", "/api/sendText", {"session": session, "chatId": chat_id, "text": text}
+    )
+
+
+def deliver_otp(payload):
+    from .otp import delivery_code
+
+    user = User.objects.filter(pk=payload["user_id"], is_active=True).first()
+    if not user or not access.has_access(user, invited=True):
+        return
+    code = delivery_code(payload["delivery_id"])
+    if not code:
+        return
+    send_waha_whatsapp_message_task(
+        user.username, f"Код входа Mazory: {code}. Срок действия — 5 минут."
+    )
+
+
+def deliver_notification(payload):
+    from .notifications import next_delivery_time, preferences
+
+    delivery = NotificationDelivery.objects.select_related(
+        "notification__recipient", "notification__commitment"
+    ).get(pk=payload["delivery_id"])
+    notification = delivery.notification
+    user = notification.recipient
+
+    def cancel():
+        delivery.state = "cancelled"
+        delivery.save(update_fields=["state"])
+
+    if delivery.state in ("sent", "delivered", "unknown", "cancelled"):
+        return
+    if not access.has_access(user) or (
+        notification.project_id
+        and not access.projects_for(user, include_client=True)
+        .filter(pk=notification.project_id)
+        .exists()
+    ):
+        return cancel()
+    if notification.commitment_id:
+        commitment = notification.commitment
+        if commitment.status not in (
+            "pending",
+            "overdue",
+        ) or commitment.version != payload.get("commitment_version"):
+            return cancel()
+        if (
+            not commitment.manager_id
+            or not access.commitments_for(user).filter(pk=commitment.id).exists()
+        ):
+            return cancel()
+        # Own reminder or current leader escalation; old assignee must never receive.
+        if (
+            user.id != commitment.manager.user_id
+            and not access.memberships(user)
+            .filter(team_id=commitment.project.team_id, role="team_lead")
+            .exists()
+        ):
+            return cancel()
+    prefs = preferences(user)
+    if not prefs.get("whatsapp", True) or prefs.get(notification.category) is False:
+        return cancel()
+    send_at = next_delivery_time(user)
+    if send_at > timezone.now() + timedelta(seconds=2):
+        delivery.next_attempt_at = send_at
+        delivery.state = "queued"
+        delivery.save()
+        OutboxEvent.objects.filter(
+            payload__delivery_id=delivery.id,
+            event_type="notification",
+            state="processing",
+        ).update(state="pending", next_attempt_at=send_at)
+        return
+    delivery.state = "sending"
+    delivery.save(update_fields=["state"])
+    result = send_waha_whatsapp_message_task(
+        user.username, f"{notification.title}\n{notification.message}"
+    )
+    provider_id = result.get("id", "")
+    if isinstance(provider_id, dict):
+        provider_id = provider_id.get("_serialized", "")
+    delivery.provider_message_id, delivery.state = str(provider_id)[:255], "sent"
+    delivery.save(update_fields=["provider_message_id", "state", "updated_at"])
+
+
+def extract_message(payload):
+    from .pipeline import extract_message as extract
+
+    extract(payload["raw_id"])
+
+
+def index_message(payload):
+    from .qdrant_service import qdrant_service
+
+    raw = RawMessage.objects.select_related("config").get(pk=payload["raw_id"])
+    if not raw.config_id or not raw.config.is_active:
+        return
+    point = qdrant_service.upsert_message(
+        raw.message_id,
+        raw.content,
+        {
+            "raw_message_id": raw.id,
+            "message_id": raw.message_id,
+            "config_id": raw.config_id,
+            "content": raw.content,
+            "sender_name": raw.sender_name,
+            "sent_at": raw.timestamp.isoformat(),
+            "sent_at_epoch": raw.timestamp.timestamp(),
+        },
+    )
+    if point:
+        RawMessage.objects.filter(pk=raw.id).update(qdrant_point_id=str(point))
+
+
+def run_operation(payload):
+    from .operations import execute_operation
+
+    execute_operation(payload["operation_id"])
+
+
+def sync_crm(payload):
+    from .bitrix_service import BitrixService
+
+    BitrixService.sync_project(payload["project_id"], payload["version"])
+
+
+def import_crm(payload):
+    from .bitrix_service import BitrixService
+
+    BitrixService.propose_import(payload)
+
+
+def process_attachment(payload):
+    from .attachments import extract_attachment
+
+    extract_attachment(payload["attachment_id"])
+
+
+def waha_control(payload):
+    cfg = WhatsAppConfig.objects.get(pk=payload["config_id"], is_active=True)
+    action = payload["action"]
+    if action == "restart":
+        waha_request("POST", f"/api/sessions/{cfg.session_name}/restart")
+    elif action == "qr":
+        result = waha_request("GET", f"/api/{cfg.session_name}/auth/qr?format=raw")
+        cfg.last_qr_code = result.get("value", "")
+    else:
+        result = waha_request("GET", f"/api/sessions/{cfg.session_name}")
+        cfg.status = result.get("status", "UNKNOWN")
+    cfg.save(update_fields=["last_qr_code", "status", "updated_at"])
 
 
 def monitor_kpi_risks_and_anomalies_task():
-    """
-    Фоновая периодическая задача Django Q2:
-    Предиктивный мониторинг финансовых и процессных рисков:
-    1. Дебиторская задолженность свыше 50 млн ₸.
-    2. Фактическая маржинальность ниже критического порога (< 15.0%).
-    3. Просроченные обязательства и дедлайны по контрольным точкам.
-    
-    Для исключения спама используется Redis-дедупликация на 24 часа.
-    Алерты доставляются в NotificationsPopover.vue через push_notification_to_redis.
-    """
-    from django.core.cache import cache
-    from django.contrib.auth.models import User
-    from .models import Project, Commitment, BusinessEvent
-    from .notifications import push_notification_to_redis
+    from .notifications import plan_reminders, plan_digests, plan_risks
 
-    today = timezone.now().date()
-    today_str = today.isoformat()
-    generated_alerts = []
+    plan_reminders()
+    plan_digests()
+    plan_risks()
 
-    all_users = list(User.objects.values_list('username', flat=True))
-    if not all_users:
-        logger.warning("No users found to dispatch risk alerts.")
-        return {"status": "no_users", "alerts_count": 0}
 
-    # 1. Проверка крупных задолженностей (> 50 млн ₸) (только проверенные)
-    high_debt_projects = Project.objects.filter(
-        is_verified=True,
-        due_amount__gte=Decimal('50000000.00')
-    ).select_related('company', 'manager')
+def enqueue_hourly_bitrix_sync_task():
+    from .models import Project
 
-    for proj in high_debt_projects:
-        cache_key = f"mazory:risk_alert:debt:{proj.id}:{today_str}"
-        if not cache.get(cache_key):
-            title = f"⚠️ Высокая дебиторка: {proj.name}"
-            msg = (
-                f"Задолженность по объекту составляет {float(proj.due_amount):,.0f} ₸. "
-                f"Менеджер: {proj.manager.full_name if proj.manager else 'Не назначен'}. "
-                f"Требуется согласование плана платежей."
-            ).replace(',', ' ')
-            
-            BusinessEvent.objects.create(
-                event_type="high_debt",
-                project=proj,
-                manager=proj.manager,
-                title=title,
-                description=msg,
-                severity="warning"
-            )
-
-            for phone in all_users:
-                push_notification_to_redis(phone, title, msg, notif_type="warning")
-
-            cache.set(cache_key, True, timeout=86400)
-            generated_alerts.append(title)
-
-    # 2. Проверка проектов с низкой маржинальностью (< 15%) (только проверенные)
-    low_margin_projects = Project.objects.filter(
-        is_verified=True,
-        actual_margin_percent__lt=Decimal('15.00'),
-        contract_amount__gt=Decimal('0.00')
-    ).select_related('company', 'manager')
-
-    for proj in low_margin_projects:
-        cache_key = f"mazory:risk_alert:margin:{proj.id}:{today_str}"
-        if not cache.get(cache_key):
-            title = f"📉 Низкая маржинальность: {proj.name}"
-            msg = (
-                f"Фактическая маржа {float(proj.actual_margin_percent):.1f}% упала ниже порога 15%. "
-                f"Сумма договора: {float(proj.contract_amount):,.0f} ₸, себестоимость: {float(proj.cost_amount):,.0f} ₸. "
-                f"Любые допработы требуют визы генерального директора."
-            ).replace(',', ' ')
-
-            BusinessEvent.objects.create(
-                event_type="low_margin",
-                project=proj,
-                manager=proj.manager,
-                title=title,
-                description=msg,
-                severity="warning"
-            )
-
-            for phone in all_users:
-                push_notification_to_redis(phone, title, msg, notif_type="warning")
-
-            cache.set(cache_key, True, timeout=86400)
-            generated_alerts.append(title)
-
-    # 3. Просроченные обязательства и дедлайны (только проверенные)
-    overdue_commitments = Commitment.objects.filter(
-        is_verified=True
-    ).filter(
-        Q(status='overdue') | Q(status='pending', deadline__lt=today)
-    ).select_related('manager', 'project')
-
-    for comm in overdue_commitments[:10]:
-        cache_key = f"mazory:risk_alert:commitment:{comm.id}:{today_str}"
-        if not cache.get(cache_key):
-            proj_name = comm.project.name if comm.project else "Общая задача"
-            title = f"⏰ Срыв дедлайна: {proj_name}"
-            msg = (
-                f"Обязательство '{comm.commitment_text}' "
-                f"({comm.counterparty_person or 'Контрагент'}) "
-                f"просрочено. Ответственный: {comm.manager.full_name if comm.manager else 'Отдел продаж'}."
-            )
-
-            BusinessEvent.objects.create(
-                event_type="overdue_deadline",
-                project=comm.project,
-                manager=comm.manager,
-                title=title,
-                description=msg,
-                severity="urgent"
-            )
-
-            for phone in all_users:
-                push_notification_to_redis(phone, title, msg, notif_type="urgent")
-
-            cache.set(cache_key, True, timeout=86400)
-            generated_alerts.append(title)
-
-    logger.info("KPI risk monitoring task completed. Generated alerts: %d", len(generated_alerts))
-    return {
-        "status": "success",
-        "generated_alerts_count": len(generated_alerts),
-        "alerts": generated_alerts
-    }
-
-def process_incoming_message_task(message_data: dict):
-    """
-    Фоновый воркер Django Q2 (Event: Новое сообщение WhatsApp):
-    1. Сохраняет RawMessage в PostgreSQL.
-    2. Векторизует через embeddings-модель и сохраняет в Qdrant.
-    3. Выполняет семантический RAG-поиск в Qdrant.
-    4. Запускает чат-модель с контекстом.
-    5. Квалифицирует сделку с ОБЯЗАТЕЛЬНОЙ защитой от дублей:
-       - Redis Lock по нормализованному названию.
-       - Поиск в локальной БД Mazory.
-       - ОБЯЗАТЕЛЬНЫЙ поиск в Bitrix24 CRM перед созданием новой!
-       - Если найдена в CRM — связывает и обновляет, НОВУЮ НЕ СОЗДАЕТ!
-    6. Обновляет обязательства (Commitment) и платежи (FinancialRecord).
-    """
-    from .models import (
-        RawMessage, Project, Commitment, FinancialRecord,
-        UserProfile, Company, BusinessEvent, MessageProcessingTrace
-    )
-    from .qdrant_service import qdrant_service
-    from .ai_service import AIService
-    from .bitrix_service import BitrixService
-    from .notifications import push_notification_to_redis
-
-    message_id = message_data.get('message_id') or f"waha-{int(timezone.now().timestamp() * 1000)}"
-    content = message_data.get('content', '').strip()
-    sender_name = message_data.get('sender_name', 'Коллега')
-    sender_phone = clean_phone_number(message_data.get('sender_phone', ''))
-    chat_id = message_data.get('chat_id', 'aquakip-sales')
-
-    if not content:
-        return {"status": "empty_content"}
-
-    # 1. Сохранение сырого сообщения
-    raw_msg, _ = RawMessage.objects.get_or_create(
-        message_id=message_id,
-        defaults={
-            "chat_id": chat_id,
-            "sender_phone": sender_phone,
-            "sender_name": sender_name,
-            "timestamp": timezone.now(),
-            "content": content,
-            "raw_payload": message_data,
-            "processed": False
-        }
-    )
-
-    # 2. Векторизация и сохранение в Qdrant
-    point_id = qdrant_service.upsert_message(
-        message_id=message_id,
-        content=content,
-        payload={
-            "sender_name": sender_name,
-            "sender_phone": sender_phone,
-            "chat_id": chat_id,
-            "timestamp": timezone.now().isoformat()
-        }
-    )
-    if point_id:
-        raw_msg.qdrant_point_id = point_id
-
-    # 3. Семантический RAG-поиск близких сообщений в Qdrant
-    similar_messages = qdrant_service.search_similar(content, limit=5)
-    
-    # Сводка существующих сделок для контекста LLM
-    existing_deals = list(Project.objects.values('name', 'status', 'contract_amount', 'company__name')[:30])
-    known_deals_summary = "\n".join([
-        f"- {d['name']} (Компания: {d['company__name'] or 'Не указана'}, Сумма: {d['contract_amount']} ₸, Статус: {d['status']})"
-        for d in existing_deals
-    ]) if existing_deals else "(База сделок пока пуста)"
-
-    # 4. Анализ большой чат-моделью OpenRouter
-    facts = AIService.analyze_message_with_context(
-        content=content,
-        sender_name=sender_name,
-        context_messages=similar_messages,
-        known_deals_summary=known_deals_summary
-    )
-
-    logger.info("AI Analysis for message %s: %s", message_id, facts)
-
-    # 5. Обработка сущностей и обновление CRM с защитой от дублей
-    object_name = facts.get("object_name")
-    company_name = facts.get("company_name")
-    responsible_name = facts.get("responsible_name") or sender_name
-
-    # Менеджер
-    manager = None
-    if responsible_name:
-        manager = UserProfile.objects.filter(
-            Q(full_name__icontains=responsible_name) |
-            Q(phone__icontains=sender_phone)
-        ).first()
-
-    # Компания
-    company = None
-    if company_name and company_name.strip():
-        company, _ = Company.objects.get_or_create(
-            name=company_name.strip(),
-            defaults={"client_type": "private"}
-        )
-
-    # Проект / Сделка
-    project = None
-    bitrix_matched_deal_id = ""
-    bitrix_deal_title = ""
-    bitrix_deal_stage = ""
-    bitrix_deal_opportunity = None
-    bitrix_search_query = ""
-    bitrix_company_data = {}
-    bitrix_raw_deal = {}
-    pipeline_action = "non_commercial"
-
-    if object_name and object_name.strip():
-        clean_obj_name = object_name.strip()
-        core_name = normalize_deal_name(clean_obj_name) or clean_obj_name
-        bitrix_search_query = clean_obj_name
-
-        # Блокировка Redis для предотвращения race condition
-        with get_deal_lock(core_name):
-            # Шаг 1: Поиск в локальной БД Mazory
-            project = Project.objects.filter(normalized_name=core_name).first()
-            if not project:
-                project = Project.objects.filter(name__icontains=clean_obj_name).first()
-
-            # Шаг 2: Если в локальной БД сделки нет — ОБЯЗАТЕЛЬНО проверяем в CRM Bitrix24!
-            if not project:
-                crm_deal = BitrixService.find_deal_by_name(clean_obj_name)
-                if crm_deal:
-                    bitrix_matched_deal_id = str(crm_deal.get("ID", ""))
-                    bitrix_deal_title = str(crm_deal.get("TITLE", ""))
-                    bitrix_deal_stage = str(crm_deal.get("STAGE_ID", ""))
-                    if crm_deal.get("OPPORTUNITY"):
-                        try:
-                            bitrix_deal_opportunity = Decimal(str(crm_deal.get("OPPORTUNITY")))
-                        except Exception:
-                            pass
-                    bitrix_raw_deal = crm_deal
-                    bitrix_company_data = {"company_id": crm_deal.get("COMPANY_ID"), "company_name": company_name}
-                    logger.info("Anti-Duplicate: Found existing deal #%s in Bitrix24 for '%s'. Importing.", crm_deal.get("ID"), clean_obj_name)
-                    project = BitrixService.import_or_update_deal_from_bitrix(crm_deal)
-                    pipeline_action = "matched_bitrix_imported"
-
-            can_create = facts.get("can_create_deal") or (facts.get("confidence", 0) >= 0.7)
-
-            # R2: Валидация обязательных полей перед созданием сделки
-            contract_amount_raw = facts.get("contract_amount")
-            has_valid_amount = (
-                contract_amount_raw is not None
-                and float(contract_amount_raw) > 0
-            )
-            if can_create and not has_valid_amount:
-                logger.info(
-                    "Deal creation skipped for '%s': contract_amount is %s (must be > 0)",
-                    clean_obj_name, contract_amount_raw
-                )
-                can_create = False
-
-            if not project and can_create:
-                # Сделки гарантированно нет ни в локальной базе, ни в CRM Bitrix24
-                project = Project.objects.create(
-                    name=clean_obj_name,
-                    normalized_name=core_name,
-                    source='chat',
-                    company=company,
-                    manager=manager,
-                    equipment_type=facts.get("direction") or facts.get("equipment_type") or "БТП",
-                    contract_number=facts.get("contract_number") or "",
-                    deal_period=facts.get("deal_period") or "",
-                    status=facts.get("stage") or "qualification",
-                    contract_amount=Decimal(str(facts.get("contract_amount") or 0.0)),
-                    cost_amount=Decimal(str(facts.get("cost_amount") or 0.0)),
-                    paid_amount=Decimal(str(facts.get("paid_amount") or 0.0)),
-                    barter_amount=Decimal(str(facts.get("barter_amount") or 0.0)),
-                    guarantee_amount=Decimal(str(facts.get("guarantee_amount") or 0.0)),
-                    avr_status=facts.get("avr_status") or "Не закрыт",
-                    current_action=facts.get("current_action") or content[:200],
-                    next_action=facts.get("next_action") or "",
-                    decision_maker=facts.get("decision_maker") or "",
-                    blocker=facts.get("blocker") or "",
-                    priority=facts.get("priority") or "standard",
-                    needs_bitrix_sync=True,
-                    is_verified=False
-                )
-                pipeline_action = "created_deal"
-
-                event_title = f"Извлечена новая сделка: {project.name} (ожидает проверки)"
-                BusinessEvent.objects.create(
-                    event_type="new_deal",
-                    project=project,
-                    manager=manager,
-                    title=event_title,
-                    description=f"Сумма: {project.contract_amount:,.2f} ₸. Менеджер: {responsible_name}. Ожидает верификации.",
-                    severity="info"
-                )
-                push_notification_to_redis(sender_phone, event_title, f"Сделка {project.name} сохранена из переписки WhatsApp и ожидает проверки перед отправкой в Bitrix24 и учетом в аналитике", "deal")
-
-            elif project:
-                # Обновление существующей сделки и выставление флагов needs_bitrix_sync и is_verified=False
-                if facts.get("contract_amount"):
-                    project.contract_amount = Decimal(str(facts["contract_amount"]))
-                if facts.get("cost_amount"):
-                    project.cost_amount = Decimal(str(facts["cost_amount"]))
-                if facts.get("paid_amount"):
-                    project.paid_amount += Decimal(str(facts["paid_amount"]))
-                if facts.get("stage"):
-                    project.status = facts["stage"]
-                if facts.get("current_action"):
-                    project.current_action = facts["current_action"]
-                if facts.get("next_action"):
-                    project.next_action = facts["next_action"]
-                if facts.get("blocker"):
-                    project.blocker = facts["blocker"]
-                if company and not project.company:
-                    project.company = company
-                if manager and not project.manager:
-                    project.manager = manager
-                
-                project.is_verified = False
-                project.needs_bitrix_sync = True
-                project.last_chat_activity_at = timezone.now()
-                project.save()
-                if pipeline_action == "non_commercial":
-                    pipeline_action = "updated_deal"
-                if not bitrix_matched_deal_id and project.bitrix_id:
-                    bitrix_matched_deal_id = str(project.bitrix_id)
-                    bitrix_deal_title = project.name
-                    bitrix_deal_stage = project.status
-                    bitrix_deal_opportunity = project.contract_amount
-
-                logger.info("Project #%d '%s' updated from chat (is_verified=False, needs_bitrix_sync=True)", project.id, project.name)
-
-    # Обязательства / Обещания менеджеров (Commitment)
-    created_commitment = None
-    next_action = facts.get("next_action")
-    if next_action and manager:
-        next_action_at = facts.get("next_action_at")
-        deadline = None
-        if next_action_at:
-            try:
-                deadline = timezone.datetime.fromisoformat(next_action_at).date()
-            except Exception:
-                deadline = timezone.now().date() + timedelta(days=2)
-        else:
-            deadline = timezone.now().date() + timedelta(days=2)
-
-        created_commitment = Commitment.objects.create(
-            project=project,
-            manager=manager,
-            source_message=raw_msg,
-            commitment_text=next_action,
-            deadline=deadline,
-            status='pending',
-            severity='critical' if ('срочно' in content.lower() or 'договор' in next_action.lower()) else 'medium',
-            bitrix_task_id=None,
-            is_verified=False
-        )
-        if pipeline_action == "non_commercial":
-            pipeline_action = "commitment_created"
-
-    # Финансовые записи (FinancialRecord)
-    created_financial_record = None
-    paid_amt = facts.get("paid_amount")
-    if paid_amt and float(paid_amt) > 0 and project:
-        created_financial_record = FinancialRecord.objects.create(
-            project=project,
-            amount=Decimal(str(paid_amt)),
-            payment_date=timezone.now().date(),
-            payment_type='final' if 'окончательн' in content.lower() else 'milestone',
-            status='received',
-            notes=f"Извлечено из отчета {sender_name}: {content[:100]}",
-            is_verified=False
-        )
-        if pipeline_action == "non_commercial":
-            pipeline_action = "financial_record_created"
-
-    raw_msg.processed = True
-    raw_msg.save(update_fields=['processed'])
-
-    # 6. Сохранение полной сквозной трассировки пайплайна
-    # «Входные данные WhatsApp» -> «Зависимые данные из сообщений ранее» -> «Зависимые данные из Bitrix24» -> «Итоговая запись»
-    trace_earlier_context = []
-    if similar_messages:
-        for sm in similar_messages:
-            trace_earlier_context.append({
-                "message_id": sm.get("message_id") or sm.get("id") or "",
-                "sender_name": sm.get("sender_name", ""),
-                "sender_phone": sm.get("sender_phone", ""),
-                "timestamp": str(sm.get("timestamp") or ""),
-                "content": sm.get("content", ""),
-                "score": round(float(sm.get("score", 0.0)), 4)
-            })
-
-    summary_parts = []
-    summary_parts.append(f"1. Входные данные WhatsApp: получено сообщение от {sender_name} ({sender_phone or 'без номера'}).")
-    if trace_earlier_context:
-        summary_parts.append(f"2. Сообщения ранее: найдено {len(trace_earlier_context)} зависимых сообщений в Qdrant RAG (макс. сходство: {trace_earlier_context[0]['score']}).")
-    else:
-        summary_parts.append("2. Сообщения ранее: зависимые сообщения не найдены (новое обращение).")
-
-    if bitrix_matched_deal_id:
-        summary_parts.append(f"3. Bitrix24 CRM: найдена сделка #{bitrix_matched_deal_id} «{bitrix_deal_title or (project.name if project else '')}» ({bitrix_deal_stage}).")
-    elif bitrix_search_query:
-        summary_parts.append(f"3. Bitrix24 CRM: поиск по запросу «{bitrix_search_query}» совпадений не выявил.")
-    else:
-        summary_parts.append("3. Bitrix24 CRM: объект сделки не выделен, поиск в CRM не требовался.")
-
-    if pipeline_action == "created_deal" and project:
-        summary_parts.append(f"4. Итоговая запись: создана новая сделка «{project.name}» на {project.contract_amount:,.2f} ₸ (ожидает проверки).")
-    elif pipeline_action == "matched_bitrix_imported" and project:
-        summary_parts.append(f"4. Итоговая запись: сделка «{project.name}» успешно синхронизирована из Bitrix24 CRM.")
-    elif pipeline_action == "updated_deal" and project:
-        summary_parts.append(f"4. Итоговая запись: обновлена сделка «{project.name}» (статус: {project.get_status_display()}).")
-    elif pipeline_action == "commitment_created" and created_commitment:
-        summary_parts.append(f"4. Итоговая запись: зафиксировано обязательство '{created_commitment.commitment_text[:60]}' (до {created_commitment.deadline}).")
-    elif pipeline_action == "financial_record_created" and created_financial_record:
-        summary_parts.append(f"4. Итоговая запись: зафиксирован платеж на сумму {created_financial_record.amount:,.2f} ₸.")
-    else:
-        summary_parts.append("4. Итоговая запись: сообщение носит информационный характер (коммерческие сущности не создавались).")
-
-    result_summary = "\n".join(summary_parts)
-
-    try:
-        trace, _ = MessageProcessingTrace.objects.update_or_create(
-            whatsapp_message_id=message_id,
+    for p in Project.objects.filter(
+        is_verified=True, needs_bitrix_sync=True, team__isnull=False
+    ):
+        OutboxEvent.objects.get_or_create(
+            deduplication_key=f"crm:{p.id}:{p.version}",
             defaults={
-                "raw_message": raw_msg,
-                "project": project,
-                "commitment": created_commitment,
-                "financial_record": created_financial_record,
-                "whatsapp_chat_id": chat_id,
-                "whatsapp_sender_phone": sender_phone,
-                "whatsapp_sender_name": sender_name,
-                "whatsapp_timestamp": raw_msg.timestamp,
-                "whatsapp_content": content,
-                "whatsapp_raw_payload": message_data,
-                "earlier_messages_context": trace_earlier_context,
-                "earlier_messages_count": len(trace_earlier_context),
-                "bitrix_matched_deal_id": bitrix_matched_deal_id,
-                "bitrix_deal_title": bitrix_deal_title,
-                "bitrix_deal_stage": bitrix_deal_stage,
-                "bitrix_deal_opportunity": bitrix_deal_opportunity,
-                "bitrix_search_query": bitrix_search_query,
-                "bitrix_company_data": bitrix_company_data,
-                "bitrix_raw_deal": bitrix_raw_deal,
-                "bitrix_known_deals_summary": known_deals_summary,
-                "ai_extracted_facts": facts,
-                "ai_confidence": float(facts.get("confidence") or 0.0),
-                "pipeline_action": pipeline_action,
-                "status": "success",
-                "result_summary": result_summary
-            }
+                "event_type": "crm_sync",
+                "payload": {"project_id": p.id, "version": p.version},
+            },
         )
-        logger.info("MessageProcessingTrace #%d saved for message %s (action: %s)", trace.id, message_id, pipeline_action)
-    except Exception as ex:
-        logger.error("Failed to save MessageProcessingTrace for %s: %s", message_id, ex)
 
-    return {
-        "status": "processed",
-        "message_id": message_id,
-        "deal": project.name if project else None,
-        "bitrix_id": project.bitrix_id if project else None
-    }
+
+def sync_single_deal_to_bitrix_task(project_id):
+    from .models import Project
+
+    p = Project.objects.get(pk=project_id)
+    return sync_crm({"project_id": p.id, "version": p.version})
+
+
+create_bitrix_deal_task = sync_single_deal_to_bitrix_task
+
+
+def process_incoming_message_task(message_data):
+    # Legacy entry point accepts only a persisted source ID, never arbitrary webhook data.
+    if not isinstance(message_data, int):
+        raise ValueError("Persist source through authenticated inbox first")
+    return extract_message({"raw_id": message_data})

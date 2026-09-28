@@ -1,91 +1,120 @@
+import uuid
+from django.contrib.auth.models import User
+from django.db import transaction
+from django.utils import timezone
+from rest_framework import serializers
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
-from rest_framework import status
-from django_q.tasks import async_task
-from .notifications import fetch_user_notifications, mark_all_notifications_as_read
+from rest_framework.exceptions import PermissionDenied
+from django.shortcuts import get_object_or_404
+from .notifications import (
+    visible_notifications,
+    serialize_notification,
+    create_notification,
+)
+from .models import Project, AuditEvent
+from . import access
+
+
+class DispatchInput(serializers.Serializer):
+    recipient_id = serializers.IntegerField(min_value=1)
+    title = serializers.CharField(max_length=255)
+    message = serializers.CharField(max_length=4000)
+    project_id = serializers.IntegerField(min_value=1, required=False)
+    type = serializers.ChoiceField(
+        choices=["info", "warning", "urgent", "deal", "kpi"], default="info"
+    )
+    send_whatsapp = serializers.BooleanField(default=False)
+    idempotency_key = serializers.CharField(max_length=64)
+
+
+def dispatch(request, force_whatsapp=False):
+    data = DispatchInput(data=request.data)
+    data.is_valid(raise_exception=True)
+    values = data.validated_data
+    recipient = get_object_or_404(User, id=values["recipient_id"], is_active=True)
+    project = (
+        get_object_or_404(access.projects_for(request.user), pk=values["project_id"])
+        if values.get("project_id")
+        else None
+    )
+    allowed = (
+        request.user.is_superuser
+        or access.memberships(recipient)
+        .filter(team_id__in=access.team_ids(request.user, ["team_lead", "finance"]))
+        .exists()
+    )
+    if not allowed or not access.has_access(recipient):
+        raise PermissionDenied("Нет права отправки выбранному получателю.")
+    if project and not access.projects_for(recipient).filter(pk=project.pk).exists():
+        raise PermissionDenied("Получателю недоступен проект.")
+    with transaction.atomic():
+        n = create_notification(
+            recipient,
+            values["title"],
+            values["message"],
+            values["type"],
+            f"manual:{request.user.id}:{values['idempotency_key']}",
+            project=project,
+            whatsapp=force_whatsapp or values["send_whatsapp"],
+        )
+        AuditEvent.objects.get_or_create(
+            actor=request.user,
+            target_type="Notification",
+            target_id=n.id,
+            action="dispatch",
+            defaults={"before_after": {"recipient_id": recipient.id}},
+        )
+    return Response({"notification_id": n.id, "status": "queued"}, status=202)
+
 
 class NotificationListView(APIView):
-    """
-    Returns real targeted notifications for the authenticated user only.
-    """
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        phone = request.user.username
-        notifications, unread_count = fetch_user_notifications(phone)
-        return Response({
-            "status": "success",
-            "phone": phone,
-            "unread_count": unread_count,
-            "notifications": notifications
-        })
+        from rest_framework.pagination import PageNumberPagination
 
-class NotificationMarkAllReadView(APIView):
-    """
-    Marks all notifications for the authenticated user as read.
-    """
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        phone = request.user.username
-        updated = mark_all_notifications_as_read(phone)
-        return Response({
-            "status": "success",
-            "message": "Все уведомления помечены как прочитанные",
-            "unread_count": 0,
-            "notifications": updated
-        })
-
-class DispatchNotificationView(APIView):
-    """
-    Targeted business notification dispatcher.
-    Sends notifications to specific users (single phone, list of phones, or all company users).
-    Enqueues delivery via Django Q and optionally sends WhatsApp message via WAHA.
-    """
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        target_phones = request.data.get("phones") or request.data.get("phone")
-        title = request.data.get("title", "").strip()
-        message = request.data.get("message", "").strip()
-        notif_type = request.data.get("type", "info")
-        send_whatsapp = bool(request.data.get("send_whatsapp", False))
-
-        if not title or not message:
-            return Response(
-                {"error": "Поля 'title' (заголовок) и 'message' (сообщение) обязательны"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        if isinstance(target_phones, str):
-            if target_phones.lower() == "all":
-                from django.contrib.auth.models import User
-                phones_list = list(User.objects.values_list('username', flat=True))
-            else:
-                phones_list = [target_phones]
-        elif isinstance(target_phones, list):
-            phones_list = target_phones
-        else:
-            phones_list = [request.user.username]
-
-        if not phones_list:
-            phones_list = [request.user.username]
-
-        async_task(
-            'api.tasks.dispatch_targeted_notification_task',
-            phones_list,
-            title,
-            message,
-            notif_type,
-            send_whatsapp,
-            request.user.username
+        pagination = PageNumberPagination()
+        pagination.page_size = 50
+        qs = visible_notifications(request.user).prefetch_related("deliveries")
+        page = pagination.paginate_queryset(qs, request)
+        return Response(
+            {
+                "notifications": [serialize_notification(n) for n in page],
+                "count": qs.count(),
+                "next": pagination.get_next_link(),
+                "unread_count": qs.filter(read_at__isnull=True).count(),
+            }
         )
 
-        return Response({
-            "status": "queued",
-            "message": f"Адресная рассылка отправлена в очередь Django Q для {len(phones_list)} получателей",
-            "targets": phones_list,
-            "send_whatsapp": send_whatsapp
-        })
 
+class NotificationMarkAllReadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        visible_notifications(request.user).filter(read_at__isnull=True).update(
+            read_at=timezone.now()
+        )
+        return Response({"unread_count": 0})
+
+
+class NotificationActionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk, action):
+        if action not in ("read", "ack"):
+            raise serializers.ValidationError("Неизвестное действие.")
+        n = get_object_or_404(visible_notifications(request.user), pk=pk)
+        n.read_at = n.read_at or timezone.now()
+        if action == "ack":
+            n.acknowledged_at = n.acknowledged_at or timezone.now()
+        n.save()
+        return Response(serialize_notification(n))
+
+
+class DispatchNotificationView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        return dispatch(request)

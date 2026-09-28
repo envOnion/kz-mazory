@@ -1,0 +1,13 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+<div style="max-width:34rem;margin:2rem auto">
+<h1>Подтверждение входа</h1>
+{% if secret %}<p>Добавьте этот ключ в приложение-аутентификатор и подтвердите настройку кодом.</p>
+<code>{{ secret }}</code><p><a href="{{ uri }}">Открыть приложение-аутентификатор</a></p>{% endif %}
+<form method="post">{% csrf_token %}
+<label for="code">Шестизначный код</label>
+<input id="code" name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="one-time-code">
+<button type="submit">Подтвердить</button>
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}
+</form></div>
+{% endblock %}

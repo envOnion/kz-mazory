@@ -20,6 +20,7 @@
           type="button"
           class="relative p-2.5 text-slate-300 hover:text-white rounded-full hover:bg-white/5 transition-colors focus:outline-none cursor-pointer"
           title="Уведомления"
+          aria-label="Открыть список уведомлений"
           @click="togglePopover"
         >
           <Bell class="w-5 h-5" />
@@ -64,10 +65,11 @@
         title="Личный кабинет"
       >
         <img
-          :src="profile.avatar_url || 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&w=120&q=80'"
+          :src="profile.avatar_url" v-if="profile.avatar_url"
           alt="Профиль"
           class="w-8 h-8 rounded-full object-cover ring-1 ring-emerald-400/80 shadow-md"
         />
+        <span v-if="!profile.avatar_url" class="flex w-8 h-8 items-center justify-center text-xs">Я</span>
         <div class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 ring-2 ring-[#060912] shadow-[0_0_6px_rgba(52,211,153,0.8)]"></div>
       </button>
     </div>

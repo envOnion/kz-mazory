@@ -14,3 +14,14 @@ waha_sessions/
 test-results/
 playwright-report/
 .env
+
+.dev-secret
+.env.*
+!.env.example
+private/
+backups/
+*.age
+*.agekey
+frontend/test-results/
+frontend/playwright-report/
+*.tsbuildinfo

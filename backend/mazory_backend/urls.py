@@ -1,4 +1,5 @@
 from django.contrib import admin
+from api.mfa import mfa_view
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
@@ -16,6 +17,7 @@ def _custom_admin_get_urls():
 admin.site.get_urls = _custom_admin_get_urls
 
 urlpatterns = [
+    path('admin/security/mfa/', mfa_view, name='admin-mfa'),
     # Custom WAHA Control Center inside Django Admin
     path('admin/waha-dashboard/', waha_dashboard_view, name='waha_dashboard'),
     path('admin/waha-action/<str:action>/', waha_action_view, name='waha_action'),
@@ -29,4 +31,3 @@ urlpatterns = [
 
 if settings.DEBUG:
     urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
-    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)

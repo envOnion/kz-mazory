@@ -1,0 +1,83 @@
+name: Platform verification
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: platform-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  verify:
+    name: PostgreSQL, queues, security and browser E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Scan committed sources for secrets
+        run: docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:v8.24.3 dir /repo --config /repo/.gitleaks.toml --redact --no-banner
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Build isolated backend
+        run: docker compose -f compose.e2e.yml build backend
+      - name: Start isolated database and providers
+        run: docker compose -f compose.e2e.yml up -d postgres redis qdrant backend test-provider
+      - name: Apply migrations and seed synthetic data
+        run: |
+          docker compose -f compose.e2e.yml exec -T backend python manage.py migrate --noinput
+          docker compose -f compose.e2e.yml exec -T backend python manage.py seed_e2e
+      - name: Django configuration, migration drift and concurrency tests
+        run: |
+          docker compose -f compose.e2e.yml exec -T backend python manage.py check
+          docker compose -f compose.e2e.yml exec -T backend python manage.py makemigrations --check
+          docker compose -f compose.e2e.yml exec -T -e TEST_CACHE=memory backend python manage.py test api --noinput
+      - name: Production security settings
+        run: |
+          docker compose -f compose.e2e.yml cp ops/check_deployment.py backend:/tmp/check_deployment.py
+          docker compose -f compose.e2e.yml exec -T backend python /tmp/check_deployment.py /app
+      - name: Dependency audit
+        run: |
+          npm --prefix frontend audit --audit-level=high
+          pipx run --spec pip-audit==2.9.0 pip-audit --no-deps --disable-pip -r backend/requirements.txt
+      - name: Start dedicated queues
+        run: docker compose -f compose.e2e.yml up -d qcluster delivery crm outbox
+      - name: Typecheck and build frontend
+        run: npm run build
+        working-directory: frontend
+      - name: Production frontend image
+        run: |
+          docker build -t mazory-frontend-check frontend
+          docker run --rm --network mazory-platform-e2e_default mazory-frontend-check nginx -t
+      - name: Browser E2E with real API and workers
+        working-directory: frontend
+        env:
+          VITE_BACKEND_PROXY_URL: http://127.0.0.1:18080
+        run: |
+          npm run dev -- --host 127.0.0.1 --port 5173 --strictPort > /tmp/vite.log 2>&1 &
+          for attempt in $(seq 1 30); do curl -fsS http://localhost:5173/ >/dev/null && break; sleep 1; done
+          npm run test:e2e
+      - name: Encrypted backup and isolated restore
+        run: |
+          docker build -f ops/backup.Dockerfile -t mazory-backup-tools .
+          bash ops/verify_restore.sh
+      - name: Worker and provider diagnostics
+        if: always()
+        run: docker compose -f compose.e2e.yml logs --tail=100 backend qcluster delivery crm outbox test-provider
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-failures-synthetic-data-only
+          path: frontend/test-results/
+          retention-days: 7
+      - name: Remove isolated services
+        if: always()
+        run: docker compose -f compose.e2e.yml down -v

@@ -10,6 +10,11 @@
       @open-profile="handleOpenProfile"
     />
 
+    <nav v-if="isAuthenticated" class="relative z-30 max-w-6xl mx-auto w-full px-4 flex flex-wrap gap-2" aria-label="Главная навигация">
+      <button v-if="!currentUser?.roles.includes('client')" class="btn" @click="currentView = 'dashboard'; fetchKpiData()">KPI и чат</button>
+      <button class="btn" @click="currentView = 'workspace'">Рабочий кабинет</button>
+      <button class="btn" @click="currentView = 'profile'">Настройки профиля</button>
+    </nav>
     <!-- Main Content Area -->
     <main class="relative z-10 flex-1 flex flex-col justify-center">
       <!-- Transition between Welcome State, Profile State, and Dashboard State -->
@@ -24,7 +29,7 @@
       >
         <!-- View 1: Welcome Screen -->
         <WelcomeView
-          v-if="currentView === 'welcome'"
+          v-if="currentView === 'welcome' && !currentUser?.roles.includes('client')"
           :suggestions="welcomeSuggestions"
           :disabled="isGenerating"
           @select-prompt="handlePromptSubmit"
@@ -39,6 +44,7 @@
           @logged-out="handleLogout"
         />
 
+        <WorkspaceView v-else-if="isAuthenticated && (currentView === 'workspace' || currentUser?.roles.includes('client'))" :key="currentUser?.id" />
         <!-- View 3: KPI Dashboard Active Chat View -->
         <div v-else class="flex-1 flex flex-col justify-between py-2">
           <KpiDashboardView
@@ -48,9 +54,16 @@
             :is-loading="isGenerating"
             :period="selectedPeriod"
             @change-period="fetchKpiData"
+            @change-filters="changeKpiFilters"
             @select-prompt="handlePromptSubmit"
           />
 
+          <div class="max-w-6xl mx-auto w-full px-4 space-y-3">
+            <p v-if="error" role="alert" class="panel text-rose-300">{{ error }}</p>
+            <button v-if="isGenerating" class="btn" @click="cancel">Отменить запрос</button>
+            <dialog ref="sourceDialog" class="panel max-w-2xl backdrop:bg-black/70"><button class="btn mb-4" @click="sourceDialog?.close()">Закрыть источник</button><pre class="whitespace-pre-wrap">{{ sourceText }}</pre></dialog>
+            <blockquote v-for="quote in quotes" :key="quote.id" class="panel text-sm"><p>{{ quote.content }}</p><p class="text-xs text-slate-400">{{ quote.sender_name }} · {{ quote.sent_at }} · <button class="underline" @click="openQuote(quote.id)">Открыть источник #{{ quote.id }}</button></p></blockquote>
+          </div>
           <!-- Bottom Docked Chat Input Bar for Dashboard View -->
           <div class="w-full pb-6 pt-4 mt-auto">
             <ChatInput
@@ -93,7 +106,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
+import WorkspaceView from './components/WorkspaceView.vue'
 import WaveBackground from './components/WaveBackground.vue'
 import AppHeader from './components/AppHeader.vue'
 import WelcomeView from './components/WelcomeView.vue'
@@ -101,6 +115,8 @@ import KpiDashboardView from './components/KpiDashboardView.vue'
 import ChatInput from './components/ChatInput.vue'
 import AuthModal from './components/AuthModal.vue'
 import UserProfileView from './components/UserProfileView.vue'
+import { api } from './composables/api'
+import type { Source } from './types/platform'
 import { useChat } from './composables/useChat'
 import { useAuth } from './composables/useAuth'
 
@@ -115,15 +131,22 @@ const {
   chatResponseText,
   fetchKpiData,
   handlePromptSubmit,
-  goHome
+  goHome, error, quotes, cancel, changeKpiFilters
 } = useChat()
 
-const { isAuthenticated, checkAuth, isAuthModalOpen } = useAuth()
+const { isAuthenticated, currentUser, checkAuth, isAuthModalOpen } = useAuth()
+watch(isAuthenticated, value => { if (!value) currentView.value = 'welcome' })
+const sourceDialog = ref<HTMLDialogElement>()
+const sourceText = ref('')
+async function openQuote(id: number) {
+  try { const source = await api<Source>(`/messages/${id}/`); sourceText.value = `${source.sender_name} · ${source.sent_at || 'Время неизвестно'}\n\n${source.content}`; sourceDialog.value?.showModal() }
+  catch (e) { showToast(e instanceof Error ? e.message : 'Источник недоступен') }
+}
 const toastMessage = ref('')
 let toastTimer: number | null = null
 
 onMounted(() => {
-  checkAuth()
+  void checkAuth().then(ok => { if (ok) fetchKpiData() })
 })
 
 function showToast(msg: string) {
@@ -158,7 +181,8 @@ function handleAttach() {
     showToast('Для прикрепления файлов необходимо войти в систему')
     return
   }
-  showToast('Прикрепление файлов: выберите документ Excel, PDF или скриншот')
+  currentView.value = 'workspace'
+  showToast('Откройте раздел «Документы» и выберите файл и проект')
 }
 
 function handleVoice() {
@@ -167,6 +191,7 @@ function handleVoice() {
     showToast('Для голосового ввода необходимо войти в систему')
     return
   }
-  showToast('Голосовой ввод активирован (слушаю...)')
+  currentView.value = 'workspace'
+  showToast('В разделе «Документы» можно загрузить голосовое сообщение OGG, WAV или MP3')
 }
 </script>
