@@ -340,10 +340,11 @@ class Handler(BaseHTTPRequestHandler):
                 limit = int(query.get("limit", [10])[0])
                 limit = min(limit, fault.get("page_cap", limit))
                 cutoff = int(query.get("filter.timestamp.lte", [9999999999])[0])
+                since = int(query.get("filter.timestamp.gte", [0])[0])
                 if fault.get("repeated_page"):
                     offset = 0
                 values = [
-                    m for m in session.get("messages", []) if m["timestamp"] <= cutoff
+                    m for m in session.get("messages", []) if since <= m["timestamp"] <= cutoff
                 ]
                 values.sort(key=lambda m: (m["timestamp"], m["id"]))
                 result = values[offset : offset + limit]

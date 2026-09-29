@@ -31,12 +31,14 @@ PERMANENT_ERRORS = {
     "history_wrong_chat",
     "history_repeated_page",
     "history_storage_disabled",
+    "history_incremental_filter_unsupported",
     "history_waha_http_401",
     "history_waha_http_403",
     "history_waha_http_404",
     "history_waha_http_422",
 }
 ERROR_LABELS = {
+    "history_incremental_filter_unsupported": "WAHA не применяет фильтр новых сообщений. Проверьте версию WAHA перед продолжением.",
     "history_source_changed": "Группа, сессия или команда изменились. Запустите новое задание с текущими настройками.",
     "history_source_unavailable": "Группа выключена или не привязана к активной команде.",
     "history_invalid_message": "WAHA вернул сообщение в неподдерживаемом формате. Импорт не выполнен.",
@@ -82,7 +84,7 @@ def enqueue_step(run, delay=0):
 
 
 @transaction.atomic
-def start_job(job_id, user=None):
+def start_job(job_id, user=None, *, scheduled=False):
     job = WhatsAppHistoryJob.objects.select_for_update().get(pk=job_id)
     config = (
         WhatsAppConfig.objects.select_for_update(of=("self",))
@@ -91,10 +93,25 @@ def start_job(job_id, user=None):
     )
     if not job.enabled:
         raise ValidationError("Сначала включите задание в его настройках.")
-    if job.runs.filter(state__in=HISTORY_ACTIVE_STATES).exists():
-        raise ValidationError("Для этой группы уже есть незавершённый запуск.")
+    active = job.runs.filter(state__in=HISTORY_ACTIVE_STATES).first()
+    if active:
+        if not job.only_new or scheduled:
+            raise ValidationError("Для этой группы уже есть незавершённый запуск.")
+        if active.state == "paused":
+            return control_run(active.pk, "resume", user)
+        # Speed up the existing next step; never fork a second monitor.
+        OutboxEvent.objects.filter(
+            event_type="history_import",
+            payload__history_run_id=active.pk,
+            state="pending",
+        ).update(next_attempt_at=timezone.now())
+        return active
     job.full_clean()
     snapshot = source(config)
+    if job.only_new:
+        from .new_messages import initialize_checkpoint
+
+        initialize_checkpoint(job, config)
     run = WhatsAppHistoryRun.objects.create(
         job=job,
         requested_by=user,
@@ -102,6 +119,8 @@ def start_job(job_id, user=None):
         settings_snapshot={
             name: getattr(job, name)
             for name in (
+                "only_new",
+                "new_message_poll_seconds",
                 "page_size",
                 "initial_wait_seconds",
                 "poll_seconds",
@@ -113,8 +132,10 @@ def start_job(job_id, user=None):
     )
     enqueue_step(run)
     job.next_run_at = (
-        timezone.now() + timedelta(minutes=job.interval_minutes)
-        if job.interval_minutes
+        timezone.now()
+        if job.only_new
+        else timezone.now() + timedelta(minutes=job.interval_minutes)
+        if job.interval_minutes or job.only_new
         else None
     )
     job.save(update_fields=["next_run_at"])
@@ -148,6 +169,9 @@ def control_run(run_id, action, user):
         run.resume_state = ""
         run.status_message = "Импорт продолжен с сохранённого шага."
     elif action == "cancel" and run.state in IMPORT_STATES | {"paused"}:
+        if run.settings_snapshot.get("only_new"):
+            job.enabled, job.next_run_at = False, None
+            job.save(update_fields=["enabled", "next_run_at"])
         run.state, run.finished_at = "cancelled", timezone.now()
         run.status_message = "Импорт отменён. Существующие сообщения не удалены."
         run.items.all().delete()
@@ -163,6 +187,9 @@ def control_run(run_id, action, user):
     ).update(state="cancelled")
     run.step += 1
     run.save()
+    if run.settings_snapshot.get("only_new"):
+        job.next_run_at = timezone.now() if action == "resume" else None
+        job.save(update_fields=["next_run_at"])
     if action == "resume":
         enqueue_step(run)
     AuditEvent.objects.create(
@@ -177,13 +204,15 @@ def control_run(run_id, action, user):
 def schedule_due_jobs():
     now = timezone.now()
     ids = (
-        WhatsAppHistoryJob.objects.filter(enabled=True, interval_minutes__gt=0)
+        WhatsAppHistoryJob.objects.filter(enabled=True)
+        .filter(Q(only_new=True) | Q(interval_minutes__gt=0))
+        .exclude(runs__state__in=HISTORY_ACTIVE_STATES)
         .filter(Q(next_run_at__lte=now) | Q(next_run_at__isnull=True))
         .values_list("id", flat=True)
     )
     for pk in ids:
         try:
-            start_job(pk)
+            start_job(pk, scheduled=True)
         except (ValidationError, ProviderUnavailable):
             # An active run owns its progress; it never overlaps a periodic run.
             WhatsAppHistoryJob.objects.filter(pk=pk).update(
@@ -297,99 +326,118 @@ def validate_page(page, run):
     return list(items.values())
 
 
+def persist_items(run, config, batch):
+    rows, keys = [], []
+    for item in batch:
+        msg, content = item.payload, item.payload.get("body") or ""
+        extra = msg.get("_data") or {}
+        extra = extra if isinstance(extra, dict) else {}
+        key = extra.get("key") or {}
+        key = key if isinstance(key, dict) else {}
+        sender = msg.get("participant") or key.get("participant") or ""
+        name = msg.get("notifyName") or extra.get("pushName") or ""
+        if not isinstance(sender, str) or not isinstance(name, str):
+            raise ProviderUnavailable("history_invalid_message")
+        revision = hashlib.sha256(content.encode()).hexdigest()
+        keys.append((item.message_id, revision))
+        rows.append(
+            RawMessage(
+                source="waha",
+                session_name=config.session_name,
+                message_id=item.message_id,
+                source_revision=revision,
+                config=config,
+                team_id=config.team_id,
+                chat_id=config.group_jid,
+                timestamp=item.timestamp,
+                sent_at_known=True,
+                content=content,
+                sender_phone=sender.split("@")[0][:64],
+                sender_name=name[:255],
+                raw_payload={
+                    "event": "history.import",
+                    "session": config.session_name,
+                    "payload": msg,
+                },
+                processed=not bool(content.strip()),
+                processing_state="received" if content.strip() else "no_text",
+            )
+        )
+    before = set(
+        RawMessage.objects.filter(
+            source="waha",
+            session_name=config.session_name,
+            message_id__in=[k[0] for k in keys],
+        ).values_list("message_id", "source_revision")
+    )
+    RawMessage.objects.bulk_create(rows, ignore_conflicts=True, batch_size=250)
+    stored = {
+        (m.message_id, m.source_revision): m
+        for m in RawMessage.objects.filter(
+            source="waha",
+            session_name=config.session_name,
+            message_id__in=[k[0] for k in keys],
+        )
+    }
+    outbox, linked = [], []
+    counted = (
+        set(
+            run.messages.filter(pk__in=[m.pk for m in stored.values()]).values_list(
+                "pk", flat=True
+            )
+        )
+        if run.settings_snapshot.get("only_new")
+        else set()
+    )
+    queued = set(
+        OutboxEvent.objects.filter(
+            deduplication_key__in=[f"extract:{m.pk}" for m in stored.values()]
+        ).values_list("deduplication_key", flat=True)
+    )
+    for key in keys:
+        raw = stored[key]
+        if (
+            raw.config_id != config.id
+            or raw.chat_id != config.group_jid
+            or raw.team_id not in (None, config.team_id)
+        ):
+            raise ProviderUnavailable("history_wrong_chat")
+        linked.append(raw)
+        if raw.pk not in counted:
+            run.existing_count += int(key in before)
+            run.imported_count += int(key not in before)
+            run.no_text_count += int(not bool(raw.content.strip()))
+            if run.settings_snapshot.get("only_new"):
+                run.fetched_count += 1
+        if (
+            raw.content.strip()
+            and not raw.processed
+            and run.settings_snapshot["analyze_after_import"]
+            and f"extract:{raw.id}" not in queued
+        ):
+            outbox.append(
+                OutboxEvent(
+                    event_type="extract_message",
+                    deduplication_key=f"extract:{raw.id}",
+                    payload={"raw_id": raw.id},
+                )
+            )
+            run.scheduled_count += 1
+    run.messages.add(*linked)
+    OutboxEvent.objects.bulk_create(outbox, ignore_conflicts=True, batch_size=250)
+
+
 def import_messages(run, config):
     """The complete staged history and extraction outbox become visible together."""
     current = []
 
-    def persist(batch):
-        rows, keys = [], []
-        for item in batch:
-            msg, content = item.payload, item.payload.get("body") or ""
-            extra = msg.get("_data") or {}
-            extra = extra if isinstance(extra, dict) else {}
-            key = extra.get("key") or {}
-            key = key if isinstance(key, dict) else {}
-            sender = msg.get("participant") or key.get("participant") or ""
-            name = msg.get("notifyName") or extra.get("pushName") or ""
-            if not isinstance(sender, str) or not isinstance(name, str):
-                raise ProviderUnavailable("history_invalid_message")
-            revision = hashlib.sha256(content.encode()).hexdigest()
-            keys.append((item.message_id, revision))
-            rows.append(
-                RawMessage(
-                    source="waha",
-                    session_name=config.session_name,
-                    message_id=item.message_id,
-                    source_revision=revision,
-                    config=config,
-                    team_id=config.team_id,
-                    chat_id=config.group_jid,
-                    timestamp=item.timestamp,
-                    sent_at_known=True,
-                    content=content,
-                    sender_phone=sender.split("@")[0][:64],
-                    sender_name=name[:255],
-                    raw_payload={
-                        "event": "history.import",
-                        "session": config.session_name,
-                        "payload": msg,
-                    },
-                    processed=not bool(content.strip()),
-                    processing_state="received" if content.strip() else "no_text",
-                )
-            )
-        before = set(
-            RawMessage.objects.filter(
-                source="waha",
-                session_name=config.session_name,
-                message_id__in=[k[0] for k in keys],
-            ).values_list("message_id", "source_revision")
-        )
-        RawMessage.objects.bulk_create(rows, ignore_conflicts=True, batch_size=250)
-        stored = {
-            (m.message_id, m.source_revision): m
-            for m in RawMessage.objects.filter(
-                source="waha",
-                session_name=config.session_name,
-                message_id__in=[k[0] for k in keys],
-            )
-        }
-        outbox, linked = [], []
-        for key in keys:
-            raw = stored[key]
-            if (
-                raw.config_id != config.id
-                or raw.chat_id != config.group_jid
-                or raw.team_id not in (None, config.team_id)
-            ):
-                raise ProviderUnavailable("history_wrong_chat")
-            linked.append(raw)
-            run.existing_count += int(key in before)
-            run.imported_count += int(key not in before)
-            run.no_text_count += int(not bool(raw.content.strip()))
-            if (
-                raw.content.strip()
-                and not raw.processed
-                and run.settings_snapshot["analyze_after_import"]
-            ):
-                outbox.append(
-                    OutboxEvent(
-                        event_type="extract_message",
-                        deduplication_key=f"extract:{raw.id}",
-                        payload={"raw_id": raw.id},
-                    )
-                )
-                run.scheduled_count += 1
-        run.messages.add(*linked)
-        OutboxEvent.objects.bulk_create(outbox, ignore_conflicts=True, batch_size=250)
-
     for item in run.items.order_by("timestamp", "message_id").iterator(chunk_size=250):
         current.append(item)
         if len(current) == 250:
-            persist(current)
+            persist_items(run, config, current)
             current = []
     if current:
-        persist(current)
+        persist_items(run, config, current)
     run.items.all().delete()
     AuditEvent.objects.create(
         actor=run.requested_by,
@@ -415,6 +463,12 @@ def import_messages(run, config):
 
 
 def process_step(payload, waha):
+    if WhatsAppHistoryRun.objects.filter(
+        pk=payload["history_run_id"], settings_snapshot__only_new=True
+    ).exists():
+        from .new_messages import process_new_messages
+
+        return process_new_messages(payload, waha)
     run_id, expected_step = payload["history_run_id"], payload["step"]
     with transaction.atomic():
         run, config = locked_run(run_id, expected_step)

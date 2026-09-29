@@ -2,7 +2,7 @@
   const panel = document.querySelector('[data-progress-url]');
   if (!panel) return;
   const terminal = new Set(['completed', 'completed_with_errors', 'empty', 'failed', 'cancelled']);
-  const importing = new Set(['waiting_connection', 'waiting_sync', 'collecting', 'importing']);
+  const importing = new Set(['waiting_connection', 'waiting_sync', 'watching', 'collecting', 'importing']);
   const names = JSON.parse(document.getElementById('history-field-names').textContent);
   const readonly = document.querySelectorAll('#whatsapphistoryrun_form .field-line .readonly');
   const fields = {};
