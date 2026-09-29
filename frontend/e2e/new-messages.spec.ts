@@ -137,7 +137,7 @@ test('Webhook and polling deduplicate in both orders and honor disabled analysis
   const job = await createJob(page, source, false)
   try {
     await runId(job)
-    const a = message(source, 'webhook-first')
+    const a = message(source, 'webhook-first', Math.floor(Date.now() / 1000) - 1, '\n  Original whitespace must survive.  \n')
     expect((await webhook(request, source, a)).status()).toBe(202)
     const b = message(source, 'poll-first')
     await configure(request, source, [a, b])

@@ -237,7 +237,11 @@ def verify_waha(request):
 class WebhookPayload(serializers.Serializer):
     id = serializers.CharField(max_length=128)
     body = serializers.CharField(
-        max_length=32000, required=False, allow_blank=True, default=""
+        max_length=32000,
+        required=False,
+        allow_blank=True,
+        default="",
+        trim_whitespace=False,
     )
     timestamp = serializers.IntegerField(min_value=0, required=False)
     fromMe = serializers.BooleanField(default=False)
