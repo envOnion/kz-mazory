@@ -4,6 +4,8 @@ from django.db.models import Q
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import path, reverse
+from django.utils import timezone
+from django.utils.formats import date_format
 from django.utils.html import format_html
 from django.views.decorators.http import require_POST
 
@@ -212,6 +214,33 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
             from django.http import HttpResponseNotAllowed
 
             return HttpResponseNotAllowed(["GET"])
+        counts = progress(run)
+        fields = {
+            name: getattr(run, name)
+            for name in (
+                "status_message",
+                "error_code",
+                "fetched_count",
+                "imported_count",
+                "existing_count",
+                "no_text_count",
+                "scheduled_count",
+                "scan_number",
+                "stable_scans",
+            )
+        }
+        fields.update(
+            state=run.get_state_display(),
+            source_snapshot=run.source_snapshot,
+            analysis_progress=f"Обработано {counts['processed']} / {counts['total']}; ошибок: {counts['errors']}",
+        )
+        for name in ("cutoff_at", "updated_at", "finished_at"):
+            value = getattr(run, name)
+            fields[name] = (
+                date_format(timezone.localtime(value), "DATETIME_FORMAT")
+                if value
+                else "—"
+            )
         return JsonResponse(
             {
                 "state": run.state,
@@ -221,7 +250,8 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
                 "fetched": run.fetched_count,
                 "imported": run.imported_count,
                 "existing": run.existing_count,
-                "analysis": progress(run),
+                "analysis": counts,
+                "fields": fields,
                 "updated_at": run.updated_at.isoformat(),
             }
         )
@@ -257,6 +287,8 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
             form_url,
             {
                 **(extra_context or {}),
+                "history_field_names": self.fields,
+                "can_control_import": can_control,
                 "can_pause_import": can_control and obj.state in IMPORT_STATES,
                 "can_resume_import": can_control and obj.state == "paused",
                 "can_cancel_import": can_control

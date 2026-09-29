@@ -28,7 +28,9 @@ async function configure(request: APIRequestContext, source: Source, status: str
   expect((await request.post(`${provider}/test/waha`, { data: { name: source.session, status, messages: items, faults, authenticated: true, group_title: source.name } })).ok()).toBeTruthy()
 }
 async function save(page: Page) {
+  const destination = new URL(page.url()).pathname.replace(/(?:add|\d+\/change)\/$/, '')
   await page.locator('[name=_save]').first().click()
+  await page.waitForURL(url => url.pathname === destination)
   await expect(page.locator('.errorlist')).toHaveCount(0)
 }
 async function createJob(page: Page, source: Source, analyze = true, interval = 0): Promise<number> {
@@ -66,7 +68,14 @@ test('History jobs import every page and full text, expose progress, pause AI an
   try {
     const job = await createJob(page, source)
     const run = await start(page, job)
+    let runLoads = 0
+    page.on('framenavigated', frame => {
+      if (frame === page.mainFrame() && frame.url().includes(`/whatsapphistoryrun/${run}/change/`)) runLoads += 1
+    })
     await expect(page.getByTestId('history-progress')).toHaveAttribute('data-state', 'analyzing', { timeout: 60000 })
+    await expect(page.getByRole('button', { name: 'Приостановить импорт', exact: true })).toBeHidden()
+    await expect(page.locator('[data-history-field="imported_count"]')).toHaveText(String(items.length))
+    expect(runLoads).toBe(0)
     const saved = inspect<{ count: number; content: string; traces: number }>(`from api.models import RawMessage, MessageProcessingTrace
 q = RawMessage.objects.filter(config_id=${source.id})
 print(json.dumps({'count':q.count(),'content':q.order_by('timestamp').first().content,'traces':MessageProcessingTrace.objects.filter(raw_message__config_id=${source.id}).count()}))`)
@@ -219,6 +228,13 @@ print(json.dumps(OutboxEvent.objects.filter(event_type='extract_message',payload
     await expect(page.getByTestId('history-progress')).toHaveAttribute('data-state', 'completed', { timeout: 30000 })
     expect(inspect<number>(`from api.models import RawMessage; print(json.dumps(RawMessage.objects.filter(config_id=${source.id},processed=True).count()))`)).toBe(2)
   } finally {
-    await setLimit('0')
+    const cleanup = await page.context().newPage()
+    try {
+      await cleanup.goto(`/admin/api/aisettings/${ai}/change/`)
+      await cleanup.locator('#id_daily_request_limit').fill('0')
+      await save(cleanup)
+    } finally {
+      await cleanup.close()
+    }
   }
 })
