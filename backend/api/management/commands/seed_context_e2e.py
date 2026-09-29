@@ -41,6 +41,15 @@ class Command(BaseCommand):
                 "whitespace_evidence",
                 "ambiguous_evidence",
                 "changed_evidence",
+                "rate_limited",
+                "always_rate_limited",
+                "retry_date",
+                "disconnected",
+                "http_timeout",
+                "unauthorized",
+                "bad_json_once",
+                "in_flight_budget",
+                "no_credits",
             ],
         )
         parser.add_argument("--count", type=int, default=50)
@@ -152,6 +161,15 @@ class Command(BaseCommand):
             "whitespace_evidence",
             "ambiguous_evidence",
             "changed_evidence",
+            "rate_limited",
+            "always_rate_limited",
+            "retry_date",
+            "disconnected",
+            "http_timeout",
+            "unauthorized",
+            "bad_json_once",
+            "in_flight_budget",
+            "no_credits",
         }:
             target_content = f"E2E extraction:{options['scenario']} {token} <img src=x onerror=window.__xss=1>"
         if options["scenario"] in {

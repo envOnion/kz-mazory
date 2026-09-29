@@ -8,7 +8,7 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.debug import sensitive_post_parameters
 from .admin_forms import BitrixSettingsForm
 from .bitrix_config import effective_webhook_url, masked_webhook_url
-from .trace_context_ui import badge_text, render_context, context_view_data, ERRORS
+from .trace_context_ui import badge_text, render_context, context_view_data, retry_view, ERRORS
 from django.utils.safestring import mark_safe
 from django.contrib import messages
 from unfold.admin import ModelAdmin, TabularInline
@@ -995,6 +995,14 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
 
     @admin.display(description="Результат")
     def trace_result(self, obj):
+        retry = retry_view(obj)
+        if retry.get("state") in ("pending", "processing", "budget_wait"):
+            return format_html(
+                '<div class="mazory-list-stack"><span class="mazory-admin-badge mazory-admin-badge--warn">{}</span>'
+                '<span class="mazory-list-meta">Попытки: {} из {}. {}</span></div>',
+                "Ожидает повтора" if retry["state"] != "processing" else "Повторный анализ",
+                retry["attempts"], retry["max_attempts"], ERRORS.get(obj.error_code, obj.error_code),
+            )
         if obj.status == "error":
             return format_html(
                 '<div class="mazory-list-stack">{}<span class="mazory-list-meta">{}</span></div>',
@@ -1244,6 +1252,7 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
                 "admin/trace_result.html",
                 {
                     "trace": obj,
+                    "retry": retry_view(obj),
                     "error_label": ERRORS.get(obj.error_code, obj.error_code),
                     "diagnostics": json.dumps(
                         obj.context_metadata.get("response_diagnostics", {}),

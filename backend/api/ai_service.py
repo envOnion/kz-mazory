@@ -10,7 +10,12 @@ from django.db.models import Sum
 from django.utils import timezone
 
 from .models import AISettings, ProviderUsage
-from .providers import ProviderUnavailable, checked_url
+from .providers import (
+    ProviderUnavailable,
+    checked_url,
+    provider_error,
+    retry_after_seconds,
+)
 
 usage_event_id = ContextVar("usage_event_id", default=None)
 
@@ -83,20 +88,33 @@ class AIService:
                 ):
                     error = "provider_context_overflow"
                     raise ProviderUnavailable(error)
-            response.raise_for_status()
-            data = response.json()
+            retry_after = retry_after_seconds(response.headers.get("Retry-After"))
+            try:
+                data = response.json()
+            except ValueError:
+                if response.status_code < 400:
+                    raise ProviderUnavailable("provider_invalid_response") from None
+            if response.status_code >= 300:
+                raise provider_error(
+                    response.status_code,
+                    retry_after=retry_after,
+                    detail=data.get("error") if isinstance(data, dict) else None,
+                )
             if isinstance(data, dict) and data.get("error"):
                 detail = data["error"]
                 status = detail.get("code") if isinstance(detail, dict) else None
-                error = {
-                    503: "provider_overloaded",
-                    429: "provider_rate_limited",
-                }.get(status, "provider_response_error")
-                raise ProviderUnavailable(
-                    error, diagnostics={"provider_error_code": status}
-                )
+                raise provider_error(status, retry_after=retry_after, detail=detail)
             succeeded = True
             return data
+        except ProviderUnavailable as exc:
+            error = str(exc)
+            raise
+        except requests.Timeout:
+            error = "provider_timeout"
+            raise ProviderUnavailable(error) from None
+        except requests.ConnectionError:
+            error = "provider_connection_failed"
+            raise ProviderUnavailable(error) from None
         except (requests.RequestException, ValueError, KeyError):
             error = "provider_request_failed"
             raise ProviderUnavailable(error) from None

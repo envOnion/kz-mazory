@@ -19,6 +19,7 @@ from .models import (
     AISettings,
 )
 from .providers import ProviderUnavailable
+from . import ai_retries
 from .waha_control import ACTION_LABELS
 
 
@@ -83,6 +84,10 @@ def run_outbox(pk):
         event = OutboxEvent.objects.select_for_update().get(pk=pk)
         if event.state not in ("pending", "enqueued"):
             return
+        if event.next_attempt_at > timezone.now():
+            event.state, event.lease_until = "pending", None
+            event.save(update_fields=["state", "lease_until"])
+            return
         if (
             event.event_type in ("extract_message", "index_message")
             and AISettings.get_active().message_processing_paused
@@ -102,6 +107,7 @@ def run_outbox(pk):
         )
         event.attempt_count += 1
         event.save()
+    ai_retries.record_attempt(event, "processing")
     from .ai_service import usage_event_id
 
     context_token = usage_event_id.set(event.id)
@@ -123,12 +129,15 @@ def run_outbox(pk):
         OutboxEvent.objects.filter(pk=pk, state="processing").update(
             state="done", error_code="", lease_until=None
         )
+        ai_retries.record_attempt(event, "done")
     except WahaOutcomeUnknown:
         OutboxEvent.objects.filter(pk=pk).update(
             state="unknown", error_code="waha_outcome_unknown", lease_until=None
         )
         logger.warning("outbox_unknown id=%s type=%s", pk, event.event_type)
     except requests.Timeout:
+        if ai_retries.handle_failure(event, ProviderUnavailable("provider_timeout")):
+            return
         state = (
             "unknown"
             if event.event_type in NON_IDEMPOTENT or event.event_type == "crm_sync"
@@ -163,6 +172,15 @@ def run_outbox(pk):
                 next_attempt_at=tomorrow,
                 lease_until=None,
                 attempt_count=max(0, event.attempt_count - 1),
+            )
+            event.attempt_count = max(0, event.attempt_count - 1)
+            ai_retries.record_attempt(event, "budget_wait", code, tomorrow)
+            return
+        if ai_retries.handle_failure(event, exc):
+            logger.warning(
+                "outbox_failure id=%s type=%s code=%s attempt=%s/%s",
+                pk, event.event_type, code, event.attempt_count,
+                ai_retries.MAX_ATTEMPTS,
             )
             return
         from .history_jobs import PERMANENT_ERRORS
