@@ -6,15 +6,16 @@ const provider = process.env.E2E_PROVIDER_URL || 'http://127.0.0.1:18090'
 interface Seed { trace_id: number; raw_id: number; target: string }
 interface State {
   status: string; error: string; proposals: number; processed: boolean;
+  quotes: string[];
   event: { state: string; attempt_count: number }; history_run: number;
-  diagnostics: { finish_reason?: string; output_tokens?: number; response_characters?: number; field_errors?: unknown }
+  diagnostics: { finish_reason?: string; output_tokens?: number; response_characters?: number; field_errors?: unknown; source_whitespace_restored?: number[]; evidence_match?: string }
 }
 function state(id: number): State {
   return JSON.parse(isolatedCommand('shell', ['--verbosity', '0', '-c', guard + `
 import json
 from api.models import MessageProcessingTrace,OutboxEvent
 t=MessageProcessingTrace.objects.get(pk=${id})
-print(json.dumps({'status':t.status,'error':t.error_code,'proposals':t.candidates.count(),'processed':t.raw_message.processed,'event':OutboxEvent.objects.filter(payload__trace_id=t.id).values('state','attempt_count').get(),'diagnostics':t.context_metadata.get('response_diagnostics',{}),'history_run':t.raw_message.history_import_runs.first().id}))
+print(json.dumps({'status':t.status,'error':t.error_code,'proposals':t.candidates.count(),'quotes':list(t.candidates.values_list('evidence__quote',flat=True)),'processed':t.raw_message.processed,'event':OutboxEvent.objects.filter(payload__trace_id=t.id).values('state','attempt_count').get(),'diagnostics':t.context_metadata.get('response_diagnostics',{}),'history_run':t.raw_message.history_import_runs.first().id}))
 `])) as State
 }
 async function start(page: Page, scenario: string): Promise<{ id: number; seed: Seed }> {
@@ -73,11 +74,26 @@ test('upstream overload in HTTP 200 is retried with the same saved request and t
   expect(state(id).proposals).toBe(1)
 })
 
+test('whitespace-folded evidence is restored to the exact unique source substring', async ({ page }) => {
+  test.setTimeout(120000)
+  await adminLogin(page)
+  const { id } = await start(page, 'whitespace_evidence')
+  await expect.poll(() => state(id).status, { timeout: 60000 }).toBe('success')
+  const result = state(id)
+  expect(result.proposals).toBe(1)
+  expect(result.quotes).toEqual(['Объект «Алматы»:\nоплачено\t125\u00a0000 ₸.'])
+  expect(result.diagnostics.source_whitespace_restored).toEqual([0])
+  await page.reload()
+  await expect(page.getByTestId('trace-result')).toContainText('Предложено фактов: 1')
+})
+
 for (const [scenario, code, reason] of [
-  ['wrong_evidence', 'evidence_not_in_source', 'Модель привела цитату'],
+  ['wrong_evidence', 'evidence_not_in_source', 'Цитату модели не удалось'],
   ['truncated', 'provider_output_truncated', 'Ответ модели не поместился'],
   ['missing_amount', 'invalid_schema', 'Поля фактов не соответствуют'],
   ['invalid_json', 'invalid_extraction_schema', 'Модель вернула некорректный JSON'],
+  ['ambiguous_evidence', 'evidence_not_in_source', 'Цитату модели не удалось'],
+  ['changed_evidence', 'evidence_not_in_source', 'Цитату модели не удалось'],
 ] as const) {
   test(`${scenario}: visible failure, no facts, one final queue attempt`, async ({ page }) => {
     test.setTimeout(120000)
@@ -93,6 +109,8 @@ for (const [scenario, code, reason] of [
     expect(result.diagnostics.response_characters).toBeGreaterThan(0)
     if (scenario === 'truncated') expect(result.diagnostics.finish_reason).toBe('length')
     if (scenario === 'missing_amount') expect(JSON.stringify(result.diagnostics.field_errors)).toContain('сумма')
+    if (scenario === 'ambiguous_evidence') expect(result.diagnostics.evidence_match).toBe('ambiguous')
+    if (scenario === 'changed_evidence') expect(result.diagnostics.evidence_match).toBe('not_found')
     await page.reload()
     const card = page.getByTestId('trace-result')
     await expect(card).toContainText(reason)

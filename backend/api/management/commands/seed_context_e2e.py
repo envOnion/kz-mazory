@@ -38,6 +38,9 @@ class Command(BaseCommand):
                 "missing_amount",
                 "invalid_json",
                 "upstream_overloaded",
+                "whitespace_evidence",
+                "ambiguous_evidence",
+                "changed_evidence",
             ],
         )
         parser.add_argument("--count", type=int, default=50)
@@ -146,8 +149,19 @@ class Command(BaseCommand):
             "missing_amount",
             "invalid_json",
             "upstream_overloaded",
+            "whitespace_evidence",
+            "ambiguous_evidence",
+            "changed_evidence",
         }:
             target_content = f"E2E extraction:{options['scenario']} {token} <img src=x onerror=window.__xss=1>"
+        if options["scenario"] in {
+            "whitespace_evidence",
+            "ambiguous_evidence",
+            "changed_evidence",
+        }:
+            target_content += "\n\nВводный  текст.\nОбъект «Алматы»:\nоплачено\t125\u00a0000 ₸.\nКонец."
+            if options["scenario"] == "ambiguous_evidence":
+                target_content += "\nОбъект «Алматы»:\tоплачено  125\n000 ₸."
         raw = RawMessage.objects.create(
             config=cfg,
             team=team,

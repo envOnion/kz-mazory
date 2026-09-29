@@ -202,6 +202,17 @@ class Handler(BaseHTTPRequestHandler):
                     facts[0].update(fact_type="payment", amount=None)
                 elif content.startswith("E2E extraction:truncated"):
                     finish_reason = "length"
+                elif any(
+                    content.startswith("E2E extraction:" + kind)
+                    for kind in (
+                        "whitespace_evidence",
+                        "ambiguous_evidence",
+                        "changed_evidence",
+                    )
+                ):
+                    facts[0]["evidence"] = "Объект «Алматы»: оплачено 125 000 ₸."
+                    if content.startswith("E2E extraction:changed_evidence"):
+                        facts[0]["evidence"] = "Объект «Алматы»: оплачено 126 000 ₸."
             response_content = json.dumps({"facts": facts}, ensure_ascii=False)
             if content.startswith("E2E extraction:fenced"):
                 response_content = "```json\n" + response_content + "\n```"

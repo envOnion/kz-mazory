@@ -45,6 +45,8 @@ print(json.dumps({'trace': t.id, 'project': p.id, 'config': c.id}))
       await page.getByRole('link', { name: /Открыть трассировку/ }).click()
       await expect(page).toHaveURL(new RegExp(`/messageprocessingtrace/${fixture.trace}/change/`))
       await expect(page.getByText('1. Входные данные WhatsApp', { exact: false }).first()).toBeVisible()
+      // Historical warning traces can already have a linked deal; retain it.
+      await expect(page.locator(`a[href="/admin/api/project/${fixture.project}/change/"]`)).toBeVisible()
       await page.goto(`/admin/api/messageprocessingtrace/?q=${token}&status__exact=success`)
       await expect(page.locator('#result_list .data-row')).toHaveCount(0)
       await page.goto(`/admin/api/bitrixsettings/?q=${token}`)
