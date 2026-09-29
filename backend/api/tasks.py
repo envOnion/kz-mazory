@@ -16,6 +16,7 @@ from .models import (
     NotificationDelivery,
     RawMessage,
     WhatsAppConfig,
+    AISettings,
 )
 from .providers import ProviderUnavailable
 from .waha_control import ACTION_LABELS
@@ -33,6 +34,7 @@ CLUSTERS = {
     "crm_sync": "crm",
     "crm_import": "crm",
     "waha_control": "delivery",
+    "history_import": "history",
 }
 NON_IDEMPOTENT = {"otp", "notification", "waha_control"}
 
@@ -54,11 +56,10 @@ def dispatch_outbox(limit=100):
     OutboxEvent.objects.filter(state="enqueued", lease_until__lte=now).update(
         state="pending"
     )
-    ids = list(
-        OutboxEvent.objects.filter(state="pending", next_attempt_at__lte=now)
-        .order_by("id")
-        .values_list("id", flat=True)[:limit]
-    )
+    pending = OutboxEvent.objects.filter(state="pending", next_attempt_at__lte=now)
+    if AISettings.get_active().message_processing_paused:
+        pending = pending.exclude(event_type__in=["extract_message", "index_message"])
+    ids = list(pending.order_by("id").values_list("id", flat=True)[:limit])
     for pk in ids:
         with transaction.atomic():
             event = OutboxEvent.objects.select_for_update().get(pk=pk)
@@ -82,12 +83,20 @@ def run_outbox(pk):
         event = OutboxEvent.objects.select_for_update().get(pk=pk)
         if event.state not in ("pending", "enqueued"):
             return
+        if (
+            event.event_type in ("extract_message", "index_message")
+            and AISettings.get_active().message_processing_paused
+        ):
+            event.state, event.lease_until = "pending", None
+            event.next_attempt_at = timezone.now() + timedelta(seconds=10)
+            event.save(update_fields=["state", "lease_until", "next_attempt_at"])
+            return
         event.state, event.lease_until = (
             "processing",
             timezone.now()
             + timedelta(
                 seconds=settings.AI_TASK_LEASE
-                if CLUSTERS.get(event.event_type, "ai") == "ai"
+                if CLUSTERS.get(event.event_type, "ai") in ("ai", "history")
                 else 240
             ),
         )
@@ -108,6 +117,7 @@ def run_outbox(pk):
             "crm_import": import_crm,
             "attachment": process_attachment,
             "waha_control": waha_control,
+            "history_import": import_history_step,
         }
         handlers[event.event_type](event.payload)
         OutboxEvent.objects.filter(pk=pk, state="processing").update(
@@ -133,19 +143,43 @@ def run_outbox(pk):
             NotificationDelivery.objects.filter(pk=event.payload["delivery_id"]).update(
                 state="unknown", error_code="provider_timeout"
             )
+        if event.event_type == "history_import" and state == "failed":
+            from .history_jobs import fail_run
+
+            fail_run(event.payload, "provider_timeout")
     except Exception as exc:
         code = (
             str(exc)[:64]
             if isinstance(exc, ProviderUnavailable)
             else type(exc).__name__
         )
+        if code == "ai_daily_budget_exhausted":
+            tomorrow = (timezone.now() + timedelta(days=1)).replace(
+                hour=0, minute=0, second=1, microsecond=0
+            )
+            OutboxEvent.objects.filter(pk=pk).update(
+                state="pending",
+                error_code=code,
+                next_attempt_at=tomorrow,
+                lease_until=None,
+                attempt_count=max(0, event.attempt_count - 1),
+            )
+            return
+        from .history_jobs import PERMANENT_ERRORS
+
         permanent = (
-            code.startswith("context_") and code != "context_model_metadata_unavailable"
-        ) or code in (
-            "provider_context_overflow",
-            "reanalysis_access_revoked",
-            "provider_output_truncated",
-            "context_request_uncertain",
+            (
+                code.startswith("context_")
+                and code != "context_model_metadata_unavailable"
+            )
+            or code in PERMANENT_ERRORS
+            or code
+            in (
+                "provider_context_overflow",
+                "reanalysis_access_revoked",
+                "provider_output_truncated",
+                "context_request_uncertain",
+            )
         )
         state = (
             "failed"
@@ -164,6 +198,10 @@ def run_outbox(pk):
             NotificationDelivery.objects.filter(pk=event.payload["delivery_id"]).update(
                 state="failed", error_code=code
             )
+        if event.event_type == "history_import" and state == "failed":
+            from .history_jobs import fail_run
+
+            fail_run(event.payload, code)
         logger.warning(
             "outbox_failure id=%s type=%s code=%s", pk, event.event_type, code
         )
@@ -309,6 +347,26 @@ def extract_message(payload):
         trace_id=payload.get("trace_id"),
         requested_by_id=payload.get("requested_by_id"),
     )
+
+
+def import_history_step(payload):
+    from .history_jobs import ERROR_LABELS, process_step
+    from .models import WhatsAppHistoryRun
+
+    try:
+        process_step(payload, waha_request)
+    except requests.HTTPError as exc:
+        code = f"history_waha_http_{exc.response.status_code}"
+        WhatsAppHistoryRun.objects.filter(
+            pk=payload["history_run_id"], step=payload["step"]
+        ).update(
+            error_code=code,
+            status_message=ERROR_LABELS.get(
+                code, "WAHA временно недоступен. Шаг будет повторён."
+            ),
+            updated_at=timezone.now(),
+        )
+        raise ProviderUnavailable(code) from None
 
 
 def index_message(payload):

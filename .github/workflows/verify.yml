@@ -48,7 +48,7 @@ jobs:
           npm --prefix frontend audit --audit-level=high
           pipx run --spec pip-audit==2.9.0 pip-audit --no-deps --disable-pip -r backend/requirements.txt
       - name: Start dedicated queues
-        run: docker compose -f compose.e2e.yml up -d qcluster delivery crm outbox
+        run: docker compose -f compose.e2e.yml up -d qcluster delivery history crm outbox
       - name: Typecheck and build frontend
         run: npm run build
         working-directory: frontend
@@ -70,7 +70,7 @@ jobs:
           bash ops/verify_restore.sh
       - name: Worker and provider diagnostics
         if: always()
-        run: docker compose -f compose.e2e.yml logs --tail=100 backend qcluster delivery crm outbox test-provider
+        run: docker compose -f compose.e2e.yml logs --tail=100 backend qcluster delivery history crm outbox test-provider
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

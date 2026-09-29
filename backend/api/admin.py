@@ -521,6 +521,25 @@ class AISettingsAdmin(IntegrationAdmin):
     list_editable = ("chat_model_name", "embedding_model_name", "is_active")
     exclude = ("chat_api_key", "embedding_api_key")
 
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        from django.utils import timezone
+        from .models import OutboxEvent
+
+        if {"daily_request_limit", "daily_budget_usd"} & set(form.changed_data):
+            OutboxEvent.objects.filter(
+                state="pending", error_code="ai_daily_budget_exhausted"
+            ).update(next_attempt_at=timezone.now())
+        if (
+            "message_processing_paused" in form.changed_data
+            and not obj.message_processing_paused
+        ):
+            OutboxEvent.objects.filter(
+                state="pending", event_type__in=["extract_message", "index_message"]
+            ).exclude(error_code="ai_daily_budget_exhausted").update(
+                next_attempt_at=timezone.now()
+            )
+
 
 @admin.register(BitrixSettings)
 class BitrixSettingsAdmin(IntegrationAdmin):
@@ -1296,8 +1315,9 @@ for model in (Team, TeamMembership, ChatAccess, ClientProjectAccess):
 for model in (
     AuditEvent,
     ProjectRevision,
-    OutboxEvent,
     FactCandidate,
     NotificationDelivery,
 ):
     admin.site.register(model, ScopedReadOnlyAdmin)
+
+from . import job_admin  # noqa: F401, E402 — register job views after source admins.
