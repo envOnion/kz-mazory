@@ -1,7 +1,6 @@
 import { createHmac } from 'node:crypto'
-import { execFileSync } from 'node:child_process'
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
-import { adminLogin, isolatedCommand } from './auth-helper'
+import { adminLogin, isolatedCommand, isolatedCompose } from './auth-helper'
 
 const provider = process.env.E2E_PROVIDER_URL || 'http://127.0.0.1:18090'
 interface Source { id: number; name: string; session: string; chat: string; stamp: number }
@@ -187,7 +186,8 @@ test('An empty source starts now, pauses durably, resumes and validates live set
     await page.goto(`/admin/api/whatsappconfig/${source.id}/change/`)
     await page.locator('#id_group_jid').fill('another@g.us')
     await page.locator('[name=_save]').first().click()
-    await expect(page.locator('.errorlist')).toContainText('Сначала отмените мониторинг')
+    await expect(page.getByText('Сначала отмените мониторинг новых сообщений, затем измените источник.', { exact: true })).toBeVisible()
+    expect(inspect<string>(`from api.models import WhatsAppConfig; print(json.dumps(WhatsAppConfig.objects.get(pk=${source.id}).group_jid))`)).toBe(source.chat)
     await page.goto(`/admin/api/whatsapphistoryrun/${run}/change/`)
     await page.getByRole('button', { name: 'Продолжить импорт', exact: true }).click()
     await expect.poll(() => rawCount(source), { timeout: 30000 }).toBe(1)
@@ -255,8 +255,7 @@ print(json.dumps(OutboxEvent.objects.filter(event_type='history_import',payload_
     const previous = (await reads(request, source)).length
     await configure(request, source, [first, second], { messages: { delay: 10 } })
     await expect.poll(async () => (await reads(request, source)).length, { timeout: 20000 }).toBeGreaterThan(previous)
-    const composeFile = new URL('../../compose.e2e.yml', import.meta.url).pathname
-    execFileSync('docker', ['compose', '-f', composeFile, '-p', process.env.E2E_COMPOSE_PROJECT || 'mazory-platform-e2e', 'restart', '-t', '1', 'history'], { timeout: 30000, stdio: 'pipe' })
+    isolatedCompose(['restart', '-t', '1', 'history'])
     // Accelerate only the abandoned test lease; production uses its normal lease.
     isolatedCommand('shell', ['-c', `from api.models import OutboxEvent; from django.utils import timezone; from datetime import timedelta
 OutboxEvent.objects.filter(event_type='history_import',payload__history_run_id=${run},state__in=['processing','enqueued']).update(lease_until=timezone.now()-timedelta(seconds=1))`])
