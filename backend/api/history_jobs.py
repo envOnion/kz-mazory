@@ -105,6 +105,8 @@ def start_job(job_id, user=None, *, scheduled=False):
             payload__history_run_id=active.pk,
             state="pending",
         ).update(next_attempt_at=timezone.now())
+        job.next_run_at = timezone.now()
+        job.save(update_fields=["next_run_at"])
         return active
     job.full_clean()
     snapshot = source(config)
