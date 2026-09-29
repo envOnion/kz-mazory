@@ -333,4 +333,10 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
         RawMessage.objects.filter(pk=raw_id, processed=False).update(
             processing_state="failed"
         )
-        raise ProviderUnavailable(trace.error_code) from None
+        raise ProviderUnavailable(
+            trace.error_code,
+            diagnostics=diagnostics,
+            retry_after=exc.retry_after
+            if isinstance(exc, ProviderUnavailable)
+            else None,
+        ) from None

@@ -3,6 +3,7 @@
 from django.core.paginator import Paginator
 from django.template.loader import render_to_string
 from django.urls import reverse
+from django.utils.dateparse import parse_datetime
 
 from . import access
 from .plain_text import clean_context
@@ -24,12 +25,29 @@ ERRORS = {
     "provider_request_failed": "Провайдер AI временно недоступен.",
     "provider_overloaded": "Провайдер AI перегружен. Запрос не обработан.",
     "provider_rate_limited": "Провайдер AI ограничил частоту запросов.",
+    "provider_timeout": "Провайдер AI не ответил вовремя.",
+    "provider_connection_failed": "Соединение с провайдером AI прервано.",
+    "provider_server_error": "Временная ошибка сервера AI.",
+    "provider_invalid_response": "Провайдер AI вернул ответ в некорректном формате.",
+    "provider_in_flight_budget": "Провайдер временно ограничил одновременные запросы.",
+    "provider_authentication_failed": "Провайдер AI отклонил ключ доступа.",
+    "provider_access_denied": "Провайдер AI запретил запрос.",
+    "provider_insufficient_credits": "Недостаточно средств у провайдера AI.",
+    "provider_invalid_request": "Провайдер AI отклонил параметры запроса.",
+    "ai_daily_budget_exhausted": "Исчерпан суточный бюджет запросов AI.",
     "provider_response_error": "Провайдер AI сообщил об ошибке вместо результата анализа.",
     "invalid_extraction_schema": "Модель вернула некорректный JSON или отсутствует массив facts.",
     "invalid_schema": "Поля фактов не соответствуют формату: проверьте диагностику ответа.",
     "evidence_not_in_source": "Цитату модели не удалось однозначно найти в целевом сообщении.",
     "payment_evidence_contradiction": "Цитата не подтверждает совершённую оплату.",
 }
+
+
+def retry_view(obj):
+    value = dict(obj.context_metadata.get("retry", {}))
+    if value.get("next_attempt_at"):
+        value["next_attempt_at"] = parse_datetime(value["next_attempt_at"])
+    return value
 
 
 def badge_text(obj):

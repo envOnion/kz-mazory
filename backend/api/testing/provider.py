@@ -5,6 +5,7 @@ import json
 import re
 import threading
 import time
+from email.utils import formatdate
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -21,11 +22,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
-    def reply(self, status, data):
+    def reply(self, status, data, headers=None):
         encoded = json.dumps(data, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(encoded)))
+        for name, value in (headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         self.wfile.write(encoded)
 
@@ -132,6 +135,41 @@ class Handler(BaseHTTPRequestHandler):
                 ai_requests["chats"].append(value)
                 ai_requests["payloads"].append(data)
             content = value.get("content", value.get("question", ""))
+            with lock:
+                attempts = sum(
+                    item.get("content") == content for item in ai_requests["chats"]
+                )
+            if content.startswith("E2E extraction:always_rate_limited") or (
+                attempts == 1 and content.startswith("E2E extraction:rate_limited")
+            ):
+                return self.reply(429, {"error": {"code": 429}}, {"Retry-After": "120"})
+            if attempts == 1 and content.startswith("E2E extraction:retry_date"):
+                return self.reply(
+                    503,
+                    {"error": {"code": 503}},
+                    {"Retry-After": formatdate(time.time() + 90, usegmt=True)},
+                )
+            if attempts == 1 and content.startswith("E2E extraction:disconnected"):
+                self.connection.shutdown(2)
+                self.connection.close()
+                return
+            if attempts == 1 and content.startswith("E2E extraction:http_timeout"):
+                return self.reply(408, {"error": {"code": 408}})
+            if content.startswith("E2E extraction:unauthorized"):
+                return self.reply(401, {"error": {"code": 401}}, {"Retry-After": "120"})
+            if attempts == 1 and content.startswith("E2E extraction:in_flight_budget"):
+                return self.reply(
+                    402,
+                    {
+                        "error": {
+                            "code": 402,
+                            "metadata": {"limit_source": "openrouter_in_flight_budget"},
+                        }
+                    },
+                    {"Retry-After": "120"},
+                )
+            if content.startswith("E2E extraction:no_credits"):
+                return self.reply(402, {"error": {"code": 402}})
             if content.startswith("E2E extraction:upstream_overloaded"):
                 with lock:
                     attempts = sum(
@@ -216,7 +254,11 @@ class Handler(BaseHTTPRequestHandler):
             response_content = json.dumps({"facts": facts}, ensure_ascii=False)
             if content.startswith("E2E extraction:fenced"):
                 response_content = "```json\n" + response_content + "\n```"
-            elif content.startswith("E2E extraction:invalid_json"):
+            elif (
+                content.startswith("E2E extraction:invalid_json")
+                or attempts == 1
+                and content.startswith("E2E extraction:bad_json_once")
+            ):
                 response_content = "[]"
             from api.context_tokens import native_counter
 
