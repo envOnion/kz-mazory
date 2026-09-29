@@ -625,6 +625,23 @@ class AISettings(models.Model):
     context_safety_tokens = models.PositiveIntegerField(
         "Технический запас, токены", default=2048
     )
+    message_processing_paused = models.BooleanField(
+        "Приостановить анализ и индексацию сообщений",
+        default=False,
+        help_text="Новые задания ждут в очереди. Уже отправленные запросы завершаются.",
+    )
+    daily_request_limit = models.PositiveIntegerField(
+        "Лимит запросов AI в сутки",
+        default=0,
+        help_text="0 — лимит из настроек сервера. Учитываются чат и embeddings.",
+    )
+    daily_budget_usd = models.DecimalField(
+        "Бюджет AI в сутки, USD",
+        max_digits=12,
+        decimal_places=2,
+        default=0,
+        help_text="0 — бюджет из настроек сервера.",
+    )
     tokenizer_id = models.CharField(
         "Токенизатор",
         max_length=255,
@@ -640,6 +657,10 @@ class AISettings(models.Model):
         from django.core.exceptions import ValidationError
 
         super().clean()
+        if self.daily_budget_usd is not None and self.daily_budget_usd < 0:
+            raise ValidationError(
+                {"daily_budget_usd": "Бюджет не может быть отрицательным."}
+            )
         if (
             not self.context_window_tokens
             or not self.max_completion_tokens
@@ -1380,3 +1401,175 @@ class ProviderUsage(models.Model):
     cost_usd = models.DecimalField(max_digits=14, decimal_places=8, null=True)
     error_code = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+
+HISTORY_ACTIVE_STATES = (
+    "waiting_connection",
+    "waiting_sync",
+    "collecting",
+    "importing",
+    "analyzing",
+    "paused",
+)
+HISTORY_STATE_CHOICES = (
+    ("waiting_connection", "Ожидает WhatsApp"),
+    ("waiting_sync", "Ожидает синхронизацию истории"),
+    ("collecting", "Собирает историю"),
+    ("importing", "Сохраняет сообщения"),
+    ("analyzing", "Анализирует сообщения"),
+    ("paused", "Приостановлено"),
+    ("completed", "Завершено"),
+    ("completed_with_errors", "Завершено с ошибками анализа"),
+    ("empty", "WAHA не вернул сообщений"),
+    ("failed", "Ошибка"),
+    ("cancelled", "Отменено"),
+)
+
+
+class WhatsAppHistoryJob(models.Model):
+    config = models.OneToOneField(
+        WhatsAppConfig,
+        on_delete=models.PROTECT,
+        related_name="history_job",
+        verbose_name="Группа WhatsApp",
+    )
+    enabled = models.BooleanField("Задание включено", default=True)
+    interval_minutes = models.PositiveIntegerField(
+        "Период запуска, минуты",
+        default=0,
+        help_text="0 — только вручную. Период больше 0 включает автоматические запуски.",
+    )
+    analyze_after_import = models.BooleanField(
+        "Анализировать после импорта", default=True
+    )
+    page_size = models.PositiveIntegerField(
+        "Сообщений в одной странице WAHA",
+        default=250,
+        help_text="Размер одного запроса (1–1000), не ограничение всей истории.",
+    )
+    initial_wait_seconds = models.PositiveIntegerField(
+        "Ожидание начальной синхронизации, секунды", default=180
+    )
+    poll_seconds = models.PositiveIntegerField("Интервал проверки, секунды", default=30)
+    stable_scans_required = models.PositiveIntegerField(
+        "Стабильных проходов истории",
+        default=3,
+        help_text="Количество одинаковых полных проходов перед импортом (2–10).",
+    )
+    next_run_at = models.DateTimeField(
+        "Следующий автоматический запуск", null=True, blank=True
+    )
+    updated_at = models.DateTimeField("Изменено", auto_now=True)
+
+    class Meta:
+        verbose_name = "настройка импорта WhatsApp"
+        verbose_name_plural = "Настройки импорта WhatsApp"
+
+    def __str__(self):
+        return f"Импорт: {self.config.name}"
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+
+        errors = {}
+        for name, low, high in (
+            ("page_size", 1, 1000),
+            ("initial_wait_seconds", 0, 86400),
+            ("poll_seconds", 1, 3600),
+            ("stable_scans_required", 2, 10),
+        ):
+            value = getattr(self, name)
+            if value is None or not low <= value <= high:
+                errors[name] = f"Допустимо от {low} до {high}."
+        if (
+            self.enabled
+            and self.config_id
+            and (
+                not self.config.is_active
+                or not self.config.team_id
+                or not self.config.team.is_active
+            )
+        ):
+            errors["config"] = "Нужна активная группа с активной командой."
+        if errors:
+            raise ValidationError(errors)
+
+
+class WhatsAppHistoryRun(models.Model):
+    job = models.ForeignKey(
+        WhatsAppHistoryJob,
+        on_delete=models.PROTECT,
+        related_name="runs",
+        verbose_name="Задание",
+    )
+    requested_by = models.ForeignKey(
+        User, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Запустил"
+    )
+    state = models.CharField(
+        "Состояние",
+        max_length=32,
+        choices=HISTORY_STATE_CHOICES,
+        default="waiting_connection",
+        db_index=True,
+    )
+    resume_state = models.CharField(max_length=32, blank=True)
+    source_snapshot = models.JSONField("Источник на момент запуска", default=dict)
+    settings_snapshot = models.JSONField("Параметры на момент запуска", default=dict)
+    step = models.PositiveIntegerField(default=0)
+    offset = models.PositiveIntegerField(default=0)
+    scan_number = models.PositiveIntegerField(default=1)
+    stable_scans = models.PositiveIntegerField(default=0)
+    last_digest = models.CharField(max_length=64, blank=True)
+    cutoff_at = models.DateTimeField("История по момент времени", null=True, blank=True)
+    stage_ready_at = models.DateTimeField(null=True, blank=True)
+    last_page_signature = models.CharField(max_length=64, blank=True)
+    fetched_count = models.PositiveIntegerField("Получено из WAHA", default=0)
+    imported_count = models.PositiveIntegerField("Новых сообщений", default=0)
+    existing_count = models.PositiveIntegerField("Уже были в базе", default=0)
+    no_text_count = models.PositiveIntegerField("Без текста", default=0)
+    scheduled_count = models.PositiveIntegerField("Направлено на анализ", default=0)
+    error_code = models.CharField("Код ошибки", max_length=64, blank=True)
+    status_message = models.TextField("Подробности", blank=True)
+    created_at = models.DateTimeField("Создано", auto_now_add=True)
+    updated_at = models.DateTimeField("Последнее обновление", auto_now=True)
+    finished_at = models.DateTimeField("Завершено", null=True, blank=True)
+    messages = models.ManyToManyField(
+        RawMessage, related_name="history_import_runs", blank=True
+    )
+
+    class Meta:
+        verbose_name = "запуск импорта WhatsApp"
+        verbose_name_plural = "Запуски импорта WhatsApp"
+        ordering = ["-id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["job"],
+                condition=models.Q(state__in=HISTORY_ACTIVE_STATES),
+                name="one_active_whatsapp_import",
+            )
+        ]
+
+    def __str__(self):
+        return f"Импорт #{self.pk}: {self.get_state_display()}"
+
+
+class WhatsAppHistoryItem(models.Model):
+    run = models.ForeignKey(
+        WhatsAppHistoryRun, on_delete=models.CASCADE, related_name="items"
+    )
+    message_id = models.CharField(max_length=128)
+    timestamp = models.DateTimeField()
+    payload = models.JSONField(default=dict)
+    seen_scan = models.PositiveIntegerField()
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["run", "message_id"], name="history_run_message_unique"
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=["run", "timestamp", "id"], name="history_item_time_idx"
+            )
+        ]

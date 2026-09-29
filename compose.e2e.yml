@@ -66,6 +66,12 @@ services:
       <<: *test-env
       Q_CLUSTER_NAME: delivery
     command: [python, manage.py, qcluster]
+  history:
+    <<: *backend
+    environment:
+      <<: *test-env
+      Q_CLUSTER_NAME: history
+    command: [python, manage.py, qcluster]
   crm:
     <<: *backend
     environment:

@@ -5,7 +5,7 @@ import json
 import re
 import threading
 import time
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 messages = []
@@ -194,10 +194,18 @@ class Handler(BaseHTTPRequestHandler):
             r"/api/sessions/([^/]+)(?:/(start|restart|stop|logout))?", path
         )
         qr_route = re.fullmatch(r"/api/([^/]+)/auth/qr", path)
-        if not session_route and not qr_route:
+        history_route = re.fullmatch(r"/api/([^/]+)/chats/([^/]+)/messages", path)
+        group_route = re.fullmatch(r"/api/([^/]+)/groups/([^/]+)", path)
+        if not session_route and not qr_route and not history_route and not group_route:
             return False
-        name = unquote((session_route or qr_route).group(1))
-        action = (session_route.group(2) or "status") if session_route else "qr"
+        name = unquote(
+            (session_route or qr_route or history_route or group_route).group(1)
+        )
+        action = (
+            (session_route.group(2) or "status")
+            if session_route
+            else ("messages" if history_route else "group" if group_route else "qr")
+        )
         if self.headers.get("X-Api-Key") != "isolated-test-provider":
             self.reply(403, {"error": "bad_test_key"})
             return True
@@ -227,9 +235,31 @@ class Handler(BaseHTTPRequestHandler):
                 "me": {"id": "fixture@c.us", "pushName": "E2E WhatsApp"}
                 if session["status"] == "WORKING"
                 else None,
+                "config": session.get(
+                    "config", {"noweb": {"store": {"enabled": True, "fullSync": True}}}
+                ),
             }
             if action == "qr":
                 result = {"value": "isolated-whatsapp-qr:" + name}
+            elif action == "group":
+                result = {
+                    "id": unquote(group_route.group(2)),
+                    "subject": session.get("group_title", "E2E history group"),
+                    "participants": [],
+                }
+            elif action == "messages":
+                query = parse_qs(urlsplit(self.path).query)
+                offset = int(query.get("offset", [0])[0])
+                limit = int(query.get("limit", [10])[0])
+                limit = min(limit, fault.get("page_cap", limit))
+                cutoff = int(query.get("filter.timestamp.lte", [9999999999])[0])
+                if fault.get("repeated_page"):
+                    offset = 0
+                values = [
+                    m for m in session.get("messages", []) if m["timestamp"] <= cutoff
+                ]
+                values.sort(key=lambda m: (m["timestamp"], m["id"]))
+                result = values[offset : offset + limit]
         if fault.get("disconnect"):
             self.close_connection = True
             return True

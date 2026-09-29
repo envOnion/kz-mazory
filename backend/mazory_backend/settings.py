@@ -295,7 +295,13 @@ UNFOLD = {
             {
                 "title": "Личные настройки",
                 "separator": True,
-                "items": [{"title": "Безопасность", "icon": "security", "link": "/admin/security/"}],
+                "items": [
+                    {
+                        "title": "Безопасность",
+                        "icon": "security",
+                        "link": "/admin/security/",
+                    }
+                ],
             },
             {
                 "title": "Управление продажами",
@@ -376,6 +382,32 @@ UNFOLD = {
                 ],
             },
             {
+                "title": "Фоновые задания",
+                "separator": True,
+                "items": [
+                    {
+                        "title": "Настройки импорта WhatsApp",
+                        "icon": "settings",
+                        "link": "/admin/api/whatsapphistoryjob/",
+                    },
+                    {
+                        "title": "Запуски и прогресс",
+                        "icon": "play_circle",
+                        "link": "/admin/api/whatsapphistoryrun/",
+                    },
+                    {
+                        "title": "Очередь и ошибки",
+                        "icon": "pending_actions",
+                        "link": "/admin/api/outboxevent/",
+                    },
+                    {
+                        "title": "Настройки анализа AI",
+                        "icon": "smart_toy",
+                        "link": "/admin/api/aisettings/",
+                    },
+                ],
+            },
+            {
                 "title": "Администрирование",
                 "separator": True,
                 "items": [
@@ -422,6 +454,11 @@ Q_CLUSTER = {
     "ALT_CLUSTERS": {
         "delivery": {"workers": 2, "timeout": 30, "retry": 60},
         "ai": {"workers": 2, "timeout": AI_WORKER_TIMEOUT, "retry": AI_TASK_LEASE + 60},
+        "history": {
+            "workers": 1,
+            "timeout": AI_WORKER_TIMEOUT,
+            "retry": AI_TASK_LEASE + 60,
+        },
         "crm": {"workers": 1, "timeout": 90, "retry": 120},
     },
     "recycle": 500,

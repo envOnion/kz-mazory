@@ -40,13 +40,13 @@ class AIService:
 
     @staticmethod
     def _post(url, payload, timeout):
+        cfg = AISettings.get_active()
         day = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
         today = ProviderUsage.objects.filter(created_at__gte=day)
         spent = today.aggregate(total=Sum("cost_usd"))["total"] or Decimal(0)
-        if (
-            today.count() >= settings.AI_DAILY_REQUEST_LIMIT
-            or spent >= settings.AI_DAILY_BUDGET_USD
-        ):
+        if today.count() >= (
+            cfg.daily_request_limit or settings.AI_DAILY_REQUEST_LIMIT
+        ) or spent >= (cfg.daily_budget_usd or settings.AI_DAILY_BUDGET_USD):
             raise ProviderUnavailable("ai_daily_budget_exhausted")
         started = time.monotonic()
         data, succeeded, error = {}, False, ""

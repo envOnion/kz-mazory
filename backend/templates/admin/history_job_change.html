@@ -1,0 +1,10 @@
+{% extends "admin/change_form.html" %}
+{% block form_before %}
+{{ block.super }}
+<div class="flex flex-wrap gap-2 mb-4">
+{% if original and has_change_permission %}
+<form method="post" action="{% url 'admin:api_whatsapphistoryjob_start' original.pk %}">{% csrf_token %}<button type="submit" class="font-medium inline-flex items-center justify-center rounded-default px-3 py-2 border border-transparent bg-primary-600 text-white cursor-pointer" data-testid="history-start">Запустить сейчас</button></form>
+<a class="font-medium inline-flex items-center justify-center rounded-default px-3 py-2 border border-base-200 bg-white text-important dark:border-base-700 dark:bg-transparent cursor-pointer" href="{% url 'admin:api_whatsapphistoryrun_changelist' %}?job__id__exact={{ original.pk }}">Все запуски</a>
+{% endif %}
+</div>
+{% endblock %}
