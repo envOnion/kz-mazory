@@ -1236,7 +1236,10 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
 
         facts = obj.ai_extracted_facts or {}
         facts_json = json.dumps(facts, indent=2, ensure_ascii=False)
-        if obj.status != "success" or "facts" in facts:
+        if obj.status == "error" or "facts" in facts or (
+            obj.status == "warning"
+            and obj.context_metadata.get("source") == "chat_history"
+        ):
             return render_to_string(
                 "admin/trace_result.html",
                 {

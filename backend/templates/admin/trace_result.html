@@ -12,7 +12,7 @@
     {% endif %}
     <details><summary>Диагностика ответа AI</summary><pre class="mazory-trace-content p-3 overflow-auto">{{ diagnostics }}</pre></details>
   {% elif trace.status == 'warning' %}
-    <strong>Обработка ещё не завершена</strong>
+    <strong>Результат требует внимания</strong>
     <p>{{ trace.result_summary }}</p>
   {% else %}
     <strong>Результат анализа целевого сообщения</strong>
