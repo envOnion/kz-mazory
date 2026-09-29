@@ -33,13 +33,32 @@ class WhatsAppHistoryJobAdmin(IntegrationAdmin):
         "latest_run",
         "next_run_at",
     )
-    list_filter = ("enabled", "analyze_after_import")
+    list_filter = ("enabled", "only_new", "analyze_after_import")
     search_fields = ("config__name", "config__group_jid")
-    readonly_fields = ("latest_run", "next_run_at", "updated_at")
+    readonly_fields = (
+        "latest_run",
+        "next_run_at",
+        "updated_at",
+        "new_messages_started_at",
+        "new_messages_since",
+        "last_checked_at",
+    )
     fieldsets = (
         (
             "Источник и расписание",
-            {"fields": ("config", "enabled", "interval_minutes", "next_run_at")},
+            {
+                "fields": (
+                    "config",
+                    "enabled",
+                    "only_new",
+                    "new_message_poll_seconds",
+                    "interval_minutes",
+                    "next_run_at",
+                    "new_messages_started_at",
+                    "new_messages_since",
+                    "last_checked_at",
+                )
+            },
         ),
         (
             "Сбор истории",
@@ -64,6 +83,8 @@ class WhatsAppHistoryJobAdmin(IntegrationAdmin):
 
     @admin.display(description="Периодичность")
     def frequency(self, obj):
+        if obj.only_new:
+            return f"Только новые · каждые {obj.new_message_poll_seconds} сек."
         return (
             f"Каждые {obj.interval_minutes} мин."
             if obj.interval_minutes
@@ -116,9 +137,17 @@ class WhatsAppHistoryJobAdmin(IntegrationAdmin):
         return redirect("admin:api_whatsapphistoryrun_change", run.id)
 
     def save_model(self, request, obj, form, change):
-        if "interval_minutes" in form.changed_data or "enabled" in form.changed_data:
+        if {
+            "interval_minutes",
+            "enabled",
+            "only_new",
+            "new_message_poll_seconds",
+        } & set(form.changed_data):
             obj.next_run_at = None
         super().save_model(request, obj, form, change)
+        from .new_messages import sync_monitor_settings
+
+        sync_monitor_settings(obj, form.changed_data, request.user)
 
 
 @admin.register(WhatsAppHistoryRun)
@@ -155,6 +184,8 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
         "scan_number",
         "stable_scans",
         "cutoff_at",
+        "last_check",
+        "next_check",
         "requested_by",
         "created_at",
         "updated_at",
@@ -162,6 +193,14 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
     )
     readonly_fields = fields
     list_per_page = 25
+
+    @admin.display(description="Последняя успешная проверка")
+    def last_check(self, obj):
+        return obj.job.last_checked_at or "—"
+
+    @admin.display(description="Следующая проверка")
+    def next_check(self, obj):
+        return obj.job.next_run_at or "—"
 
     def has_add_permission(self, request):
         return False
@@ -273,6 +312,15 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
             source_snapshot=run.source_snapshot,
             analysis_progress=f"Обработано {counts['processed']} / {counts['total']}; ошибок: {counts['errors']}",
         )
+        for name, value in (
+            ("last_check", run.job.last_checked_at),
+            ("next_check", run.job.next_run_at),
+        ):
+            fields[name] = (
+                date_format(timezone.localtime(value), "DATETIME_FORMAT")
+                if value
+                else "—"
+            )
         for name in ("cutoff_at", "updated_at", "finished_at"):
             value = getattr(run, name)
             fields[name] = (

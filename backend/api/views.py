@@ -237,7 +237,11 @@ def verify_waha(request):
 class WebhookPayload(serializers.Serializer):
     id = serializers.CharField(max_length=128)
     body = serializers.CharField(
-        max_length=32000, required=False, allow_blank=True, default=""
+        max_length=32000,
+        required=False,
+        allow_blank=True,
+        default="",
+        trim_whitespace=False,
     )
     timestamp = serializers.IntegerField(min_value=0, required=False)
     fromMe = serializers.BooleanField(default=False)
@@ -327,6 +331,26 @@ class MessageIngestView(APIView):
         revision = hashlib.sha256(payload["body"].encode()).hexdigest()
         sender = (payload["participant"] or "").split("@")[0]
         with transaction.atomic():
+            from .models import (
+                WhatsAppHistoryJob,
+                WhatsAppHistoryRun,
+                HISTORY_ACTIVE_STATES,
+            )
+
+            job = (
+                WhatsAppHistoryJob.objects.select_for_update()
+                .filter(config_id=cfg.pk)
+                .first()
+            )
+            cfg = WhatsAppConfig.objects.select_for_update().get(pk=cfg.pk)
+            if (
+                not cfg.is_active
+                or not cfg.team_id
+                or not cfg.team.is_active
+                or cfg.session_name != data["session"]
+                or cfg.group_jid != data["chat_id"]
+            ):
+                raise PermissionDenied("Источник изменился или выключен.")
             raw, created = RawMessage.objects.get_or_create(
                 source="waha",
                 session_name=data["session"],
@@ -334,6 +358,7 @@ class MessageIngestView(APIView):
                 source_revision=revision,
                 defaults={
                     "config": cfg,
+                    "team_id": cfg.team_id,
                     "chat_id": data["chat_id"],
                     "sender_phone": sender,
                     "sender_name": payload["notifyName"],
@@ -349,14 +374,38 @@ class MessageIngestView(APIView):
             )
             if raw.config_id != cfg.id:
                 raise Conflict("Идентификатор источника уже связан с другим чатом.")
-            if created:
+            analyze = not job or not job.only_new or job.analyze_after_import
+            if created and analyze:
                 OutboxEvent.objects.create(
                     event_type="extract_message",
                     deduplication_key=f"extract:{raw.id}",
                     payload={"raw_id": raw.id},
                 )
+            if created and job and job.only_new:
+                run = (
+                    WhatsAppHistoryRun.objects.select_for_update()
+                    .filter(job=job, state__in=HISTORY_ACTIVE_STATES)
+                    .first()
+                )
+                if run:
+                    run.messages.add(raw)
+                    run.imported_count += 1
+                    run.fetched_count += 1
+                    run.scheduled_count += int(analyze)
+                    run.save(
+                        update_fields=[
+                            "imported_count",
+                            "fetched_count",
+                            "scheduled_count",
+                        ]
+                    )
         return Response(
-            {"status": "queued" if created else "duplicate", "source_id": raw.id},
+            {
+                "status": ("queued" if analyze else "saved")
+                if created
+                else "duplicate",
+                "source_id": raw.id,
+            },
             status=202 if created else 200,
         )
 

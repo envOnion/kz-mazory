@@ -577,6 +577,32 @@ class WhatsAppConfig(models.Model):
     def __str__(self):
         return f"{self.name} ({'Активен' if self.is_active else 'Выключен'})"
 
+    def clean(self):
+        from django.core.exceptions import ValidationError
+
+        if self.pk:
+            previous = type(self).objects.filter(pk=self.pk).first()
+            if previous and any(
+                getattr(previous, key) != getattr(self, key)
+                for key in ("team_id", "group_jid", "session_name")
+            ):
+                from django.db import connection
+
+                if connection.in_atomic_block:
+                    list(
+                        WhatsAppHistoryJob.objects.select_for_update().filter(
+                            config_id=self.pk
+                        )
+                    )
+                if WhatsAppHistoryRun.objects.filter(
+                    job__config_id=self.pk,
+                    job__only_new=True,
+                    state__in=HISTORY_ACTIVE_STATES,
+                ).exists():
+                    raise ValidationError(
+                        "Сначала отмените мониторинг новых сообщений, затем измените источник."
+                    )
+
     @classmethod
     def get_active(cls):
         return cls.objects.filter(is_active=True).first() or cls(is_active=False)
@@ -1406,6 +1432,7 @@ class ProviderUsage(models.Model):
 HISTORY_ACTIVE_STATES = (
     "waiting_connection",
     "waiting_sync",
+    "watching",
     "collecting",
     "importing",
     "analyzing",
@@ -1414,6 +1441,7 @@ HISTORY_ACTIVE_STATES = (
 HISTORY_STATE_CHOICES = (
     ("waiting_connection", "Ожидает WhatsApp"),
     ("waiting_sync", "Ожидает синхронизацию истории"),
+    ("watching", "Ожидаем новые сообщения"),
     ("collecting", "Собирает историю"),
     ("importing", "Сохраняет сообщения"),
     ("analyzing", "Анализирует сообщения"),
@@ -1434,10 +1462,30 @@ class WhatsAppHistoryJob(models.Model):
         verbose_name="Группа WhatsApp",
     )
     enabled = models.BooleanField("Задание включено", default=True)
+    only_new = models.BooleanField(
+        "Только новые",
+        default=False,
+        help_text="Постоянно получать новые сообщения с сохранённой точки. Старую историю можно загрузить полным импортом.",
+    )
+    new_message_poll_seconds = models.PositiveIntegerField(
+        "Интервал проверки новых сообщений, секунды",
+        default=5,
+        help_text="5–3600 секунд. Работает постоянно, пока задание включено; период в минутах не используется.",
+    )
+    new_messages_since = models.DateTimeField(
+        "Проверено по", null=True, blank=True, editable=False
+    )
+    new_messages_started_at = models.DateTimeField(
+        "Начальная точка новых сообщений", null=True, blank=True, editable=False
+    )
+    checkpoint_source = models.JSONField(default=dict, blank=True, editable=False)
+    last_checked_at = models.DateTimeField(
+        "Последняя успешная проверка", null=True, blank=True, editable=False
+    )
     interval_minutes = models.PositiveIntegerField(
         "Период запуска, минуты",
         default=0,
-        help_text="0 — только вручную. Период больше 0 включает автоматические запуски.",
+        help_text="Для полного импорта: 0 — только вручную, больше 0 — автоматические запуски. В режиме «Только новые» используется интервал в секундах.",
     )
     analyze_after_import = models.BooleanField(
         "Анализировать после импорта", default=True
@@ -1473,6 +1521,7 @@ class WhatsAppHistoryJob(models.Model):
 
         errors = {}
         for name, low, high in (
+            ("new_message_poll_seconds", 5, 3600),
             ("page_size", 1, 1000),
             ("initial_wait_seconds", 0, 86400),
             ("poll_seconds", 1, 3600),
@@ -1491,6 +1540,30 @@ class WhatsAppHistoryJob(models.Model):
             )
         ):
             errors["config"] = "Нужна активная группа с активной командой."
+        if self.pk:
+            from django.db import connection
+
+            query = type(self).objects.filter(pk=self.pk)
+            previous = (
+                query.select_for_update() if connection.in_atomic_block else query
+            ).first()
+            if previous:
+                for field in (
+                    "new_messages_since",
+                    "new_messages_started_at",
+                    "checkpoint_source",
+                    "last_checked_at",
+                    "next_run_at",
+                ):
+                    setattr(self, field, getattr(previous, field))
+            if previous and (
+                previous.only_new != self.only_new
+                or previous.config_id != self.config_id
+            ):
+                if self.runs.filter(state__in=HISTORY_ACTIVE_STATES).exists():
+                    errors["only_new"] = (
+                        "Сначала отмените активный запуск, затем измените режим или источник."
+                    )
         if errors:
             raise ValidationError(errors)
 
@@ -1515,6 +1588,7 @@ class WhatsAppHistoryRun(models.Model):
     resume_state = models.CharField(max_length=32, blank=True)
     source_snapshot = models.JSONField("Источник на момент запуска", default=dict)
     settings_snapshot = models.JSONField("Параметры на момент запуска", default=dict)
+    incremental_state = models.JSONField(default=dict, blank=True)
     step = models.PositiveIntegerField(default=0)
     offset = models.PositiveIntegerField(default=0)
     scan_number = models.PositiveIntegerField(default=1)

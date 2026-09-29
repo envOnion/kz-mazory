@@ -374,11 +374,25 @@ def extract_message(payload):
 def import_history_step(payload):
     from .history_jobs import ERROR_LABELS, process_step
     from .models import WhatsAppHistoryRun
+    from .new_messages import monitor_error
 
     try:
         process_step(payload, waha_request)
-    except requests.HTTPError as exc:
-        code = f"history_waha_http_{exc.response.status_code}"
+    except (requests.RequestException, ProviderUnavailable) as exc:
+        if isinstance(exc, requests.HTTPError):
+            code = f"history_waha_http_{exc.response.status_code}"
+        elif isinstance(exc, requests.Timeout):
+            code = "provider_timeout"
+        else:
+            code = (
+                str(exc)[:64]
+                if isinstance(exc, ProviderUnavailable)
+                else type(exc).__name__
+            )
+        if monitor_error(payload, code):
+            return
+        if not isinstance(exc, requests.HTTPError):
+            raise
         WhatsAppHistoryRun.objects.filter(
             pk=payload["history_run_id"], step=payload["step"]
         ).update(
