@@ -25,6 +25,10 @@
   .waha-state { padding: 1rem; border: 1px solid #94a3b8; border-radius: .75rem; margin: 1rem 0; }
   .waha-error { border-color: #ef4444; }
   .waha-qr { width: 256px; max-width: 100%; height: auto; margin: 1rem 0; }
+  .waha-groups-scroll { overflow-x: auto; max-height: 32rem; }
+  .waha-groups-table { width: 100%; text-align: left; }
+  .waha-groups-table th, .waha-groups-table td { padding: .75rem; border-bottom: 1px solid #94a3b8; }
+  .waha-group-id { white-space: nowrap; user-select: all; }
 </style>
 {% endblock %}
 {% block content %}
@@ -73,6 +77,9 @@
     <div class="waha-card mazory-trace-card">
       <h3>Целевая группа WhatsApp</h3>
       <p><strong>{{ config.name }}</strong></p><p>{{ config.group_jid|default:"Группа не указана" }}</p>
+      {% if selected_group %}<p>Название в WhatsApp: <strong>{{ selected_group.name }}</strong></p>
+      {% if selected_group.name != config.name %}<p class="mazory-trace-meta">Локальное название отличается. Источник сообщений определяется по ID группы.</p>{% endif %}
+      {% elif groups_loaded and config.group_jid %}<p role="status">Настроенный ID не найден в последнем списке групп этого аккаунта.</p>{% endif %}
       <a href="{% url 'admin:api_whatsappconfig_change' config.id %}">Изменить настройки группы →</a>
     </div>
     <div class="waha-card mazory-trace-card">
@@ -97,6 +104,29 @@
       <p>Обновите статус для проверки подключения. При ошибке проверьте настройки и доступность WAHA.</p>
     {% endif %}
   </div>
+  <section class="waha-card mazory-trace-card" data-testid="waha-groups">
+    <h3>Группы WhatsApp</h3>
+    <p>Группы подключённого аккаунта и их ID. У разных групп могут быть одинаковые названия: проверяйте ID перед настройкой импорта.</p>
+    <form method="post" action="{% url 'admin:waha_action' 'groups' %}" data-waha-action="groups">
+      {% csrf_token %}<input type="hidden" name="config_id" value="{{ config.id }}">
+      <button type="submit" class="waha-button" {% if operation.busy %}disabled{% endif %}>Обновить группы</button>
+    </form>
+    {% if groups_loaded %}
+      <p class="mazory-trace-meta" data-testid="waha-groups-updated">Последний сохранённый список: {{ groups_updated_at|date:"d.m.Y H:i:s" }} · Групп: {{ groups|length }}</p>
+      {% if groups %}
+      <div class="waha-groups-scroll"><table class="waha-groups-table">
+        <thead><tr><th scope="col">Название в WhatsApp</th><th scope="col">ID группы (JID)</th><th scope="col">Источник</th><th scope="col">Действие</th></tr></thead>
+        <tbody>{% for group in groups %}<tr data-group-id="{{ group.id }}">
+          <td>{{ group.name }}</td><td class="waha-group-id"><code>{{ group.id }}</code></td>
+          <td>{% if group.id == config.group_jid %}Выбрана в настройках{% endif %}</td>
+          <td><button type="button" class="waha-button" data-copy-group-id="{{ group.id }}" aria-label="Копировать ID {{ group.id }}">Копировать ID</button></td>
+        </tr>{% endfor %}</tbody>
+      </table></div>
+      {% else %}<p data-testid="waha-groups-empty">WAHA вернула пустой список групп для этого аккаунта.</p>{% endif %}
+    {% elif config.status == 'WORKING' %}<p>Список ещё не загружен. Нажмите «Обновить группы».</p>
+    {% else %}<p>Подключите WhatsApp, затем нажмите «Обновить группы».</p>{% endif %}
+    <p id="waha-copy-result" role="status" aria-live="polite"></p>
+  </section>
   {% else %}
     <div class="waha-state"><p>Нет выбранной активной конфигурации WhatsApp.</p><a href="{% url 'admin:api_whatsappconfig_changelist' %}">Открыть настройки WhatsApp →</a></div>
   {% endif %}

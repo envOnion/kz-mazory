@@ -14,6 +14,7 @@ ACTION_LABELS = {
     "logout": "Выйти (Logout)",
     "status": "Обновить статус",
     "qr": "Обновить QR-код",
+    "groups": "Обновить группы",
 }
 ACTIVE_STATES = ("pending", "enqueued", "processing")
 

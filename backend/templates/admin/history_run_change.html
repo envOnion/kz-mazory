@@ -22,6 +22,12 @@
 <p data-history-counts>Получено: {{ original.fetched_count }} · Новых: {{ original.imported_count }} · Уже были: {{ original.existing_count }}</p>
 <p data-history-analysis></p>
 <p data-history-error>{{ original.error_code }}</p>
+<div data-history-empty-help {% if original.state != 'empty' %}hidden{% endif %}>
+  <p>WAHA не отдала доступных сообщений этой группы на момент чтения. Это не подтверждает, что история на телефоне пуста: импорт читает только историю, которую WhatsApp передал в хранилище WAHA.</p>
+  <p>Группа по данным WAHA: <strong data-history-group-title>{{ original.source_snapshot.group_title|default:"Название не получено" }}</strong> · ID: <code>{{ original.source_snapshot.chat_id }}</code> · Сессия: {{ original.source_snapshot.session_name }}.</p>
+  <p>Сверьте ID в списке групп: одинаковое название может быть у разных групп. Если ID верен и сообщения на телефоне есть, проверьте синхронизацию связанного устройства, затем запустите импорт снова. Несколько стабильных проходов — проверка результата чтения, а не ограничение числа сообщений.</p>
+  <a href="{% url 'admin:waha_dashboard' %}?config_id={{ original.source_snapshot.config_id }}">Проверить группы и ID в WAHA →</a>
+</div>
 </section>
 {% endif %}
 {% endblock %}

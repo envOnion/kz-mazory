@@ -9,6 +9,7 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import JsonResponse
 from django.shortcuts import render, redirect
 from django.urls import reverse
+from django.utils.dateparse import parse_datetime
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET, require_POST
 
@@ -36,6 +37,9 @@ ERROR_LABELS = {
     "worker_interrupted": "Воркер был прерван. Обновите статус перед повторной командой.",
     "waha_config_changed": "Конфигурация изменена. Обновите страницу.",
     "ConnectionError": "Не удалось подключиться к WAHA. Проверьте доступность сервера.",
+    "waha_groups_not_connected": "Для получения групп подключите WhatsApp и обновите статус.",
+    "waha_invalid_groups": "WAHA вернула некорректный список групп. Предыдущий снимок сохранён.",
+    "waha_repeated_groups": "WAHA повторяет страницу групп. Неполный список не сохранён; повторите обновление.",
 }
 
 
@@ -82,6 +86,18 @@ def control_state(config):
 
 def dashboard(request, config, error="", status_code=200):
     state = control_state(config)
+    group_snapshot = None
+    if config and config.status == "WORKING":
+        saved = config.snapshot.get("waha_groups") or {}
+        account_id = (config.snapshot.get("waha_me") or {}).get("id")
+        if (
+            saved.get("session_name") == config.session_name
+            and account_id
+            and saved.get("account_id") == account_id
+        ):
+            group_snapshot = saved
+    groups = group_snapshot["items"] if group_snapshot else []
+    selected_group = next((g for g in groups if g["id"] == config.group_jid), None)
     qr_image = None
     if (
         config
@@ -104,10 +120,18 @@ def dashboard(request, config, error="", status_code=200):
             "title": "WAHA Центр управления WhatsApp",
             "config": config,
             "configs": WhatsAppConfig.objects.filter(is_active=True).order_by("id"),
-            "actions": ACTION_LABELS.items(),
+            "actions": [
+                (key, label) for key, label in ACTION_LABELS.items() if key != "groups"
+            ],
             "operation": state,
             "error": error,
             "qr_image": qr_image,
+            "groups": groups,
+            "groups_loaded": group_snapshot is not None,
+            "groups_updated_at": parse_datetime(group_snapshot["updated_at"])
+            if group_snapshot
+            else None,
+            "selected_group": selected_group,
             "me": config.snapshot.get("waha_me")
             if config and config.status == "WORKING"
             else None,

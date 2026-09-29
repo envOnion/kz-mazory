@@ -1,6 +1,17 @@
 (() => {
   const dashboard = document.getElementById('waha-dashboard');
   if (!dashboard) return;
+  for (const button of dashboard.querySelectorAll('[data-copy-group-id]')) {
+    button.addEventListener('click', async () => {
+      const status = document.getElementById('waha-copy-result');
+      try {
+        await navigator.clipboard.writeText(button.dataset.copyGroupId);
+        status.textContent = `ID скопирован: ${button.dataset.copyGroupId}`;
+      } catch {
+        status.textContent = 'Не удалось записать в буфер. Выделите и скопируйте ID из таблицы.';
+      }
+    });
+  }
   for (const form of dashboard.querySelectorAll('[data-waha-action]')) {
     form.addEventListener('submit', (event) => {
       if (form.dataset.wahaAction === 'logout' && !window.confirm('Выйти из WhatsApp? Авторизация будет сброшена; для подключения потребуется новый QR-код.')) {
