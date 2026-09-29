@@ -5,8 +5,8 @@ import json
 import re
 import threading
 import time
-from urllib.parse import unquote, urlsplit, parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, unquote, urlsplit
 
 messages = []
 waha_sessions = {}
@@ -132,6 +132,21 @@ class Handler(BaseHTTPRequestHandler):
                 ai_requests["chats"].append(value)
                 ai_requests["payloads"].append(data)
             content = value.get("content", value.get("question", ""))
+            if content.startswith("E2E extraction:upstream_overloaded"):
+                with lock:
+                    attempts = sum(
+                        item.get("content") == content for item in ai_requests["chats"]
+                    )
+                if attempts == 1:
+                    return self.reply(
+                        200,
+                        {
+                            "error": {
+                                "code": 503,
+                                "message": "Synthetic upstream overload",
+                            }
+                        },
+                    )
             if "SIMULATE_CONTEXT_OVERFLOW" in content:
                 return self.reply(400, {"error": "Maximum context length exceeded"})
             if context_options.get("delay_seconds"):
@@ -168,6 +183,30 @@ class Handler(BaseHTTPRequestHandler):
                         "uncertainties": [],
                     }
                 ]
+            finish_reason = "stop"
+            if content.startswith("E2E extraction:"):
+                facts = [
+                    {
+                        "fact_type": "project",
+                        "object_name": "<img src=x onerror=window.__xss=1>",
+                        "evidence": content,
+                        "contract_amount": None,
+                        "stage": None,
+                        "company_name": None,
+                        "confidence": None,
+                    }
+                ]
+                if content.startswith("E2E extraction:wrong_evidence"):
+                    facts[0]["evidence"] = value["context"][-1]["content"]
+                elif content.startswith("E2E extraction:missing_amount"):
+                    facts[0].update(fact_type="payment", amount=None)
+                elif content.startswith("E2E extraction:truncated"):
+                    finish_reason = "length"
+            response_content = json.dumps({"facts": facts}, ensure_ascii=False)
+            if content.startswith("E2E extraction:fenced"):
+                response_content = "```json\n" + response_content + "\n```"
+            elif content.startswith("E2E extraction:invalid_json"):
+                response_content = "[]"
             from api.context_tokens import native_counter
 
             tokens = native_counter().count_payload(data)
@@ -177,11 +216,8 @@ class Handler(BaseHTTPRequestHandler):
                     "usage": {"prompt_tokens": tokens, "completion_tokens": 32},
                     "choices": [
                         {
-                            "message": {
-                                "content": json.dumps(
-                                    {"facts": facts}, ensure_ascii=False
-                                )
-                            }
+                            "finish_reason": finish_reason,
+                            "message": {"content": response_content},
                         }
                     ],
                 },

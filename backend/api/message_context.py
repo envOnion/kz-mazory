@@ -194,6 +194,7 @@ def build_context(raw, cfg, known_projects, snapshot_id):
     included = len(context)
     metadata = {
         "schema_version": 1,
+        "input_serialization": "target-last-v1",
         "policy_version": POLICY,
         "source": "chat_history",
         "model": cfg.chat_model_name,

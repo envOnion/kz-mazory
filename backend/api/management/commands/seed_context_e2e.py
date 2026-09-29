@@ -32,6 +32,12 @@ class Command(BaseCommand):
                 "provider_overflow",
                 "payment",
                 "unknown_time",
+                "fenced",
+                "wrong_evidence",
+                "truncated",
+                "missing_amount",
+                "invalid_json",
+                "upstream_overloaded",
             ],
         )
         parser.add_argument("--count", type=int, default=50)
@@ -133,6 +139,15 @@ class Command(BaseCommand):
             target_content = f"{token} SIMULATE_CONTEXT_OVERFLOW"
         if options["scenario"] == "payment":
             target_content = f"E2E payment: amount=123456.00 date={timezone.now().date().isoformat()} {token}"
+        if options["scenario"] in {
+            "fenced",
+            "wrong_evidence",
+            "truncated",
+            "missing_amount",
+            "invalid_json",
+            "upstream_overloaded",
+        }:
+            target_content = f"E2E extraction:{options['scenario']} {token} <img src=x onerror=window.__xss=1>"
         raw = RawMessage.objects.create(
             config=cfg,
             team=team,

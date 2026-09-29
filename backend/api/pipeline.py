@@ -10,7 +10,7 @@ from django.db import transaction
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from .ai_service import AIService, usage_event_id
-from .context_tokens import canonical_json, payload_hash
+from .context_tokens import canonical_json, extraction_input, payload_hash
 from .deduplication import normalize_deal_name
 from .facts import FactSchema, fact_identity, json_value
 from .message_context import build_context, source_scope
@@ -28,16 +28,38 @@ from .providers import ProviderUnavailable
 
 
 def _facts(result, raw):
-    schema = FactSchema(data=result["facts"], many=True)
+    # A missing optional value and an explicit null both mean unknown. Required
+    # values, enums and evidence still go through the full serializer validation.
+    fields = FactSchema().fields
+    normalized = [
+        {
+            key: value
+            for key, value in item.items()
+            if not (
+                value is None
+                and key in fields
+                and not fields[key].required
+                and not fields[key].allow_null
+            )
+        }
+        if isinstance(item, dict)
+        else item
+        for item in result["facts"]
+    ]
+    schema = FactSchema(data=normalized, many=True)
     schema.is_valid(raise_exception=True)
     for fact in schema.validated_data:
         if fact["fact_type"] == "payment" and fact["payment_kind"] == "increment":
             if re.search(
-                r"не\s+оплат|оплатим|төленбеді|төлейміз", fact["evidence"], re.IGNORECASE
+                r"не\s+оплат|оплатим|төленбеді|төлейміз",
+                fact["evidence"],
+                re.IGNORECASE,
             ):
                 raise ProviderUnavailable("payment_evidence_contradiction")
             if re.search(
-                r"всего\s+оплачено|итого\s+оплачено|накопительн", fact["evidence"], re.IGNORECASE
+                r"всего\s+оплачено|итого\s+оплачено|накопительн",
+                fact["evidence"],
+                re.IGNORECASE,
             ):
                 fact["payment_kind"] = "cumulative"
                 fact["uncertainties"].append(
@@ -57,7 +79,12 @@ def _restore_request(trace):
     payload = copy.deepcopy(trace.context_metadata["request_envelope"])
     fixed = json.loads(payload["messages"][1]["content"])
     fixed["context"] = trace.earlier_messages_context
-    payload["messages"][1]["content"] = canonical_json(fixed)
+    serialize = (
+        extraction_input
+        if trace.context_metadata.get("input_serialization") == "target-last-v1"
+        else canonical_json
+    )
+    payload["messages"][1]["content"] = serialize(fixed)
     if payload_hash(payload) != trace.context_metadata["payload_sha256"]:
         raise ProviderUnavailable("context_snapshot_mismatch")
     return payload
@@ -129,10 +156,11 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
         trace.error_code = ""
         trace.result_summary = "Запрос с сохранённой историей отправлен в AI."
         trace.save()
-        result, usage = AIService.analyze_payload(
+        result, usage, diagnostics = AIService.analyze_payload(
             payload, trace.context_metadata["provider_url"]
         )
         trace.context_metadata["request_state"] = "responded"
+        trace.context_metadata["response_diagnostics"] = diagnostics
         value = usage.get("prompt_tokens") if isinstance(usage, dict) else None
         trace.context_metadata["input_tokens_actual"] = (
             value if type(value) is int and value >= 0 else None
@@ -275,10 +303,17 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
         )
         if usage:
             trace.context_metadata["input_tokens_actual"] = usage.input_tokens
+        diagnostics = trace.context_metadata.setdefault("response_diagnostics", {})
+        if isinstance(exc, ProviderUnavailable):
+            diagnostics.update(exc.diagnostics)
+        elif isinstance(exc, ValidationError):
+            diagnostics["field_errors"] = json_value(exc.get_full_details())
         trace.result_summary = (
-            "Обработка не завершена. Предыдущие результаты сохранены."
+            "Обработка не завершена. Новые факты не сохранены. "
+            "Предыдущие результаты сохранены."
         )
         trace.save()
-        if not explicit:
-            RawMessage.objects.filter(pk=raw_id).update(processing_state="failed")
+        RawMessage.objects.filter(pk=raw_id, processed=False).update(
+            processing_state="failed"
+        )
         raise ProviderUnavailable(trace.error_code) from None

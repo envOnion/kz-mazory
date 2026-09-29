@@ -22,6 +22,13 @@ ERRORS = {
     "provider_output_truncated": "Ответ модели не поместился в резерв генерации. Факты не сохранены.",
     "reanalysis_access_revoked": "Доступ к повторному анализу был отозван.",
     "provider_request_failed": "Провайдер AI временно недоступен.",
+    "provider_overloaded": "Провайдер AI перегружен. Запрос не обработан.",
+    "provider_rate_limited": "Провайдер AI ограничил частоту запросов.",
+    "provider_response_error": "Провайдер AI сообщил об ошибке вместо результата анализа.",
+    "invalid_extraction_schema": "Модель вернула некорректный JSON или отсутствует массив facts.",
+    "invalid_schema": "Поля фактов не соответствуют формату: проверьте диагностику ответа.",
+    "evidence_not_in_source": "Модель привела цитату, которой нет в целевом сообщении.",
+    "payment_evidence_contradiction": "Цитата не подтверждает совершённую оплату.",
 }
 
 
