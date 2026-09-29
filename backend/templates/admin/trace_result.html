@@ -1,0 +1,30 @@
+<div class="mazory-trace-card p-5 rounded-xl border space-y-3" data-testid="trace-result">
+  {% if trace.status == 'error' %}
+    <div role="alert">
+      <strong>Анализ не завершён</strong>
+      <p>{{ error_label }}</p>
+      <p class="mazory-trace-meta">Код: <code>{{ trace.error_code }}</code></p>
+    </div>
+    <p>В этой попытке новые факты не сохранены. Предыдущие результаты сохранены.</p>
+    {% if trace.context_metadata.completion_reserve_tokens %}
+      <p>Резерв ответа: {{ trace.context_metadata.completion_reserve_tokens }} токенов.
+      Вход: {{ trace.context_metadata.input_tokens_actual|default:trace.context_metadata.input_tokens_preflight }} токенов.</p>
+    {% endif %}
+    <details><summary>Диагностика ответа AI</summary><pre class="mazory-trace-content p-3 overflow-auto">{{ diagnostics }}</pre></details>
+  {% elif trace.status == 'warning' %}
+    <strong>Обработка ещё не завершена</strong>
+    <p>{{ trace.result_summary }}</p>
+  {% else %}
+    <strong>Результат анализа целевого сообщения</strong>
+    <p>{{ trace.result_summary }}</p>
+    <p class="mazory-trace-meta">Предложения AI требуют проверки человеком. Анализ сам по себе не подтверждает сделки или оплаты.</p>
+    <ul>
+      {% for candidate in candidates %}
+        <li><a href="{% url 'admin:api_factcandidate_change' candidate.pk %}">Предложение №{{ candidate.pk }} — {{ candidate.get_fact_type_display }}</a> · {{ candidate.get_status_display }}</li>
+      {% empty %}
+        <li>Новых предложений для проверки нет.</li>
+      {% endfor %}
+    </ul>
+    <details><summary>Проверенные по формату факты AI (JSON)</summary><pre class="mazory-trace-content p-3 overflow-auto">{{ facts_json }}</pre></details>
+  {% endif %}
+</div>

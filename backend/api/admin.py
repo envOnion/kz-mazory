@@ -995,6 +995,12 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
 
     @admin.display(description="Результат")
     def trace_result(self, obj):
+        if obj.status == "error":
+            return format_html(
+                '<div class="mazory-list-stack">{}<span class="mazory-list-meta">{}</span></div>',
+                self.status_badge(obj),
+                ERRORS.get(obj.error_code, obj.error_code or obj.result_summary),
+            )
         return format_html(
             '<div class="mazory-list-stack">{}{}</div>',
             self.pipeline_action_badge(obj),
@@ -1226,19 +1232,36 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
 
     def stage_4_final_record_card(self, obj):
         """Рендеринг Этапа 4: «Итоговая запись»"""
+        from django.template.loader import render_to_string
+
         facts = obj.ai_extracted_facts or {}
         facts_json = json.dumps(facts, indent=2, ensure_ascii=False)
+        if obj.status != "success" or "facts" in facts:
+            return render_to_string(
+                "admin/trace_result.html",
+                {
+                    "trace": obj,
+                    "error_label": ERRORS.get(obj.error_code, obj.error_code),
+                    "diagnostics": json.dumps(
+                        obj.context_metadata.get("response_diagnostics", {}),
+                        ensure_ascii=False, indent=2,
+                    ),
+                    "candidates": obj.candidates.all(),
+                    "facts_json": facts_json,
+                },
+            )
         conf_pct = f"{obj.ai_confidence * 100:.0f}%"
-        project_html = (
-            '<em class="mazory-trace-meta">Сделка не создавалась/не привязана</em>'
+        project_html = format_html(
+            '<em class="mazory-trace-meta">{}</em>',
+            "Сделка не создавалась/не привязана",
         )
         if obj.project:
             p = obj.project
             p_url = f"/admin/api/project/{p.id}/change/"
-            verified_badge = (
-                '<span class="text-emerald-500 font-bold">✓ Проверено</span>'
-                if p.is_verified
-                else '<span class="text-amber-500 font-bold">⏳ Ожидает проверки</span>'
+            verified_badge = format_html(
+                '<span class="{} font-bold">{}</span>',
+                "text-emerald-500" if p.is_verified else "text-amber-500",
+                "✓ Проверено" if p.is_verified else "⏳ Ожидает проверки",
             )
             project_html = format_html(
                 '\n            <div class="p-3 rounded-lg mazory-trace-card border border-emerald-500/30 space-y-2">\n                <div class="flex items-center justify-between">\n                    <a href="{}" class="text-sm font-bold text-indigo-600 hover:underline">\n                        Проект #{}: {} ↗\n                    </a>\n                    {}\n                </div>\n                <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">\n                    <div><span class="mazory-trace-meta">Сумма:</span> <b class="mazory-trace-text">{} ₸</b></div>\n                    <div><span class="mazory-trace-meta">Маржа:</span> <b class="mazory-trace-text">{}%</b></div>\n                    <div><span class="mazory-trace-meta">Статус:</span> <b class="mazory-trace-text">{}</b></div>\n                    <div><span class="mazory-trace-meta">Синхр. Bitrix:</span> <b class="mazory-trace-text">{}</b></div>\n                </div>\n            </div>\n            ',

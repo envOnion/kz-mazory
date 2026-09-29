@@ -139,6 +139,20 @@ def context_runtime(cfg):
     return native_counter(), endpoint
 
 
+def extraction_input(value):
+    """Keep the target adjacent to generation, after its reference history."""
+    # PostgreSQL JSONB reorders nested keys. Canonicalize every value so a saved
+    # request remains byte-identical on a delayed retry after reading it from DB.
+    keys = sorted(key for key in value if key != "content") + ["content"]
+    return (
+        "{"
+        + ",".join(
+            canonical_json(key) + ":" + canonical_json(value[key]) for key in keys
+        )
+        + "}"
+    )
+
+
 def extraction_payload(
     cfg, endpoint, content, sender, context, known_projects, sent_at, source_timezone
 ):
@@ -159,7 +173,7 @@ def extraction_payload(
             {"role": "system", "content": WORKER_PROMPT},
             {
                 "role": "user",
-                "content": canonical_json(
+                "content": extraction_input(
                     {
                         "content": content,
                         "sender": sender,

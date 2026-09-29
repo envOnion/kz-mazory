@@ -1,18 +1,25 @@
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db.models import Q
+from django.db.models import OuterRef, Q, Subquery
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.formats import date_format
-from django.utils.html import format_html
+from django.utils.html import format_html, format_html_join
 from django.views.decorators.http import require_POST
 
 from .admin_access import IntegrationAdmin, ScopedReadOnlyAdmin
 from .history_jobs import ERROR_LABELS, IMPORT_STATES, control_run, progress, start_job
-from .models import OutboxEvent, WhatsAppHistoryJob, WhatsAppHistoryRun
+from .models import (
+    AISettings,
+    MessageProcessingTrace,
+    OutboxEvent,
+    WhatsAppHistoryJob,
+    WhatsAppHistoryRun,
+)
 from .providers import ProviderUnavailable
+from .trace_context_ui import ERRORS
 
 
 @admin.register(WhatsAppHistoryJob)
@@ -141,6 +148,7 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
         "no_text_count",
         "scheduled_count",
         "analysis_progress",
+        "analysis_errors",
         "results_links",
         "source_snapshot",
         "settings_snapshot",
@@ -175,6 +183,37 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
             return "—"
         value = progress(obj)
         return f"Обработано {value['processed']} / {value['total']}; ошибок: {value['errors']}"
+
+    @admin.display(description="Причины ошибок анализа")
+    def analysis_errors(self, obj):
+        from collections import Counter
+
+        latest = MessageProcessingTrace.objects.filter(
+            raw_message_id=OuterRef("pk")
+        ).order_by("-attempt_no", "-id")
+        codes = (
+            obj.messages.filter(processing_state="failed")
+            .annotate(latest_error=Subquery(latest.values("error_code")[:1]))
+            .values_list("latest_error", flat=True)
+        )
+        counts = Counter(code or "unknown" for code in codes)
+        rows = format_html_join(
+            "",
+            "<li>{} — {} <code>{}</code></li>",
+            (
+                (count, ERRORS.get(code, "Причина не записана"), code)
+                for code, count in counts.most_common()
+            ),
+        )
+        return format_html(
+            '<div data-testid="history-analysis-errors"><p>{}</p><ul>{}</ul></div>',
+            "Новые запросы AI приостановлены в настройках AI."
+            if AISettings.get_active().message_processing_paused
+            else "Ошибок анализа нет."
+            if not counts
+            else "Ошибки последних попыток:",
+            rows,
+        )
 
     @admin.display(description="Результаты")
     def results_links(self, obj):
@@ -403,7 +442,7 @@ class OutboxEventAdmin(ScopedReadOnlyAdmin):
 
 
 # Existing source/trace admins keep their established permission scoping.
-from .models import MessageProcessingTrace, RawMessage
+from .models import RawMessage
 
 for model in (RawMessage, MessageProcessingTrace):
     registered = admin.site.get_model_admin(model)

@@ -1,9 +1,12 @@
 from urllib.parse import urlparse
+
 from django.conf import settings
 
 
 class ProviderUnavailable(Exception):
-    pass
+    def __init__(self, code, *, diagnostics=None):
+        super().__init__(code)
+        self.diagnostics = diagnostics or {}
 
 
 def checked_url(url):

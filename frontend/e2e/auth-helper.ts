@@ -17,5 +17,7 @@ export async function adminLogin(page: Page) {
   await page.locator('[name=username]').fill('77000000001')
   await page.locator('[name=password]').fill('test-only-admin-password')
   await page.locator('button[type=submit], input[type=submit]').click()
-  await page.waitForURL('**/admin/')
+  // The login URL itself ends with ?next=/admin/; a glob can match it before
+  // the POST completes, so the next navigation cancels login in WebKit.
+  await page.waitForURL(url => url.pathname === '/admin/')
 }

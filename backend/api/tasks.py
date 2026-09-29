@@ -178,6 +178,10 @@ def run_outbox(pk):
                 "provider_context_overflow",
                 "reanalysis_access_revoked",
                 "provider_output_truncated",
+                "invalid_extraction_schema",
+                "invalid_schema",
+                "evidence_not_in_source",
+                "payment_evidence_contradiction",
                 "context_request_uncertain",
             )
         )
