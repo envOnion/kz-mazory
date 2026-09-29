@@ -1,7 +1,16 @@
 <div class="mazory-trace-card p-5 rounded-xl border space-y-3" data-testid="trace-result">
-  {% if trace.status == 'error' %}
+  {% if retry.state == 'pending' or retry.state == 'processing' or retry.state == 'budget_wait' %}
+    <div role="status" data-testid="trace-retry">
+      <strong>{% if retry.state == 'processing' %}Выполняется повторный анализ{% elif retry.state == 'budget_wait' %}Ожидает суточного бюджета AI{% else %}Повтор запланирован{% endif %}</strong>
+      <p>Попытки: {{ retry.attempts }} из {{ retry.max_attempts }}.</p>
+      <p>{{ error_label }} <code>{{ trace.error_code }}</code></p>
+      {% if retry.next_attempt_at %}<p>Следующая попытка №{{ retry.next_attempt }} — не ранее {{ retry.next_attempt_at|date:"d.m.Y H:i:s T" }}. Пауза анализа и доступность очереди могут отложить запуск.</p>{% endif %}
+      <p>Повтор выполняется автоматически с сохранённым контекстом.</p>
+    </div>
+  {% elif trace.status == 'error' %}
     <div role="alert">
       <strong>Анализ не завершён</strong>
+      {% if retry.attempts >= retry.max_attempts and retry.state == 'failed' %}<p>Исчерпаны все {{ retry.max_attempts }} попыток. Автоматических повторов больше не будет.</p>{% endif %}
       <p>{{ error_label }}</p>
       <p class="mazory-trace-meta">Код: <code>{{ trace.error_code }}</code></p>
     </div>
