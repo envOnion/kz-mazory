@@ -27,7 +27,22 @@ from .processing_attempts import require_reanalysis, reserve_attempt
 from .providers import ProviderUnavailable
 
 
-def _facts(result, raw):
+def _source_quote(quote, content):
+    if quote in content:
+        return quote
+    # Models often fold newlines/NBSP into spaces. Match literal text separated
+    # only by whitespace, then store the exact original substring as evidence.
+    pattern = re.compile(r"\s+".join(re.escape(part) for part in quote.split()))
+    match = pattern.search(content)
+    if not match or pattern.search(content, match.start() + 1):
+        raise ProviderUnavailable(
+            "evidence_not_in_source",
+            diagnostics={"evidence_match": "ambiguous" if match else "not_found"},
+        )
+    return match.group()
+
+
+def _facts(result, raw, diagnostics=None):
     # A missing optional value and an explicit null both mean unknown. Required
     # values, enums and evidence still go through the full serializer validation.
     fields = FactSchema().fields
@@ -48,7 +63,7 @@ def _facts(result, raw):
     ]
     schema = FactSchema(data=normalized, many=True)
     schema.is_valid(raise_exception=True)
-    for fact in schema.validated_data:
+    for index, fact in enumerate(schema.validated_data):
         if fact["fact_type"] == "payment" and fact["payment_kind"] == "increment":
             if re.search(
                 r"не\s+оплат|оплатим|төленбеді|төлейміз",
@@ -65,8 +80,10 @@ def _facts(result, raw):
                 fact["uncertainties"].append(
                     "Накопительный итог не является новым платежом."
                 )
-        if fact["evidence"] not in raw.content:
-            raise ProviderUnavailable("evidence_not_in_source")
+        quote = _source_quote(fact["evidence"], raw.content)
+        if quote != fact["evidence"] and diagnostics is not None:
+            diagnostics.setdefault("source_whitespace_restored", []).append(index)
+        fact["evidence"] = quote
         if not raw.sent_at_known and fact.get("deadline_at"):
             fact["deadline_at"], fact["deadline_precision"] = None, "unknown"
             fact["uncertainties"].append(
@@ -165,7 +182,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
         trace.context_metadata["input_tokens_actual"] = (
             value if type(value) is int and value >= 0 else None
         )
-        facts = _facts(result, raw)
+        facts = _facts(result, raw, diagnostics)
         with transaction.atomic():
             locked = (
                 RawMessage.objects.select_for_update(of=("self",))
