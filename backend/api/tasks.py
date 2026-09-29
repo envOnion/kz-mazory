@@ -416,6 +416,44 @@ def process_attachment(payload):
     extract_attachment(payload["attachment_id"])
 
 
+def waha_group_list(session):
+    """NOWEB returns a JID-keyed map; other engines return an array."""
+    groups, offset = {}, 0
+    while True:
+        result = waha_request(
+            "GET",
+            f"/api/{session}/groups?limit=100&offset={offset}&sortBy=id&sortOrder=asc&exclude=participants",
+        )
+        if isinstance(result, dict):
+            result = list(result.values())
+        if not isinstance(result, list):
+            raise ProviderUnavailable("waha_invalid_groups")
+        if not result:
+            return sorted(
+                groups.values(),
+                key=lambda group: (group["name"].casefold(), group["id"]),
+            )
+        page = {}
+        for item in result:
+            if not isinstance(item, dict):
+                raise ProviderUnavailable("waha_invalid_groups")
+            jid = item.get("id")
+            name = item.get("subject", item.get("name", ""))
+            if (
+                not isinstance(jid, str)
+                or not jid.endswith("@g.us")
+                or len(jid) > 128
+                or not isinstance(name, str)
+            ):
+                raise ProviderUnavailable("waha_invalid_groups")
+            page[jid] = {"id": jid, "name": name or jid}
+        if not page.keys() - groups.keys():
+            raise ProviderUnavailable("waha_repeated_groups")
+        groups.update(page)
+        # Short pages are not EOF: WAHA may clamp the requested page size.
+        offset += len(result)
+
+
 def waha_control(payload):
     cfg = WhatsAppConfig.objects.get(pk=payload["config_id"], is_active=True)
     action = payload["action"]
@@ -427,7 +465,7 @@ def waha_control(payload):
     command = action in ("start", "restart", "stop", "logout")
     accepted = False
 
-    def save_state(status, qr="", me=None):
+    def save_state(status, qr="", me=None, groups=None):
         cfg.status, cfg.last_qr_code = status, qr
         with transaction.atomic():
             for item in (
@@ -436,7 +474,17 @@ def waha_control(payload):
                 .order_by("id")
             ):
                 item.status, item.last_qr_code = status, qr
+                previous_me = item.snapshot.get("waha_me") or {}
+                if me and previous_me.get("id") != me.get("id") or action == "logout":
+                    item.snapshot.pop("waha_groups", None)
                 item.snapshot = {**item.snapshot, "waha_me": me}
+                if groups is not None:
+                    item.snapshot["waha_groups"] = {
+                        "session_name": cfg.session_name,
+                        "account_id": (me or {}).get("id"),
+                        "updated_at": timezone.now().isoformat(),
+                        "items": groups,
+                    }
                 item.save(
                     update_fields=["status", "last_qr_code", "snapshot", "updated_at"]
                 )
@@ -460,6 +508,15 @@ def waha_control(payload):
         else:
             me = None
         save_state(status, me=me)
+        if action == "groups":
+            if status != "WORKING" or not me or not me.get("id"):
+                raise ProviderUnavailable("waha_groups_not_connected")
+            groups = waha_group_list(session)
+            if not WhatsAppConfig.objects.filter(
+                pk=cfg.pk, is_active=True, session_name=cfg.session_name
+            ).exists():
+                raise ProviderUnavailable("waha_config_changed")
+            save_state(status, me=me, groups=groups)
         if status == "SCAN_QR_CODE":
             result = waha_request("GET", f"/api/{session}/auth/qr?format=raw")
             value = result.get("value") if isinstance(result, dict) else None

@@ -196,15 +196,36 @@ class Handler(BaseHTTPRequestHandler):
         qr_route = re.fullmatch(r"/api/([^/]+)/auth/qr", path)
         history_route = re.fullmatch(r"/api/([^/]+)/chats/([^/]+)/messages", path)
         group_route = re.fullmatch(r"/api/([^/]+)/groups/([^/]+)", path)
-        if not session_route and not qr_route and not history_route and not group_route:
+        groups_route = re.fullmatch(r"/api/([^/]+)/groups", path)
+        if (
+            not session_route
+            and not qr_route
+            and not history_route
+            and not group_route
+            and not groups_route
+        ):
             return False
         name = unquote(
-            (session_route or qr_route or history_route or group_route).group(1)
+            (
+                session_route
+                or qr_route
+                or history_route
+                or group_route
+                or groups_route
+            ).group(1)
         )
         action = (
             (session_route.group(2) or "status")
             if session_route
-            else ("messages" if history_route else "group" if group_route else "qr")
+            else (
+                "messages"
+                if history_route
+                else "group"
+                if group_route
+                else "groups"
+                if groups_route
+                else "qr"
+            )
         )
         if self.headers.get("X-Api-Key") != "isolated-test-provider":
             self.reply(403, {"error": "bad_test_key"})
@@ -232,7 +253,10 @@ class Handler(BaseHTTPRequestHandler):
             result = {
                 "name": name,
                 "status": session["status"],
-                "me": {"id": "fixture@c.us", "pushName": "E2E WhatsApp"}
+                "me": {
+                    "id": session.get("account_id", "fixture@c.us"),
+                    "pushName": "E2E WhatsApp",
+                }
                 if session["status"] == "WORKING"
                 else None,
                 "config": session.get(
@@ -241,6 +265,22 @@ class Handler(BaseHTTPRequestHandler):
             }
             if action == "qr":
                 result = {"value": "isolated-whatsapp-qr:" + name}
+            elif action == "groups":
+                query = parse_qs(urlsplit(self.path).query)
+                offset = int(query.get("offset", [0])[0])
+                limit = min(
+                    int(query.get("limit", [10])[0]), fault.get("page_cap", 100)
+                )
+                if fault.get("repeated_page"):
+                    offset = 0
+                values = sorted(
+                    session.get("groups", []), key=lambda group: group["id"]
+                )
+                result = values[offset : offset + limit]
+                if session.get("groups_format") == "map":
+                    result = {group["id"]: group for group in result}
+                if fault.get("invalid"):
+                    result = {"error": "invalid_fixture"}
             elif action == "group":
                 result = {
                     "id": unquote(group_route.group(2)),
