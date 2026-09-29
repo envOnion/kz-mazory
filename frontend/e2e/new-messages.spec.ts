@@ -1,4 +1,5 @@
 import { createHmac } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test'
 import { adminLogin, isolatedCommand } from './auth-helper'
 
@@ -97,6 +98,12 @@ test('Only new reads bounded pages forever, keeps context and ingests while AI i
     const c = message(source, 'c')
     await configure(request, source, [old, a, b, empty, c])
     await expect.poll(() => rawCount(source), { timeout: 30000 }).toBe(5)
+    expect((await webhook(request, source, a)).status()).toBe(200)
+    const d = message(source, 'webhook-target')
+    expect((await webhook(request, source, d)).status()).toBe(202)
+    expect((await webhook(request, source, d)).status()).toBe(200)
+    await configure(request, source, [old, a, b, empty, c, d])
+    await expect.poll(() => rawCount(source), { timeout: 30000 }).toBe(6)
     const paths = await reads(request, source)
     expect(paths.length).toBeGreaterThan(3)
     for (const read of paths) {
@@ -108,7 +115,7 @@ test('Only new reads bounded pages forever, keeps context and ingests while AI i
     await page.getByTestId('history-start').click()
     await page.waitForURL(new RegExp(`/whatsapphistoryrun/${run}/change/`))
     await pauseAI(page, false)
-    await expect.poll(() => inspect<number>(`from api.models import MessageProcessingTrace; print(json.dumps(MessageProcessingTrace.objects.filter(raw_message__config_id=${source.id},status='success').count()))`), { timeout: 45000 }).toBe(3)
+    await expect.poll(() => inspect<number>(`from api.models import MessageProcessingTrace; print(json.dumps(MessageProcessingTrace.objects.filter(raw_message__config_id=${source.id},status='success').count()))`), { timeout: 45000 }).toBe(4)
     const context = inspect<{ text: string[]; own: boolean }>(`from api.models import MessageProcessingTrace
 q=MessageProcessingTrace.objects.get(raw_message__message_id='${b.id}')
 print(json.dumps({'text':[v['content'] for v in q.earlier_messages_context],'own':all(v['message_id'].startswith('${source.session}') for v in q.earlier_messages_context)}))`)
@@ -219,5 +226,44 @@ test('Transient provider failures retry beyond three attempts and recover the sa
     expect(await runId(job)).toBe(run)
     await expect(page.getByTestId('history-progress')).toHaveAttribute('data-state', 'watching', { timeout: 15000 })
     await expect(page.locator('[data-history-error]')).toBeEmpty()
+  } finally { await stop(page, job) }
+})
+
+test('A stale page cannot commit after pause, and a killed worker resumes from its durable step', async ({ page, request }) => {
+  test.setTimeout(150000)
+  const source = fixture('restart')
+  const first = message(source, 'first')
+  await configure(request, source, [first], { messages: { delay: 10 } })
+  await adminLogin(page)
+  const job = await createJob(page, source, false)
+  try {
+    const run = await runId(job)
+    await page.goto(`/admin/api/whatsapphistoryrun/${run}/change/`)
+    await expect.poll(async () => (await reads(request, source)).length, { timeout: 20000 }).toBeGreaterThan(0)
+    await page.getByRole('button', { name: 'Приостановить импорт', exact: true }).click()
+    await expect(page.getByTestId('history-progress')).toHaveAttribute('data-state', 'paused')
+    // Wait for the real in-flight task to return, without sleeping the test.
+    await expect.poll(() => inspect<number>(`from api.models import OutboxEvent
+print(json.dumps(OutboxEvent.objects.filter(event_type='history_import',payload__history_run_id=${run},state='processing').count()))`), { timeout: 20000 }).toBe(0)
+    expect(rawCount(source)).toBe(1)
+    await configure(request, source, [first])
+    await page.getByRole('button', { name: 'Продолжить импорт', exact: true }).click()
+    await expect.poll(() => rawCount(source), { timeout: 20000 }).toBe(2)
+    await expect(page.getByTestId('history-progress')).toHaveAttribute('data-state', 'watching', { timeout: 20000 })
+    const checkpoint = inspect<string>(`from api.models import WhatsAppHistoryJob; print(json.dumps(WhatsAppHistoryJob.objects.get(pk=${job}).new_messages_since.isoformat()))`)
+    const second = message(source, 'second')
+    const previous = (await reads(request, source)).length
+    await configure(request, source, [first, second], { messages: { delay: 10 } })
+    await expect.poll(async () => (await reads(request, source)).length, { timeout: 20000 }).toBeGreaterThan(previous)
+    const composeFile = new URL('../../compose.e2e.yml', import.meta.url).pathname
+    execFileSync('docker', ['compose', '-f', composeFile, '-p', process.env.E2E_COMPOSE_PROJECT || 'mazory-platform-e2e', 'restart', '-t', '1', 'history'], { timeout: 30000, stdio: 'pipe' })
+    // Accelerate only the abandoned test lease; production uses its normal lease.
+    isolatedCommand('shell', ['-c', `from api.models import OutboxEvent; from django.utils import timezone; from datetime import timedelta
+OutboxEvent.objects.filter(event_type='history_import',payload__history_run_id=${run},state__in=['processing','enqueued']).update(lease_until=timezone.now()-timedelta(seconds=1))`])
+    await configure(request, source, [first, second])
+    await expect.poll(() => rawCount(source), { timeout: 30000 }).toBe(3)
+    expect(await runId(job)).toBe(run)
+    const current = inspect<string>(`from api.models import WhatsAppHistoryJob; print(json.dumps(WhatsAppHistoryJob.objects.get(pk=${job}).new_messages_since.isoformat()))`)
+    expect(current >= checkpoint).toBe(true)
   } finally { await stop(page, job) }
 })

@@ -373,6 +373,8 @@ def import_history_step(payload):
             )
         if monitor_error(payload, code):
             return
+        if not isinstance(exc, requests.HTTPError):
+            raise
         WhatsAppHistoryRun.objects.filter(
             pk=payload["history_run_id"], step=payload["step"]
         ).update(

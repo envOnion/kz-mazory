@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 from datetime import timedelta
 from urllib.parse import quote, urlencode
 
@@ -193,7 +194,7 @@ def process_new_messages(payload, waha):
             ):
                 raise ProviderUnavailable("history_invalid_message")
             stamp = message["timestamp"]
-            if not 0 < stamp or stamp != stamp:
+            if not math.isfinite(stamp) or stamp <= 0:
                 raise ProviderUnavailable("history_invalid_message")
             if (
                 message.get("from") != run.source_snapshot["chat_id"]
