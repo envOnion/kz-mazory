@@ -12,6 +12,7 @@ from django.utils import timezone
 from django_q.tasks import async_task
 from . import access
 from .models import (
+    FactCandidate,
     OutboxEvent,
     NotificationDelivery,
     RawMessage,
@@ -34,6 +35,7 @@ CLUSTERS = {
     "delivery_ack": "delivery",
     "crm_sync": "crm",
     "crm_import": "crm",
+    "crm_match": "crm",
     "waha_control": "delivery",
     "history_import": "history",
 }
@@ -79,6 +81,63 @@ def dispatch_outbox(limit=100):
     return len(ids)
 
 
+def enqueue_crm_match(candidate_id, allowed_states=("not_requested",)):
+    """Create one durable lookup generation.
+
+    Repeated calls for already queued work are no-ops.
+    """
+    from .bitrix_service import crm_match_query
+
+    with transaction.atomic():
+        candidate = (
+            FactCandidate.objects.select_for_update(of=("self",))
+            .filter(pk=candidate_id, status="pending", fact_type="project")
+            .first()
+        )
+        if not candidate:
+            return None
+        if candidate.crm_match_state == "queued" and candidate.crm_match_revision:
+            key = f"crm_match:{candidate.id}:{candidate.crm_match_revision}"
+            event, _ = OutboxEvent.objects.get_or_create(
+                deduplication_key=key,
+                defaults={
+                    "event_type": "crm_match",
+                    "payload": {
+                        "candidate_id": candidate.id,
+                        "crm_match_revision": candidate.crm_match_revision,
+                    },
+                },
+            )
+            return event
+        if candidate.crm_match_state not in set(allowed_states):
+            return None
+        candidate.crm_match_revision += 1
+        candidate.crm_match_state = "queued"
+        candidate.crm_match_query = crm_match_query(candidate)
+        candidate.crm_match_error_code = ""
+        candidate.crm_checked_at = None
+        candidate.save(
+            update_fields=[
+                "crm_match_revision",
+                "crm_match_state",
+                "crm_match_query",
+                "crm_match_error_code",
+                "crm_checked_at",
+            ]
+        )
+        event = OutboxEvent.objects.create(
+            event_type="crm_match",
+            deduplication_key=(
+                f"crm_match:{candidate.id}:{candidate.crm_match_revision}"
+            ),
+            payload={
+                "candidate_id": candidate.id,
+                "crm_match_revision": candidate.crm_match_revision,
+            },
+        )
+        return event
+
+
 def run_outbox(pk):
     with transaction.atomic():
         event = OutboxEvent.objects.select_for_update().get(pk=pk)
@@ -121,6 +180,7 @@ def run_outbox(pk):
             "operation": run_operation,
             "crm_sync": sync_crm,
             "crm_import": import_crm,
+            "crm_match": match_crm,
             "attachment": process_attachment,
             "waha_control": waha_control,
             "history_import": import_history_step,
@@ -444,6 +504,64 @@ def import_crm(payload):
     from .bitrix_service import BitrixService
 
     BitrixService.propose_import(payload)
+
+
+def match_crm(payload):
+    from .bitrix_service import BitrixService
+
+    candidate_id = payload.get("candidate_id")
+    revision = payload.get("crm_match_revision")
+    if (
+        type(candidate_id) is not int
+        or candidate_id <= 0
+        or type(revision) is not int
+        or revision <= 0
+    ):
+        raise ProviderUnavailable("crm_match_payload_invalid")
+    try:
+        state = BitrixService.match_candidate(candidate_id, revision)
+    except requests.Timeout:
+        if not BitrixService.record_match_error(
+            candidate_id, revision, "provider_timeout"
+        ):
+            return
+        raise
+    except requests.HTTPError as exc:
+        status_code = getattr(exc.response, "status_code", "error")
+        code = f"crm_http_{status_code}"[:64]
+        if not BitrixService.record_match_error(candidate_id, revision, code):
+            return
+        raise ProviderUnavailable(code) from None
+    except requests.ConnectionError:
+        if not BitrixService.record_match_error(
+            candidate_id, revision, "crm_connection_error"
+        ):
+            return
+        raise ProviderUnavailable("crm_connection_error") from None
+    except requests.RequestException:
+        if not BitrixService.record_match_error(
+            candidate_id, revision, "crm_request_error"
+        ):
+            return
+        raise ProviderUnavailable("crm_request_error") from None
+    except ProviderUnavailable as exc:
+        if not BitrixService.record_match_error(
+            candidate_id, revision, str(exc)[:64]
+        ):
+            return
+        raise
+    except Exception:
+        if not BitrixService.record_match_error(
+            candidate_id, revision, "crm_unexpected_error"
+        ):
+            return
+        raise
+    logger.info(
+        "crm_match_done candidate_id=%s revision=%s state=%s",
+        candidate_id,
+        revision,
+        state,
+    )
 
 
 def process_attachment(payload):

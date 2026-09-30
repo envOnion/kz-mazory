@@ -30,7 +30,7 @@ from .models import (
     NotificationDelivery,
     WhatsAppConfig,
 )
-from .facts import review, allocate_payment, json_value
+from .facts import review, select_crm_match, allocate_payment, json_value
 from .datamart import datamart, scoped_projects
 from .notifications import change_commitment
 from .security import Conflict
@@ -51,6 +51,37 @@ def candidate_data(candidate, user):
     values = dict(candidate.proposed_changes)
     if not evidence:
         values.pop("evidence", None)
+    crm_matches = [
+        match
+        for match in candidate.crm_matches.all()
+        if match.crm_match_revision == candidate.crm_match_revision
+    ]
+    crm_options = [
+        {
+            "id": match.id,
+            "project_id": match.project_id,
+            "project_version": match.project.version if match.project else None,
+            "bitrix_deal_id": match.bitrix_deal_id,
+            "bitrix_company_id": match.bitrix_company_id,
+            "deal_title": match.deal_title,
+            "company_name": match.company_name,
+            "object_label": match.object_label,
+            "stage_id": match.stage_id,
+            "opportunity": (
+                str(match.opportunity) if match.opportunity is not None else None
+            ),
+            "currency": match.currency,
+            "score": match.score,
+            "match_reasons": (
+                [item for item in match.match_reasons if isinstance(item, str)]
+                if isinstance(match.match_reasons, list)
+                else []
+            ),
+            "selection_state": match.selection_state,
+            "captured_at": match.captured_at,
+        }
+        for match in crm_matches
+    ]
     return {
         "id": candidate.id,
         "project_id": candidate.project_id,
@@ -60,13 +91,20 @@ def candidate_data(candidate, user):
         "fact_type": candidate.fact_type,
         "proposed_changes": values,
         "status": candidate.status,
-        "base_version": candidate.base_project_version,
+        "base_version": candidate.base_project_version or 0,
         "current_version": candidate.project.version if candidate.project else 0,
         "confidence": candidate.confidence,
         "uncertainties": candidate.uncertainties,
         "evidence": evidence,
         "review_reason": candidate.review_reason,
         "created_at": candidate.created_at,
+        "crm_resolution": {
+            "state": candidate.crm_match_state,
+            "revision": candidate.crm_match_revision,
+            "checked_at": candidate.crm_checked_at,
+            "error_code": candidate.crm_match_error_code,
+            "options": crm_options,
+        },
     }
 
 
@@ -81,7 +119,7 @@ class CandidateListView(APIView):
             access.candidates_for(request.user)
             .filter(status=state)
             .select_related("project")
-            .prefetch_related("evidence")
+            .prefetch_related("evidence", "crm_matches__project")
             .order_by("id")
         )
         pagination = PageNumberPagination()
@@ -92,11 +130,24 @@ class CandidateListView(APIView):
 
 
 class ReviewInput(serializers.Serializer):
-    action = serializers.ChoiceField(choices=["approve", "reject", "match", "rebase"])
+    action = serializers.ChoiceField(
+        choices=["approve", "reject", "match", "rebase", "match_crm"]
+    )
     base_version = serializers.IntegerField(min_value=0)
     reason = serializers.CharField(max_length=2000, allow_blank=True, default="")
     changes = serializers.DictField(required=False, default=dict)
     project_id = serializers.IntegerField(min_value=1, required=False)
+    crm_match_id = serializers.IntegerField(min_value=1, required=False)
+    crm_match_revision = serializers.IntegerField(min_value=0, required=False)
+
+    def validate(self, data):
+        if data["action"] == "match_crm" and (
+            "crm_match_id" not in data or "crm_match_revision" not in data
+        ):
+            raise serializers.ValidationError(
+                "Укажите вариант и версию результата CRM."
+            )
+        return data
 
 
 class CandidateReviewView(APIView):
@@ -107,16 +158,27 @@ class CandidateReviewView(APIView):
         schema.is_valid(raise_exception=True)
         values = schema.validated_data
         candidate = get_object_or_404(access.candidates_for(request.user), pk=pk)
-        access.require_review(request.user, candidate)
-        if values["action"] in ("match", "rebase"):
+        if values["action"] == "match_crm":
+            candidate = select_crm_match(
+                pk,
+                request.user,
+                values["crm_match_id"],
+                values["crm_match_revision"],
+                values["base_version"],
+                values["reason"],
+            )
+        elif values["action"] in ("match", "rebase"):
             if not values["reason"].strip():
                 raise ValidationError(
                     "Укажите основание сопоставления или новой проверки."
                 )
             with transaction.atomic():
-                candidate = FactCandidate.objects.select_for_update(of=("self",)).get(
-                    pk=candidate.id
+                candidate = (
+                    access.candidates_for(request.user)
+                    .select_for_update(of=("self",))
+                    .get(pk=candidate.id)
                 )
+                access.require_review(request.user, candidate)
                 if candidate.status != "pending":
                     raise Conflict()
                 project = get_object_or_404(
@@ -126,11 +188,68 @@ class CandidateReviewView(APIView):
                 )
                 if values["base_version"] != project.version:
                     raise Conflict()
+                current_crm_matches = list(
+                    candidate.crm_matches.select_for_update(of=("self",)).filter(
+                        crm_match_revision=candidate.crm_match_revision
+                    )
+                )
+                list(
+                    candidate.crm_matches.select_for_update(of=("self",)).filter(
+                        selection_state="selected"
+                    )
+                )
+                compatible_crm_match = None
+                if project.bitrix_id:
+                    compatible_crm_match = next(
+                        (
+                            item
+                            for item in current_crm_matches
+                            if item.bitrix_deal_id == project.bitrix_id
+                        ),
+                        None,
+                    )
+                else:
+                    compatible_crm_match = next(
+                        (
+                            item
+                            for item in current_crm_matches
+                            if item.selection_state == "selected"
+                            and item.project_id == project.id
+                        ),
+                        None,
+                    )
+                selected_crm_matches = candidate.crm_matches.filter(
+                    selection_state="selected"
+                )
+                if compatible_crm_match:
+                    selected_crm_matches = selected_crm_matches.exclude(
+                        pk=compatible_crm_match.pk
+                    )
+                selected_crm_matches.update(selection_state="dismissed")
+                if compatible_crm_match:
+                    compatible_crm_match.selection_state = "selected"
+                    compatible_crm_match.project = project
+                    compatible_crm_match.save(
+                        update_fields=["selection_state", "project"]
+                    )
+                    candidate.crm_match_state = "matched"
+                else:
+                    candidate.crm_match_state = (
+                        "ambiguous" if current_crm_matches else "not_requested"
+                    )
+                candidate.crm_match_error_code = ""
                 candidate.project, candidate.base_project_version = (
                     project,
                     project.version,
                 )
-                candidate.save(update_fields=["project", "base_project_version"])
+                candidate.save(
+                    update_fields=[
+                        "project",
+                        "base_project_version",
+                        "crm_match_state",
+                        "crm_match_error_code",
+                    ]
+                )
                 AuditEvent.objects.create(
                     actor=request.user,
                     target_type="FactCandidate",
@@ -139,6 +258,10 @@ class CandidateReviewView(APIView):
                     before_after={
                         "project_id": project.id,
                         "base_version": project.version,
+                        "crm_match_id": (
+                            compatible_crm_match.id if compatible_crm_match else None
+                        ),
+                        "crm_match_state": candidate.crm_match_state,
                         "reason": values["reason"],
                     },
                 )
@@ -609,7 +732,12 @@ class CandidateDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        candidate = get_object_or_404(access.candidates_for(request.user), pk=pk)
+        candidate = get_object_or_404(
+            access.candidates_for(request.user)
+            .select_related("project")
+            .prefetch_related("evidence", "crm_matches__project"),
+            pk=pk,
+        )
         return Response(candidate_data(candidate, request.user))
 
 

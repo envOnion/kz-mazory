@@ -1,4 +1,5 @@
 from decimal import Decimal
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
@@ -93,6 +94,14 @@ class Company(models.Model):
         verbose_name = "Компания"
         verbose_name_plural = "Компании"
         ordering = ["name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["bitrix_company_id"],
+                condition=models.Q(bitrix_company_id__isnull=False)
+                & ~models.Q(bitrix_company_id=""),
+                name="company_bitrix_id_unique",
+            )
+        ]
 
     def __str__(self):
         return self.name
@@ -875,6 +884,9 @@ class BitrixSettings(models.Model):
         "Секретный токен входящего вебхука", max_length=128, blank=True, default=""
     )
     is_active = models.BooleanField("Синхронизация активна", default=True)
+    crm_matching_enabled = models.BooleanField(
+        "Read-only сопоставление с CRM", default=False
+    )
     auto_create_deals = models.BooleanField(
         "Авто-создание сделок в Bitrix24", default=True
     )
@@ -891,6 +903,13 @@ class BitrixSettings(models.Model):
         "Публиковать саммари в таймлайн сделки", default=True
     )
     deal_category_id = models.IntegerField("ID воронки сделок", default=0)
+    deal_object_field_code = models.CharField(
+        "Код поля объекта сделки",
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Необязательный код пользовательского поля UF_CRM_* для read-only поиска объекта.",
+    )
     default_assigned_by_id = models.IntegerField(
         "ID ответственного по умолчанию", default=1
     )
@@ -908,6 +927,22 @@ class BitrixSettings(models.Model):
     class Meta:
         verbose_name = "Настройки Bitrix24"
         verbose_name_plural = "Настройки Bitrix24"
+        constraints = [
+            models.UniqueConstraint(
+                models.Value(1),
+                name="bitrix_settings_singleton",
+                violation_error_message=(
+                    "Допускается только одна конфигурация Bitrix24."
+                ),
+            )
+        ]
+
+    def clean(self):
+        super().clean()
+        if type(self).objects.exclude(pk=self.pk).exists():
+            raise ValidationError(
+                "Допускается только одна конфигурация Bitrix24."
+            )
 
     def __str__(self):
         return f"{self.name} ({'Активен' if self.is_active else 'Выключен'})"
@@ -1242,6 +1277,16 @@ class AdminMFA(models.Model):
 
 
 class FactCandidate(models.Model):
+    CRM_MATCH_STATE_CHOICES = [
+        ("not_requested", "Не запускалось"),
+        ("queued", "В очереди"),
+        ("matched", "Сопоставлено"),
+        ("ambiguous", "Требуется выбор"),
+        ("not_found", "Совпадений нет"),
+        ("disabled", "Сопоставление отключено"),
+        ("error", "Ошибка сопоставления"),
+    ]
+
     trace = models.ForeignKey(
         MessageProcessingTrace, on_delete=models.PROTECT, related_name="candidates"
     )
@@ -1270,12 +1315,85 @@ class FactCandidate(models.Model):
     source_key = models.CharField(max_length=255, unique=True)
     confidence = models.FloatField(default=0)
     uncertainties = models.JSONField(default=list, blank=True)
+    crm_match_state = models.CharField(
+        max_length=16,
+        choices=CRM_MATCH_STATE_CHOICES,
+        default="not_requested",
+        db_index=True,
+    )
+    crm_match_revision = models.PositiveIntegerField(default=0)
+    crm_match_query = models.JSONField(default=dict, blank=True)
+    crm_match_error_code = models.CharField(max_length=64, blank=True, default="")
+    crm_checked_at = models.DateTimeField(null=True, blank=True)
     reviewed_by = models.ForeignKey(
         User, null=True, blank=True, on_delete=models.SET_NULL
     )
     reviewed_at = models.DateTimeField(null=True, blank=True)
     review_reason = models.TextField(blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class CandidateCrmMatch(models.Model):
+    SELECTION_STATE_CHOICES = [
+        ("suggested", "Предложено"),
+        ("selected", "Выбрано"),
+        ("dismissed", "Отклонено"),
+    ]
+
+    candidate = models.ForeignKey(
+        FactCandidate, on_delete=models.PROTECT, related_name="crm_matches"
+    )
+    crm_match_revision = models.PositiveIntegerField()
+    project = models.ForeignKey(
+        Project,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="candidate_crm_matches",
+    )
+    bitrix_deal_id = models.CharField(max_length=64)
+    bitrix_company_id = models.CharField(max_length=64, blank=True, default="")
+    deal_title = models.CharField(max_length=255, blank=True, default="")
+    normalized_deal_title = models.CharField(
+        max_length=255, blank=True, default="", db_index=True
+    )
+    company_name = models.CharField(max_length=255, blank=True, default="")
+    normalized_company_name = models.CharField(
+        max_length=255, blank=True, default="", db_index=True
+    )
+    object_label = models.CharField(max_length=255, blank=True, default="")
+    stage_id = models.CharField(max_length=64, blank=True, default="")
+    opportunity = models.DecimalField(
+        max_digits=14, decimal_places=2, null=True, blank=True
+    )
+    currency = models.CharField(max_length=3, blank=True, default="")
+    score = models.PositiveSmallIntegerField(default=0)
+    match_reasons = models.JSONField(default=list, blank=True)
+    selection_state = models.CharField(
+        max_length=16,
+        choices=SELECTION_STATE_CHOICES,
+        default="suggested",
+        db_index=True,
+    )
+    captured_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-crm_match_revision", "-score", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["candidate", "crm_match_revision", "bitrix_deal_id"],
+                name="candidate_crm_match_unique",
+            ),
+            models.UniqueConstraint(
+                fields=["candidate"],
+                condition=models.Q(selection_state="selected"),
+                name="candidate_crm_selected_unique",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(score__gte=0, score__lte=100),
+                name="candidate_crm_score_range",
+            ),
+        ]
 
 
 class FactEvidence(models.Model):

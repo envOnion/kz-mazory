@@ -1,5 +1,6 @@
 import re
 import logging
+import unicodedata
 from contextlib import contextmanager
 from django.conf import settings
 import redis
@@ -14,25 +15,27 @@ def get_redis_client():
 def normalize_deal_name(raw_name: str) -> str:
     """
     Нормализует название сделки/объекта для строгой дедупликации:
+    - Выполняет Unicode NFKC/casefold без потери казахских букв
     - Удаляет кавычки, спецсимволы, пунктуацию
-    - Удаляет префиксы 'жк', 'бц', 'тоо', 'ао', 'мжд', 'объект', 'мкр'
+    - Удаляет префиксы 'жк', 'бц', 'тоо'/'too', 'ао', 'мжд', 'объект', 'мкр'
     - Приводит к нижнему регистру и удаляет лишние пробелы
     Пример: 'ЖК «Медео»' -> 'медео', 'ЖК Медео' -> 'медео'
     """
     if not raw_name:
         return ""
-    text = raw_name.lower().strip()
+    text = unicodedata.normalize("NFKC", str(raw_name)).casefold().strip()
     # Удаление кавычек и скобок
     text = re.sub(r'[«»""\'\(\)\[\]\{\}]', ' ', text)
     # Удаление префиксов
-    prefixes = [r'\bжк\b', r'\bбц\b', r'\bтоо\b', r'\bао\b', r'\bмжд\b', r'\bобъект\b', r'\bмкр\b', r'\bмикрорайон\b']
+    prefixes = [r'\bжк\b', r'\bбц\b', r'\bтоо\b', r'\btoo\b', r'\bао\b', r'\bмжд\b', r'\bобъект\b', r'\bмкр\b', r'\bмикрорайон\b']
     for p in prefixes:
         text = re.sub(p, ' ', text)
     # Удаление спецсимволов кроме дефиса
-    text = re.sub(r'[^a-zа-яё0-9\-]', ' ', text)
+    # Python's Unicode-aware \w preserves Kazakh and other meaningful letters.
+    text = re.sub(r'[^\w\-]', ' ', text, flags=re.UNICODE).replace('_', ' ')
     # Схлопывание пробелов
     text = re.sub(r'\s+', ' ', text).strip()
-    return text
+    return text[:255]
 
 @contextmanager
 def get_deal_lock(normalized_name: str, timeout: int = 30):
@@ -63,4 +66,3 @@ def get_deal_lock(normalized_name: str, timeout: int = 30):
                 lock.release()
             except Exception:
                 pass
-

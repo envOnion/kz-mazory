@@ -71,3 +71,232 @@ body.dark .mazory-trace-label,
 .mazory-trace-overview > div > div {
     background-color: rgba(255, 255, 255, .05);
 }
+
+/* Per-candidate CRM lineage. The state is always written as text as well as color. */
+.mazory-crm-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    padding: 1.25rem;
+    border: 1px solid #bae6fd;
+    border-radius: .75rem;
+    background: #f8fafc;
+    color: #0f172a;
+}
+.mazory-crm-panel__header,
+.mazory-crm-candidate__header,
+.mazory-crm-option__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+}
+.mazory-crm-panel__eyebrow,
+.mazory-crm-label,
+.mazory-crm-options__title {
+    display: block;
+    margin: 0 0 .25rem;
+    color: #0369a1;
+    font-size: .6875rem;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+}
+.mazory-crm-panel__title {
+    margin: 0;
+    color: #0f172a;
+    font-size: 1rem;
+    font-weight: 700;
+}
+.mazory-crm-panel__config {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: .35rem .75rem;
+    max-width: 52rem;
+    color: #475569;
+    font-size: .75rem;
+}
+.mazory-crm-summary {
+    padding: .65rem .8rem;
+    border: 1px solid #cbd5e1;
+    border-radius: .5rem;
+    background: #f1f5f9;
+    color: #334155;
+    font-size: .8125rem;
+    font-weight: 700;
+}
+.mazory-crm-summary--good { border-color: #a7f3d0; background: #ecfdf5; color: #065f46; }
+.mazory-crm-summary--info { border-color: #bfdbfe; background: #eff6ff; color: #1e40af; }
+.mazory-crm-summary--warn { border-color: #fde68a; background: #fffbeb; color: #92400e; }
+.mazory-crm-summary--error { border-color: #fecdd3; background: #fff1f2; color: #9f1239; }
+.mazory-crm-candidates,
+.mazory-crm-options {
+    display: flex;
+    flex-direction: column;
+    gap: .75rem;
+}
+.mazory-crm-candidate {
+    padding: 1rem;
+    border: 1px solid #cbd5e1;
+    border-left-width: 4px;
+    border-radius: .75rem;
+    background: #fff;
+    overflow-wrap: anywhere;
+}
+.mazory-crm-candidate--good { border-left-color: #10b981; }
+.mazory-crm-candidate--info { border-left-color: #3b82f6; }
+.mazory-crm-candidate--warn { border-left-color: #f59e0b; }
+.mazory-crm-candidate--error { border-left-color: #e11d48; }
+.mazory-crm-candidate--neutral { border-left-color: #94a3b8; }
+.mazory-crm-fact-grid,
+.mazory-crm-option__facts {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: .75rem;
+    margin-top: .9rem;
+}
+.mazory-crm-fact-grid > div,
+.mazory-crm-option__facts > div {
+    min-width: 0;
+    padding: .65rem;
+    border: 1px solid #e2e8f0;
+    border-radius: .5rem;
+    background: #f8fafc;
+}
+.mazory-crm-option__facts dt {
+    color: #64748b;
+    font-size: .6875rem;
+}
+.mazory-crm-option__facts dd {
+    margin: .2rem 0 0;
+    color: #0f172a;
+    font-weight: 600;
+}
+.mazory-crm-state-copy,
+.mazory-crm-local-project,
+.mazory-crm-empty {
+    margin: .75rem 0 0;
+    color: #334155;
+    font-size: .8125rem;
+}
+.mazory-crm-meta {
+    margin: .35rem 0 0;
+    color: #64748b;
+    font-size: .75rem;
+}
+.mazory-crm-link {
+    color: #4338ca;
+    font-weight: 650;
+    overflow-wrap: anywhere;
+}
+.mazory-crm-link:hover { text-decoration: underline; }
+.mazory-crm-error {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: .5rem;
+    margin-top: .75rem;
+    padding: .65rem .8rem;
+    border: 1px solid #fecdd3;
+    border-radius: .5rem;
+    background: #fff1f2;
+    color: #9f1239;
+    font-size: .75rem;
+}
+.mazory-crm-options { margin-top: 1rem; }
+.mazory-crm-option {
+    padding: .85rem;
+    border: 1px solid #cbd5e1;
+    border-radius: .625rem;
+    background: #f8fafc;
+}
+.mazory-crm-option--selected {
+    border-color: #10b981;
+    box-shadow: inset 3px 0 0 #10b981;
+}
+.mazory-crm-option--dismissed { opacity: .72; }
+.mazory-crm-option__selection {
+    flex: 0 0 auto;
+    padding: .2rem .5rem;
+    border-radius: 999px;
+    background: #e2e8f0;
+    color: #334155;
+    font-size: .6875rem;
+    font-weight: 700;
+}
+.mazory-crm-option--selected .mazory-crm-option__selection {
+    background: #d1fae5;
+    color: #065f46;
+}
+.mazory-crm-reasons { margin-top: .75rem; }
+.mazory-crm-reasons ul {
+    margin: .25rem 0 0 1.1rem;
+    color: #475569;
+    font-size: .75rem;
+    list-style: disc;
+}
+
+html.dark .mazory-crm-panel,
+body.dark .mazory-crm-panel,
+.dark .mazory-crm-panel,
+[data-theme="dark"] .mazory-crm-panel {
+    border-color: #075985;
+    background: #0f172a;
+    color: #f8fafc;
+}
+html.dark .mazory-crm-panel__title,
+html.dark .mazory-crm-option__facts dd,
+body.dark .mazory-crm-panel__title,
+body.dark .mazory-crm-option__facts dd,
+.dark .mazory-crm-panel__title,
+.dark .mazory-crm-option__facts dd {
+    color: #f8fafc;
+}
+html.dark .mazory-crm-panel__config,
+html.dark .mazory-crm-meta,
+html.dark .mazory-crm-state-copy,
+html.dark .mazory-crm-local-project,
+html.dark .mazory-crm-empty,
+body.dark .mazory-crm-panel__config,
+body.dark .mazory-crm-meta,
+body.dark .mazory-crm-state-copy,
+body.dark .mazory-crm-local-project,
+body.dark .mazory-crm-empty,
+.dark .mazory-crm-panel__config,
+.dark .mazory-crm-meta,
+.dark .mazory-crm-state-copy,
+.dark .mazory-crm-local-project,
+.dark .mazory-crm-empty {
+    color: #94a3b8;
+}
+html.dark .mazory-crm-candidate,
+html.dark .mazory-crm-option,
+html.dark .mazory-crm-fact-grid > div,
+html.dark .mazory-crm-option__facts > div,
+body.dark .mazory-crm-candidate,
+body.dark .mazory-crm-option,
+body.dark .mazory-crm-fact-grid > div,
+body.dark .mazory-crm-option__facts > div,
+.dark .mazory-crm-candidate,
+.dark .mazory-crm-option,
+.dark .mazory-crm-fact-grid > div,
+.dark .mazory-crm-option__facts > div {
+    border-color: #334155;
+    background: #1e293b;
+}
+html.dark .mazory-crm-link,
+body.dark .mazory-crm-link,
+.dark .mazory-crm-link { color: #a5b4fc; }
+
+@media (max-width: 700px) {
+    .mazory-crm-panel { padding: .85rem; }
+    .mazory-crm-panel__header,
+    .mazory-crm-candidate__header,
+    .mazory-crm-option__header {
+        flex-direction: column;
+    }
+    .mazory-crm-panel__config { justify-content: flex-start; }
+    .mazory-crm-fact-grid,
+    .mazory-crm-option__facts { grid-template-columns: minmax(0, 1fr); }
+}

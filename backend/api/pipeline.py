@@ -294,7 +294,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
                     fact["uncertainties"].append(
                         "Есть ранее подтверждённый факт из этого сообщения. Проверьте, является ли предложение корректировкой."
                     )
-                candidate, _ = FactCandidate.objects.get_or_create(
+                candidate, created = FactCandidate.objects.get_or_create(
                     source_key=f"message:{raw.id}:attempt:{trace.attempt_no}:fact:{index}",
                     defaults={
                         "trace": trace,
@@ -314,6 +314,10 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
                     quote=fact["evidence"],
                     field_name="source",
                 )
+                if created and candidate.fact_type == "project":
+                    from .tasks import enqueue_crm_match
+
+                    enqueue_crm_match(candidate.id)
                 proposed += 1
             previous.filter(status="pending").update(status="superseded")
             locked.processed, locked.processing_state = (
