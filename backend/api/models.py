@@ -610,8 +610,12 @@ class WhatsAppConfig(models.Model):
 
 class AISettings(models.Model):
     """
-    Конфигурация нейросетевых моделей (Embeddings и Chat/Reasoning) через OpenRouter.
+    Конфигурация нейросетевых моделей для embeddings и Chat/Reasoning.
     """
+
+    class ChatApiFormat(models.TextChoices):
+        OPENAI_COMPATIBLE = "openai_compatible", "OpenAI-compatible"
+        ANTHROPIC_MESSAGES = "anthropic_messages", "Anthropic Messages"
 
     name = models.CharField(
         "Конфигурация", max_length=128, default="Основная конфигурация OpenRouter"
@@ -630,6 +634,16 @@ class AISettings(models.Model):
     embedding_dimension = models.IntegerField("Размерность вектора", default=1024)
 
     # Chat & Reasoning
+    chat_api_format = models.CharField(
+        "Формат Chat API",
+        max_length=32,
+        choices=ChatApiFormat.choices,
+        default=ChatApiFormat.OPENAI_COMPATIBLE,
+        help_text=(
+            "OpenAI-compatible использует Chat Base URL ниже; Anthropic Messages "
+            "использует ANTHROPIC_BASE_URL из окружения сервера."
+        ),
+    )
     chat_provider_url = models.CharField(
         "Chat Base URL", max_length=255, default="https://openrouter.ai/api/v1"
     )
@@ -659,7 +673,10 @@ class AISettings(models.Model):
     daily_request_limit = models.PositiveIntegerField(
         "Лимит запросов AI в сутки",
         default=0,
-        help_text="0 — лимит из настроек сервера. Учитываются чат и embeddings.",
+        help_text=(
+            "0 — лимит из настроек сервера. Учитываются все внешние AI-запросы: "
+            "embeddings, chat и подсчёт токенов."
+        ),
     )
     daily_budget_usd = models.DecimalField(
         "Бюджет AI в сутки, USD",
@@ -1417,6 +1434,11 @@ class PrivateAttachment(models.Model):
 class ProviderUsage(models.Model):
     outbox_event = models.ForeignKey(
         OutboxEvent, null=True, on_delete=models.PROTECT, related_name="provider_usage"
+    )
+    api_format = models.CharField(
+        max_length=32,
+        choices=AISettings.ChatApiFormat.choices,
+        default=AISettings.ChatApiFormat.OPENAI_COMPATIBLE,
     )
     operation = models.CharField(max_length=32)
     model_name = models.CharField(max_length=128)

@@ -40,6 +40,7 @@ def provider_error(status, *, retry_after=None, detail=None):
         status = int(status)
     if type(status) is not int:
         status = None
+    provider_type = detail.get("type") if isinstance(detail, dict) else None
     code = {
         401: "provider_authentication_failed",
         402: "provider_insufficient_credits",
@@ -47,7 +48,17 @@ def provider_error(status, *, retry_after=None, detail=None):
         408: "provider_timeout",
         429: "provider_rate_limited",
         503: "provider_overloaded",
+        529: "provider_overloaded",
     }.get(status)
+    if code is None:
+        code = {
+            "authentication_error": "provider_authentication_failed",
+            "permission_error": "provider_access_denied",
+            "rate_limit_error": "provider_rate_limited",
+            "overloaded_error": "provider_overloaded",
+            "api_error": "provider_server_error",
+            "invalid_request_error": "provider_invalid_request",
+        }.get(provider_type)
     metadata = detail.get("metadata", {}) if isinstance(detail, dict) else {}
     if (
         status == 402
@@ -71,21 +82,46 @@ def provider_error(status, *, retry_after=None, detail=None):
     )
 
 
-def checked_url(url):
-    parsed = urlparse(url)
+def checked_url(url, *, allowed_hosts=None):
+    try:
+        parsed = urlparse(url)
+        port = parsed.port
+    except (TypeError, ValueError):
+        raise ProviderUnavailable("provider_not_allowed") from None
+    hosts = settings.PROVIDER_ALLOWED_HOSTS if allowed_hosts is None else allowed_hosts
     if (
         settings.INTEGRATION_TEST_MODE
         and parsed.scheme == "http"
         and parsed.hostname == "test-provider"
-        and parsed.port == 9000
+        and port == 9000
+        and parsed.username is None
+        and parsed.password is None
     ):
         return url
     if (
         parsed.scheme != "https"
-        or parsed.hostname not in settings.PROVIDER_ALLOWED_HOSTS
-        or parsed.username
-        or parsed.password
-        or parsed.port not in (None, 443)
+        or parsed.hostname not in hosts
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
     ):
         raise ProviderUnavailable("provider_not_allowed")
     return url
+
+
+def checked_base_url(url, *, allowed_hosts=None):
+    """Validate and normalize a provider base before appending fixed routes."""
+    if not isinstance(url, str) or not url:
+        raise ProviderUnavailable("ai_not_configured")
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        raise ProviderUnavailable("provider_not_allowed") from None
+    # urlparse cannot distinguish an absent delimiter from an explicitly empty
+    # one (for example ``...?`` or ``https://@host``). Reject the raw syntax so
+    # appending our fixed route cannot silently turn it into a query/fragment.
+    if any(delimiter in url for delimiter in (";", "?", "#")):
+        raise ProviderUnavailable("provider_not_allowed")
+    normalized = url.rstrip("/")
+    checked_url(normalized, allowed_hosts=allowed_hosts)
+    return normalized

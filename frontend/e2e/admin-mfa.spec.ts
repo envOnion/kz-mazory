@@ -6,6 +6,7 @@ import { isolatedCommand } from './auth-helper'
 const security = '/admin/security/'
 const challenge = '/admin/security/mfa/'
 const password = 'test-only-mfa-password'
+const e2eBaseUrl = process.env.E2E_BASE_URL || 'http://localhost:5173'
 const test = base.extend<{ account: string }>({
   account: async ({}, use) => {
     const username = `e2e-mfa-${randomUUID()}`
@@ -97,7 +98,7 @@ test('MFA is optional; GET never enrolls; cancellation and pending-session isola
   const secret = await start(page)
   await page.screenshot({ path: testInfo.outputPath('mfa-setup.png'), fullPage: true })
   await page.getByRole('img', { name: 'QR-код для подключения MFA' }).screenshot({ path: testInfo.outputPath('mfa-qr.png') })
-  const other = await browser.newContext({ baseURL: 'http://localhost:5173' })
+  const other = await browser.newContext({ baseURL: e2eBaseUrl })
   try {
     const tab = await other.newPage()
     await signIn(tab, account)
@@ -126,7 +127,7 @@ test('MFA full lifecycle: enroll, require code, reject replay, return to destina
   await expect(page.locator('[x-show="shortcutsOpen"]')).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(page.locator('#modal-overlay')).toBeHidden()
-  const other = await browser.newContext({ baseURL: 'http://localhost:5173' })
+  const other = await browser.newContext({ baseURL: e2eBaseUrl })
   try {
     const tab = await other.newPage()
     const target = '/admin/password_change/?from=mfa'
@@ -171,7 +172,7 @@ test('MFA full lifecycle: enroll, require code, reject replay, return to destina
 test('MFA gate protects direct settings actions and never redirects outside Admin', async ({ page, browser, account }) => {
   await signIn(page, account)
   const { secret } = await enable(page)
-  const other = await browser.newContext({ baseURL: 'http://localhost:5173' })
+  const other = await browser.newContext({ baseURL: e2eBaseUrl })
   try {
     const tab = await other.newPage()
     await signIn(tab, account)
@@ -190,14 +191,14 @@ test('MFA gate protects direct settings actions and never redirects outside Admi
     }
     await tab.getByLabel('Шестизначный код').fill(code(secret))
     await tab.getByRole('button', { name: 'Подтвердить вход' }).click()
-    await expect(tab).toHaveURL('http://localhost:5173/admin/')
+    await expect(tab).toHaveURL(`${e2eBaseUrl}/admin/`)
     await page.goto(security)
     await expect(page.getByRole('heading', { name: 'MFA включена' })).toBeVisible()
   } finally { await other.close() }
 })
 
 test('MFA rejects CSRF and unauthenticated actions; active secret stays private to its owner', async ({ page, browser, account }) => {
-  const anon = await browser.newContext({ baseURL: 'http://localhost:5173' })
+  const anon = await browser.newContext({ baseURL: e2eBaseUrl })
   try {
     const tab = await anon.newPage()
     await tab.goto(security)
@@ -233,7 +234,7 @@ test('MFA throttles enrollment across setup restarts and browser sessions', asyn
   await page.getByLabel('Шестизначный код').fill(code(secret))
   await page.getByRole('button', { name: 'Подтвердить и включить MFA' }).click()
   await expect(page.getByRole('alert')).toContainText('Слишком много попыток')
-  const other = await browser.newContext({ baseURL: 'http://localhost:5173' })
+  const other = await browser.newContext({ baseURL: e2eBaseUrl })
   try {
     const tab = await other.newPage()
     await signIn(tab, account)
@@ -248,7 +249,7 @@ test('MFA throttles enrollment across setup restarts and browser sessions', asyn
 test('MFA consumes a fresh code only once under concurrent HTTP verification', async ({ page, browser, account }) => {
   await signIn(page, account)
   const { secret } = await enable(page)
-  const contexts = await Promise.all([browser.newContext({ baseURL: 'http://localhost:5173' }), browser.newContext({ baseURL: 'http://localhost:5173' })])
+  const contexts = await Promise.all([browser.newContext({ baseURL: e2eBaseUrl }), browser.newContext({ baseURL: e2eBaseUrl })])
   try {
     const pages = await Promise.all(contexts.map(context => context.newPage()))
     await Promise.all(pages.map(tab => signIn(tab, account)))
@@ -267,7 +268,7 @@ test('MFA consumes a fresh code only once under concurrent HTTP verification', a
 test('MFA login limit is shared across sessions and also protects disabling', async ({ page, browser, account }) => {
   await signIn(page, account)
   const { secret } = await enable(page)
-  const other = await browser.newContext({ baseURL: 'http://localhost:5173' })
+  const other = await browser.newContext({ baseURL: e2eBaseUrl })
   try {
     const tab = await other.newPage()
     await signIn(tab, account)

@@ -13,6 +13,8 @@ from .plain_text import plain_text
 from .providers import ProviderUnavailable
 
 POLICY = "chat-history-256k-v1"
+MAX_REMOTE_PREFLIGHT_PROBES = 4
+MAX_REMOTE_BOUNDARY_PROBES = 12
 
 
 def source_scope(raw):
@@ -99,24 +101,27 @@ def build_context(raw, cfg, known_projects, snapshot_id):
     if fixed > max_input:
         raise ProviderUnavailable("context_fixed_input_too_large")
     nearest, available, empty = [], 0, 0
-    estimated, full = fixed, False
+    estimated, full, preflight_probes = fixed, False, 0
     available_first, available_last = None, None
 
     def fit_boundary(items):
         # Find the largest complete suffix. Only the next, oldest item may be partial.
         low, high = 0, len(items)
-        while low < high:
+        probes = 0
+        while low < high and (
+            not counter.remote or probes < MAX_REMOTE_BOUNDARY_PROBES
+        ):
             mid = (low + high + 1) // 2
             if counter.count_payload(payload(items[:mid])) <= max_input:
                 low = mid
             else:
                 high = mid - 1
+            probes += 1
         accepted = items[:low]
         if low == len(items):
             return accepted
         boundary = items[low]
         content = boundary["content"]
-        starts = [offset for offset in counter.offsets(content) if offset > 0]
 
         def partial(start):
             return {
@@ -128,18 +133,36 @@ def build_context(raw, cfg, known_projects, snapshot_id):
                 "included_character_range": [start, len(content)],
             }
 
-        lo, hi = 0, len(starts)
-        while lo < hi:
-            mid = (lo + hi) // 2
-            if (
-                counter.count_payload(payload(accepted + [partial(starts[mid])]))
-                <= max_input
-            ):
-                hi = mid
-            else:
-                lo = mid + 1
-        if lo < len(starts):
-            accepted.append(partial(starts[lo]))
+        if counter.remote:
+            # Character slicing is Unicode-safe. A capped binary search bounds
+            # external count requests even for an exceptionally large message.
+            lo, hi, found, probes = 1, len(content) - 1, None, 0
+            while lo <= hi and probes < MAX_REMOTE_BOUNDARY_PROBES:
+                mid = (lo + hi) // 2
+                if (
+                    counter.count_payload(payload(accepted + [partial(mid)]))
+                    <= max_input
+                ):
+                    found, hi = mid, mid - 1
+                else:
+                    lo = mid + 1
+                probes += 1
+            if found is not None:
+                accepted.append(partial(found))
+        else:
+            starts = [offset for offset in counter.offsets(content) if offset > 0]
+            lo, hi = 0, len(starts)
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if (
+                    counter.count_payload(payload(accepted + [partial(starts[mid])]))
+                    <= max_input
+                ):
+                    hi = mid
+                else:
+                    lo = mid + 1
+            if lo < len(starts):
+                accepted.append(partial(starts[lo]))
         return accepted
 
     fields = (
@@ -177,12 +200,18 @@ def build_context(raw, cfg, known_projects, snapshot_id):
         nearest.append(item)
         estimated += counter.count_text(canonical_json(item)) + 4
         if estimated > max_input:
-            actual = counter.count_payload(payload(nearest))
-            if actual > max_input:
+            if counter.remote and preflight_probes >= MAX_REMOTE_PREFLIGHT_PROBES:
                 nearest = fit_boundary(nearest)
                 full = True
             else:
-                estimated = actual
+                actual = counter.count_payload(payload(nearest))
+                if counter.remote:
+                    preflight_probes += 1
+                if actual > max_input:
+                    nearest = fit_boundary(nearest)
+                    full = True
+                else:
+                    estimated = actual
     if counter.count_payload(payload(nearest)) > max_input:
         nearest = fit_boundary(nearest)
     request = payload(nearest)
@@ -199,9 +228,13 @@ def build_context(raw, cfg, known_projects, snapshot_id):
         "source": "chat_history",
         "model": cfg.chat_model_name,
         "provider": endpoint["tag"],
+        "api_format": endpoint["api_format"],
+        "effective_provider_url": endpoint["effective_provider_url"],
         "provider_window_tokens": endpoint["context_length"],
-        "tokenizer_id": cfg.tokenizer_id,
-        "tokenizer_revision": cfg.tokenizer_revision,
+        "token_counter": counter.strategy,
+        "token_count_requests": counter.request_count,
+        "tokenizer_id": None if counter.remote else cfg.tokenizer_id,
+        "tokenizer_revision": None if counter.remote else cfg.tokenizer_revision,
         "snapshot_max_id": snapshot_id,
         "time_basis": time_field,
         "window_tokens": cfg.context_window_tokens,
