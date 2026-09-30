@@ -2,7 +2,7 @@
 useDefault = true
 [allowlist]
 description = "Generated dependencies, repository internals and exact Django migration dependency tuples and pinned public tokenizer SHA-256 checksums"
-paths = ['''(^|/)(node_modules|\.venv|\.git|dist|test-results|playwright-report)/''']
+paths = ['''(^|/)(node_modules|\.venv|\.git|dist)/''']
 regexTarget = "line"
 regexes = [
     '''^\s*"tokenizer\.json": "623c34567aebb18582765289fbe23d901c62704d6518d71866e0e58db892b5b7",?\s*$''',

@@ -90,15 +90,6 @@ def checked_url(url, *, allowed_hosts=None):
         raise ProviderUnavailable("provider_not_allowed") from None
     hosts = settings.PROVIDER_ALLOWED_HOSTS if allowed_hosts is None else allowed_hosts
     if (
-        settings.INTEGRATION_TEST_MODE
-        and parsed.scheme == "http"
-        and parsed.hostname == "test-provider"
-        and port == 9000
-        and parsed.username is None
-        and parsed.password is None
-    ):
-        return url
-    if (
         parsed.scheme != "https"
         or parsed.hostname not in hosts
         or parsed.username is not None
