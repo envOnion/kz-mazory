@@ -10,6 +10,7 @@ from .plain_text import clean_context
 
 ERRORS = {
     "context_tokenizer_unavailable": "Для выбранной модели не настроен проверенный подсчёт токенов.",
+    "context_token_count_unavailable": "Anthropic-провайдер не вернул проверяемый размер контекста; запрос к модели не отправлен.",
     "context_invalid_budget": "Окно должно превышать резерв ответа и технический запас.",
     "context_model_metadata_unavailable": "Не удалось проверить ограничения провайдера модели.",
     "context_model_window_unavailable": "Провайдер не поддерживает выбранное окно и резерв ответа.",
@@ -36,6 +37,7 @@ ERRORS = {
     "provider_invalid_request": "Провайдер AI отклонил параметры запроса.",
     "ai_daily_budget_exhausted": "Исчерпан суточный бюджет запросов AI.",
     "provider_response_error": "Провайдер AI сообщил об ошибке вместо результата анализа.",
+    "provider_usage_persistence_failed": "Не удалось сохранить аудит AI-запроса; результат не применён.",
     "invalid_extraction_schema": "Модель вернула некорректный JSON или отсутствует массив facts.",
     "invalid_schema": "Поля фактов не соответствуют формату: проверьте диагностику ответа.",
     "evidence_not_in_source": "Цитату модели не удалось однозначно найти в целевом сообщении.",

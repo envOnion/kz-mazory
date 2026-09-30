@@ -17,11 +17,14 @@ x-environment: &environment
   WAHA_API_KEY: ${WAHA_API_KEY:?Set the WAHA key}
   WAHA_WEBHOOK_SECRET: ${WAHA_WEBHOOK_SECRET:?Set the webhook signing secret}
   OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+  ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
   BITRIX_WEBHOOK_URL: ${BITRIX_WEBHOOK_URL:-}
   BITRIX_INBOUND_TOKEN: ${BITRIX_INBOUND_TOKEN:-}
   BITRIX_TEAM_ID: ${BITRIX_TEAM_ID:-0}
   BITRIX_STAGE_MAP: ${BITRIX_STAGE_MAP:-}
   PROVIDER_ALLOWED_HOSTS: ${PROVIDER_ALLOWED_HOSTS:-openrouter.ai}
+  OPENAI_PROVIDER_ALLOWED_HOSTS: ${OPENAI_PROVIDER_ALLOWED_HOSTS:-openrouter.ai}
+  ANTHROPIC_PROVIDER_ALLOWED_HOSTS: ${ANTHROPIC_PROVIDER_ALLOWED_HOSTS:-ru.cheapvibecode.ru}
   QDRANT_URL: http://qdrant:6333
   QDRANT_API_KEY: ${QDRANT_API_KEY:?Set the vector database key}
   OCR_URL: ${OCR_URL:-}
@@ -72,6 +75,7 @@ services:
     environment:
       <<: *environment
       Q_CLUSTER_NAME: ai
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     command: [python, manage.py, qcluster]
   qcluster_delivery:
     <<: *backend

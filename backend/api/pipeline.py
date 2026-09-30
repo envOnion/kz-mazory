@@ -93,18 +93,42 @@ def _facts(result, raw, diagnostics=None):
 
 
 def _restore_request(trace):
-    payload = copy.deepcopy(trace.context_metadata["request_envelope"])
-    fixed = json.loads(payload["messages"][1]["content"])
-    fixed["context"] = trace.earlier_messages_context
-    serialize = (
-        extraction_input
-        if trace.context_metadata.get("input_serialization") == "target-last-v1"
-        else canonical_json
-    )
-    payload["messages"][1]["content"] = serialize(fixed)
-    if payload_hash(payload) != trace.context_metadata["payload_sha256"]:
+    try:
+        payload = copy.deepcopy(trace.context_metadata["request_envelope"])
+        user_message = _extraction_user_message(payload)
+        fixed = json.loads(user_message["content"])
+        if not isinstance(fixed, dict):
+            raise TypeError()
+        fixed["context"] = trace.earlier_messages_context
+        serialize = (
+            extraction_input
+            if trace.context_metadata.get("input_serialization") == "target-last-v1"
+            else canonical_json
+        )
+        user_message["content"] = serialize(fixed)
+        expected_hash = trace.context_metadata["payload_sha256"]
+    except (KeyError, TypeError, ValueError):
+        raise ProviderUnavailable("context_snapshot_mismatch") from None
+    if payload_hash(payload) != expected_hash:
         raise ProviderUnavailable("context_snapshot_mismatch")
     return payload
+
+
+def _extraction_user_message(payload):
+    try:
+        messages = payload["messages"]
+        matches = [
+            message
+            for message in messages
+            if isinstance(message, dict)
+            and message.get("role") == "user"
+            and isinstance(message.get("content"), str)
+        ]
+    except (KeyError, TypeError):
+        matches = []
+    if len(matches) != 1:
+        raise ProviderUnavailable("context_snapshot_mismatch")
+    return matches[0]
 
 
 def extract_message(raw_id, trace_id=None, requested_by_id=None):
@@ -136,12 +160,22 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
             except (User.DoesNotExist, PermissionDenied) as exc:
                 raise ProviderUnavailable("reanalysis_access_revoked") from exc
         cfg = AIService._config()
+        api_format = getattr(cfg, "chat_api_format", "openai_compatible")
+        effective_provider_url = AIService.effective_chat_provider_url(cfg)
         if trace.context_metadata.get("request_state") == "sent":
             raise ProviderUnavailable("context_request_uncertain")
         if "request_envelope" in trace.context_metadata:
+            snapshot_format = trace.context_metadata.get(
+                "api_format", "openai_compatible"
+            )
+            snapshot_url = trace.context_metadata.get(
+                "effective_provider_url", trace.context_metadata.get("provider_url")
+            )
             if (
                 cfg.chat_model_name != trace.model_version
-                or cfg.chat_provider_url != trace.context_metadata["provider_url"]
+                or api_format != snapshot_format
+                or not isinstance(snapshot_url, str)
+                or effective_provider_url.rstrip("/") != snapshot_url.rstrip("/")
             ):
                 raise ProviderUnavailable("context_configuration_changed")
             payload = _restore_request(trace)
@@ -158,11 +192,15 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
                 raw, cfg, known, trace.context_metadata["snapshot_max_id"]
             )
             envelope = copy.deepcopy(payload)
-            fixed = json.loads(envelope["messages"][1]["content"])
+            user_message = _extraction_user_message(envelope)
+            fixed = json.loads(user_message["content"])
             fixed.pop("context")
-            envelope["messages"][1]["content"] = canonical_json(fixed)
+            user_message["content"] = canonical_json(fixed)
             metadata.update(
-                request_envelope=envelope, provider_url=cfg.chat_provider_url
+                request_envelope=envelope,
+                provider_url=effective_provider_url,
+                effective_provider_url=effective_provider_url,
+                api_format=api_format,
             )
             trace.earlier_messages_context, trace.earlier_messages_count = (
                 context,
@@ -174,11 +212,18 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
         trace.result_summary = "Запрос с сохранённой историей отправлен в AI."
         trace.save()
         result, usage, diagnostics = AIService.analyze_payload(
-            payload, trace.context_metadata["provider_url"]
+            payload,
+            trace.context_metadata.get("effective_provider_url")
+            or trace.context_metadata.get("provider_url"),
+            expected_api_format=api_format,
         )
         trace.context_metadata["request_state"] = "responded"
         trace.context_metadata["response_diagnostics"] = diagnostics
-        value = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+        value = (
+            usage.get("prompt_tokens", usage.get("input_tokens"))
+            if isinstance(usage, dict)
+            else None
+        )
         trace.context_metadata["input_tokens_actual"] = (
             value if type(value) is int and value >= 0 else None
         )
@@ -311,7 +356,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
             trace.context_metadata["request_state"] = "failed"
         usage = (
             ProviderUsage.objects.filter(
-                outbox_event_id=usage_event_id.get(), operation="chat"
+                outbox_event_id=usage_event_id.get(),
+                operation__in=("extraction", "chat"),
             )
             .order_by("-id")
             .first()

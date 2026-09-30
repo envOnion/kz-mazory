@@ -2,6 +2,7 @@ from .admin_access import ScopedReadOnlyAdmin, IntegrationAdmin, SuperuserAdmin
 import json
 import requests
 from django.contrib import admin
+from django.conf import settings
 from django.utils.html import format_html, format_html_join
 from django.urls import reverse
 from django.utils.decorators import method_decorator
@@ -512,14 +513,32 @@ class WhatsAppConfigAdmin(IntegrationAdmin):
 class AISettingsAdmin(IntegrationAdmin):
     list_display = (
         "name",
+        "chat_api_format",
         "chat_model_name",
         "embedding_model_name",
         "embedding_dimension",
         "is_active",
         "updated_at",
     )
+    list_filter = ("chat_api_format", "is_active")
     list_editable = ("chat_model_name", "embedding_model_name", "is_active")
     exclude = ("chat_api_key", "embedding_api_key")
+    readonly_fields = ("anthropic_configuration",)
+
+    @admin.display(description="Конфигурация Anthropic")
+    def anthropic_configuration(self, obj):
+        base_url = settings.ANTHROPIC_BASE_URL
+        if not base_url:
+            return (
+                "ANTHROPIC_BASE_URL не задан. Ключ доступен только AI worker "
+                "и намеренно не проверяется/не отображается HTTP backend."
+            )
+        return format_html(
+            "Base URL: <code>{}</code>. Ключ доступен только AI worker и не "
+            "отображается в админке. USD-стоимость учитывается только когда "
+            "gateway возвращает её в usage.",
+            base_url,
+        )
 
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)

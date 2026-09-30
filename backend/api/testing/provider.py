@@ -13,9 +13,25 @@ messages = []
 waha_sessions = {}
 waha_requests = []
 crm_requests = []
-ai_requests = {"embeddings": [], "chats": [], "payloads": []}
+ai_requests = {
+    "embeddings": [],
+    "chats": [],
+    "payloads": [],
+    "anthropic": [],
+    "anthropic_counts": [],
+}
 context_options = {}
 lock = threading.Lock()
+
+ANTHROPIC_TEST_KEY = "isolated-test-anthropic"
+ANTHROPIC_VERSION = "2023-06-01"
+ANTHROPIC_FORBIDDEN_FIELDS = {
+    "provider",
+    "plugins",
+    "reasoning",
+    "response_format",
+    "temperature",
+}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -31,6 +47,192 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(encoded)
+
+    def anthropic_capture(self, data, *, count_tokens):
+        """Capture protocol evidence without retaining or returning credentials."""
+        item = {
+            "path": urlsplit(self.path).path,
+            "payload": data,
+            "auth_valid": self.headers.get("x-api-key") == ANTHROPIC_TEST_KEY,
+            "version_valid": self.headers.get("anthropic-version")
+            == ANTHROPIC_VERSION,
+            "content_type_valid": self.headers.get_content_type()
+            == "application/json",
+            "authorization_header_absent": self.headers.get("Authorization") is None,
+        }
+        key = "anthropic_counts" if count_tokens else "anthropic"
+        with lock:
+            ai_requests[key].append(item)
+        return item
+
+    @staticmethod
+    def anthropic_user_text(data):
+        if not isinstance(data, dict):
+            return ""
+        messages_value = data.get("messages")
+        if not isinstance(messages_value, list):
+            return ""
+        for message in reversed(messages_value):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                return "\n".join(
+                    block["text"]
+                    for block in content
+                    if isinstance(block, dict)
+                    and block.get("type") == "text"
+                    and isinstance(block.get("text"), str)
+                )
+        return ""
+
+    @staticmethod
+    def anthropic_error(error_type, message):
+        return {
+            "type": "error",
+            "error": {"type": error_type, "message": message},
+        }
+
+    def anthropic_request(self, data, *, count_tokens):
+        capture = self.anthropic_capture(data, count_tokens=count_tokens)
+        if not capture["auth_valid"]:
+            return self.reply(
+                401,
+                self.anthropic_error(
+                    "authentication_error", "Synthetic authentication failure"
+                ),
+            )
+        if not capture["version_valid"] or not capture["content_type_valid"]:
+            return self.reply(
+                400,
+                self.anthropic_error(
+                    "invalid_request_error", "Synthetic invalid protocol headers"
+                ),
+            )
+        if (
+            not isinstance(data, dict)
+            or not isinstance(data.get("model"), str)
+            or not data["model"]
+            or not isinstance(data.get("system"), (str, list))
+            or not isinstance(data.get("messages"), list)
+            or ANTHROPIC_FORBIDDEN_FIELDS.intersection(data)
+            or any(
+                isinstance(message, dict) and message.get("role") == "system"
+                for message in data.get("messages", [])
+            )
+        ):
+            return self.reply(
+                400,
+                self.anthropic_error(
+                    "invalid_request_error", "Synthetic non-native request body"
+                ),
+            )
+        user_text = self.anthropic_user_text(data)
+        try:
+            value = json.loads(user_text)
+        except (TypeError, ValueError):
+            value = {}
+        target = value.get("content") if isinstance(value, dict) else None
+        trigger_text = target if isinstance(target, str) else user_text
+        if "ANTHROPIC_E2E_401" in trigger_text:
+            return self.reply(
+                401,
+                self.anthropic_error(
+                    "authentication_error", "Synthetic authentication failure"
+                ),
+            )
+        if "ANTHROPIC_E2E_429" in trigger_text:
+            return self.reply(
+                429,
+                self.anthropic_error("rate_limit_error", "Synthetic rate limit"),
+                {"Retry-After": "120"},
+            )
+        if "ANTHROPIC_E2E_529" in trigger_text or (
+            count_tokens and "ANTHROPIC_E2E_COUNT_FAILURE" in trigger_text
+        ):
+            return self.reply(
+                529,
+                self.anthropic_error("overloaded_error", "Synthetic overload"),
+                {"Retry-After": "60"},
+            )
+        if count_tokens:
+            if "max_tokens" in data:
+                return self.reply(
+                    400,
+                    self.anthropic_error(
+                        "invalid_request_error",
+                        "Token counting must not receive max_tokens",
+                    ),
+                )
+            if "ANTHROPIC_E2E_COUNT_MALFORMED" in trigger_text:
+                return self.reply(200, {"input_tokens": "invalid"})
+            serialized = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+            return self.reply(200, {"input_tokens": max(1, len(serialized) // 4)})
+        if "ANTHROPIC_E2E_TRANSIENT_529" in trigger_text:
+            with lock:
+                attempts = sum(
+                    self.anthropic_user_text(item["payload"]) == user_text
+                    for item in ai_requests["anthropic"]
+                )
+            if attempts == 1:
+                return self.reply(
+                    529,
+                    self.anthropic_error(
+                        "overloaded_error", "Synthetic transient overload"
+                    ),
+                    {"Retry-After": "60"},
+                )
+        if type(data.get("max_tokens")) is not int or data["max_tokens"] <= 0:
+            return self.reply(
+                400,
+                self.anthropic_error(
+                    "invalid_request_error", "Synthetic max_tokens validation"
+                ),
+            )
+        if "ANTHROPIC_E2E_DELAY" in trigger_text:
+            time.sleep(1)
+        if "ANTHROPIC_E2E_MALFORMED" in trigger_text:
+            content = "not-a-content-block-list"
+        else:
+            if isinstance(target, str):
+                facts = [
+                    {
+                        "fact_type": "project",
+                        "object_name": "Anthropic E2E project",
+                        "evidence": target,
+                        "contract_amount": None,
+                        "stage": None,
+                        "company_name": None,
+                        "confidence": None,
+                    }
+                ]
+                response_text = json.dumps({"facts": facts}, ensure_ascii=False)
+            else:
+                response_text = (
+                    "Ответ через Anthropic Messages по разрешённым источникам."
+                )
+            content = [{"type": "text", "text": response_text}]
+        serialized = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+        return self.reply(
+            200,
+            {
+                "id": "msg_isolated_test",
+                "type": "message",
+                "role": "assistant",
+                "model": data["model"],
+                "content": content,
+                "stop_reason": "max_tokens"
+                if "ANTHROPIC_E2E_MAX_TOKENS" in trigger_text
+                else "end_turn",
+                "stop_sequence": None,
+                "usage": {
+                    "input_tokens": max(1, len(serialized) // 4),
+                    "output_tokens": 32,
+                },
+            },
+        )
 
     def do_GET(self):
         if self.path == "/test/crm":
@@ -82,6 +284,11 @@ class Handler(BaseHTTPRequestHandler):
                 200, {"text": "Изолированный тестовый документ без финансовых фактов."}
             )
         data = json.loads(raw or b"{}")
+        path = urlsplit(self.path).path
+        if path == "/anthropic/v1/messages/count_tokens":
+            return self.anthropic_request(data, count_tokens=True)
+        if path == "/anthropic/v1/messages":
+            return self.anthropic_request(data, count_tokens=False)
         crm_route = re.fullmatch(
             r"/rest/1/(e2e-[A-Za-z0-9-]+)/crm\.deal\.get\.json", self.path
         )
