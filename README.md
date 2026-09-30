@@ -53,16 +53,17 @@ docker compose -f docker-compose.yml -f compose.server.yml config --quiet
 docker compose -f docker-compose.yml -f compose.server.yml build nginx
 
 # Проверить новый image до переключения на отдельном loopback-порту.
+MAZORY_PREFLIGHT_PORT=18082 # выберите свободный loopback-порт на сервере
 MAZORY_GATEWAY_IMAGE=$(docker compose -f docker-compose.yml -f compose.server.yml config --format json \
   | jq -er '.services.nginx.image')
 docker image inspect "$MAZORY_GATEWAY_IMAGE" >/dev/null
 docker run -d --rm --name mazory-nginx-preflight \
   --network mazory_mazory-network \
-  -p 127.0.0.1:18081:80 \
+  -p "127.0.0.1:${MAZORY_PREFLIGHT_PORT}:80" \
   -v mazory_static_files:/staticfiles:ro \
   "$MAZORY_GATEWAY_IMAGE"
-curl --fail http://127.0.0.1:18081/api/health/ready/
-curl --head http://127.0.0.1:18081/admin
+curl --fail "http://127.0.0.1:${MAZORY_PREFLIGHT_PORT}/api/health/ready/"
+curl --head "http://127.0.0.1:${MAZORY_PREFLIGHT_PORT}/admin"
 docker stop mazory-nginx-preflight
 
 # Только после успешного preflight точечно заменить gateway и удалить старый
