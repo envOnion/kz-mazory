@@ -22,3 +22,6 @@ backups/
 *.agekey
 *.tsbuildinfo
 backend/tokenizers/*/
+
+frontend/test-results/
+frontend/playwright-report/

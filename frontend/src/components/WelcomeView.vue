@@ -25,7 +25,6 @@
       :disabled="disabled"
       @submit="(query) => $emit('selectPrompt', query)"
       @attach-file="$emit('attachFile')"
-      @voice-input="$emit('voiceInput')"
     />
   </div>
 </template>
@@ -42,6 +41,5 @@ defineProps<{
 defineEmits<{
   (e: 'selectPrompt', query: string): void
   (e: 'attachFile'): void
-  (e: 'voiceInput'): void
 }>()
 </script>

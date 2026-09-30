@@ -34,7 +34,6 @@
           :disabled="isGenerating"
           @select-prompt="handlePromptSubmit"
           @attach-file="handleAttach"
-          @voice-input="handleVoice"
         />
 
         <!-- View 2: User Profile (Личный кабинет) - Only for authenticated users -->
@@ -50,9 +49,12 @@
           <KpiDashboardView
             :data="kpiData"
             :widget="activeWidget"
+            :presentation="activePresentation"
+            :has-chat-response="hasChatResponse"
             :response-text="chatResponseText"
             :is-loading="isGenerating"
             :period="selectedPeriod"
+            @open-source="openQuote"
             @change-period="fetchKpiData"
             @change-filters="changeKpiFilters"
             @select-prompt="handlePromptSubmit"
@@ -72,7 +74,6 @@
               :disabled="isGenerating"
               @submit="handlePromptSubmit"
               @attach-file="handleAttach"
-              @voice-input="handleVoice"
             />
           </div>
         </div>
@@ -86,7 +87,7 @@
       @success="handleAuthSuccess"
     />
 
-    <!-- Global Subtle Toast for Attachment/Mic Interactions -->
+    <!-- Global Subtle Toast for Attachment Interactions -->
     <transition
       enter-active-class="transition duration-200 ease-out"
       enter-from-class="opacity-0 translate-y-4"
@@ -127,7 +128,7 @@ const {
   dashboardSuggestions,
   selectedPeriod,
   kpiData,
-  activeWidget,
+  activeWidget, activePresentation, hasChatResponse,
   chatResponseText,
   fetchKpiData,
   handlePromptSubmit,
@@ -185,13 +186,5 @@ function handleAttach() {
   showToast('Откройте раздел «Документы» и выберите файл и проект')
 }
 
-function handleVoice() {
-  if (!isAuthenticated.value) {
-    isAuthModalOpen.value = true
-    showToast('Для голосового ввода необходимо войти в систему')
-    return
-  }
-  currentView.value = 'workspace'
-  showToast('В разделе «Документы» можно загрузить голосовое сообщение OGG, WAV или MP3')
-}
+
 </script>

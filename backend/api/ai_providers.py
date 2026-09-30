@@ -87,9 +87,7 @@ def anthropic_message_payload(payload, *, default_max_tokens):
 
 def anthropic_count_payload(payload, *, default_max_tokens):
     """Token Counting accepts the Messages input but not generation controls."""
-    result = anthropic_message_payload(
-        payload, default_max_tokens=default_max_tokens
-    )
+    result = anthropic_message_payload(payload, default_max_tokens=default_max_tokens)
     result.pop("max_tokens")
     return result
 
@@ -170,3 +168,144 @@ def normalize_anthropic_message(data):
         ],
         "usage": usage,
     }
+
+
+def analytics_payload(model, messages, tools, max_tokens, api_format):
+    """Translate tool conversations separately from existing text-only methods."""
+    if api_format == OPENAI_COMPATIBLE:
+        return {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "max_tokens": max_tokens,
+            "temperature": 0.1,
+        }
+    native = []
+    system = []
+    for message in messages:
+        if message["role"] == "system":
+            system.append(message["content"])
+        elif message["role"] == "tool":
+            block = {
+                "type": "tool_result",
+                "tool_use_id": message["tool_call_id"],
+                "content": message["content"],
+            }
+            if (
+                native
+                and native[-1]["role"] == "user"
+                and isinstance(native[-1]["content"], list)
+            ):
+                native[-1]["content"].append(block)
+            else:
+                native.append({"role": "user", "content": [block]})
+        elif message["role"] == "assistant" and message.get("tool_calls"):
+            blocks = (
+                [{"type": "text", "text": message["content"]}]
+                if message.get("content")
+                else []
+            )
+            import json
+
+            blocks += [
+                {
+                    "type": "tool_use",
+                    "id": call["id"],
+                    "name": call["function"]["name"],
+                    "input": json.loads(call["function"]["arguments"]),
+                }
+                for call in message["tool_calls"]
+            ]
+            native.append({"role": "assistant", "content": blocks})
+        else:
+            native.append(
+                {"role": message["role"], "content": message["content"] or ""}
+            )
+    return {
+        "model": model,
+        "system": "\n\n".join(system),
+        "messages": native,
+        "tools": [
+            {
+                "name": tool["function"]["name"],
+                "description": tool["function"]["description"],
+                "input_schema": tool["function"]["parameters"],
+            }
+            for tool in tools
+        ],
+        "max_tokens": max_tokens,
+    }
+
+
+def analytics_turn(data, api_format):
+    import json
+
+    calls = []
+    if api_format == ANTHROPIC_MESSAGES:
+        if (
+            not isinstance(data, dict)
+            or data.get("stop_reason") not in ["end_turn", "tool_use"]
+            or not isinstance(data.get("content"), list)
+        ):
+            raise ProviderUnavailable("provider_invalid_response")
+        text = ""
+        for block in data["content"]:
+            if not isinstance(block, dict):
+                raise ProviderUnavailable("provider_invalid_response")
+            if block.get("type") == "text" and isinstance(block.get("text"), str):
+                text += block["text"]
+            elif block.get("type") == "tool_use":
+                calls.append(
+                    {
+                        "id": block.get("id"),
+                        "name": block.get("name"),
+                        "arguments": block.get("input"),
+                    }
+                )
+            else:
+                raise ProviderUnavailable("provider_invalid_response")
+        if (
+            data["stop_reason"] == "tool_use"
+            and not calls
+            or data["stop_reason"] == "end_turn"
+            and calls
+        ):
+            raise ProviderUnavailable("provider_invalid_response")
+    else:
+        try:
+            choice = data["choices"][0]
+            if choice["finish_reason"] not in ["stop", "tool_calls"]:
+                raise ProviderUnavailable("provider_output_truncated")
+            message = choice["message"]
+            text = message.get("content") or ""
+            for call in message.get("tool_calls", []):
+                calls.append(
+                    {
+                        "id": call["id"],
+                        "name": call["function"]["name"],
+                        "arguments": json.loads(call["function"]["arguments"]),
+                    }
+                )
+            if (
+                choice["finish_reason"] == "tool_calls"
+                and not calls
+                or choice["finish_reason"] == "stop"
+                and calls
+            ):
+                raise ProviderUnavailable("provider_invalid_response")
+        except (KeyError, TypeError, IndexError, ValueError):
+            raise ProviderUnavailable("provider_invalid_response") from None
+    if not isinstance(text, str) or len(text) > 12000 or len(calls) > 16:
+        raise ProviderUnavailable("provider_invalid_response")
+    seen = set()
+    for call in calls:
+        if (
+            not isinstance(call["id"], str)
+            or not 1 <= len(call["id"]) <= 128
+            or call["id"] in seen
+            or not isinstance(call["name"], str)
+            or not isinstance(call["arguments"], dict)
+        ):
+            raise ProviderUnavailable("provider_invalid_response")
+        seen.add(call["id"])
+    return {"text": text, "tool_calls": calls}

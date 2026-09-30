@@ -1,19 +1,23 @@
 import csv
 import io
-from django.db import transaction
+import time
+import logging
+from asgiref.sync import async_to_sync
+from django.db import connection
+from django.conf import settings
 from django.utils import timezone
 from .models import AsyncOperation, UserProfile
 from . import access
 from .datamart import datamart
-from .ai_service import AIService
-from .qdrant_service import qdrant_service
 from .providers import ProviderUnavailable
 from .facts import json_value
 
+logger = logging.getLogger(__name__)
 
-def execute_operation(pk):
+
+def _execute_operation(pk):
     op = AsyncOperation.objects.select_related("requested_by").get(pk=pk)
-    if op.status in ("cancelled", "expired", "succeeded"):
+    if op.status in ("cancelled", "expired", "succeeded", "failed"):
         return
     if op.expires_at <= timezone.now() or op.access_fingerprint != access.fingerprint(
         op.requested_by
@@ -22,17 +26,21 @@ def execute_operation(pk):
             status="expired", result={}, error_code="access_or_lifetime_changed"
         )
         return
-    AsyncOperation.objects.filter(pk=pk).update(status="running")
+    if not AsyncOperation.objects.filter(
+        pk=pk, status__in=["queued", "running"], expires_at__gt=timezone.now()
+    ).update(status="running"):
+        return
     try:
         user = op.requested_by
         values = op.request
         prompt = values.get("prompt", "")
-        query = prompt.lower()
+        query = " ".join(prompt.lower().replace("↗", "").split())
         period = values.get("period", "this_month")
         profile = UserProfile.objects.filter(user=user).first()
         mode = profile.ai_response_mode if profile else "detailed"
         suggest = profile.ai_auto_suggest_next_actions if profile else True
         quotes = []
+        presentation = None
         if op.operation_type == "export":
             mart = datamart.get_sales_kpi_mart(user, period, values)
             buffer = io.StringIO()
@@ -73,45 +81,57 @@ def execute_operation(pk):
                 "coverage": mart["coverage"],
             }
         else:
-            if any(word in query for word in ("график", "диаграм", "chart", "сравни")):
+            if query == "покажи график поступлений":
                 widget = {
                     "type": "chart",
                     "data": datamart.get_sales_chart_dataset(user, period, values),
                 }
                 text = "План и подтверждённые поступления за одинаковый период. План не задан там, где серия отсутствует."
-            elif any(
-                word in query
-                for word in ("обещ", "дедлайн", "напомин", "задач", "срок", "просроч")
-            ):
+            elif query == "какие обещания просрочены?":
                 widget = {
                     "type": "commitments_list",
                     "data": datamart.get_commitments_sla_mart(user, period),
                 }
                 text = f"На контроле: {widget['data']['total_count']}. Просрочено: {widget['data']['overdue_count']}."
-            elif any(
-                word in query
-                for word in ("сделк", "объект", "проект", "воронк", "марж")
-            ):
+            elif query == "покажи воронку проектов":
                 widget = {
                     "type": "project_table",
                     "data": datamart.get_pipeline_mart(user, values),
                 }
                 text = "Подтверждённые проекты. Маржа доступна только при подтверждённой стоимости."
-            elif any(
-                word in query
-                for word in ("kpi", "кпи", "план", "команд", "менеджер", "поступлен")
-            ):
+            elif query == "покажи kpi команды":
                 data = datamart.get_sales_kpi_mart(user, period, values)
                 widget = {"type": "kpi_grid", "data": data}
                 text = data["insight"]["headline"] + " " + data["coverage"]["message"]
             else:
-                config_ids = list(access.configs_for(user).values_list("id", flat=True))
-                quotes = qdrant_service.search(prompt, config_ids=config_ids)
-                data = datamart.get_sales_kpi_mart(user, period, values)
-                text = AIService.chat_assistant(
-                    prompt, {"kpi": json_value(data), "evidence": quotes}, mode, suggest
+                from .analytics.data import OperationContext
+                from .analytics.host import run
+
+                deadline = time.monotonic() + min(
+                    150,
+                    max(1, settings.AI_WORKER_TIMEOUT - 30),
+                    max(0, (op.expires_at - timezone.now()).total_seconds()),
                 )
-                widget = None
+                context = OperationContext(
+                    op.id,
+                    user.id,
+                    op.access_fingerprint,
+                    op.expires_at,
+                    deadline,
+                    values,
+                )
+                from .ai_service import analytics_deadline
+
+                deadline_token = analytics_deadline.set(deadline)
+                try:
+                    dynamic = async_to_sync(run)(context, prompt, mode, suggest)
+                    text, widget = dynamic["text"], None
+                    presentation = dynamic["presentation"]
+                    quotes = dynamic.get("quotes", [])
+                finally:
+                    analytics_deadline.reset(deadline_token)
+                    context.registry.clear()
+                    context.sources.clear()
             if mode == "concise":
                 text = text.split("\n\n")[0][:600]
             if mode == "finance" and widget and widget["type"] == "kpi_grid":
@@ -121,13 +141,21 @@ def execute_operation(pk):
                 "prompt": prompt,
                 "text": text,
                 "widget": widget,
+                "presentation": presentation,
                 "quotes": quotes,
                 "insights": ["Откройте источник показателя для проверки операций."]
                 if suggest
                 else [],
             }
         # Recheck access after the provider returns; revoked grants invalidate in-flight work.
-        if op.access_fingerprint != access.fingerprint(user):
+        user.refresh_from_db()
+        op.refresh_from_db()
+        if op.status != "running":
+            return
+        if (
+            op.expires_at <= timezone.now()
+            or op.access_fingerprint != access.fingerprint(user)
+        ):
             AsyncOperation.objects.filter(pk=pk).update(
                 status="expired", result={}, error_code="access_changed"
             )
@@ -141,6 +169,26 @@ def execute_operation(pk):
             if isinstance(exc, ProviderUnavailable)
             else "operation_failed"
         )
+        logger.warning("operation_failed operation_id=%s code=%s", pk, code)
         AsyncOperation.objects.filter(pk=pk, status="running").update(
-            status="failed", result={}, error_code=code
+            status="expired" if code == "access_or_lifetime_changed" else "failed",
+            result={},
+            error_code=code,
         )
+
+
+def execute_operation(pk):
+    # The worker holds the lock for the complete operation, including tool turns.
+    # Separate operation namespace prevents collisions with other advisory users.
+    if connection.vendor != "postgresql":
+        return _execute_operation(pk)
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT pg_try_advisory_lock(%s, %s)", [73104, pk])
+        acquired = cursor.fetchone()[0]
+    if not acquired:
+        return
+    try:
+        _execute_operation(pk)
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_unlock(%s, %s)", [73104, pk])
