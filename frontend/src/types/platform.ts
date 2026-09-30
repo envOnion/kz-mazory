@@ -19,7 +19,52 @@ export interface NotificationItem { id: number; title: string; message: string; 
 export interface Delivery { state: string; channel: string; updated_at: string; error_code: string }
 export interface DispatchNotificationPayload { recipient_id: number; project_id?: number; title: string; message: string; type?: string; send_whatsapp?: boolean }
 export interface Session { id: number; device: string; created_at: string; last_used_at: string; expires_at: string }
-export interface Candidate { id: number; project_id: number | null; project_name: string; team_id: number; manager_id: number | null; fact_type: string; proposed_changes: Record<string, unknown>; status: string; base_version: number; current_version: number; confidence: number; uncertainties: string[]; evidence: Evidence[]; review_reason: string; created_at: string }
+export type CandidateStatus = 'pending' | 'approved' | 'rejected' | 'superseded'
+export type CandidateFactType = 'project' | 'payment' | 'commitment'
+export type CrmMatchState = 'not_requested' | 'queued' | 'matched' | 'ambiguous' | 'not_found' | 'disabled' | 'error'
+export type CrmMatchSelectionState = 'suggested' | 'selected' | 'dismissed'
+export interface CrmMatchOption {
+  id: number
+  project_id: number | null
+  project_version: number | null
+  bitrix_deal_id: string
+  bitrix_company_id: string
+  deal_title: string
+  company_name: string
+  object_label: string
+  stage_id: string
+  opportunity: Money | null
+  currency: string
+  score: number
+  match_reasons: string[]
+  selection_state: CrmMatchSelectionState
+  captured_at: string
+}
+export interface CrmResolution {
+  state: CrmMatchState
+  revision: number
+  checked_at: string | null
+  error_code: string
+  options: CrmMatchOption[]
+}
+export interface Candidate {
+  id: number
+  project_id: number | null
+  project_name: string
+  team_id: number
+  manager_id: number | null
+  fact_type: CandidateFactType
+  proposed_changes: Record<string, unknown>
+  status: CandidateStatus
+  base_version: number
+  current_version: number
+  confidence: number
+  uncertainties: string[]
+  evidence: Evidence[]
+  review_reason: string
+  created_at: string
+  crm_resolution: CrmResolution
+}
 export interface Evidence { id: number; quote: string; source_id: number; source_url: string }
 export interface Source { id: number; content: string; sender_name: string; sent_at: string | null; received_at: string; processing_state: string; revision: string }
 export interface Directory { teams: { id: number; name: string; history_complete_from: string | null }[]; profiles: { id: number; user_id: number; full_name: string }[]; projects: { id: number; name: string; version: number; currency: string; team_id: number }[] }

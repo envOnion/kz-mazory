@@ -1,7 +1,12 @@
-from .admin_access import ScopedReadOnlyAdmin, IntegrationAdmin, SuperuserAdmin
+from collections import Counter
 import json
+from urllib.parse import quote, urlsplit
+
 import requests
+
 from django.contrib import admin
+from django.db.models import F, Prefetch
+from django.template.loader import render_to_string
 from django.utils.html import format_html, format_html_join
 from django.urls import reverse
 from django.utils.decorators import method_decorator
@@ -13,6 +18,9 @@ from django.utils.safestring import mark_safe
 from django.contrib import messages
 from unfold.admin import ModelAdmin, TabularInline
 from unfold.decorators import action
+
+from .admin_access import ScopedReadOnlyAdmin, IntegrationAdmin, SuperuserAdmin
+from .providers import ProviderUnavailable, checked_url
 from api.models import (
     UserProfile,
     Company,
@@ -25,8 +33,335 @@ from api.models import (
     AISettings,
     BitrixSettings,
     BitrixDealChangeLog,
+    CandidateCrmMatch,
+    FactCandidate,
     MessageProcessingTrace,
 )
+
+
+CRM_MATCH_STATE_UI = {
+    "not_requested": {
+        "label": "Нет данных о CRM-проверке",
+        "description": "CRM-сопоставление для этого факта ещё не запускалось или не фиксировалось в исторических данных.",
+        "tone": "neutral",
+    },
+    "queued": {
+        "label": "CRM-проверка в очереди",
+        "description": "Фоновая read-only проверка запланирована или выполняется.",
+        "tone": "info",
+    },
+    "matched": {
+        "label": "Сопоставлено с CRM",
+        "description": "Найдена одна детерминированная сделка либо выбор подтверждён человеком.",
+        "tone": "good",
+    },
+    "ambiguous": {
+        "label": "Требуется выбор сделки",
+        "description": "CRM вернула варианты, но данных недостаточно для безопасной автоматической привязки.",
+        "tone": "warn",
+    },
+    "not_found": {
+        "label": "Совпадений в CRM не найдено",
+        "description": "Read-only поиск успешно завершён и не вернул подходящих сделок.",
+        "tone": "neutral",
+    },
+    "disabled": {
+        "label": "CRM-проверка отключена",
+        "description": "Поиск не выполнялся: read-only сопоставление с CRM выключено.",
+        "tone": "neutral",
+    },
+    "error": {
+        "label": "Ошибка CRM-проверки",
+        "description": "Поиск не завершён; отсутствие сделки не подтверждено.",
+        "tone": "error",
+    },
+}
+
+CRM_MATCH_COUNT_LABELS = {
+    "not_requested": "без данных",
+    "queued": "в очереди",
+    "matched": "сопоставлено",
+    "ambiguous": "требует выбора",
+    "not_found": "не найдено",
+    "disabled": "отключено",
+    "error": "ошибка",
+}
+
+CRM_MATCH_SUMMARY_ORDER = (
+    "matched",
+    "ambiguous",
+    "not_found",
+    "queued",
+    "disabled",
+    "error",
+    "not_requested",
+)
+
+CRM_MATCH_REASON_LABELS = {
+    "existing_project_bitrix_id": "У локального проекта уже сохранён этот Bitrix ID.",
+    "company_exact": "Название компании совпало точно.",
+    "title_exact": "TITLE сделки точно совпал с объектом.",
+    "object_field_exact": "Настроенное поле объекта точно совпало с фактом.",
+    "title_partial": "TITLE сделки частично совпал с объектом; требуется ручная проверка.",
+    "object_field_partial": "Поле объекта частично совпало; требуется ручная проверка.",
+}
+
+
+def _fact_count_label(count):
+    remainder = count % 100
+    if 11 <= remainder <= 14:
+        noun = "фактов"
+    else:
+        noun = {1: "факт", 2: "факта", 3: "факта", 4: "факта"}.get(
+            count % 10, "фактов"
+        )
+    return f"{count} {noun}"
+
+
+def _candidate_queryset():
+    current_matches = (
+        CandidateCrmMatch.objects.filter(
+            crm_match_revision=F("candidate__crm_match_revision")
+        )
+        .select_related("project")
+        .order_by("-score", "id")
+    )
+    return FactCandidate.objects.select_related("project").prefetch_related(
+        Prefetch("crm_matches", queryset=current_matches, to_attr="current_crm_matches")
+    ).order_by("id")
+
+
+def _with_trace_candidates(queryset):
+    return queryset.prefetch_related(
+        Prefetch("candidates", queryset=_candidate_queryset(), to_attr="crm_candidates")
+    )
+
+
+def _trace_candidates(obj):
+    prefetched = getattr(obj, "crm_candidates", None)
+    if prefetched is not None:
+        return list(prefetched)
+    return list(_candidate_queryset().filter(trace=obj))
+
+
+def _candidate_matches(candidate):
+    prefetched = getattr(candidate, "current_crm_matches", None)
+    if prefetched is not None:
+        return list(prefetched)
+    return list(
+        candidate.crm_matches.filter(
+            crm_match_revision=candidate.crm_match_revision
+        )
+        .select_related("project")
+        .order_by("-score", "id")
+    )
+
+
+def _crm_summary(obj):
+    candidates = _trace_candidates(obj)
+    counts = Counter(candidate.crm_match_state for candidate in candidates)
+    if not candidates:
+        return {
+            "candidate_count": 0,
+            "counts": counts,
+            "text": "Нет кандидатов для CRM-проверки",
+            "tone": "neutral",
+        }
+    parts = [_fact_count_label(len(candidates))]
+    parts.extend(
+        f"{CRM_MATCH_COUNT_LABELS[state]}: {counts[state]}"
+        for state in CRM_MATCH_SUMMARY_ORDER
+        if counts[state]
+    )
+    tone = (
+        "error"
+        if counts["error"]
+        else "warn"
+        if counts["ambiguous"]
+        else "info"
+        if counts["queued"]
+        else "good"
+        if counts["matched"]
+        and not any(
+            counts[state]
+            for state in ("not_requested", "not_found", "disabled")
+        )
+        else "neutral"
+    )
+    return {
+        "candidate_count": len(candidates),
+        "counts": counts,
+        "text": " · ".join(parts),
+        "tone": tone,
+    }
+
+
+def _crm_summary_badge(obj):
+    summary = _crm_summary(obj)
+    return format_html(
+        '<span class="mazory-admin-badge mazory-admin-badge--{}">{}</span>',
+        summary["tone"],
+        summary["text"],
+    )
+
+
+def _candidate_projects(obj):
+    projects = {}
+    for candidate in _trace_candidates(obj):
+        if candidate.project_id and candidate.project:
+            projects[candidate.project_id] = candidate.project
+    # Older traces predate FactCandidate and only keep the direct project link.
+    # Preserve that historical relation without presenting it as a CRM match.
+    if not projects and obj.project_id and obj.project:
+        projects[obj.project_id] = obj.project
+    return list(projects.values())
+
+
+def _bitrix_display_config():
+    matching_config = (
+        BitrixSettings.objects.filter(crm_matching_enabled=True)
+        .order_by("pk")
+        .first()
+    )
+    return (
+        matching_config
+        or BitrixSettings.objects.order_by("pk").first()
+        or BitrixSettings()
+    )
+
+
+def _bitrix_portal_base(config):
+    try:
+        webhook_url = effective_webhook_url(config)
+        checked_url(webhook_url)
+        parsed = urlsplit(webhook_url)
+        if parsed.scheme != "https" or not parsed.hostname:
+            return ""
+        hostname = (
+            f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        )
+        port = parsed.port
+        suffix = (
+            f":{port}"
+            if port and not (parsed.scheme == "https" and port == 443)
+            and not (parsed.scheme == "http" and port == 80)
+            else ""
+        )
+        return f"{parsed.scheme}://{hostname}{suffix}"
+    except (ProviderUnavailable, TypeError, ValueError):
+        return ""
+
+
+def _crm_error_text(code):
+    labels = {
+        "crm_disabled": "Read-only сопоставление CRM выключено.",
+        "crm_matching_disabled": "Read-only сопоставление CRM выключено.",
+        "crm_not_configured": "Подключение Bitrix24 для read-only поиска не настроено.",
+        "crm_rejected": "Bitrix24 отклонил read-only запрос.",
+        "crm_invalid_response": "Bitrix24 вернул ответ в неожиданном формате.",
+        "crm_invalid_pagination": "Bitrix24 вернул некорректную страницу результатов.",
+        "crm_pagination_limit": "Поиск остановлен на безопасном лимите страниц.",
+        "crm_object_field_invalid": "Код поля объекта CRM настроен некорректно.",
+        "crm_match_query_empty": "В факте нет объекта или компании для CRM-поиска.",
+        "crm_project_scope_conflict": "Локальный проект относится к другой команде.",
+        "crm_match_stale": "Результат относится к устаревшей версии кандидата.",
+        "crm_match_deadline": "CRM-проверка остановлена по общему лимиту времени.",
+        "crm_match_request_limit": "CRM-проверка остановлена по лимиту read-only запросов.",
+        "provider_timeout": "Bitrix24 не ответил вовремя.",
+        "crm_connection_error": "Соединение с Bitrix24 прервано.",
+        "crm_request_error": "Read-only запрос к Bitrix24 не был завершён.",
+        "crm_unexpected_error": "CRM-проверка остановлена внутренней ошибкой.",
+        "provider_not_allowed": "Адрес Bitrix24 не разрешён настройками безопасности.",
+        "bitrix_webhook_invalid": "Адрес REST Webhook Bitrix24 имеет неверный формат.",
+        "provider_server_error": "Bitrix24 временно недоступен.",
+    }
+    if str(code).startswith("crm_http_"):
+        return "Bitrix24 вернул ошибку HTTP; безопасный повтор запланирован."
+    return labels.get(
+        code,
+        "CRM-проверка не завершена. Подробности доступны в журнале фоновых задач.",
+    )
+
+
+def _crm_card(candidate, portal_base):
+    state = CRM_MATCH_STATE_UI.get(
+        candidate.crm_match_state, CRM_MATCH_STATE_UI["not_requested"]
+    )
+    proposed = candidate.proposed_changes or {}
+    options = []
+    matches = sorted(
+        _candidate_matches(candidate),
+        key=lambda match: (
+            {"selected": 0, "suggested": 1, "dismissed": 2}.get(
+                match.selection_state, 3
+            ),
+            -match.score,
+            match.id,
+        ),
+    )
+    for match in matches:
+        deal_id = str(match.bitrix_deal_id)
+        reasons = (
+            [
+                CRM_MATCH_REASON_LABELS.get(str(reason), str(reason))
+                for reason in match.match_reasons[:8]
+            ]
+            if isinstance(match.match_reasons, list)
+            else []
+        )
+        deal_url = (
+            f"{portal_base}/crm/deal/details/{quote(deal_id, safe='')}/"
+            if portal_base and deal_id
+            else ""
+        )
+        options.append(
+            {
+                "id": match.id,
+                "deal_id": deal_id,
+                "deal_title": match.deal_title or "Без названия",
+                "company_name": match.company_name or "—",
+                "object_label": match.object_label or "—",
+                "stage_id": match.stage_id or "—",
+                "opportunity": (
+                    f"{match.opportunity:,.2f} {match.currency or ''}".strip()
+                    if match.opportunity is not None
+                    else "—"
+                ),
+                "score": match.score,
+                "reasons": reasons,
+                "selection_state": match.selection_state,
+                "selection_label": match.get_selection_state_display(),
+                "deal_url": deal_url,
+                "project": match.project,
+                "project_url": (
+                    reverse("admin:api_project_change", args=[match.project_id])
+                    if match.project_id
+                    else ""
+                ),
+            }
+        )
+    return {
+        "id": candidate.id,
+        "fact_type": candidate.get_fact_type_display(),
+        "review_status": candidate.get_status_display(),
+        "object_name": proposed.get("object_name") or "—",
+        "company_name": proposed.get("company_name") or "—",
+        "state": candidate.crm_match_state,
+        "state_label": state["label"],
+        "state_description": state["description"],
+        "tone": state["tone"],
+        "checked_at": candidate.crm_checked_at,
+        "revision": candidate.crm_match_revision,
+        "error_code": candidate.crm_match_error_code,
+        "error_text": _crm_error_text(candidate.crm_match_error_code),
+        "project": candidate.project,
+        "project_url": (
+            reverse("admin:api_project_change", args=[candidate.project_id])
+            if candidate.project_id
+            else ""
+        ),
+        "options": options,
+    }
 
 
 @admin.register(UserProfile)
@@ -181,6 +516,11 @@ class MessageProcessingTraceInLine(TabularInline):
     def has_add_permission(self, request, obj=None):
         return False
 
+    def get_queryset(self, request):
+        return _with_trace_candidates(
+            super().get_queryset(request).select_related("project")
+        )
+
     def created_at_fmt(self, obj):
         return obj.created_at.strftime("%d.%m.%Y %H:%M:%S") if obj.created_at else "—"
 
@@ -206,12 +546,7 @@ class MessageProcessingTraceInLine(TabularInline):
     earlier_messages_badge.short_description = "Сообщений в контексте"
 
     def bitrix_matched_badge(self, obj):
-        if obj.bitrix_matched_deal_id:
-            return format_html(
-                '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-blue-500/10 text-blue-500">Сделка #{}</span>',
-                obj.bitrix_matched_deal_id,
-            )
-        return mark_safe('<span class="text-xs text-gray-400">В CRM нет</span>')
+        return _crm_summary_badge(obj)
 
     bitrix_matched_badge.short_description = "Bitrix24"
 
@@ -247,6 +582,9 @@ class MessageProcessingTraceInLine(TabularInline):
 
 @admin.register(Project)
 class ProjectAdmin(ScopedReadOnlyAdmin):
+    class Media:
+        css = {"all": ("mazory/css/admin_lists.css",)}
+
     list_display = (
         "name",
         "verified_badge",
@@ -649,6 +987,12 @@ class BitrixSettingsAdmin(IntegrationAdmin):
     form = BitrixSettingsForm
     search_fields = ("name",)
 
+    def has_add_permission(self, request):
+        return (
+            not BitrixSettings.objects.exists()
+            and super().has_add_permission(request)
+        )
+
     class Media:
         css = {"all": ("mazory/css/admin_lists.css",)}
 
@@ -671,7 +1015,21 @@ class BitrixSettingsAdmin(IntegrationAdmin):
             {"fields": ("name", "webhook_url_masked", "new_webhook_url", "is_active")},
         ),
         (
-            "Синхронизация",
+            "Read-only сопоставление",
+            {
+                "description": (
+                    "Независимый поиск существующих компаний и сделок. "
+                    "Этот режим не создаёт и не изменяет записи Bitrix24."
+                ),
+                "fields": (
+                    "crm_matching_enabled",
+                    "deal_object_field_code",
+                    "deal_category_id",
+                ),
+            },
+        ),
+        (
+            "Исходящая и входящая синхронизация",
             {
                 "fields": (
                     "hourly_sync_enabled",
@@ -679,7 +1037,6 @@ class BitrixSettingsAdmin(IntegrationAdmin):
                     "auto_import_deals",
                     "auto_create_tasks",
                     "sync_timeline_comments",
-                    "deal_category_id",
                     "default_assigned_by_id",
                 )
             },
@@ -739,9 +1096,14 @@ class BitrixSettingsAdmin(IntegrationAdmin):
     @admin.display(description="Синхронизация")
     def sync_summary(self, obj):
         return format_html(
-            '<div class="mazory-list-stack"><span class="mazory-admin-badge mazory-admin-badge--{}">{}</span>{}</div>',
+            '<div class="mazory-list-stack">'
+            '<span class="mazory-admin-badge mazory-admin-badge--{}">Запись: {}</span>'
+            '<span class="mazory-admin-badge mazory-admin-badge--{}">Read-only поиск: {}</span>'
+            "{}</div>",
             "good" if obj.is_active else "neutral",
-            "Активна" if obj.is_active else "Выключена",
+            "включена" if obj.is_active else "выключена",
+            "info" if obj.crm_matching_enabled else "neutral",
+            "включён" if obj.crm_matching_enabled else "выключен",
             format_html_join(
                 "",
                 '<span class="mazory-list-meta">{}: {}</span>',
@@ -911,14 +1273,16 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
         "project_link",
     )
     list_display_links = ("trace_source",)
-    list_select_related = ("project",)
     list_filter = ("pipeline_action", "status", "created_at")
     search_fields = (
         "whatsapp_content",
         "whatsapp_sender_name",
         "whatsapp_sender_phone",
-        "bitrix_matched_deal_id",
         "project__name",
+        "candidates__project__name",
+        "candidates__crm_matches__bitrix_deal_id",
+        "candidates__crm_matches__deal_title",
+        "candidates__crm_matches__company_name",
         "whatsapp_message_id",
     )
     readonly_fields = (
@@ -934,7 +1298,7 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
     )
     fieldsets = (
         (
-            "Сквозная цепочка пайплайна (WhatsApp → Сообщения ранее → Bitrix24 → Итог)",
+            "Сквозная цепочка (WhatsApp → Контекст → CRM-сопоставление → AI-факты)",
             {"fields": ("pipeline_overview_banner", "result_summary_fmt")},
         ),
         ("Этап 1: «Входные данные WhatsApp»", {"fields": ("stage_1_whatsapp_card",)}),
@@ -943,16 +1307,21 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
             {"fields": ("stage_2_earlier_messages_card",)},
         ),
         (
-            "Этап 3: «Зависимые данные из Bitrix24» (CRM Поиск & Синхронизация)",
+            "Этап 3: Read-only сопоставление с Bitrix24 по каждому факту",
             {"fields": ("stage_3_bitrix_card",)},
         ),
         (
-            "Этап 4: «Итоговая запись» (AI Факты & Созданные сущности)",
+            "Этап 4: AI-факты и созданные сущности",
             {"fields": ("stage_4_final_record_card",)},
         ),
     )
     change_form_template = "admin/message_trace_change.html"
     actions = None
+
+    def get_queryset(self, request):
+        return _with_trace_candidates(
+            super().get_queryset(request).select_related("project")
+        )
 
     def get_urls(self):
         from django.urls import path
@@ -1151,20 +1520,7 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
     earlier_messages_badge.short_description = "Сообщений в контексте"
 
     def bitrix_matched_badge(self, obj):
-        if obj.bitrix_matched_deal_id:
-            cfg = BitrixSettings.get_active()
-            base_url = (
-                effective_webhook_url(cfg).split("/rest/")[0]
-                if "/rest/" in effective_webhook_url(cfg)
-                else "https://aquakip.bitrix24.kz"
-            )
-            url = f"{base_url}/crm/deal/details/{obj.bitrix_matched_deal_id}/"
-            return format_html(
-                '<a href="{}" target="_blank" rel="noopener noreferrer" class="mazory-admin-badge mazory-admin-badge--info">CRM #{} ↗</a>',
-                url,
-                obj.bitrix_matched_deal_id,
-            )
-        return mark_safe('<span class="mazory-list-meta">В CRM нет</span>')
+        return _crm_summary_badge(obj)
 
     bitrix_matched_badge.short_description = "Bitrix24 CRM"
 
@@ -1191,31 +1547,49 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
     pipeline_action_badge.short_description = "Итоговое действие"
 
     def project_link(self, obj):
-        if obj.project:
+        candidates = _trace_candidates(obj)
+        projects = _candidate_projects(obj)
+        links = format_html_join(
+            "",
+            '<a href="{}" class="mazory-list-link mazory-project-name" title="{}">{} →</a>',
+            (
+                (
+                    reverse("admin:api_project_change", args=[project.pk]),
+                    project.name,
+                    project.name,
+                )
+                for project in projects
+            ),
+        )
+        if links:
             return format_html(
-                '<a href="{}" class="mazory-list-stack mazory-list-link"><span class="mazory-project-name" title="{}">{}</span>'
-                '<span class="mazory-list-meta">{} ₸</span><span class="mazory-list-meta">{}</span></a>',
-                reverse("admin:api_project_change", args=[obj.project_id]),
-                obj.project.name,
-                obj.project.name,
-                f"{obj.project.contract_amount or 0:,.0f}",
-                "Подтверждена" if obj.project.is_verified else "Ждёт проверки",
+                '<span class="mazory-list-stack"><span class="mazory-list-meta">{} · {} связанных проектов</span>{}</span>',
+                _fact_count_label(len(candidates)),
+                len(projects),
+                links,
             )
-        return format_html('<span class="mazory-list-meta">{}</span>', "Без сделки")
+        return format_html(
+            '<span class="mazory-list-stack"><span class="mazory-list-meta">{}</span>'
+            '<span class="mazory-list-meta">{}</span></span>',
+            _fact_count_label(len(candidates)) if candidates else "Фактов нет",
+            "Каноническая сделка ещё не выбрана"
+            if candidates
+            else "Связь со сделкой не применима",
+        )
 
-    project_link.short_description = "Сделка"
+    project_link.short_description = "Кандидаты / сделки"
 
     def status_badge(self, obj):
         color = {"success": "good", "warning": "warn", "error": "error"}.get(
             obj.status, "neutral"
         )
         return format_html(
-            '<span class="mazory-admin-badge mazory-admin-badge--{}">{}</span>',
+            '<span class="mazory-admin-badge mazory-admin-badge--{}">AI: {}</span>',
             color,
             obj.get_status_display(),
         )
 
-    status_badge.short_description = "Статус"
+    status_badge.short_description = "AI-анализ"
 
     def result_summary_fmt(self, obj):
         lines = (obj.result_summary or "").split("\n")
@@ -1242,12 +1616,16 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
         """Интерактивный 4-шаговый визуальный прогресс пайплайна"""
         s1_title = f"{obj.whatsapp_sender_name}"
         s2_sub = badge_text(obj)
-        s3_sub = (
-            f"CRM #{obj.bitrix_matched_deal_id}"
-            if obj.bitrix_matched_deal_id
-            else "В CRM отсутствует"
+        s3_sub = _crm_summary(obj)["text"]
+        s4_sub = f"AI: {obj.get_status_display()}"
+        projects = _candidate_projects(obj)
+        project_summary = (
+            projects[0].name
+            if len(projects) == 1
+            else f"Связано проектов: {len(projects)}"
+            if projects
+            else "Ожидает review"
         )
-        s4_sub = obj.get_pipeline_action_display()
         html = format_html(
             '\n        <div class="mazory-trace-overview w-full my-3 p-5 rounded-2xl bg-gradient-to-r from-gray-900 via-indigo-950 to-gray-900 text-white shadow-lg border border-indigo-900/40">\n            <div class="text-xs font-mono uppercase tracking-wider text-indigo-400 mb-3 flex items-center justify-between">\n                <span>Data Lineage Audit Trail</span>\n                <span>ID Трассировки: #{}</span>\n            </div>\n            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 relative">\n                <!-- Step 1 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-emerald-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-emerald-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-emerald-500/20 flex items-center justify-center text-xs">1</span>\n                        WhatsApp Вход\n                    </div>\n                    <div class="mt-2 text-sm font-bold truncate text-white">{}</div>\n                    <div class="text-xs text-gray-400 font-mono mt-0.5">{}</div>\n                </div>\n\n                <!-- Step 2 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-purple-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-purple-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-purple-500/20 flex items-center justify-center text-xs">2</span>\n                        Контекст ранее\n                    </div>\n                    <div class="mt-2 text-sm font-bold text-white">{}</div>\n                    <div class="text-xs text-purple-300 mt-0.5">Сохранённый контекст</div>\n                </div>\n\n                <!-- Step 3 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-sky-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-sky-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-sky-500/20 flex items-center justify-center text-xs">3</span>\n                        Данные Bitrix24\n                    </div>\n                    <div class="mt-2 text-sm font-bold text-white truncate">{}</div>\n                    <div class="text-xs text-sky-300 mt-0.5 truncate">{}</div>\n                </div>\n\n                <!-- Step 4 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-amber-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-amber-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center text-xs">4</span>\n                        Итоговая запись\n                    </div>\n                    <div class="mt-2 text-sm font-bold text-white truncate">{}</div>\n                    <div class="text-xs text-amber-300 mt-0.5 truncate">{}</div>\n                </div>\n            </div>\n        </div>\n        ',
             obj.id,
@@ -1255,9 +1633,9 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
             obj.whatsapp_sender_phone or "Прямой вебхук",
             s2_sub,
             s3_sub,
-            obj.bitrix_deal_title or "Поиск по объекту",
+            "Независимый статус для каждого факта",
             s4_sub,
-            obj.project.name if obj.project else "Связанная сущность",
+            project_summary,
         )
         return mark_safe(html)
 
@@ -1293,58 +1671,30 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
     stage_2_earlier_messages_card.short_description = "2. История сообщений"
 
     def stage_3_bitrix_card(self, obj):
-        """Рендеринг Этапа 3: «Зависимые данные из Bitrix24»"""
-        matched_id = obj.bitrix_matched_deal_id
-        cfg = BitrixSettings.get_active()
-        base_url = (
-            effective_webhook_url(cfg).split("/rest/")[0]
-            if "/rest/" in effective_webhook_url(cfg)
-            else "https://aquakip.bitrix24.kz"
+        """Render one truthful CRM state per extracted fact."""
+        config = _bitrix_display_config()
+        portal_base = _bitrix_portal_base(config)
+        return render_to_string(
+            "admin/trace_crm_matches.html",
+            {
+                "cards": [
+                    _crm_card(candidate, portal_base)
+                    for candidate in _trace_candidates(obj)
+                ],
+                "summary": _crm_summary(obj),
+                "config_name": config.name,
+                "matching_enabled": config.crm_matching_enabled,
+                "outbound_enabled": config.is_active,
+                "webhook_configured": bool(effective_webhook_url(config)),
+            },
         )
-        deal_url = f"{base_url}/crm/deal/details/{matched_id}/" if matched_id else "#"
-        opp_str = (
-            f"{obj.bitrix_deal_opportunity:,.2f} ₸"
-            if obj.bitrix_deal_opportunity
-            else "—"
-        )
-        raw_deal_json = json.dumps(
-            obj.bitrix_raw_deal or {}, indent=2, ensure_ascii=False
-        )
-        if matched_id:
-            deal_block = format_html(
-                '\n            <div class="p-4 rounded-xl mazory-trace-card border border-sky-500/30 shadow-sm space-y-3">\n                <div class="flex items-center justify-between">\n                    <div class="flex items-center gap-2">\n                        <span class="px-2.5 py-1 text-xs font-bold rounded-lg bg-sky-500/20 text-sky-600">\n                            Сделка в Bitrix24 найдена\n                        </span>\n                        <a href="{}" target="_blank" class="text-sm font-bold text-sky-600 hover:underline">\n                            #{} — {} ↗\n                        </a>\n                    </div>\n                    <span class="text-xs font-mono mazory-trace-meta">Стадия CRM: {}</span>\n                </div>\n\n                <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">\n                    <div class="p-2.5 rounded mazory-trace-content">\n                        <span class="mazory-trace-meta block text-[11px]">Сумма в CRM:</span>\n                        <span class="font-bold mazory-trace-text">{}</span>\n                    </div>\n                    <div class="p-2.5 rounded mazory-trace-content">\n                        <span class="mazory-trace-meta block text-[11px]">Компания в CRM:</span>\n                        <span class="font-bold mazory-trace-text">{}</span>\n                    </div>\n                    <div class="p-2.5 rounded mazory-trace-content">\n                        <span class="mazory-trace-meta block text-[11px]">Поисковый запрос:</span>\n                        <span class="font-bold text-indigo-500 font-mono truncate block">{}</span>\n                    </div>\n                    <div class="p-2.5 rounded mazory-trace-content">\n                        <span class="mazory-trace-meta block text-[11px]">Защита от дублей:</span>\n                        <span class="font-bold text-emerald-600">Связана существующая</span>\n                    </div>\n                </div>\n\n                <details class="text-xs mazory-trace-meta cursor-pointer pt-1">\n                    <summary class="font-semibold text-sky-600 hover:underline">Показать сырой ответ crm.deal.list/get (JSON)</summary>\n                    <pre class="mt-2 p-3 bg-gray-950 text-gray-200 rounded-lg overflow-x-auto font-mono text-xs max-h-56"><code>{}</code></pre>\n                </details>\n            </div>\n            ',
-                deal_url,
-                matched_id,
-                obj.bitrix_deal_title or "Сделка Bitrix24",
-                obj.bitrix_deal_stage or "PREPARATION",
-                opp_str,
-                obj.bitrix_company_data.get("company_name")
-                or obj.bitrix_company_data.get("TITLE")
-                or obj.bitrix_company_data.get("name")
-                or "ТОО / Не привязана",
-                obj.bitrix_search_query or "—",
-                raw_deal_json,
-            )
-        else:
-            deal_block = format_html(
-                '\n            <div class="p-4 rounded-xl mazory-trace-card border border-amber-500/30 shadow-sm space-y-2">\n                <div class="flex items-center gap-2 text-xs font-semibold text-amber-600">\n                    <span>⚠ В Bitrix24 CRM сделка по объекту «{}» не найдена</span>\n                </div>\n                <div class="text-xs mazory-trace-meta">\n                    Система проверила наличие сделки через <code>BitrixService.find_deal_by_name</code> по полям TITLE и кастомным свойствам объекта.\n                    Так как совпадений нет, сделка создана локально как новая и подготовлена к первичной регистрации.\n                </div>\n            </div>\n            ',
-                obj.bitrix_search_query or "—",
-            )
-        summary_text = obj.bitrix_known_deals_summary or "—"
-        html = format_html(
-            '\n        <div class="p-5 rounded-xl border border-sky-500/30 bg-sky-50/10 dark:bg-sky-950/10 space-y-3">\n            <div class="flex items-center justify-between pb-2 border-b border-sky-500/20">\n                <div class="text-xs font-semibold text-sky-600 uppercase tracking-wider">\n                    Состояние Bitrix24 CRM на момент обработки\n                </div>\n                <div class="text-xs mazory-trace-meta">\n                    Webhook: <span class="font-mono text-sky-600">{}</span>\n                </div>\n            </div>\n\n            {}\n\n            <details class="text-xs mazory-trace-meta cursor-pointer pt-1">\n                <summary class="font-semibold text-sky-600 hover:underline">Сводка известных сделок компании, переданная в контекст AI (промпт)</summary>\n                <div class="mt-2 p-3 rounded-lg mazory-trace-content text-xs font-mono max-h-48 overflow-y-auto whitespace-pre-wrap">\n{}\n                </div>\n            </details>\n        </div>\n        ',
-            cfg.name,
-            deal_block,
-            summary_text,
-        )
-        return mark_safe(html)
 
-    stage_3_bitrix_card.short_description = "3. Зависимые данные из Bitrix24"
+    stage_3_bitrix_card.short_description = (
+        "3. Read-only сопоставление с Bitrix24 по каждому факту"
+    )
 
     def stage_4_final_record_card(self, obj):
         """Рендеринг Этапа 4: «Итоговая запись»"""
-        from django.template.loader import render_to_string
-
         facts = obj.ai_extracted_facts or {}
         facts_json = json.dumps(facts, indent=2, ensure_ascii=False)
         if obj.status == "error" or "facts" in facts or (
@@ -1361,33 +1711,45 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
                         obj.context_metadata.get("response_diagnostics", {}),
                         ensure_ascii=False, indent=2,
                     ),
-                    "candidates": obj.candidates.all(),
+                    "candidates": _trace_candidates(obj),
                     "facts_json": facts_json,
                 },
             )
         conf_pct = f"{obj.ai_confidence * 100:.0f}%"
-        project_html = format_html(
-            '<em class="mazory-trace-meta">{}</em>',
-            "Сделка не создавалась/не привязана",
-        )
-        if obj.project:
-            p = obj.project
-            p_url = f"/admin/api/project/{p.id}/change/"
-            verified_badge = format_html(
-                '<span class="{} font-bold">{}</span>',
-                "text-emerald-500" if p.is_verified else "text-amber-500",
-                "✓ Проверено" if p.is_verified else "⏳ Ожидает проверки",
+        projects = _candidate_projects(obj)
+        if projects:
+            project_html = format_html_join(
+                "",
+                '<div class="p-3 rounded-lg mazory-trace-card border border-emerald-500/30 space-y-2">'
+                '<a href="{}" class="text-sm font-bold text-indigo-600 hover:underline">'
+                'Проект #{}: {} ↗</a>'
+                '<div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">'
+                '<div><span class="mazory-trace-meta">Сумма:</span> '
+                '<b class="mazory-trace-text">{} ₸</b></div>'
+                '<div><span class="mazory-trace-meta">Маржа:</span> '
+                '<b class="mazory-trace-text">{}%</b></div>'
+                '<div><span class="mazory-trace-meta">Статус:</span> '
+                '<b class="mazory-trace-text">{}</b></div>'
+                '<div><span class="mazory-trace-meta">Проверка:</span> '
+                '<b class="mazory-trace-text">{}</b></div>'
+                '</div></div>',
+                (
+                    (
+                        reverse("admin:api_project_change", args=[project.pk]),
+                        project.pk,
+                        project.name,
+                        f"{project.contract_amount:,.2f}",
+                        project.actual_margin_percent,
+                        project.get_status_display(),
+                        "Подтверждена" if project.is_verified else "Ожидает review",
+                    )
+                    for project in projects
+                ),
             )
+        else:
             project_html = format_html(
-                '\n            <div class="p-3 rounded-lg mazory-trace-card border border-emerald-500/30 space-y-2">\n                <div class="flex items-center justify-between">\n                    <a href="{}" class="text-sm font-bold text-indigo-600 hover:underline">\n                        Проект #{}: {} ↗\n                    </a>\n                    {}\n                </div>\n                <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">\n                    <div><span class="mazory-trace-meta">Сумма:</span> <b class="mazory-trace-text">{} ₸</b></div>\n                    <div><span class="mazory-trace-meta">Маржа:</span> <b class="mazory-trace-text">{}%</b></div>\n                    <div><span class="mazory-trace-meta">Статус:</span> <b class="mazory-trace-text">{}</b></div>\n                    <div><span class="mazory-trace-meta">Синхр. Bitrix:</span> <b class="mazory-trace-text">{}</b></div>\n                </div>\n            </div>\n            ',
-                p_url,
-                p.id,
-                p.name,
-                verified_badge,
-                f"{p.contract_amount:,.2f}",
-                p.actual_margin_percent,
-                p.get_status_display(),
-                "Да" if p.needs_bitrix_sync else "Актуально",
+                '<em class="mazory-trace-meta">{}</em>',
+                "Канонические проекты кандидатов ещё не выбраны",
             )
         commitment_html = ""
         if obj.commitment:
@@ -1444,7 +1806,6 @@ from .models import (
     AuditEvent,
     ProjectRevision,
     OutboxEvent,
-    FactCandidate,
     NotificationDelivery,
 )
 

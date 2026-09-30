@@ -9,7 +9,7 @@
     </div>
   {% elif trace.status == 'error' %}
     <div role="alert">
-      <strong>Анализ не завершён</strong>
+      <strong>AI-анализ не завершён</strong>
       {% if retry.attempts >= retry.max_attempts and retry.state == 'failed' %}<p>Исчерпаны все {{ retry.max_attempts }} попыток. Автоматических повторов больше не будет.</p>{% endif %}
       <p>{{ error_label }}</p>
       <p class="mazory-trace-meta">Код: <code>{{ trace.error_code }}</code></p>
@@ -21,15 +21,19 @@
     {% endif %}
     <details><summary>Диагностика ответа AI</summary><pre class="mazory-trace-content p-3 overflow-auto">{{ diagnostics }}</pre></details>
   {% elif trace.status == 'warning' %}
-    <strong>Результат требует внимания</strong>
+    <strong>AI-результат требует внимания</strong>
     <p>{{ trace.result_summary }}</p>
   {% else %}
-    <strong>Результат анализа целевого сообщения</strong>
+    <strong>AI-анализ целевого сообщения завершён</strong>
     <p>{{ trace.result_summary }}</p>
-    <p class="mazory-trace-meta">Предложения AI требуют проверки человеком. Анализ сам по себе не подтверждает сделки или оплаты.</p>
+    <p class="mazory-trace-meta">Этот статус относится только к извлечению фактов. CRM-сопоставление показано отдельно на этапе 3; предложения AI требуют проверки человеком.</p>
     <ul>
       {% for candidate in candidates %}
-        <li><a href="{% url 'admin:api_factcandidate_change' candidate.pk %}">Предложение №{{ candidate.pk }} — {{ candidate.get_fact_type_display }}</a> · {{ candidate.get_status_display }}</li>
+        <li data-crm-state="{{ candidate.crm_match_state }}">
+          <a href="{% url 'admin:api_factcandidate_change' candidate.pk %}">Предложение №{{ candidate.pk }} — {{ candidate.get_fact_type_display }}</a>
+          · {{ candidate.get_status_display }} · CRM:
+          {% if candidate.crm_match_state == 'not_requested' %}Нет данных о CRM-проверке{% else %}{{ candidate.get_crm_match_state_display }}{% endif %}
+        </li>
       {% empty %}
         <li>Новых предложений для проверки нет.</li>
       {% endfor %}

@@ -6,8 +6,9 @@ from django.conf import settings
 from django.views.decorators.debug import sensitive_variables
 from unfold.widgets import INPUT_CLASSES
 
+from .bitrix_config import checked_bitrix_webhook_base
 from .models import AISettings, BitrixSettings
-from .providers import ProviderUnavailable, checked_base_url, checked_url
+from .providers import ProviderUnavailable, checked_base_url
 
 
 class BitrixSettingsForm(forms.ModelForm):
@@ -35,33 +36,36 @@ class BitrixSettingsForm(forms.ModelForm):
         if not value:
             return value
         try:
-            parsed = urlsplit(value)
-            valid = (
-                not parsed.username
-                and not parsed.password
-                and not parsed.query
-                and not parsed.fragment
-                and re.fullmatch(r"/rest/[1-9][0-9]*/[A-Za-z0-9_-]+/?", parsed.path)
-            )
-            if not valid:
-                raise ValueError
-            checked_url(value)
-        except ProviderUnavailable:
-            raise forms.ValidationError(
-                "Используйте HTTPS и разрешённый портал Bitrix24. "
-                "Для нового портала добавьте его хост в PROVIDER_ALLOWED_HOSTS на сервере."
-            ) from None
-        except ValueError:
-            raise forms.ValidationError(
-                "Укажите полный REST Webhook URL вида https://портал/rest/ID/ключ/, "
-                "без параметров запроса и имени метода."
-            ) from None
-        normalized = value.rstrip("/") + "/"
+            normalized = checked_bitrix_webhook_base(value)
+        except ProviderUnavailable as exc:
+            if str(exc) == "bitrix_webhook_invalid":
+                message = (
+                    "Укажите полный REST Webhook URL вида "
+                    "https://портал/rest/ID/ключ/, без параметров запроса "
+                    "и имени метода."
+                )
+            else:
+                message = (
+                    "Используйте HTTPS и разрешённый портал Bitrix24. "
+                    "Для нового портала добавьте его хост в "
+                    "PROVIDER_ALLOWED_HOSTS на сервере."
+                )
+            raise forms.ValidationError(message) from None
         if len(normalized) > 255:
             raise forms.ValidationError(
                 "Адрес Webhook не должен превышать 255 символов."
             )
         return normalized
+
+    def clean_deal_object_field_code(self):
+        value = (
+            self.cleaned_data.get("deal_object_field_code") or ""
+        ).strip().upper()
+        if value and not re.fullmatch(r"UF_CRM_[A-Z0-9_]+", value):
+            raise forms.ValidationError(
+                "Укажите код пользовательского поля вида UF_CRM_* либо оставьте поле пустым."
+            )
+        return value
 
     def save(self, commit=True):
         if self.cleaned_data.get("new_webhook_url"):

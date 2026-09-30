@@ -15,11 +15,39 @@
       <p v-for="uncertainty in item.uncertainties" :key="uncertainty" class="text-amber-300">{{ uncertainty }}</p>
       <blockquote v-for="evidence in item.evidence" :key="evidence.id" class="border-l-2 border-indigo-400 pl-3 text-sm whitespace-pre-wrap">{{ evidence.quote }} <button class="text-indigo-300 underline" @click="showSource(evidence.source_id)">Источник #{{ evidence.source_id }}</button></blockquote>
       <p v-if="!item.evidence.length" class="text-amber-300">Доступ к первоисточнику ограничен.</p>
-      <template v-if="item.status === 'pending' && canReview(item)">
-        <div class="flex flex-wrap gap-2"><button class="btn-primary" :disabled="busy || !item.evidence.length" @click="reviewItem(item, 'approve')">Подтвердить факт</button><button class="btn" :disabled="busy" @click="editing = item.id; editJson = JSON.stringify(item.proposed_changes, null, 2)">Исправить предложение</button><button class="btn" :disabled="busy" @click="reviewItem(item, 'reject')">Отклонить</button></div>
-        <label class="block text-sm">Основание / причина<input class="field w-full mt-1" v-model="reasons[item.id]" /></label>
-        <div class="flex gap-2 flex-wrap"><select class="field" v-model="matches[item.id]" aria-label="Сопоставить с проектом"><option :value="undefined">Выберите проект</option><option v-for="p in directory.projects.filter(p => p.team_id === item.team_id)" :key="p.id" :value="p.id">{{ p.name }} · v{{ p.version }}</option></select><button class="btn" :disabled="busy || !matches[item.id]" @click="matchItem(item)">Сопоставить / обновить версию</button></div>
-        <div v-if="editing === item.id"><label class="block text-sm">Проверенные значения<textarea class="field font-mono w-full h-60 mt-2" v-model="editJson" /></label><p class="text-xs text-slate-400">Исправления сохранятся вместе с подтверждением и исходной цитатой.</p></div>
+      <label v-if="item.status === 'pending' && (canReview(item) || canApprove(item) || canSelectCrm(item))" class="block text-sm">Основание / причина<input class="field w-full mt-1" v-model="reasons[item.id]" /></label>
+      <section v-if="item.fact_type === 'project'" class="rounded-xl border border-sky-700/60 bg-sky-950/20 p-3 space-y-3" :data-crm-state="item.crm_resolution.state">
+        <div class="flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <h3 class="font-semibold text-sky-200">Сопоставление с CRM</h3>
+            <p class="text-sm" :class="crmStateTone(item.crm_resolution.state)">{{ crmStateLabel(item) }}</p>
+          </div>
+          <span class="text-xs text-slate-400">Проверка №{{ item.crm_resolution.revision }}<template v-if="item.crm_resolution.checked_at"> · {{ new Date(item.crm_resolution.checked_at).toLocaleString() }}</template></span>
+        </div>
+        <p v-if="item.crm_resolution.error_code" class="text-xs text-rose-300">Код: {{ item.crm_resolution.error_code }}</p>
+        <fieldset v-if="item.crm_resolution.options.length" class="space-y-2">
+          <legend class="text-xs text-slate-400 mb-2">Варианты отсортированы по релевантности; оценка сама по себе не создаёт связь.</legend>
+          <label v-for="option in item.crm_resolution.options" :key="option.id" class="flex items-start gap-3 rounded-lg border border-slate-700 p-3 cursor-pointer hover:border-sky-500">
+            <input v-if="item.status === 'pending' && canSelectCrm(item)" v-model="crmSelections[item.id]" type="radio" :name="`crm-match-${item.id}`" :value="option.id" class="mt-1" />
+            <span class="min-w-0 flex-1 space-y-1">
+              <span class="flex flex-wrap justify-between gap-2"><strong class="break-words">#{{ option.bitrix_deal_id }} · {{ option.deal_title || 'Без названия' }}</strong><span class="text-xs text-slate-400">Рейтинг {{ option.score }}/100</span></span>
+              <span class="block text-sm text-slate-300">{{ option.company_name || 'Компания не указана' }}<template v-if="option.object_label"> · Объект: {{ option.object_label }}</template></span>
+              <span class="block text-xs text-slate-400">{{ option.stage_id || 'Стадия не указана' }} · {{ option.opportunity ?? 'Сумма не указана' }} {{ option.currency }}</span>
+              <span v-if="option.match_reasons.length" class="block text-xs text-sky-300">{{ option.match_reasons.join(' · ') }}</span>
+              <span v-if="option.selection_state === 'selected'" class="inline-block text-xs font-semibold text-emerald-300">Выбрано</span>
+            </span>
+          </label>
+        </fieldset>
+        <div v-if="item.status === 'pending' && canSelectCrm(item) && item.crm_resolution.options.length && ['ambiguous', 'matched'].includes(item.crm_resolution.state)" class="flex flex-wrap items-end gap-2">
+          <button class="btn" :disabled="busy || !crmSelections[item.id] || !reasons[item.id]?.trim()" @click="matchCrm(item)">Сопоставить с CRM</button>
+          <span class="text-xs text-slate-400">Выбор сохраняется отдельно и не подтверждает AI-факт.</span>
+        </div>
+      </section>
+      <template v-if="item.status === 'pending' && (canReview(item) || canApprove(item))">
+        <p v-if="requiresFinanceForCrmMaterialization(item) && !financeRole" class="text-sm text-amber-300">Выбрать CRM-сделку или отклонить предложение можно сейчас, но сумму из CRM должен подтвердить пользователь с ролью финансиста.</p>
+        <div class="flex flex-wrap gap-2"><button class="btn-primary" :disabled="busy || !item.evidence.length || !canApprove(item)" @click="reviewItem(item, 'approve')">Подтвердить факт</button><button v-if="canReview(item)" class="btn" :disabled="busy" @click="editing = item.id; editJson = JSON.stringify(item.proposed_changes, null, 2)">Исправить предложение</button><button v-if="canReview(item)" class="btn" :disabled="busy" @click="reviewItem(item, 'reject')">Отклонить</button></div>
+        <div v-if="canReview(item)" class="flex gap-2 flex-wrap"><select class="field" v-model="matches[item.id]" aria-label="Сопоставить с проектом"><option :value="undefined">Выберите проект</option><option v-for="p in directory.projects.filter(p => p.team_id === item.team_id)" :key="p.id" :value="p.id">{{ p.name }} · v{{ p.version }}</option></select><button class="btn" :disabled="busy || !matches[item.id]" @click="matchItem(item)">Сопоставить / обновить версию</button></div>
+        <div v-if="canReview(item) && editing === item.id"><label class="block text-sm">Проверенные значения<textarea class="field font-mono w-full h-60 mt-2" v-model="editJson" /></label><p class="text-xs text-slate-400">Исправления сохранятся вместе с подтверждением и исходной цитатой.</p></div>
       </template><p v-else class="text-sm text-slate-400">{{ item.status }} · {{ item.review_reason }}</p>
     </article><p v-if="!candidates.length && !loading" class="panel">Предложений с этим статусом нет.</p>
   </template>
@@ -55,7 +83,7 @@ import { ref, computed, onMounted } from 'vue'
 import { api, post, pollOperation, download } from '../composables/api'
 import { currentUser } from '../composables/session'
 import { useNotifications } from '../composables/useNotifications'
-import type { Page, Candidate, Directory, Finance, Attachment, Source, OperationReceipt, ExportResult, Health, LegacyProject } from '../types/platform'
+import type { Page, Candidate, CrmMatchState, Directory, Finance, Attachment, Source, OperationReceipt, ExportResult, Health, LegacyProject } from '../types/platform'
 import type { ManagerProjectSummary, CommitmentData, CommitmentItem } from '../types/chat'
 const roles = computed(() => currentUser.value?.roles || [])
 const client = computed(() => roles.value.includes('client')), lead = computed(() => roles.value.includes('team_lead')), financeRole = computed(() => roles.value.includes('finance'))
@@ -67,6 +95,7 @@ const legacy = ref<LegacyProject[]>([]), legacyTeams = ref<Record<number, number
 const projects = ref<ManagerProjectSummary[]>([]), candidates = ref<Candidate[]>([]), commitments = ref<CommitmentData | null>(null), financeData = ref<Finance | null>(null)
 const attachments = ref<Attachment[]>([]), health = ref<Health | null>(null), directory = ref<Directory>({ teams: [], profiles: [], projects: [] })
 const candidateStatus = ref('pending'), editing = ref<number | null>(null), editJson = ref(''), reasons = ref<Record<number, string>>({}), deadlines = ref<Record<number, string>>({}), matches = ref<Record<number, number>>({})
+const crmSelections = ref<Record<number, number>>({})
 const schedule = ref({ project_id: 0, due_date: '', amount: '' }), allocation = ref({ payment_id: 0, schedule_id: 0, amount: '' })
 const target = ref({ team_id: 0, profile_id: 0, amount: '', currency: 'KZT' }), targetMonth = ref(new Date().toISOString().slice(0, 7))
 const uploadProject = ref(0), file = ref<File | null>(null)
@@ -74,14 +103,47 @@ const noticeForm = ref({ recipient_id: 0, title: '', message: '', send_whatsapp:
 const dialog = ref<HTMLDialogElement>(), modalTitle = ref(''), modalText = ref('')
 const { notifications, fetchNotifications, markAllAsRead, acknowledge, dispatchNotification } = useNotifications()
 function projectName(id: number) { return directory.value.projects.find(p => p.id === id)?.name || projects.value.find(p => p.id === id)?.name || `#${id}` }
-function canReview(item: Candidate) { return item.fact_type === 'payment' || (item.fact_type === 'project' && ('contract_amount' in item.proposed_changes || 'cost_amount' in item.proposed_changes)) ? financeRole.value : lead.value }
+function canReview(item: Candidate) {
+  const financialProject = item.fact_type === 'project' && ('contract_amount' in item.proposed_changes || 'cost_amount' in item.proposed_changes)
+  return item.fact_type === 'payment' || financialProject ? financeRole.value : lead.value
+}
+function canSelectCrm(item: Candidate) { return item.fact_type === 'project' && lead.value }
+function requiresFinanceForCrmMaterialization(item: Candidate) {
+  const selected = item.crm_resolution.options.find(option => option.selection_state === 'selected')
+  if (!selected) return false
+  return item.crm_resolution.state === 'matched'
+    && item.project_id === null
+    && selected.project_id === null
+    && selected.opportunity !== null
+}
+function canApprove(item: Candidate) { return requiresFinanceForCrmMaterialization(item) ? financeRole.value : canReview(item) }
 function deliveryLabel(state: string) { return ({ sent: 'Отправлено', delivered: 'Доставлено', unknown: 'Результат неизвестен; автоматический повтор остановлен', queued: 'В очереди', failed: 'Ошибка отправки', cancelled: 'Отменено' } as Record<string, string>)[state] || state }
+function crmStateTone(state: CrmMatchState) { return ({ matched: 'text-emerald-300', ambiguous: 'text-amber-300', error: 'text-rose-300', queued: 'text-sky-300', not_found: 'text-slate-300', disabled: 'text-slate-300', not_requested: 'text-slate-300' } satisfies Record<CrmMatchState, string>)[state] }
+function crmStateLabel(item: Candidate) {
+  const options = item.crm_resolution.options.length
+  return ({
+    not_requested: 'CRM-сопоставление ещё не запускалось.',
+    queued: 'CRM-сопоставление в очереди или выполняется.',
+    matched: 'Связано с выбранной сделкой CRM.',
+    ambiguous: options === 1 ? 'Найден один вариант — требуется подтверждение.' : `Найдено вариантов: ${options}. Требуется выбор.`,
+    not_found: 'Поиск выполнен: совпадений в CRM не найдено.',
+    disabled: 'Поиск не выполнялся: сопоставление с CRM отключено.',
+    error: 'Поиск CRM завершился ошибкой; отсутствие сделки не установлено.',
+  } satisfies Record<CrmMatchState, string>)[item.crm_resolution.state]
+}
 async function load() {
   loading.value = true; error.value = ''
   try {
     if (tab.value === 'legacy') legacy.value = (await api<Page<LegacyProject>>('/legacy/projects/')).results
     if (tab.value === 'projects') projects.value = (await api<Page<ManagerProjectSummary>>('/projects/')).results
-    if (tab.value === 'review') candidates.value = (await api<Page<Candidate>>(`/candidates/?status=${candidateStatus.value}`)).results
+    if (tab.value === 'review') {
+      candidates.value = (await api<Page<Candidate>>(`/candidates/?status=${candidateStatus.value}`)).results
+      crmSelections.value = {}
+      for (const candidate of candidates.value) {
+        const selected = candidate.crm_resolution.options.find(option => option.selection_state === 'selected')
+        if (selected) crmSelections.value[candidate.id] = selected.id
+      }
+    }
     if (tab.value === 'tasks') commitments.value = await api<CommitmentData>('/commitments/')
     if (tab.value === 'finance') financeData.value = await api<Finance>('/finance/')
     if (tab.value === 'documents') attachments.value = await api<Attachment[]>('/attachments/')
@@ -104,6 +166,19 @@ async function reviewItem(item: Candidate, action: string) {
   }, action === 'approve' ? 'Факт подтверждён' : 'Предложение отклонено')
 }
 async function matchItem(item: Candidate) { const p = directory.value.projects.find(p => p.id === matches.value[item.id]); if (p) await perform(() => post(`/candidates/${item.id}/review/`, { action: 'match', project_id: p.id, base_version: p.version, reason: reasons.value[item.id] || '' })) }
+async function matchCrm(item: Candidate) {
+  const crmMatchId = crmSelections.value[item.id]
+  if (!crmMatchId || !reasons.value[item.id]?.trim()) return
+  const selected = item.crm_resolution.options.find(option => option.id === crmMatchId)
+  if (!selected) return
+  await perform(() => post(`/candidates/${item.id}/review/`, {
+    action: 'match_crm',
+    crm_match_id: crmMatchId,
+    crm_match_revision: item.crm_resolution.revision,
+    base_version: selected.project_version ?? item.base_version,
+    reason: reasons.value[item.id],
+  }), 'CRM-сделка выбрана; подтвердите AI-факт отдельно.')
+}
 async function taskAction(item: CommitmentItem, action: string) { await perform(() => post(`/commitments/${item.id}/action/`, { action, version: item.version, reason: reasons.value[item.id] || '', ...(action === 'postpone' && deadlines.value[item.id] ? { deadline_at: new Date(deadlines.value[item.id]!).toISOString() } : {}) })) }
 async function assignProject(project: ManagerProjectSummary) { await perform(() => post(`/projects/${project.id}/assign/`, { manager_id: assignments.value[project.id], base_version: project.version, reason: reasons.value[project.id], transfer_open_commitments: transferTasks.value[project.id] || false })) }
 async function proposeLegacy(project: LegacyProject) { await perform(() => post('/candidates/manual/', { project_id: project.id, team_id: project.team_id || legacyTeams.value[project.id], reason: reasons.value[project.id], changes: { fact_type: 'project', contract_amount: project.contract_amount } }), 'Предложение создано. Подтвердите проверенные значения в разделе проверки фактов.') }

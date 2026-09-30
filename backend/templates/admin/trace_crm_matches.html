@@ -1,0 +1,131 @@
+<section class="mazory-crm-panel" data-testid="trace-crm-summary">
+  <header class="mazory-crm-panel__header">
+    <div>
+      <p class="mazory-crm-panel__eyebrow">Read-only сопоставление Bitrix24</p>
+      <h3 class="mazory-crm-panel__title">Отдельный результат для каждого AI-факта</h3>
+    </div>
+    <div class="mazory-crm-panel__config">
+      <span>{{ config_name }}</span>
+      <span>Поиск: {% if matching_enabled %}включён{% else %}выключен{% endif %}</span>
+      <span>Внешняя запись: {% if outbound_enabled %}включена{% else %}выключена{% endif %}</span>
+      <span>Подключение: {% if webhook_configured %}настроено{% else %}не настроено{% endif %}</span>
+    </div>
+  </header>
+
+  <div class="mazory-crm-summary mazory-crm-summary--{{ summary.tone }}">
+    {{ summary.text }}
+  </div>
+
+  {% if cards %}
+    <div class="mazory-crm-candidates">
+      {% for card in cards %}
+        <article
+          class="mazory-crm-candidate mazory-crm-candidate--{{ card.tone }}"
+          data-testid="crm-candidate-{{ card.id }}"
+          data-crm-state="{{ card.state }}"
+        >
+          <header class="mazory-crm-candidate__header">
+            <div>
+              <a class="mazory-crm-link" href="{% url 'admin:api_factcandidate_change' card.id %}">
+                Предложение №{{ card.id }} · {{ card.fact_type }} →
+              </a>
+              <p class="mazory-crm-meta">Review: {{ card.review_status }}</p>
+            </div>
+            <span class="mazory-admin-badge mazory-admin-badge--{{ card.tone }}">
+              {{ card.state_label }}
+            </span>
+          </header>
+
+          <div class="mazory-crm-fact-grid">
+            <div>
+              <span class="mazory-crm-label">Объект из сообщения</span>
+              <strong>{{ card.object_name }}</strong>
+            </div>
+            <div>
+              <span class="mazory-crm-label">Компания из сообщения</span>
+              <strong>{{ card.company_name }}</strong>
+            </div>
+          </div>
+
+          <p class="mazory-crm-state-copy">{{ card.state_description }}</p>
+          <p class="mazory-crm-meta">
+            Ревизия поиска: {{ card.revision }} ·
+            Проверено: {% if card.checked_at %}{{ card.checked_at|date:"d.m.Y H:i:s T" }}{% else %}—{% endif %}
+          </p>
+
+          {% if card.error_code %}
+            <div class="mazory-crm-error" role="alert">
+              <strong>{{ card.error_text }}</strong>
+              <span>Код: <code>{{ card.error_code }}</code></span>
+            </div>
+          {% endif %}
+
+          {% if card.project %}
+            <p class="mazory-crm-local-project">
+              Канонический проект Mazory:
+              <a class="mazory-crm-link" href="{{ card.project_url }}">{{ card.project.name }} →</a>
+            </p>
+          {% endif %}
+
+          {% if card.options %}
+            <div class="mazory-crm-options">
+              <p class="mazory-crm-options__title">Сделки текущей ревизии</p>
+              {% for option in card.options %}
+                <section
+                  class="mazory-crm-option mazory-crm-option--{{ option.selection_state }}"
+                  data-testid="crm-option-{{ option.id }}"
+                >
+                  <div class="mazory-crm-option__header">
+                    <div>
+                      {% if option.deal_url %}
+                        <a
+                          class="mazory-crm-link"
+                          href="{{ option.deal_url }}"
+                          target="_blank"
+                          rel="noopener noreferrer"
+                        >CRM #{{ option.deal_id }} · {{ option.deal_title }} ↗</a>
+                      {% else %}
+                        <strong>CRM #{{ option.deal_id }} · {{ option.deal_title }}</strong>
+                      {% endif %}
+                    </div>
+                    <span class="mazory-crm-option__selection">{{ option.selection_label }}</span>
+                  </div>
+
+                  <dl class="mazory-crm-option__facts">
+                    <div><dt>Компания</dt><dd>{{ option.company_name }}</dd></div>
+                    <div><dt>Объект CRM</dt><dd>{{ option.object_label }}</dd></div>
+                    <div><dt>Стадия</dt><dd>{{ option.stage_id }}</dd></div>
+                    <div><dt>Сумма</dt><dd>{{ option.opportunity }}</dd></div>
+                    <div><dt>Ранг</dt><dd>{{ option.score }} / 100</dd></div>
+                  </dl>
+
+                  {% if option.reasons %}
+                    <div class="mazory-crm-reasons">
+                      <span class="mazory-crm-label">Основания подсказки</span>
+                      <ul>
+                        {% for reason in option.reasons %}<li>{{ reason }}</li>{% endfor %}
+                      </ul>
+                    </div>
+                  {% endif %}
+
+                  {% if option.project %}
+                    <p class="mazory-crm-meta">
+                      Локальная запись:
+                      <a class="mazory-crm-link" href="{{ option.project_url }}">{{ option.project.name }} →</a>
+                    </p>
+                  {% endif %}
+                </section>
+              {% endfor %}
+            </div>
+          {% elif card.state == 'matched' %}
+            <p class="mazory-crm-empty">Сопоставление зафиксировано, но снимок сделки текущей ревизии недоступен.</p>
+          {% elif card.state == 'ambiguous' %}
+            <p class="mazory-crm-empty">Варианты текущей ревизии не сохранены; автоматическая привязка не выполнялась.</p>
+          {% endif %}
+        </article>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p class="mazory-crm-empty">В этой попытке нет кандидатов, для которых можно показать CRM-проверку.</p>
+  {% endif %}
+</section>

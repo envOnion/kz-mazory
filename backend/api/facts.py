@@ -4,7 +4,7 @@ from decimal import Decimal
 from datetime import datetime
 import math
 from zoneinfo import ZoneInfo
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Sum
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -25,8 +25,14 @@ from .models import (
     Company,
     PaymentAllocation,
     PaymentScheduleItem,
+    BitrixSettings,
+    CandidateCrmMatch,
+    Team,
 )
 from .security import Conflict
+
+
+SUPPORTED_CURRENCIES = ("KZT", "USD", "EUR", "RUB")
 
 
 class FactSchema(serializers.Serializer):
@@ -40,9 +46,7 @@ class FactSchema(serializers.Serializer):
         max_digits=14, decimal_places=2, min_value=0, required=False
     )
     amount = serializers.DecimalField(max_digits=14, decimal_places=2, required=False)
-    currency = serializers.ChoiceField(
-        choices=["KZT", "USD", "EUR", "RUB"], default="KZT"
-    )
+    currency = serializers.ChoiceField(choices=SUPPORTED_CURRENCIES, required=False)
     payment_date = serializers.DateField(required=False, allow_null=True)
     payment_kind = serializers.ChoiceField(
         choices=["increment", "cumulative", "promise", "reversal"], default="increment"
@@ -122,7 +126,12 @@ def fact_identity(data):
         ),
     }
     kind = data.get("fact_type")
-    value = {key: json_value(data.get(key)) for key in fields.get(kind, ())}
+    value = {
+        key: json_value(
+            "KZT" if key == "currency" and key not in data else data.get(key)
+        )
+        for key in fields.get(kind, ())
+    }
     for key in ("amount", "contract_amount", "cost_amount"):
         if value.get(key) is not None:
             value[key] = str(Decimal(value[key]).normalize())
@@ -170,6 +179,338 @@ def record_revision(project, actor, previous_stage=""):
     return revision
 
 
+def _project_identity_conflict(team_id, name, normalized):
+    """Check the shared pipeline/CRM canonical key under a team lock."""
+    canonical = normalize_deal_name(name)
+    identity_values = {value for value in (normalized, canonical) if value}
+    projects = Project.objects.select_for_update(of=("self",)).filter(
+        team_id=team_id, archived=False
+    )
+    if identity_values and projects.filter(
+        normalized_name__in=identity_values
+    ).exists():
+        return True
+    return any(
+        normalize_deal_name(project.name) == canonical
+        for project in projects.filter(normalized_name="").only("name")
+    )
+
+
+def _review_currency(data, currency_was_explicit, project=None, crm_match=None):
+    if currency_was_explicit:
+        return data["currency"]
+    if project and project.currency:
+        return project.currency
+    if crm_match and crm_match.currency in SUPPORTED_CURRENCIES:
+        return crm_match.currency
+    return "KZT"
+
+
+def _validate_project_currency(project, currency):
+    if (
+        project.pk
+        and currency != project.currency
+        and project.financial_records.exists()
+    ):
+        raise serializers.ValidationError("Валюта проекта с платежами неизменна.")
+
+
+def _crm_project_for_match(candidate, crm_match):
+    """Resolve a local mirror without inferring identity from mutable names."""
+    bitrix_deal_id = crm_match.bitrix_deal_id.strip()
+    if not bitrix_deal_id:
+        raise serializers.ValidationError("У варианта CRM отсутствует ID сделки.")
+
+    option_project = None
+    if crm_match.project_id:
+        option_project = Project.objects.select_for_update(of=("self",)).get(
+            pk=crm_match.project_id
+        )
+        if (
+            option_project.team_id != candidate.team_id
+            or option_project.archived
+            or option_project.bitrix_id not in (None, "", bitrix_deal_id)
+        ):
+            raise Conflict("Локальная связь варианта CRM противоречива.")
+        if not option_project.bitrix_id and candidate.project_id != option_project.id:
+            raise Conflict("Неподтверждённая локальная связь CRM устарела.")
+
+    external_project = (
+        Project.objects.select_for_update(of=("self",))
+        .filter(bitrix_id=bitrix_deal_id)
+        .first()
+    )
+    if external_project and (
+        external_project.team_id != candidate.team_id or external_project.archived
+    ):
+        raise Conflict("Сделка CRM уже связана с проектом другой области доступа.")
+    if option_project and external_project and option_project.pk != external_project.pk:
+        raise Conflict("Сделка CRM имеет несколько противоречивых локальных связей.")
+    return option_project or external_project
+
+
+def select_crm_match(
+    candidate_id,
+    user,
+    crm_match_id,
+    crm_match_revision,
+    base_version,
+    reason,
+):
+    """Record a human CRM choice without approving the AI fact."""
+    reason = reason.strip()
+    if not reason:
+        raise serializers.ValidationError("Укажите причину выбора сделки CRM.")
+
+    with transaction.atomic():
+        candidate = (
+            access.candidates_for(user)
+            .select_for_update(of=("self",))
+            .get(pk=candidate_id)
+        )
+        access.require_team_role(user, candidate.team_id, ["team_lead"])
+        if candidate.status != "pending":
+            raise Conflict("Предложение уже рассмотрено или заменено.")
+        if candidate.fact_type != "project":
+            raise serializers.ValidationError(
+                "CRM-сделку можно выбрать только для факта проекта."
+            )
+        if candidate.crm_match_state not in ("ambiguous", "matched"):
+            raise Conflict("Текущий результат CRM не допускает выбор сделки.")
+        if candidate.crm_match_revision != crm_match_revision:
+            raise Conflict("Результаты CRM обновились. Перезагрузите карточку.")
+
+        try:
+            crm_match = (
+                CandidateCrmMatch.objects.select_for_update(of=("self",))
+                .select_related("project")
+                .get(
+                    pk=crm_match_id,
+                    candidate=candidate,
+                    crm_match_revision=candidate.crm_match_revision,
+                )
+            )
+        except CandidateCrmMatch.DoesNotExist:
+            raise serializers.ValidationError(
+                "Выбранный вариант не относится к текущему результату CRM."
+            ) from None
+
+        project = _crm_project_for_match(candidate, crm_match)
+        selected_matches = list(
+            CandidateCrmMatch.objects.select_for_update(of=("self",)).filter(
+                candidate=candidate, selection_state="selected"
+            )
+        )
+        previous_selected = next(
+            (item for item in selected_matches if item.pk != crm_match.pk), None
+        )
+        current_project = None
+        if candidate.project_id:
+            current_project = Project.objects.select_for_update(of=("self",)).get(
+                pk=candidate.project_id
+            )
+            if (
+                current_project.team_id != candidate.team_id
+                or current_project.archived
+            ):
+                raise Conflict("Текущий проект кандидата недоступен для сопоставления.")
+            if project and current_project.pk != project.pk:
+                if not previous_selected or previous_selected.project_id != current_project.pk:
+                    raise Conflict("Кандидат уже связан с другим локальным проектом.")
+            if not project:
+                if current_project.bitrix_id not in (
+                    None,
+                    "",
+                    crm_match.bitrix_deal_id.strip(),
+                ):
+                    if (
+                        not previous_selected
+                        or previous_selected.project_id != current_project.pk
+                    ):
+                        raise Conflict(
+                            "Сделка CRM конфликтует с текущей локальной связью кандидата."
+                        )
+                else:
+                    project = current_project
+        version_project = project
+        if (
+            version_project is None
+            and current_project
+            and previous_selected
+            and previous_selected.project_id == current_project.pk
+        ):
+            version_project = current_project
+        expected_version = version_project.version if version_project else 0
+        if base_version != expected_version:
+            raise Conflict()
+
+        already_selected = any(item.pk == crm_match.pk for item in selected_matches)
+        already_audited = AuditEvent.objects.filter(
+            target_type="FactCandidate",
+            target_id=candidate.id,
+            action="match_crm",
+            before_after__crm_match_id=crm_match.id,
+            before_after__crm_match_revision=candidate.crm_match_revision,
+        ).exists()
+        if (
+            already_selected
+            and already_audited
+            and candidate.crm_match_state == "matched"
+            and candidate.project_id == (project.id if project else None)
+            and candidate.base_project_version == expected_version
+        ):
+            return candidate
+
+        previous_ids = [item.id for item in selected_matches]
+        for item in selected_matches:
+            if item.pk != crm_match.pk:
+                item.selection_state = "dismissed"
+                item.save(update_fields=["selection_state"])
+        if not already_selected:
+            crm_match.selection_state = "selected"
+        if project and crm_match.project_id != project.id:
+            crm_match.project = project
+        crm_match.save(update_fields=["selection_state", "project"])
+
+        previous_project_id = candidate.project_id
+        candidate.project = project
+        candidate.base_project_version = project.version if project else 0
+        candidate.crm_match_state = "matched"
+        candidate.crm_match_error_code = ""
+        candidate.save(
+            update_fields=[
+                "project",
+                "base_project_version",
+                "crm_match_state",
+                "crm_match_error_code",
+            ]
+        )
+        AuditEvent.objects.create(
+            actor=user,
+            target_type="FactCandidate",
+            target_id=candidate.id,
+            action="match_crm",
+            before_after={
+                "previous_crm_match_ids": previous_ids,
+                "crm_match_id": crm_match.id,
+                "crm_match_revision": candidate.crm_match_revision,
+                "bitrix_deal_id": crm_match.bitrix_deal_id,
+                "previous_project_id": previous_project_id,
+                "project_id": project.id if project else None,
+                "reason": reason,
+            },
+        )
+        return candidate
+
+
+def _selected_crm_match(candidate):
+    matches = list(
+        CandidateCrmMatch.objects.select_for_update(of=("self",))
+        .select_related("project")
+        .filter(
+            candidate=candidate,
+            crm_match_revision=candidate.crm_match_revision,
+            selection_state="selected",
+        )[:2]
+    )
+    if candidate.crm_match_state == "matched":
+        if len(matches) != 1:
+            raise Conflict("Выбранная CRM-сделка не определена однозначно.")
+        return matches[0]
+    if matches:
+        raise Conflict("CRM-состояние кандидата противоречит сохранённому выбору.")
+    return None
+
+
+def _crm_approval_requires_finance(candidate, crm_match, project):
+    return bool(
+        candidate.fact_type == "project"
+        and crm_match
+        and crm_match.opportunity is not None
+        and project is None
+        and candidate.project_id is None
+    )
+
+
+def _company_from_crm_match(crm_match, data):
+    company_id = crm_match.bitrix_company_id.strip()
+    company_name = (crm_match.company_name or data.get("company_name", "")).strip()
+    if not company_id:
+        if not company_name:
+            return None
+        try:
+            with transaction.atomic():
+                company, _ = Company.objects.get_or_create(name=company_name)
+                return company
+        except IntegrityError as exc:
+            raise Conflict("Компания конфликтует с существующей записью.") from exc
+
+    company = (
+        Company.objects.select_for_update()
+        .filter(bitrix_company_id=company_id)
+        .first()
+    )
+    if company:
+        return company
+    if not company_name:
+        raise serializers.ValidationError(
+            "В снимке CRM отсутствует название выбранной компании."
+        )
+    if Company.objects.select_for_update().filter(name=company_name).exists():
+        raise Conflict(
+            "Компания с таким названием уже существует без выбранного CRM ID."
+        )
+    try:
+        with transaction.atomic():
+            return Company.objects.create(
+                name=company_name, bitrix_company_id=company_id
+            )
+    except IntegrityError as exc:
+        raise Conflict("CRM-компания конфликтует с существующей записью.") from exc
+
+
+def _materialize_crm_project(candidate, crm_match, data):
+    bitrix_deal_id = crm_match.bitrix_deal_id.strip()
+    name = (crm_match.deal_title or crm_match.object_label or data["object_name"]).strip()
+    normalized = normalize_deal_name(name)
+    if not bitrix_deal_id or not name or not normalized:
+        raise serializers.ValidationError(
+            "В выбранном снимке CRM недостаточно данных для создания проекта."
+        )
+    Team.objects.select_for_update(of=("self",)).get(pk=candidate.team_id)
+    if Project.objects.select_for_update().filter(bitrix_id=bitrix_deal_id).exists():
+        raise Conflict("Сделка CRM уже связана с другим локальным проектом.")
+    if _project_identity_conflict(candidate.team_id, name, normalized):
+        raise Conflict(
+            "Проект с таким названием уже существует. Сопоставьте его явно."
+        )
+
+    company = _company_from_crm_match(crm_match, data)
+    contract_amount = (
+        crm_match.opportunity
+        if crm_match.opportunity is not None
+        else data.get("contract_amount", Decimal(0))
+    )
+    try:
+        with transaction.atomic():
+            project = Project.objects.create(
+                team=candidate.team,
+                manager=candidate.manager,
+                company=company,
+                name=name,
+                normalized_name=normalized,
+                source="bitrix_crm",
+                bitrix_id=bitrix_deal_id,
+                contract_amount=contract_amount,
+                currency=data["currency"],
+            )
+    except IntegrityError as exc:
+        raise Conflict("CRM-сделка конфликтует с существующим проектом.") from exc
+    crm_match.project = project
+    crm_match.save(update_fields=["project"])
+    return project
+
+
 def review(candidate_id, user, action, reason="", changes=None, base_version=None):
     with transaction.atomic():
         candidate = (
@@ -177,15 +518,27 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
             .select_for_update(of=("self",))
             .get(pk=candidate_id)
         )
-        access.require_review(user, candidate)
+        if action not in ("approve", "reject"):
+            raise serializers.ValidationError("Неизвестное действие.")
         if candidate.status in ("approved", "rejected"):
             if candidate.status != ("approved" if action == "approve" else "rejected"):
                 raise Conflict("Предложение уже рассмотрено с другим решением.")
+            if candidate.reviewed_by_id != user.id and not user.is_superuser:
+                access.require_review(user, candidate)
             return candidate
         if candidate.status != "pending":
             raise Conflict("Предложение заменено новой версией.")
-        if action not in ("approve", "reject"):
-            raise serializers.ValidationError("Неизвестное действие.")
+
+        crm_match = None
+        project = None
+        if action == "approve" and candidate.fact_type == "project":
+            crm_match = _selected_crm_match(candidate)
+            project = _crm_project_for_match(candidate, crm_match) if crm_match else None
+        if _crm_approval_requires_finance(candidate, crm_match, project):
+            access.require_team_role(user, candidate.team_id, ["finance"])
+        else:
+            access.require_review(user, candidate)
+
         if action == "reject" and not reason.strip():
             raise serializers.ValidationError("Укажите причину отклонения.")
         if (
@@ -197,18 +550,32 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                 "Укажите причину исправления извлечённых значений."
             )
         data = {**candidate.proposed_changes, **(changes or {})}
+        currency_was_explicit = "currency" in data
         schema = FactSchema(data=data)
         schema.is_valid(raise_exception=True)
         data = schema.validated_data
         if data["fact_type"] != candidate.fact_type:
             raise serializers.ValidationError("Тип факта изменить нельзя.")
         if action == "approve":
-            project = (
-                Project.objects.select_for_update(of=("self",)).get(
-                    pk=candidate.project_id
-                )
-                if candidate.project_id
-                else None
+            if candidate.project_id:
+                candidate_project = Project.objects.select_for_update(
+                    of=("self",)
+                ).get(pk=candidate.project_id)
+                if project and project.pk != candidate_project.pk:
+                    raise Conflict(
+                        "Выбранная CRM-сделка конфликтует с проектом кандидата."
+                    )
+                if not project:
+                    if crm_match:
+                        raise Conflict(
+                            "Выбранная CRM-сделка не подтверждает текущую локальную связь."
+                        )
+                    project = candidate_project
+            data["currency"] = _review_currency(
+                data,
+                currency_was_explicit,
+                project=project,
+                crm_match=crm_match,
             )
             if project and (
                 base_version != project.version
@@ -234,39 +601,48 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
             old_stage = project.status if project else ""
             if candidate.fact_type == "project":
                 if project is None:
-                    if not data["object_name"] or data.get("contract_amount", 0) <= 0:
+                    if crm_match:
+                        if base_version != 0:
+                            raise Conflict()
+                        project = _materialize_crm_project(candidate, crm_match, data)
+                    elif not data["object_name"] or data.get("contract_amount", 0) <= 0:
                         raise serializers.ValidationError(
                             "Нужны название и положительная сумма договора."
                         )
-                    # Team-scoped canonical identity, never fuzzy auto-merging.
-                    normalized = normalize_deal_name(data["object_name"])
-                    if Project.objects.filter(
-                        team=candidate.team, normalized_name=normalized, archived=False
-                    ).exists():
+                    else:
+                        # Team-scoped canonical identity, never fuzzy auto-merging.
+                        normalized = normalize_deal_name(data["object_name"])
+                        Team.objects.select_for_update(of=("self",)).get(
+                            pk=candidate.team_id
+                        )
+                        if _project_identity_conflict(
+                            candidate.team_id, data["object_name"], normalized
+                        ):
+                            raise Conflict(
+                                "Объект уже существует. Сопоставьте предложение с ним."
+                            )
+                        company = None
+                        if data.get("company_name"):
+                            company, _ = Company.objects.get_or_create(
+                                name=data["company_name"]
+                            )
+                        project = Project(
+                            team=candidate.team,
+                            manager=candidate.manager,
+                            company=company,
+                            name=data["object_name"],
+                            normalized_name=normalized,
+                            source="chat",
+                        )
+                if crm_match:
+                    bitrix_deal_id = crm_match.bitrix_deal_id.strip()
+                    if project.bitrix_id in (None, ""):
+                        project.bitrix_id = bitrix_deal_id
+                    elif project.bitrix_id != bitrix_deal_id:
                         raise Conflict(
-                            "Объект уже существует. Сопоставьте предложение с ним."
+                            "Проект уже связан с другой сделкой CRM."
                         )
-                    company = None
-                    if data.get("company_name"):
-                        company, _ = Company.objects.get_or_create(
-                            name=data["company_name"]
-                        )
-                    project = Project(
-                        team=candidate.team,
-                        manager=candidate.manager,
-                        company=company,
-                        name=data["object_name"],
-                        normalized_name=normalized,
-                        source="chat",
-                    )
-                if (
-                    project.pk
-                    and data["currency"] != project.currency
-                    and project.financial_records.exists()
-                ):
-                    raise serializers.ValidationError(
-                        "Валюта проекта с платежами неизменна."
-                    )
+                _validate_project_currency(project, data["currency"])
                 if any(key in data for key in ("cost_amount", "contract_amount")):
                     access.require_team_role(user, candidate.team_id, ["finance"])
                 project.currency = data["currency"]
@@ -406,7 +782,11 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
             project.is_verified = True
             project.version += 1
             project.needs_bitrix_sync = True
-            project.save()
+            try:
+                with transaction.atomic():
+                    project.save()
+            except IntegrityError as exc:
+                raise Conflict("Проект конфликтует с существующей записью.") from exc
             candidate.project = project
             candidate.proposed_changes = json_value(data)
             record_revision(project, user, old_stage)
@@ -421,13 +801,17 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                     "candidate_id": candidate.id,
                 },
             )
-            OutboxEvent.objects.get_or_create(
-                deduplication_key=f"crm:{project.id}:{project.version}",
-                defaults={
-                    "event_type": "crm_sync",
-                    "payload": {"project_id": project.id, "version": project.version},
-                },
-            )
+            if BitrixSettings.objects.filter(is_active=True).exists():
+                OutboxEvent.objects.get_or_create(
+                    deduplication_key=f"crm:{project.id}:{project.version}",
+                    defaults={
+                        "event_type": "crm_sync",
+                        "payload": {
+                            "project_id": project.id,
+                            "version": project.version,
+                        },
+                    },
+                )
         candidate.status = "approved" if action == "approve" else "rejected"
         candidate.reviewed_by, candidate.reviewed_at, candidate.review_reason = (
             user,
