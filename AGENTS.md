@@ -4,7 +4,7 @@
 
 ```text
 Docker Compose:
-  frontend :5173  → Vue 3 + TypeScript + Vite + Tailwind CSS
+  nginx    127.0.0.1:18080 → собранный Vue + proxy для /api/* и /admin/*
   backend  :8000  → Django 6.1 (DRF) + SimpleJWT (/api/*, /admin/*)
   qcluster        → Django Q2 Worker (фоновые задачи через Redis)
   redis    :6379  → Брокер очередей Django Q2 и кэш
@@ -14,7 +14,8 @@ Docker Compose:
 - **Backend** (`backend/`) на Django 6.1 и Django REST Framework предоставляет весь API:
   аутентификация по телефону и OTP, интеграция с WhatsApp через WAHA, аналитический дашборд KPI,
   обработка AI-запросов (`/api/chat/query/`), административная панель Django (`/admin/`) и фоновые задачи через Django Q2.
-- **Frontend** (`frontend/`) построен на Vue 3 (Composition API), Vite, TypeScript и Tailwind CSS.
+- **Frontend** (`frontend/`) построен на Vue 3 (Composition API), Vite, TypeScript и Tailwind CSS;
+  Vite используется только при разработке и сборке, а production `dist` встроен в единый image `nginx`.
 - **QCluster** (`qcluster`) выполняет асинхронную обработку очередей (отправка OTP, взаимодействие с WAHA, долгие аналитические операции).
 - **WAHA** (`waha`) шлюз WhatsApp Web/Noweb API для приема и отправки сообщений.
 
@@ -197,12 +198,12 @@ docker compose up
 
 # Пересборка конкретного сервиса при обновлении зависимостей или Dockerfile
 docker compose up -d --build backend
-docker compose up -d --build frontend
+docker compose up -d --build nginx
 docker compose up -d --build qcluster
 
 # Просмотр логов конкретного сервиса
 docker compose logs -f backend
-docker compose logs -f frontend
+docker compose logs -f nginx
 docker compose logs -f qcluster
 docker compose logs -f waha
 ```

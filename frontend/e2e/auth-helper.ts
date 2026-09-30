@@ -9,10 +9,12 @@ export function isolatedCompose(args: string[]): string {
   const command = ['docker', 'compose', '-f', compose, '-p', process.env.E2E_COMPOSE_PROJECT || 'mazory-platform-e2e', ...args]
   const options = { encoding: 'utf8' as const, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], maxBuffer: 16 * 1024 * 1024, timeout: 120000 }
   if (remote) {
-    const names = ['E2E_IMAGE_TAG', 'E2E_BACKEND_PORT', 'E2E_PROVIDER_PORT', 'E2E_BIND_ADDRESS']
+    const names = ['E2E_IMAGE_TAG', 'E2E_GATEWAY_PORT', 'E2E_PROVIDER_PORT', 'E2E_BIND_ADDRESS']
     const env = names.filter(name => process.env[name]).map(name => `${name}=${process.env[name]}`)
+    const controlPath = process.env.E2E_SSH_CONTROL_PATH
+    const sshOptions = ['-o', 'BatchMode=yes', ...(controlPath ? ['-S', controlPath] : [])]
     // Transport argv as data: synthetic fixture code never passes through a shell.
-    return execFileSync('ssh', ['-o', 'BatchMode=yes', remote, "python3 -c 'import json,subprocess,sys; subprocess.run(json.load(sys.stdin), check=True)'"], { ...options, input: JSON.stringify(['env', ...env, ...command]) }).trim()
+    return execFileSync('ssh', [...sshOptions, remote, "python3 -c 'import json,subprocess,sys; subprocess.run(json.load(sys.stdin), check=True)'"], { ...options, input: JSON.stringify(['env', ...env, ...command]) }).trim()
   }
   return execFileSync(command[0]!, command.slice(1), options).trim()
 }

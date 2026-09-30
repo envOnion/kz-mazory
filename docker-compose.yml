@@ -48,22 +48,12 @@ x-backend: &backend
   networks: [internal]
 services:
   nginx:
-    image: nginx:1.27-alpine
-    profiles: [tls]
+    image: mazory-nginx:${APP_TAG:-local}
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
     restart: unless-stopped
-    ports: ['80:80', '443:443']
-    volumes: ['./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro', './certbot/www:/var/www/certbot:ro', './certbot/conf:/etc/letsencrypt:ro']
-    depends_on: [frontend]
-    networks: [internal]
-  certbot:
-    image: certbot/certbot:v3.2.0
-    profiles: [tls]
-    volumes: ['./certbot/www:/var/www/certbot', './certbot/conf:/etc/letsencrypt']
-    networks: [internal]
-  frontend:
-    build: ./frontend
-    restart: unless-stopped
-    ports: ['${HTTP_BIND:-127.0.0.1}:${HTTP_PORT:-5173}:8080']
+    ports: ['127.0.0.1:18080:80']
     volumes: [static_files:/staticfiles:ro]
     depends_on: [backend]
     networks: [internal]
