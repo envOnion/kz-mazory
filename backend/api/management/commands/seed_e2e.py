@@ -125,11 +125,21 @@ class Command(BaseCommand):
         )
         for user in (manager, lead, finance):
             ChatAccess.objects.create(user=user, config=cfg)
-        AISettings.objects.create(
+        ai_settings = AISettings.objects.create(
             name="E2E provider",
             chat_provider_url="http://test-provider:9000/v1",
             embedding_provider_url="http://test-provider:9000/v1",
             embedding_dimension=8,
+        )
+        ai_settings.set_chat_api_key("isolated-test-provider")
+        ai_settings.set_embedding_api_key("isolated-test-embedding")
+        ai_settings.save(
+            update_fields=(
+                "chat_api_key",
+                "chat_api_key_encrypted",
+                "embedding_api_key",
+                "embedding_api_key_encrypted",
+            )
         )
         raw = RawMessage.objects.create(
             config=cfg,

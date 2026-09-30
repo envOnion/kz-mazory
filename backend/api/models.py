@@ -3,6 +3,7 @@ from django.db import models
 from django.conf import settings
 from django.utils import timezone
 from django.contrib.auth.models import User
+from django.views.decorators.debug import sensitive_variables
 from .deduplication import normalize_deal_name
 
 
@@ -629,7 +630,17 @@ class AISettings(models.Model):
         "Embeddings Model", max_length=128, default="liquid/lfm-2.5-embedding-350m:free"
     )
     embedding_api_key = models.CharField(
-        "Embeddings API Key", max_length=255, blank=True, default=""
+        "Embeddings API Key",
+        max_length=255,
+        blank=True,
+        default="",
+        editable=False,
+    )
+    embedding_api_key_encrypted = models.TextField(
+        "Зашифрованный Embeddings API Key",
+        blank=True,
+        default="",
+        editable=False,
     )
     embedding_dimension = models.IntegerField("Размерность вектора", default=1024)
 
@@ -640,8 +651,8 @@ class AISettings(models.Model):
         choices=ChatApiFormat.choices,
         default=ChatApiFormat.OPENAI_COMPATIBLE,
         help_text=(
-            "OpenAI-compatible использует Chat Base URL ниже; Anthropic Messages "
-            "использует ANTHROPIC_BASE_URL из окружения сервера."
+            "Определяет протокол запросов и проверку разрешённых хостов для "
+            "редактируемого Chat Base URL."
         ),
     )
     chat_provider_url = models.CharField(
@@ -653,7 +664,17 @@ class AISettings(models.Model):
         default="nvidia/nemotron-3-ultra-550b-a55b:free",
     )
     chat_api_key = models.CharField(
-        "Chat API Key", max_length=255, blank=True, default=""
+        "Chat API Key",
+        max_length=255,
+        blank=True,
+        default="",
+        editable=False,
+    )
+    chat_api_key_encrypted = models.TextField(
+        "Зашифрованный Chat API Key",
+        blank=True,
+        default="",
+        editable=False,
     )
     chat_temperature = models.FloatField("Temperature", default=0.2)
     context_window_tokens = models.PositiveIntegerField(
@@ -689,11 +710,19 @@ class AISettings(models.Model):
         "Токенизатор",
         max_length=255,
         default="nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B-BF16",
+        help_text=(
+            "Словарь для предварительного подсчёта контекста OpenAI-compatible. "
+            "Для Anthropic Messages не используется."
+        ),
     )
     tokenizer_revision = models.CharField(
         "Версия токенизатора",
         max_length=64,
         default="77df655d5e9f8362164ed14dd8b48f8bce657498",
+        help_text=(
+            "Зафиксированная версия токенизатора OpenAI-compatible. "
+            "Для Anthropic Messages не используется."
+        ),
     )
 
     def clean(self):
@@ -771,6 +800,62 @@ class AISettings(models.Model):
 
     def __str__(self):
         return f"{self.name} ({self.chat_model_name})"
+
+    @property
+    def has_chat_api_key(self):
+        return bool(self.chat_api_key_encrypted)
+
+    @property
+    def has_embedding_api_key(self):
+        return bool(self.embedding_api_key_encrypted)
+
+    @sensitive_variables("value")
+    def set_chat_api_key(self, value):
+        from .ai_credentials import encrypt_credential
+
+        self.chat_api_key_encrypted = encrypt_credential(
+            value, purpose="chat", api_format=self.chat_api_format
+        )
+        self.chat_api_key = ""
+
+    @sensitive_variables("self")
+    def get_chat_api_key(self):
+        from .ai_credentials import decrypt_credential
+
+        return decrypt_credential(
+            self.chat_api_key_encrypted,
+            purpose="chat",
+            api_format=self.chat_api_format,
+        )
+
+    def clear_chat_api_key(self):
+        self.chat_api_key_encrypted = ""
+        self.chat_api_key = ""
+
+    @sensitive_variables("value")
+    def set_embedding_api_key(self, value):
+        from .ai_credentials import encrypt_credential
+
+        self.embedding_api_key_encrypted = encrypt_credential(
+            value,
+            purpose="embedding",
+            api_format=self.ChatApiFormat.OPENAI_COMPATIBLE,
+        )
+        self.embedding_api_key = ""
+
+    @sensitive_variables("self")
+    def get_embedding_api_key(self):
+        from .ai_credentials import decrypt_credential
+
+        return decrypt_credential(
+            self.embedding_api_key_encrypted,
+            purpose="embedding",
+            api_format=self.ChatApiFormat.OPENAI_COMPATIBLE,
+        )
+
+    def clear_embedding_api_key(self):
+        self.embedding_api_key_encrypted = ""
+        self.embedding_api_key = ""
 
     @classmethod
     def get_active(cls):

@@ -16,8 +16,6 @@ x-environment: &environment
   WAHA_API_URL: http://waha:3000
   WAHA_API_KEY: ${WAHA_API_KEY:?Set the WAHA key}
   WAHA_WEBHOOK_SECRET: ${WAHA_WEBHOOK_SECRET:?Set the webhook signing secret}
-  OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
-  ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
   BITRIX_WEBHOOK_URL: ${BITRIX_WEBHOOK_URL:-}
   BITRIX_INBOUND_TOKEN: ${BITRIX_INBOUND_TOKEN:-}
   BITRIX_TEAM_ID: ${BITRIX_TEAM_ID:-0}
@@ -59,13 +57,20 @@ services:
     networks: [internal]
   backend:
     <<: *backend
+    environment:
+      <<: *environment
+      AI_CREDENTIAL_ENCRYPTION_KEY: ${AI_CREDENTIAL_ENCRYPTION_KEY:?Set a Fernet AI credential key}
     command: [gunicorn, mazory_backend.wsgi:application, --bind, '0.0.0.0:8000', --workers, '2', --timeout, '30', --max-requests, '1000', --max-requests-jitter, '100']
   qcluster:
     <<: *backend
     environment:
       <<: *environment
       Q_CLUSTER_NAME: ai
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AI_CREDENTIAL_ENCRYPTION_KEY: ${AI_CREDENTIAL_ENCRYPTION_KEY:?Set a Fernet AI credential key}
+    extra_hosts:
+      - 'ru.cheapvibecode.ru:104.26.0.83'
+      - 'ru.cheapvibecode.ru:104.26.1.83'
+      - 'ru.cheapvibecode.ru:172.67.72.244'
     command: [python, manage.py, qcluster]
   qcluster_delivery:
     <<: *backend

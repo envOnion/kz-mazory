@@ -35,5 +35,5 @@ export async function adminLogin(page: Page) {
   await page.locator('button[type=submit], input[type=submit]').click()
   // The login URL itself ends with ?next=/admin/; a glob can match it before
   // the POST completes, so the next navigation cancels login in WebKit.
-  await page.waitForURL(url => url.pathname === '/admin/')
+  await page.waitForURL(url => url.pathname === '/admin/', { timeout: 15_000 })
 }

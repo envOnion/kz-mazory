@@ -73,6 +73,19 @@ INTEGRATION_TEST_MODE = TESTING and os.getenv("INTEGRATION_TEST_MODE") == "1"
 MFA_ENCRYPTION_KEY = os.getenv("MFA_ENCRYPTION_KEY", "")
 if MAZORY_ENV == "production" and not MFA_ENCRYPTION_KEY:
     raise ImproperlyConfigured("MFA_ENCRYPTION_KEY is required")
+AI_CREDENTIAL_ENCRYPTION_KEY = os.getenv("AI_CREDENTIAL_ENCRYPTION_KEY", "")
+if AI_CREDENTIAL_ENCRYPTION_KEY:
+    from cryptography.fernet import Fernet
+
+    try:
+        Fernet(AI_CREDENTIAL_ENCRYPTION_KEY.encode("ascii"))
+    except (UnicodeEncodeError, ValueError, TypeError):
+        raise ImproperlyConfigured(
+            "AI_CREDENTIAL_ENCRYPTION_KEY must be a valid Fernet key"
+        ) from None
+# Explicit, temporary rollout escape hatch. A database credential always takes
+# precedence, and an invalid ciphertext never falls back to an environment key.
+AI_PROVIDER_ENV_FALLBACK = os.getenv("AI_PROVIDER_ENV_FALLBACK", "0") == "1"
 PROVIDER_ALLOWED_HOSTS = [
     h
     for h in os.getenv(
@@ -508,7 +521,6 @@ SIMPLE_JWT = {
 BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL", "")
 BITRIX_INBOUND_TOKEN = os.getenv("BITRIX_INBOUND_TOKEN", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "").rstrip("/")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
 TRANSCRIPTION_URL = os.getenv("TRANSCRIPTION_URL", "")

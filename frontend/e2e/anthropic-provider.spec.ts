@@ -1,11 +1,18 @@
 import { createHmac, randomUUID } from 'node:crypto'
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test'
-import { adminLogin, isolatedCommand, login } from './auth-helper'
+import { adminLogin, isolatedCommand, isolatedCompose, login } from './auth-helper'
 
 const provider = process.env.E2E_PROVIDER_URL || 'http://127.0.0.1:18090'
 const appBaseUrl = process.env.ANTHROPIC_E2E_BASE_URL || process.env.E2E_BASE_URL || 'http://localhost:5173'
 const guard = "from django.conf import settings; assert settings.INTEGRATION_TEST_MODE; assert str(settings.DATABASES['default']['NAME']).endswith('_e2e'); "
 const anthropicModel = 'claude-e2e-native'
+const openAIModel = 'openai-e2e-admin'
+const anthropicUrl = 'http://test-provider:9000/anthropic'
+const openAIUrl = 'http://test-provider:9000/v1'
+const anthropicKey = 'isolated-test-anthropic'
+const invalidAnthropicKey = 'isolated-test-anthropic-invalid'
+const openAIKey = 'isolated-test-provider'
+const embeddingKey = 'isolated-test-embedding'
 
 test.use({ baseURL: appBaseUrl })
 
@@ -25,10 +32,28 @@ interface NativeCapture {
   version_valid: boolean
   content_type_valid: boolean
   authorization_header_absent: boolean
+  client_ip: string
+}
+interface OpenAICapture {
+  path: string
+  payload: Record<string, unknown>
+  auth_valid: boolean
+  content_type_valid: boolean
+  x_api_key_absent: boolean
+  client_ip: string
 }
 interface ProviderCaptures {
+  openai_chats: OpenAICapture[]
+  openai_embeddings: OpenAICapture[]
   anthropic: NativeCapture[]
   anthropic_counts: NativeCapture[]
+}
+interface CredentialState {
+  chat: string
+  embedding: string
+  embedding_url: string
+  has_chat: boolean
+  has_embedding: boolean
 }
 interface UsageState {
   api_format: string
@@ -71,6 +96,12 @@ function inspect<T>(code: string): T {
   return JSON.parse(output.split('\n').at(-1)!) as T
 }
 
+function adminSection(page: Page, heading: string) {
+  return page.getByRole('group').filter({
+    has: page.getByRole('heading', { name: heading, exact: true }),
+  }).first()
+}
+
 function operationState(prompt: string): OperationState {
   return inspect<OperationState>(`
 import json
@@ -106,6 +137,20 @@ print(json.dumps({
   'usages':usages,
   'metadata':{key:metadata.get(key) for key in ('api_format','effective_provider_url','token_counter','token_count_requests','input_tokens_actual','payload_sha256')},
 }, default=str))
+`)
+}
+
+function credentialState(settingsId: number): CredentialState {
+  return inspect<CredentialState>(`
+from api.models import AISettings
+s=AISettings.objects.get(pk=${settingsId})
+print(json.dumps({
+  'chat':s.chat_api_key_encrypted,
+  'embedding':s.embedding_api_key_encrypted,
+  'embedding_url':s.embedding_provider_url,
+  'has_chat':s.has_chat_api_key,
+  'has_embedding':s.has_embedding_api_key,
+}))
 `)
 }
 
@@ -148,11 +193,11 @@ function findCapture(captures: NativeCapture[], marker: string): NativeCapture {
   return capture
 }
 
-function assertNativeRequest(capture: NativeCapture, countTokens = false) {
+function assertNativeRequest(capture: NativeCapture, countTokens = false, authValid = true) {
   expect(capture.path).toBe(countTokens
     ? '/anthropic/v1/messages/count_tokens'
     : '/anthropic/v1/messages')
-  expect(capture.auth_valid).toBe(true)
+  expect(capture.auth_valid).toBe(authValid)
   expect(capture.version_valid).toBe(true)
   expect(capture.content_type_valid).toBe(true)
   expect(capture.authorization_header_absent).toBe(true)
@@ -176,13 +221,53 @@ function assertNativeRequest(capture: NativeCapture, countTokens = false) {
   }
 }
 
-async function saveAISettings(page: Page, id: number, apiFormat: string, model: string) {
+interface AISettingsUpdate {
+  apiFormat?: string
+  providerUrl?: string
+  model?: string
+  newChatKey?: string
+  clearChatKey?: boolean
+  embeddingProviderUrl?: string
+  newEmbeddingKey?: string
+  clearEmbeddingKey?: boolean
+}
+
+async function saveAISettings(page: Page, id: number, update: AISettingsUpdate) {
   await page.goto(`/admin/api/aisettings/${id}/change/`)
-  await page.locator('#id_chat_api_format').selectOption(apiFormat)
-  await page.locator('#id_chat_model_name').fill(model)
-  await page.locator('[name=_save]').first().click()
-  await page.waitForURL(url => url.pathname === '/admin/api/aisettings/')
+  if (update.apiFormat !== undefined) await page.locator('#id_chat_api_format').selectOption(update.apiFormat)
+  if (update.providerUrl !== undefined) await page.locator('#id_chat_provider_url').fill(update.providerUrl)
+  if (update.model !== undefined) await page.locator('#id_chat_model_name').fill(update.model)
+  if (update.newChatKey !== undefined) await page.locator('#id_new_chat_api_key').fill(update.newChatKey)
+  if (update.clearChatKey !== undefined) await page.locator('#id_clear_chat_api_key').setChecked(update.clearChatKey)
+  if (update.embeddingProviderUrl !== undefined) await page.locator('#id_embedding_provider_url').fill(update.embeddingProviderUrl)
+  if (update.newEmbeddingKey !== undefined) await page.locator('#id_new_embedding_api_key').fill(update.newEmbeddingKey)
+  if (update.clearEmbeddingKey !== undefined) await page.locator('#id_clear_embedding_api_key').setChecked(update.clearEmbeddingKey)
+  const response = page.waitForResponse(res =>
+    res.request().method() === 'POST'
+    && new URL(res.url()).pathname === `/admin/api/aisettings/${id}/change/`)
+  await page.locator('[name=_continue]').first().click()
+  expect((await response).status()).toBe(302)
+  await page.waitForURL(url => url.pathname === `/admin/api/aisettings/${id}/change/`)
   await expect(page.locator('.errorlist')).toHaveCount(0)
+  await expect(page.getByText(/был изменен успешно/)).toBeVisible()
+}
+
+async function expectRejectedAISettings(page: Page, id: number, update: AISettingsUpdate) {
+  await page.goto(`/admin/api/aisettings/${id}/change/`)
+  if (update.apiFormat !== undefined) await page.locator('#id_chat_api_format').selectOption(update.apiFormat)
+  if (update.providerUrl !== undefined) await page.locator('#id_chat_provider_url').fill(update.providerUrl)
+  if (update.model !== undefined) await page.locator('#id_chat_model_name').fill(update.model)
+  if (update.newChatKey !== undefined) await page.locator('#id_new_chat_api_key').fill(update.newChatKey)
+  if (update.clearChatKey !== undefined) await page.locator('#id_clear_chat_api_key').setChecked(update.clearChatKey)
+  if (update.embeddingProviderUrl !== undefined) await page.locator('#id_embedding_provider_url').fill(update.embeddingProviderUrl)
+  if (update.newEmbeddingKey !== undefined) await page.locator('#id_new_embedding_api_key').fill(update.newEmbeddingKey)
+  if (update.clearEmbeddingKey !== undefined) await page.locator('#id_clear_embedding_api_key').setChecked(update.clearEmbeddingKey)
+  const response = page.waitForResponse(res =>
+    res.request().method() === 'POST'
+    && new URL(res.url()).pathname === `/admin/api/aisettings/${id}/change/`)
+  await page.locator('[name=_continue]').first().click()
+  expect((await response).status()).toBe(200)
+  await expect(page.locator('.errorlist')).not.toHaveCount(0)
 }
 
 async function submitChat(page: Page, prompt: string) {
@@ -221,8 +306,8 @@ async function sendWebhook(request: APIRequestContext, messageId: string, conten
   })
 }
 
-test('Anthropic native admin config → UI chat/errors → webhook extraction and token-count guard', async ({ page, request, browser }) => {
-  test.setTimeout(240_000)
+test('Admin-managed AI credentials → live provider rotation → UI chat and webhook extraction', async ({ page, request, browser }) => {
+  test.setTimeout(360_000)
   const pageErrors: string[] = []
   const consoleErrors: string[] = []
   page.on('pageerror', error => pageErrors.push(error.message))
@@ -230,7 +315,19 @@ test('Anthropic native admin config → UI chat/errors → webhook extraction an
 
   let settingsId = 0
   let originalFormat = ''
+  let originalUrl = ''
   let originalModel = ''
+  const qclusterContainer = isolatedCompose(['ps', '-q', 'qcluster']).trim()
+  expect(qclusterContainer).not.toBe('')
+  const legacyProviderEnv = JSON.parse(isolatedCompose([
+    'exec', '-T', 'qcluster', 'python', '-c',
+    "import json,os; print(json.dumps({name: bool(os.getenv(name)) for name in ('OPENROUTER_API_KEY','ANTHROPIC_API_KEY','ANTHROPIC_BASE_URL')}))",
+  ])) as Record<string, boolean>
+  expect(legacyProviderEnv).toEqual({
+    OPENROUTER_API_KEY: false,
+    ANTHROPIC_API_KEY: false,
+    ANTHROPIC_BASE_URL: false,
+  })
   const adminContext = await browser.newContext({ baseURL: appBaseUrl })
   const adminPage = await adminContext.newPage()
   try {
@@ -238,19 +335,102 @@ test('Anthropic native admin config → UI chat/errors → webhook extraction an
     settingsId = inspect<number>('from api.models import AISettings; print(json.dumps(AISettings.get_active().id))')
     await adminPage.goto(`/admin/api/aisettings/${settingsId}/change/`)
     originalFormat = await adminPage.locator('#id_chat_api_format').inputValue()
+    originalUrl = await adminPage.locator('#id_chat_provider_url').inputValue()
     originalModel = await adminPage.locator('#id_chat_model_name').inputValue()
 
-    await saveAISettings(adminPage, settingsId, 'anthropic_messages', anthropicModel)
-    await adminPage.goto(`/admin/api/aisettings/${settingsId}/change/`)
+    await saveAISettings(adminPage, settingsId, {
+      apiFormat: 'anthropic_messages',
+      providerUrl: anthropicUrl,
+      model: anthropicModel,
+      newChatKey: anthropicKey,
+      newEmbeddingKey: embeddingKey,
+    })
     await expect(adminPage.locator('#id_chat_api_format')).toHaveValue('anthropic_messages')
+    await expect(adminPage.locator('#id_chat_provider_url')).toHaveValue(anthropicUrl)
     await expect(adminPage.locator('#id_chat_model_name')).toHaveValue(anthropicModel)
-    await expect(adminPage.getByText('http://test-provider:9000/anthropic', { exact: false })).toBeVisible()
-    await expect(adminPage.locator('[name*="api_key" i]')).toHaveCount(0)
-    expect(await adminPage.content()).not.toContain('isolated-test-anthropic')
+    const chatKeyInput = adminPage.locator('#id_new_chat_api_key')
+    const embeddingKeyInput = adminPage.locator('#id_new_embedding_api_key')
+    await expect(chatKeyInput).toHaveAttribute('type', 'password')
+    await expect(chatKeyInput).toHaveAttribute('autocomplete', 'new-password')
+    await expect(chatKeyInput).toHaveValue('')
+    await expect(embeddingKeyInput).toHaveAttribute('type', 'password')
+    await expect(embeddingKeyInput).toHaveValue('')
+    await expect(adminSection(adminPage, 'Chat / Reasoning').getByText('Настроен', { exact: true })).toBeVisible()
+    await expect(adminSection(adminPage, 'Embeddings (OpenAI-compatible)').getByText('Настроен', { exact: true })).toBeVisible()
+    await expect(adminPage.getByRole('heading', { name: 'Расширенные настройки контекста (OpenAI-compatible)' })).toBeVisible()
+    await expect(adminPage.getByText(/Токенизатор — это словарь/)).toHaveCount(1)
+    await expect(adminPage.locator('[name="chat_api_key_encrypted"], [name="embedding_api_key_encrypted"]')).toHaveCount(0)
+
+    const configured = credentialState(settingsId)
+    expect(configured).toMatchObject({ has_chat: true, has_embedding: true })
+    expect(configured.chat).toMatch(/^fernet:v1:/)
+    expect(configured.embedding).toMatch(/^fernet:v1:/)
+    expect(configured.chat).not.toContain(anthropicKey)
+    expect(configured.embedding).not.toContain(embeddingKey)
+    expect(configured.embedding_url).toBe(openAIUrl)
+    let adminHtml = await adminPage.content()
+    expect(adminHtml).not.toContain(anthropicKey)
+    expect(adminHtml).not.toContain(embeddingKey)
+    expect(adminHtml).not.toContain(configured.chat)
+    expect(adminHtml).not.toContain(configured.embedding)
+
+    await expectRejectedAISettings(adminPage, settingsId, {
+      embeddingProviderUrl: 'https://openrouter.ai/api/v1',
+    })
+    await expect(adminPage.getByText(/При смене hostname Embeddings/)).toBeVisible()
+    expect(credentialState(settingsId)).toMatchObject({
+      embedding: configured.embedding,
+      embedding_url: openAIUrl,
+      has_embedding: true,
+    })
+
+    await expectRejectedAISettings(adminPage, settingsId, {
+      apiFormat: 'openai_compatible',
+      providerUrl: openAIUrl,
+    })
+    expect(credentialState(settingsId).chat).toBe(configured.chat)
+
+    const conflictingKey = `isolated-test-conflict-${randomUUID()}`
+    await expectRejectedAISettings(adminPage, settingsId, {
+      newChatKey: conflictingKey,
+      clearChatKey: true,
+    })
+    await expect(adminPage.locator('#id_new_chat_api_key')).toHaveValue('')
+    expect(await adminPage.content()).not.toContain(conflictingKey)
+    expect(credentialState(settingsId).chat).toBe(configured.chat)
+
+    const rejectedKey = `isolated-test-rejected-${randomUUID()}`
+    await expectRejectedAISettings(adminPage, settingsId, {
+      providerUrl: 'https://127.0.0.1/anthropic',
+      newChatKey: rejectedKey,
+    })
+    await expect(adminPage.locator('#id_new_chat_api_key')).toHaveValue('')
+    expect(await adminPage.content()).not.toContain(rejectedKey)
+    expect(credentialState(settingsId).chat).toBe(configured.chat)
+
+    await saveAISettings(adminPage, settingsId, {})
+    expect(credentialState(settingsId).chat).toBe(configured.chat)
+
+    await saveAISettings(adminPage, settingsId, { newChatKey: invalidAnthropicKey })
+    const invalidConfigured = credentialState(settingsId)
+    expect(invalidConfigured.chat).toMatch(/^fernet:v1:/)
+    expect(invalidConfigured.chat).not.toBe(configured.chat)
+    expect(invalidConfigured.chat).not.toContain(invalidAnthropicKey)
 
     await login(page)
     await page.getByRole('button', { name: 'KPI и чат', exact: true }).click()
     await expect(page.getByText('Полная история', { exact: true })).toBeVisible()
+
+    const rejectedPrompt = `ANTHROPIC_ADMIN_BAD_KEY ${randomUUID()}`
+    await submitChat(page, rejectedPrompt)
+    await expect.poll(() => operationState(rejectedPrompt).error, { timeout: 45_000 }).toBe('provider_authentication_failed')
+    let captures = await providerCaptures(request)
+    const rejectedCapture = findCapture(captures.anthropic, rejectedPrompt)
+    assertNativeRequest(rejectedCapture, false, false)
+    expect(JSON.stringify(rejectedCapture)).not.toContain(invalidAnthropicKey)
+
+    await saveAISettings(adminPage, settingsId, { newChatKey: anthropicKey })
+    expect(isolatedCompose(['ps', '-q', 'qcluster']).trim()).toBe(qclusterContainer)
 
     const chatPrompt = `ANTHROPIC_E2E_DELAY ${randomUUID()}`
     await submitChat(page, chatPrompt)
@@ -277,11 +457,24 @@ test('Anthropic native admin config → UI chat/errors → webhook extraction an
     expect(chatUsage!.input_tokens!).toBeGreaterThan(0)
     expect(embeddingUsage?.api_format).toBe('openai_compatible')
 
-    let captures = await providerCaptures(request)
+    captures = await providerCaptures(request)
     const chatCapture = findCapture(captures.anthropic, chatPrompt)
     assertNativeRequest(chatCapture)
     expect(contentText(chatCapture.payload.system!)).toContain('Ты аналитик Mazory')
     expect(JSON.stringify(chatCapture)).not.toContain('isolated-test-anthropic')
+    const embeddingCapture = captures.openai_embeddings.findLast(item =>
+      JSON.stringify(item.payload).includes(chatPrompt))
+    expect(embeddingCapture).toMatchObject({
+      path: '/v1/embeddings',
+      auth_valid: true,
+      content_type_valid: true,
+      x_api_key_absent: true,
+    })
+    const qclusterIps = isolatedCompose(['exec', '-T', 'qcluster', 'hostname', '-i']).trim().split(/\s+/)
+    const backendIps = isolatedCompose(['exec', '-T', 'backend', 'hostname', '-i']).trim().split(/\s+/)
+    expect(qclusterIps).toContain(chatCapture.client_ip)
+    expect(qclusterIps).toContain(embeddingCapture!.client_ip)
+    expect(backendIps).not.toContain(chatCapture.client_ip)
 
     const errorScenarios = [
       ['ANTHROPIC_E2E_401', 'provider_authentication_failed'],
@@ -447,16 +640,122 @@ test('Anthropic native admin config → UI chat/errors → webhook extraction an
     expect(captures.anthropic.some(item => userText(item).includes(countFailureMarker))).toBe(false)
     expect(JSON.stringify(captures)).not.toContain('isolated-test-anthropic')
 
+    await saveAISettings(adminPage, settingsId, {
+      apiFormat: 'openai_compatible',
+      providerUrl: openAIUrl,
+      model: openAIModel,
+      newChatKey: openAIKey,
+    })
+    await expect(adminPage.locator('#id_chat_api_format')).toHaveValue('openai_compatible')
+    await expect(adminPage.locator('#id_chat_provider_url')).toHaveValue(openAIUrl)
+    await expect(adminPage.locator('#id_chat_model_name')).toHaveValue(openAIModel)
+    await expect(adminSection(adminPage, 'Chat / Reasoning').getByText('Настроен', { exact: true })).toBeVisible()
+
+    await page.getByRole('button', { name: 'KPI и чат', exact: true }).click()
+    await expect(page.getByText('Полная история', { exact: true })).toBeVisible()
+    const openAIPrompt = `OPENAI_ADMIN_SWITCH ${randomUUID()}`
+    await submitChat(page, openAIPrompt)
+    await expect(page.getByTestId('chat-response')).toHaveText(
+      'Ответ по разрешённым источникам тестового провайдера.',
+      { timeout: 45_000 },
+    )
+    await expect.poll(() => operationState(openAIPrompt).status, { timeout: 45_000 }).toBe('succeeded')
+    const openAIState = operationState(openAIPrompt)
+    expect(openAIState.usages.find(usage => usage.operation === 'chat')).toMatchObject({
+      api_format: 'openai_compatible',
+      model_name: openAIModel,
+      succeeded: true,
+      error_code: '',
+    })
+    captures = await providerCaptures(request)
+    const openAICapture = captures.openai_chats.findLast(item =>
+      JSON.stringify(item.payload).includes(openAIPrompt))
+    expect(openAICapture).toMatchObject({
+      path: '/v1/chat/completions',
+      auth_valid: true,
+      content_type_valid: true,
+      x_api_key_absent: true,
+    })
+    expect(openAICapture?.payload.model).toBe(openAIModel)
+    expect(qclusterIps).toContain(openAICapture!.client_ip)
+    expect(JSON.stringify(openAICapture)).not.toContain(openAIKey)
+    expect(captures.anthropic.some(item => userText(item).includes(openAIPrompt))).toBe(false)
+
+    const openAICountBeforeCorruption = captures.openai_chats.length
+    isolatedCommand('shell', ['--verbosity', '0', '-c', guard + `
+from api.models import AISettings
+AISettings.objects.filter(pk=${settingsId}).update(chat_api_key_encrypted='fernet:v1:synthetic-corrupted-ciphertext')
+`])
+    const corruptedPrompt = `OPENAI_ADMIN_CORRUPTED ${randomUUID()}`
+    await submitChat(page, corruptedPrompt)
+    await expect.poll(() => operationState(corruptedPrompt).error, { timeout: 45_000 }).toBe('credential_decryption_failed')
+    captures = await providerCaptures(request)
+    expect(captures.openai_chats).toHaveLength(openAICountBeforeCorruption)
+
+    await saveAISettings(adminPage, settingsId, { newChatKey: openAIKey })
+    expect(isolatedCompose(['ps', '-q', 'qcluster']).trim()).toBe(qclusterContainer)
+    const recoveredPrompt = `OPENAI_ADMIN_RECOVERED ${randomUUID()}`
+    await submitChat(page, recoveredPrompt)
+    await expect.poll(() => operationState(recoveredPrompt).status, { timeout: 45_000 }).toBe('succeeded')
+    captures = await providerCaptures(request)
+    const recoveredCapture = captures.openai_chats.findLast(item =>
+      JSON.stringify(item.payload).includes(recoveredPrompt))
+    expect(recoveredCapture).toMatchObject({ auth_valid: true, client_ip: openAICapture!.client_ip })
+
+    const openAIChatCount = captures.openai_chats.length
+    const clearedCiphertext = credentialState(settingsId).chat
+    await saveAISettings(adminPage, settingsId, { clearChatKey: true })
+    await expect(adminSection(adminPage, 'Chat / Reasoning').getByText('Не настроен', { exact: true })).toBeVisible()
+    const cleared = credentialState(settingsId)
+    expect(cleared).toMatchObject({ chat: '', has_chat: false, has_embedding: true })
+    expect(clearedCiphertext).toMatch(/^fernet:v1:/)
+
+    const clearedPrompt = `OPENAI_ADMIN_CLEARED ${randomUUID()}`
+    await submitChat(page, clearedPrompt)
+    await expect.poll(() => operationState(clearedPrompt).error, { timeout: 45_000 }).toBe('ai_not_configured')
+    captures = await providerCaptures(request)
+    expect(captures.openai_chats).toHaveLength(openAIChatCount)
+    expect(JSON.stringify(captures)).not.toContain(clearedCiphertext)
+
+    await adminPage.goto(`/admin/api/aisettings/${settingsId}/history/`)
+    adminHtml = await adminPage.content()
+    for (const secret of [anthropicKey, invalidAnthropicKey, openAIKey, embeddingKey, configured.chat, configured.embedding, clearedCiphertext]) {
+      expect(adminHtml).not.toContain(secret)
+    }
+    const audit = inspect<unknown[]>(`
+from api.models import AuditEvent
+print(json.dumps(list(AuditEvent.objects.filter(target_type='AISettings',target_id=${settingsId}).values_list('before_after',flat=True))))
+`)
+    const auditJson = JSON.stringify(audit)
+    expect(auditJson).toContain('new_chat_api_key')
+    expect(auditJson).toContain('clear_chat_api_key')
+    for (const secret of [anthropicKey, invalidAnthropicKey, openAIKey, embeddingKey, configured.chat, configured.embedding, clearedCiphertext]) {
+      expect(auditJson).not.toContain(secret)
+    }
+    const logs = isolatedCompose([
+      'logs', '--no-color',
+      'backend', 'qcluster', 'outbox', 'history', 'delivery', 'crm', 'test-provider',
+    ])
+    for (const secret of [anthropicKey, invalidAnthropicKey, openAIKey, embeddingKey, configured.chat, configured.embedding, clearedCiphertext]) {
+      expect(logs).not.toContain(secret)
+    }
+
     expect(pageErrors).toEqual([])
     expect(consoleErrors).toEqual([])
   } finally {
     try {
-      if (settingsId && originalFormat && originalModel) {
+      if (settingsId && originalFormat && originalUrl && originalModel) {
         await adminPage.goto('/admin/')
         if (new URL(adminPage.url()).pathname === '/admin/login/') await adminLogin(adminPage)
-        await saveAISettings(adminPage, settingsId, originalFormat, originalModel)
-        await adminPage.goto(`/admin/api/aisettings/${settingsId}/change/`)
+        await saveAISettings(adminPage, settingsId, {
+          apiFormat: originalFormat,
+          providerUrl: originalUrl,
+          model: originalModel,
+          newChatKey: originalFormat === 'anthropic_messages' ? anthropicKey : openAIKey,
+          newEmbeddingKey: embeddingKey,
+        })
         await expect(adminPage.locator('#id_chat_api_format')).toHaveValue(originalFormat)
+        await expect(adminPage.locator('#id_chat_provider_url')).toHaveValue(originalUrl)
         await expect(adminPage.locator('#id_chat_model_name')).toHaveValue(originalModel)
       }
     } finally {
