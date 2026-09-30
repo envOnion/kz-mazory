@@ -304,7 +304,11 @@ class BitrixService:
             amount = Decimal(str(value)).quantize(Decimal("0.01"))
         except (InvalidOperation, TypeError, ValueError):
             return None
-        if not amount.is_finite() or abs(amount) >= Decimal("1000000000000"):
+        if (
+            not amount.is_finite()
+            or amount < 0
+            or amount >= Decimal("1000000000000")
+        ):
             return None
         return amount
 
