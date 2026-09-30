@@ -175,8 +175,7 @@ def context_runtime(cfg):
                 raise TypeError()
         except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
             raise ProviderUnavailable("context_model_metadata_unavailable") from exc
-        if not settings.INTEGRATION_TEST_MODE:
-            cache.set(key, endpoints, timeout=300)
+        cache.set(key, endpoints, timeout=300)
     eligible = []
     for endpoint in endpoints:
         if not isinstance(endpoint, dict):

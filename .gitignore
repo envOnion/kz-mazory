@@ -11,8 +11,6 @@ dist/
 .DS_Store
 *.log
 waha_sessions/
-test-results/
-playwright-report/
 .env
 
 .dev-secret
@@ -22,7 +20,5 @@ private/
 backups/
 *.age
 *.agekey
-frontend/test-results/
-frontend/playwright-report/
 *.tsbuildinfo
 backend/tokenizers/*/

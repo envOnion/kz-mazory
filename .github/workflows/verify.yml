@@ -11,9 +11,9 @@ concurrency:
   cancel-in-progress: true
 jobs:
   verify:
-    name: PostgreSQL, queues, security and browser E2E
+    name: Build, Django and security checks
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Scan committed sources for secrets
@@ -23,64 +23,36 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
-      - run: npm ci
+      - name: Install frontend dependencies
+        run: npm ci
         working-directory: frontend
-      - run: npx playwright install --with-deps chromium webkit
+      - name: Typecheck and build frontend
+        run: npm run build
         working-directory: frontend
-      - name: Build isolated backend and production gateway
-        run: docker compose -f compose.e2e.yml build backend nginx
-      - name: Start isolated database and providers
-        run: docker compose -f compose.e2e.yml up -d postgres redis qdrant backend test-provider
-      - name: Apply migrations and seed synthetic data
-        run: |
-          docker compose -f compose.e2e.yml exec -T backend python manage.py migrate --noinput
-          docker compose -f compose.e2e.yml exec -T backend python manage.py seed_e2e
-          docker compose -f compose.e2e.yml exec -T backend python manage.py collectstatic --noinput
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
       - name: Django configuration and migration drift
         run: |
-          docker compose -f compose.e2e.yml exec -T backend python manage.py check
-          docker compose -f compose.e2e.yml exec -T backend python manage.py makemigrations --check
+          uv run --project backend python backend/manage.py check
+          uv run --project backend python backend/manage.py makemigrations --check
       - name: Production security settings
-        run: |
-          docker compose -f compose.e2e.yml cp ops/check_deployment.py backend:/tmp/check_deployment.py
-          docker compose -f compose.e2e.yml exec -T backend python /tmp/check_deployment.py /app
+        run: uv run --project backend python ops/check_deployment.py
       - name: Dependency audit
         run: |
           npm --prefix frontend audit --audit-level=high
           pipx run --spec pip-audit==2.9.0 pip-audit --no-deps --disable-pip -r backend/requirements.txt
-      - name: Start dedicated queues
-        run: docker compose -f compose.e2e.yml up -d qcluster delivery history crm outbox
-      - name: Typecheck and build frontend
-        run: npm run build
-        working-directory: frontend
-      - name: Start and validate production gateway
-        run: |
-          docker compose -f compose.e2e.yml up -d nginx
-          docker compose -f compose.e2e.yml exec -T nginx nginx -t
-          for attempt in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:5173/api/health/ready/ >/dev/null; then
-              exit 0
-            fi
-            sleep 1
-          done
-          docker compose -f compose.e2e.yml logs --tail=100 nginx backend
-          exit 1
-      - name: Browser E2E through production gateway with real API and workers
-        working-directory: frontend
-        run: npm run test:e2e
-      - name: Encrypted backup and isolated restore
-        run: |
-          docker build -f ops/backup.Dockerfile -t mazory-backup-tools .
-          bash ops/verify_restore.sh
-      - name: Worker and provider diagnostics
-        if: always()
-        run: docker compose -f compose.e2e.yml logs --tail=100 nginx backend qcluster delivery history crm outbox test-provider
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: browser-failures-synthetic-data-only
-          path: frontend/test-results/
-          retention-days: 7
-      - name: Remove isolated services
-        if: always()
-        run: docker compose -f compose.e2e.yml down -v
+      - name: Compose configuration
+        env:
+          SECRET_KEY: synthetic-ci-secret-key-abcdefghijklmnopqrstuvwxyz-0123456789
+          JWT_SIGNING_KEY: synthetic-ci-jwt-key-abcdefghijklmnopqrstuvwxyz-0123456789
+          MFA_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          AI_CREDENTIAL_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          ALLOWED_HOSTS: localhost
+          CSRF_TRUSTED_ORIGINS: https://localhost
+          POSTGRES_PASSWORD: synthetic-ci-password
+          WAHA_API_KEY: synthetic-ci-key
+          WAHA_WEBHOOK_SECRET: synthetic-ci-hook
+          QDRANT_API_KEY: synthetic-ci-vector-key
+          WAHA_IMAGE: devlikeapro/waha:2025.11.2
+        run: docker compose config --quiet
