@@ -35,6 +35,8 @@ ERRORS = {
     "provider_access_denied": "Провайдер AI запретил запрос.",
     "provider_insufficient_credits": "Недостаточно средств у провайдера AI.",
     "provider_invalid_request": "Провайдер AI отклонил параметры запроса.",
+    "ai_not_configured": "API-ключ выбранного AI-канала не настроен. Замените ключ в настройках AI.",
+    "credential_decryption_failed": "Сохранённый API-ключ AI недоступен. Замените его в настройках AI.",
     "ai_daily_budget_exhausted": "Исчерпан суточный бюджет запросов AI.",
     "provider_response_error": "Провайдер AI сообщил об ошибке вместо результата анализа.",
     "provider_usage_persistence_failed": "Не удалось сохранить аудит AI-запроса; результат не применён.",

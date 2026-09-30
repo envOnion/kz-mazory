@@ -17,6 +17,8 @@ ai_requests = {
     "embeddings": [],
     "chats": [],
     "payloads": [],
+    "openai_chats": [],
+    "openai_embeddings": [],
     "anthropic": [],
     "anthropic_counts": [],
 }
@@ -24,6 +26,8 @@ context_options = {}
 lock = threading.Lock()
 
 ANTHROPIC_TEST_KEY = "isolated-test-anthropic"
+OPENAI_CHAT_TEST_KEY = "isolated-test-provider"
+OPENAI_EMBEDDING_TEST_KEY = "isolated-test-embedding"
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_FORBIDDEN_FIELDS = {
     "provider",
@@ -59,8 +63,31 @@ class Handler(BaseHTTPRequestHandler):
             "content_type_valid": self.headers.get_content_type()
             == "application/json",
             "authorization_header_absent": self.headers.get("Authorization") is None,
+            "client_ip": self.client_address[0],
         }
         key = "anthropic_counts" if count_tokens else "anthropic"
+        with lock:
+            ai_requests[key].append(item)
+        return item
+
+    def openai_capture(self, data, *, operation):
+        """Capture protocol evidence without retaining or returning credentials."""
+        expected_key = (
+            OPENAI_EMBEDDING_TEST_KEY
+            if operation == "embedding"
+            else OPENAI_CHAT_TEST_KEY
+        )
+        item = {
+            "path": urlsplit(self.path).path,
+            "payload": data,
+            "auth_valid": self.headers.get("Authorization")
+            == f"Bearer {expected_key}",
+            "content_type_valid": self.headers.get_content_type()
+            == "application/json",
+            "x_api_key_absent": self.headers.get("x-api-key") is None,
+            "client_ip": self.client_address[0],
+        }
+        key = "openai_embeddings" if operation == "embedding" else "openai_chats"
         with lock:
             ai_requests[key].append(item)
         return item
@@ -330,6 +357,9 @@ class Handler(BaseHTTPRequestHandler):
                 messages.append(item)
             return self.reply(200, {"id": item["id"]})
         if self.path.endswith("/embeddings"):
+            capture = self.openai_capture(data, operation="embedding")
+            if not capture["auth_valid"]:
+                return self.reply(401, {"error": {"code": 401}})
             with lock:
                 ai_requests["embeddings"].append(data["input"])
             digest = hashlib.sha256(data["input"].encode()).digest()
@@ -337,6 +367,9 @@ class Handler(BaseHTTPRequestHandler):
                 200, {"data": [{"embedding": [(n - 128) / 128 for n in digest[:8]]}]}
             )
         if self.path.endswith("/chat/completions"):
+            capture = self.openai_capture(data, operation="chat")
+            if not capture["auth_valid"]:
+                return self.reply(401, {"error": {"code": 401}})
             value = json.loads(data["messages"][-1]["content"])
             with lock:
                 ai_requests["chats"].append(value)

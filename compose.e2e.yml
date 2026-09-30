@@ -19,8 +19,6 @@ x-env: &test-env
   WAHA_WEBHOOK_SECRET: isolated-test-webhook
   BITRIX_WEBHOOK_URL: http://test-provider:9000/rest/1/e2e-environment/
   BITRIX_INBOUND_TOKEN: isolated-test-bitrix-inbound
-  OPENROUTER_API_KEY: isolated-test-provider
-  ANTHROPIC_BASE_URL: http://test-provider:9000/anthropic
   ALLOWED_HOSTS: localhost,127.0.0.1,backend,192.168.0.193
   CSRF_TRUSTED_ORIGINS: ${E2E_CSRF_TRUSTED_ORIGINS:-}
   OCR_URL: http://test-provider:9000/ocr
@@ -63,13 +61,16 @@ services:
     ports: ['${E2E_BIND_ADDRESS:-127.0.0.1}:${E2E_PROVIDER_PORT:-18090}:9000']
   backend:
     <<: *backend
+    environment:
+      <<: *test-env
+      AI_CREDENTIAL_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
     command: [gunicorn, api.testing.wsgi:application, --bind, '0.0.0.0:8000', --workers, '2', --timeout, '30']
   qcluster:
     <<: *backend
     environment:
       <<: *test-env
       Q_CLUSTER_NAME: ai
-      ANTHROPIC_API_KEY: isolated-test-anthropic
+      AI_CREDENTIAL_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
     command: [python, manage.py, qcluster]
   delivery:
     <<: *backend
