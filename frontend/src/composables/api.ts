@@ -23,12 +23,13 @@ export async function api<T>(path: string, init: RequestInit = {}, retry = true)
   return data
 }
 export function post<T>(path: string, data: object): Promise<T> { return api<T>(path, { method: 'POST', body: JSON.stringify(data) }) }
+const analyticsErrors: Record<string, string> = { analytics_not_configured: 'Доступ к аналитическим данным ещё не настроен администратором.', analytics_query_failed: 'Не удалось прочитать аналитические данные.', unsupported_query: 'Этот разрез пока не поддерживается. Уточните условия.', invalid_tool_arguments: 'Не удалось подобрать корректную выборку. Уточните вопрос.', presentation_invalid: 'Не удалось построить график по этим данным.', provider_tools_unsupported: 'Выбранная модель не поддерживает инструменты аналитики.', dataset_limit_use_filters: 'Слишком много данных. Сузьте период или фильтры.', context_budget_use_filters: 'Выборка слишком велика для модели. Уточните условия.', query_limit_exceeded: 'Превышен лимит аналитического запроса. Уточните вопрос.', analytics_timeout: 'Запрос превысил время обработки. Сузьте выборку.' }
 export async function pollOperation<T>(id: number, signal?: AbortSignal): Promise<T> {
   for (let attempt = 0; attempt < 180; attempt++) {
     if (signal?.aborted) throw new Error('Запрос отменён')
     const operation = await api<Operation<T>>(`/operations/${id}/`, { signal })
     if (operation.status === 'succeeded' && operation.result !== null) return operation.result
-    if (['failed', 'expired', 'cancelled'].includes(operation.status)) throw new Error(operation.status === 'failed' ? 'Не удалось обработать запрос. Попробуйте позже; KPI и кабинет доступны.' : 'Запрос отменён или доступ изменился')
+    if (['failed', 'expired', 'cancelled'].includes(operation.status)) throw new Error(operation.status === 'failed' ? (analyticsErrors[operation.error_code] || 'Не удалось обработать запрос. Попробуйте позже; KPI и кабинет доступны.') : 'Запрос отменён или доступ изменился')
     await new Promise(resolve => setTimeout(resolve, 1000))
   }
   throw new Error('Обработка занимает больше времени. Запрос можно повторить позже.')

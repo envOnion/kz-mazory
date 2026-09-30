@@ -32,16 +32,6 @@
           <Paperclip class="w-4 h-4" />
         </button>
 
-        <!-- Microphone (Voice input) -->
-        <button
-          type="button"
-          class="p-2 text-slate-400 hover:text-indigo-200 transition-colors rounded-full hover:bg-white/5"
-          title="Голосовой ввод"
-          @click="$emit('voiceInput')"
-        >
-          <Mic class="w-4 h-4" />
-        </button>
-
         <!-- Submit Send Button -->
         <button
           type="submit"
@@ -76,7 +66,7 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
-import { Sparkles, Paperclip, Mic, ArrowUp, ArrowUpRight, Loader2 } from 'lucide-vue-next'
+import { Sparkles, Paperclip, ArrowUp, ArrowUpRight, Loader2 } from 'lucide-vue-next'
 
 const props = defineProps<{
   placeholder?: string
@@ -87,7 +77,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: 'submit', query: string): void
   (e: 'attachFile'): void
-  (e: 'voiceInput'): void
 }>()
 
 const queryText = ref('')

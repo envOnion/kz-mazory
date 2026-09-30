@@ -251,6 +251,16 @@ else:
         }
     }
 
+# Never fall back to the writer when analytics credentials are absent.
+if os.getenv('ANALYTICS_DB_PASSWORD'):
+    DATABASES['analytics_readonly'] = {
+        **DATABASES['default'],
+        'USER': os.getenv('ANALYTICS_DB_USER', 'mazory_analytics'),
+        'PASSWORD': os.getenv('ANALYTICS_DB_PASSWORD'),
+        'OPTIONS': {'options': '-c default_transaction_read_only=on'},
+        'TEST': {'MIRROR': 'default'},
+    }
+
 QDRANT_URL = os.getenv("QDRANT_URL")
 if not QDRANT_URL:
     QDRANT_URL = (

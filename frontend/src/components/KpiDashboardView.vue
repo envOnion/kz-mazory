@@ -1,7 +1,7 @@
 <template>
   <section class="w-full max-w-6xl mx-auto px-4 py-6 space-y-5" aria-label="Показатели и ответы">
     <div class="flex flex-wrap items-center justify-between gap-3">
-      <div><p class="text-xs text-indigo-300">ПОДТВЕРЖДЁННЫЕ ДАННЫЕ</p><h1 class="text-2xl font-semibold">KPI отдела продаж</h1></div>
+      <div><p class="text-xs text-indigo-300">ПОДТВЕРЖДЁННЫЕ ДАННЫЕ</p><h1 class="text-2xl font-semibold">{{ presentation?.title || (hasChatResponse ? 'Ответ Mazory' : 'KPI отдела продаж') }}</h1></div>
       <select aria-label="Период" class="field" :value="period" @change="$emit('changePeriod', ($event.target as HTMLSelectElement).value)">
         <option value="this_month">Текущий месяц</option><option value="last_month">Прошлый месяц</option><option value="quarter">Квартал</option><option value="year">Год</option>
       </select>
@@ -14,12 +14,13 @@
     </div>
     <p v-if="isLoading" role="status" class="panel animate-pulse">Обрабатываю запрос…</p>
     <p v-if="responseText" class="panel whitespace-pre-wrap" data-testid="chat-response">{{ responseText }}</p>
-    <template v-if="widget">
+    <PresentationRenderer v-if="presentation" :document="presentation" @open-source="$emit('openSource', $event)" />
+    <template v-else-if="widget">
       <PresetChart v-if="widget.type === 'chart'" :data="widget.data" />
       <PresetCommitmentList v-else-if="widget.type === 'commitments_list'" :data="widget.data" />
       <PresetProjectTable v-else-if="widget.type === 'project_table'" :data="widget.data" />
     </template>
-    <template v-if="data && (!widget || widget.type === 'kpi_grid')">
+    <template v-if="data && !presentation && !isLoading && ((!hasChatResponse && !widget) || widget?.type === 'kpi_grid')">
       <p class="text-sm text-slate-400">{{ data.querySubtitle }} · {{ data.updatedAtText }}</p>
       <p class="panel" :class="data.coverage.status === 'partial' ? 'text-amber-300' : 'text-emerald-300'">{{ data.coverage.message }}</p>
       <div class="grid md:grid-cols-3 gap-4">
@@ -53,8 +54,10 @@ import PresetChart from './presets/PresetChart.vue'
 import PresetCommitmentList from './presets/PresetCommitmentList.vue'
 import PresetProjectTable from './presets/PresetProjectTable.vue'
 import ManagerCard from './ManagerCard.vue'
-const props = defineProps<{ data: KpiDashboardData | null; widget: ChatWidget | null; responseText: string; isLoading: boolean; period: string }>()
-const emit = defineEmits<{ changePeriod: [period: string]; changeFilters: [filters: KpiFilters]; selectPrompt: [prompt: string] }>()
+import PresentationRenderer from '../presentation/PresentationRenderer.vue'
+import type { PresentationDocument } from '../types/presentation'
+const props = defineProps<{ data: KpiDashboardData | null; widget: ChatWidget | null; responseText: string; presentation: PresentationDocument | null; hasChatResponse: boolean; isLoading: boolean; period: string }>()
+const emit = defineEmits<{ changePeriod: [period: string]; changeFilters: [filters: KpiFilters]; selectPrompt: [prompt: string]; openSource: [id: number] }>()
 const filters = reactive<KpiFilters>({ currency: 'KZT' })
 const directory = ref<Directory>({ teams: [], profiles: [], projects: [] })
 watch(filters, value => emit('changeFilters', { ...value }), { deep: true })

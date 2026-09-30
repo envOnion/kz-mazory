@@ -11,6 +11,8 @@ x-environment: &environment
   POSTGRES_USER: ${POSTGRES_USER:-mazory}
   POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set the database password}
   POSTGRES_HOST: postgres
+  ANALYTICS_DB_USER: ${ANALYTICS_DB_USER:-mazory_analytics}
+  ANALYTICS_DB_PASSWORD: ${ANALYTICS_DB_PASSWORD:-}
   POSTGRES_PORT: '5432'
   REDIS_HOST: redis
   WAHA_API_URL: http://waha:3000

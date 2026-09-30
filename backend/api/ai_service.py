@@ -33,6 +33,7 @@ from .providers import (
     retry_after_seconds,
 )
 
+analytics_deadline = ContextVar("analytics_deadline", default=None)
 usage_event_id = ContextVar("usage_event_id", default=None)
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,16 @@ class AIService:
         headers=None,
         response_validator=None,
     ):
+        deadline = analytics_deadline.get()
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ProviderUnavailable("analytics_timeout")
+            timeout = (
+                min(timeout, remaining)
+                if isinstance(timeout, (int, float))
+                else tuple(min(t, remaining) for t in timeout)
+            )
         cfg = AISettings.get_active()
         day = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
         today = ProviderUsage.objects.filter(created_at__gte=day)
@@ -170,6 +181,8 @@ class AIService:
                 timeout=timeout,
                 allow_redirects=False,
             )
+            if deadline is not None and time.monotonic() >= deadline:
+                raise ProviderUnavailable("analytics_timeout")
             if response.status_code in (400, 413, 422):
                 detail = response.text.lower()
                 if any(
@@ -233,8 +246,7 @@ class AIService:
                 value = usage.get(key)
                 return (
                     value
-                    if type(value) is int
-                    and 0 <= value <= MAX_USAGE_TOKEN_COUNT
+                    if type(value) is int and 0 <= value <= MAX_USAGE_TOKEN_COUNT
                     else None
                 )
 
@@ -367,10 +379,7 @@ class AIService:
                     else settings.OPENAI_PROVIDER_ALLOWED_HOSTS
                 ),
             )
-            if (
-                api_format != active_api_format
-                or provider_url != active_provider_url
-            ):
+            if api_format != active_api_format or provider_url != active_provider_url:
                 raise ProviderUnavailable("context_configuration_changed")
         api_key = AIService._credential(cfg, api_format=api_format)
         if api_format == ANTHROPIC_MESSAGES:
@@ -493,3 +502,44 @@ class AIService:
             return content
         except (KeyError, TypeError, IndexError, AttributeError):
             raise ProviderUnavailable("invalid_chat_response") from None
+
+    @staticmethod
+    def analytics_turn(messages, tools, deadline):
+        from .ai_providers import analytics_payload, analytics_turn
+
+        cfg = AIService._config()
+        api_format = chat_api_format(cfg)
+        payload = analytics_payload(
+            cfg.chat_model_name, messages, tools, cfg.max_completion_tokens, api_format
+        )
+        # Conservative byte bound includes tools and envelopes, and cannot silently
+        # discard facts. Byte-per-token overestimation also supports unknown gateways.
+        available = (
+            cfg.context_window_tokens
+            - cfg.max_completion_tokens
+            - cfg.context_safety_tokens
+        )
+        if len(json.dumps(payload, ensure_ascii=False).encode()) + 4096 > available:
+            raise ProviderUnavailable("context_budget_use_filters")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProviderUnavailable("analytics_timeout")
+        key = AIService._credential(cfg, api_format=api_format)
+        native = api_format == ANTHROPIC_MESSAGES
+        try:
+            result = AIService._post(
+                f"{AIService.effective_chat_provider_url(cfg)}"
+                + ("/v1/messages" if native else "/chat/completions"),
+                payload,
+                min(45, remaining),
+                api_format=api_format,
+                operation="analytics",
+                headers=anthropic_headers(key) if native else None,
+                api_key=None if native else key,
+                response_validator=lambda data: analytics_turn(data, api_format),
+            )
+        except ProviderUnavailable as exc:
+            if str(exc) in ["provider_invalid_request", "provider_request_rejected"]:
+                raise ProviderUnavailable("provider_tools_unsupported") from None
+            raise
+        return analytics_turn(result, api_format)

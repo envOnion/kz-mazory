@@ -3,11 +3,19 @@
 annotated-types==0.8.0
     # via pydantic
 anyio==4.15.1
-    # via httpx
+    # via
+    #   httpx
+    #   mcp
+    #   sse-starlette
+    #   starlette
 asgiref==3.12.1
     # via
     #   django
     #   django-cors-headers
+attrs==26.1.0
+    # via
+    #   jsonschema
+    #   referencing
 certifi==2026.7.22
     # via
     #   httpcore
@@ -18,13 +26,17 @@ cffi==2.1.1 ; platform_python_implementation != 'PyPy'
 charset-normalizer==3.5.1
     # via requests
 click==8.5.0
-    # via huggingface-hub
+    # via
+    #   huggingface-hub
+    #   uvicorn
 colorama==0.4.6 ; sys_platform == 'win32'
     # via
     #   qrcode
     #   tqdm
 cryptography==50.0.1
-    # via mazory-backend
+    # via
+    #   mazory-backend
+    #   pyjwt
 django==6.1.1
     # via
     #   django-cors-headers
@@ -57,7 +69,9 @@ grpcio==1.84.0
 gunicorn==26.2.0
     # via mazory-backend
 h11==0.16.0
-    # via httpcore
+    # via
+    #   httpcore
+    #   uvicorn
 h2==4.4.1
     # via httpx
 hf-xet==1.6.0 ; platform_machine == 'AMD64' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'arm64' or platform_machine == 'x86_64'
@@ -69,7 +83,10 @@ httpcore==1.0.9
 httpx==0.28.1
     # via
     #   huggingface-hub
+    #   mcp
     #   qdrant-client
+httpx-sse==0.4.3
+    # via mcp
 huggingface-hub==1.33.0
     # via tokenizers
 hyperframe==6.1.0
@@ -81,8 +98,14 @@ idna==3.20
     #   requests
 jinja2==3.1.6
     # via mazory-backend
+jsonschema==4.26.0
+    # via mcp
+jsonschema-specifications==2025.9.1
+    # via jsonschema
 markupsafe==3.0.3
     # via jinja2
+mcp==1.28.1
+    # via mazory-backend
 numpy==2.5.3
     # via
     #   mazory-backend
@@ -100,13 +123,26 @@ psycopg-binary==3.3.6 ; implementation_name != 'pypy'
 pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
     # via cffi
 pydantic==2.13.5
-    # via qdrant-client
+    # via
+    #   mcp
+    #   pydantic-settings
+    #   qdrant-client
 pydantic-core==2.46.5
     # via pydantic
-pyjwt==2.14.0
-    # via djangorestframework-simplejwt
+pydantic-settings==2.15.0
+    # via mcp
+pyjwt==2.15.1
+    # via
+    #   djangorestframework-simplejwt
+    #   mcp
+python-dotenv==1.2.3
+    # via pydantic-settings
+python-multipart==0.0.32
+    # via mcp
 pywin32==312 ; sys_platform == 'win32'
-    # via portalocker
+    # via
+    #   mcp
+    #   portalocker
 pyyaml==6.0.3
     # via huggingface-hub
 qdrant-client==1.19.1
@@ -115,10 +151,24 @@ qrcode==8.2
     # via mazory-backend
 redis==8.1.0
     # via mazory-backend
+referencing==0.37.0
+    # via
+    #   jsonschema
+    #   jsonschema-specifications
 requests==2.34.2
     # via mazory-backend
+rpds-py==2026.6.3
+    # via
+    #   jsonschema
+    #   referencing
 sqlparse==0.6.0
     # via django
+sse-starlette==3.5.0
+    # via mcp
+starlette==1.7.0
+    # via
+    #   mcp
+    #   sse-starlette
 tokenizers==0.23.2
     # via mazory-backend
 tqdm==4.70.1
@@ -128,12 +178,18 @@ typing-extensions==4.16.0
     #   anyio
     #   grpcio
     #   huggingface-hub
+    #   mcp
     #   psycopg
     #   pydantic
     #   pydantic-core
+    #   referencing
+    #   starlette
     #   typing-inspection
 typing-inspection==0.4.4
-    # via pydantic
+    # via
+    #   mcp
+    #   pydantic
+    #   pydantic-settings
 tzdata==2026.4 ; sys_platform == 'win32'
     # via
     #   django
@@ -142,3 +198,5 @@ urllib3==2.8.0
     # via
     #   qdrant-client
     #   requests
+uvicorn==0.54.0 ; sys_platform != 'emscripten'
+    # via mcp

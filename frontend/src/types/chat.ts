@@ -1,3 +1,4 @@
+import type { PresentationDocument } from './presentation'
 import type { Money, Coverage, Payment, Receivables } from './platform'
 export interface MetricSummary { id: string; title: string; value: string; trend: string; trendPositive: boolean; icon: 'bar-chart' | 'target' | 'users' }
 export interface ManagerProjectSummary {
@@ -27,5 +28,5 @@ export interface PipelineData { conversion: { value: number | null; reason: stri
 export type ChatWidget = { type: 'chart'; data: ChartPayload } | { type: 'commitments_list'; data: CommitmentData } | { type: 'project_table'; data: PipelineData } | { type: 'kpi_grid'; data: KpiDashboardData }
 export type WidgetType = ChatWidget['type']
 export interface ChatQuote { id: number; content: string; sender_name: string; sent_at: string; source_url: string }
-export interface ChatResponse { prompt: string; text: string; widget: ChatWidget | null; insights: string[]; quotes: ChatQuote[] }
+export interface ChatResponse { presentation?: PresentationDocument | null; prompt: string; text: string; widget: ChatWidget | null; insights: string[]; quotes: ChatQuote[] }
 export type ViewMode = 'welcome' | 'dashboard' | 'profile' | 'workspace'

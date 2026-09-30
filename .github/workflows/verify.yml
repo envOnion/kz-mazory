@@ -29,6 +29,9 @@ jobs:
       - name: Typecheck and build frontend
         run: npm run build
         working-directory: frontend
+      - name: Frontend analytics regression tests
+        run: npm test
+        working-directory: frontend
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
@@ -36,6 +39,8 @@ jobs:
         run: |
           uv run --project backend python backend/manage.py check
           uv run --project backend python backend/manage.py makemigrations --check
+      - name: Backend analytics contracts and access tests
+        run: uv run --project backend python backend/manage.py test api.tests_analytics
       - name: Production security settings
         run: uv run --project backend python ops/check_deployment.py
       - name: Dependency audit
