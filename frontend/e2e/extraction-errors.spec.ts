@@ -17,8 +17,9 @@ import json
 from api.models import MessageProcessingTrace,OutboxEvent,ProviderUsage
 t=MessageProcessingTrace.objects.get(pk=${id})
 e=OutboxEvent.objects.get(payload__trace_id=t.id)
-u=ProviderUsage.objects.filter(outbox_event=e,operation='chat').order_by('-id').first()
-print(json.dumps({'status':t.status,'error':t.error_code,'proposals':t.candidates.count(),'quotes':list(t.candidates.values_list('evidence__quote',flat=True)),'processed':t.raw_message.processed,'event':{'id':e.id,'state':e.state,'attempt_count':e.attempt_count,'next_attempt_at':e.next_attempt_at,'lease_until':e.lease_until},'diagnostics':t.context_metadata.get('response_diagnostics',{}),'history_run':t.raw_message.history_import_runs.first().id,'retry_delay':(e.next_attempt_at-u.created_at).total_seconds() if u else 0,'provider_requests':ProviderUsage.objects.filter(outbox_event=e,operation='chat').count(),'payload_hash':t.context_metadata.get('payload_sha256','')},default=str))
+requests=ProviderUsage.objects.filter(outbox_event=e,operation__in=['extraction','chat'])
+u=requests.order_by('-id').first()
+print(json.dumps({'status':t.status,'error':t.error_code,'proposals':t.candidates.count(),'quotes':list(t.candidates.values_list('evidence__quote',flat=True)),'processed':t.raw_message.processed,'event':{'id':e.id,'state':e.state,'attempt_count':e.attempt_count,'next_attempt_at':e.next_attempt_at,'lease_until':e.lease_until},'diagnostics':t.context_metadata.get('response_diagnostics',{}),'history_run':t.raw_message.history_import_runs.first().id,'retry_delay':(e.next_attempt_at-u.created_at).total_seconds() if u else 0,'provider_requests':requests.count(),'payload_hash':t.context_metadata.get('payload_sha256','')},default=str))
 `])) as State
 }
 function releaseRetry(id: number) {

@@ -1,5 +1,7 @@
 import { defineConfig, devices } from '@playwright/test'
 
+const e2eBaseUrl = process.env.E2E_BASE_URL || 'http://localhost:5173'
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: false,
@@ -8,7 +10,7 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   reporter: [['list']],
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL: e2eBaseUrl,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },

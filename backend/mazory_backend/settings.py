@@ -76,7 +76,20 @@ if MAZORY_ENV == "production" and not MFA_ENCRYPTION_KEY:
 PROVIDER_ALLOWED_HOSTS = [
     h
     for h in os.getenv(
-        "PROVIDER_ALLOWED_HOSTS", "openrouter.ai,aquakip.bitrix24.kz"
+        "PROVIDER_ALLOWED_HOSTS",
+        "openrouter.ai,aquakip.bitrix24.kz",
+    ).split(",")
+    if h
+]
+OPENAI_PROVIDER_ALLOWED_HOSTS = [
+    h
+    for h in os.getenv("OPENAI_PROVIDER_ALLOWED_HOSTS", "openrouter.ai").split(",")
+    if h
+]
+ANTHROPIC_PROVIDER_ALLOWED_HOSTS = [
+    h
+    for h in os.getenv(
+        "ANTHROPIC_PROVIDER_ALLOWED_HOSTS", "ru.cheapvibecode.ru"
     ).split(",")
     if h
 ]
@@ -495,6 +508,8 @@ SIMPLE_JWT = {
 BITRIX_WEBHOOK_URL = os.getenv("BITRIX_WEBHOOK_URL", "")
 BITRIX_INBOUND_TOKEN = os.getenv("BITRIX_INBOUND_TOKEN", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+ANTHROPIC_BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "").rstrip("/")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY", "")
 TRANSCRIPTION_URL = os.getenv("TRANSCRIPTION_URL", "")
 OCR_URL = os.getenv("OCR_URL", "")

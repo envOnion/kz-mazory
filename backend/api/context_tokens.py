@@ -1,4 +1,4 @@
-"""Native token counting and verified routing for extraction, without remote model code."""
+"""Provider-specific token counting and verified routing for extraction."""
 
 import hashlib
 import json
@@ -16,6 +16,7 @@ from .providers import ProviderUnavailable, checked_url
 
 ROOT = Path(__file__).resolve().parents[1] / "tokenizers"
 MANIFEST = json.loads((ROOT / "manifest.json").read_text())
+MAX_REMOTE_COUNT_REQUESTS = 32
 
 
 def canonical_json(value):
@@ -27,6 +28,9 @@ def payload_hash(payload):
 
 
 class NativeCounter:
+    strategy = "nemotron_local_manifest"
+    remote = False
+
     def __init__(self):
         root = ROOT / MANIFEST["revision"]
         for name, checksum in MANIFEST["files"].items():
@@ -63,6 +67,62 @@ class NativeCounter:
             }
         )
 
+    @property
+    def request_count(self):
+        return 0
+
+
+class AnthropicCounter:
+    """Exact provider counts cached for one extraction job.
+
+    ``count_text`` is deliberately only an inexpensive scheduling estimate. Every
+    accepted request and every history boundary is still verified by the native
+    count-tokens endpoint before generation.
+    """
+
+    strategy = "anthropic_count_tokens"
+    remote = True
+
+    def __init__(self):
+        self._counts = {}
+        self._request_count = 0
+
+    def count_text(self, text):
+        # This is not a compatibility tokenizer. UTF-8 size is merely a useful
+        # signal for deciding when an exact, cached remote check is worthwhile.
+        return (len(text.encode("utf-8")) + 2) // 3
+
+    def count_payload(self, payload):
+        key = payload_hash(payload)
+        if key not in self._counts:
+            if self._request_count >= MAX_REMOTE_COUNT_REQUESTS:
+                raise ProviderUnavailable("context_token_count_unavailable")
+            from .ai_service import AIService
+
+            try:
+                value = AIService.count_chat_tokens(payload)
+            except ProviderUnavailable as exc:
+                if str(exc) in {
+                    "context_token_count_invalid",
+                    "provider_invalid_request",
+                    "provider_invalid_response",
+                    "provider_response_error",
+                }:
+                    raise ProviderUnavailable(
+                        "context_token_count_unavailable",
+                        diagnostics=exc.diagnostics,
+                    ) from None
+                raise
+            if type(value) is not int or value < 0:
+                raise ProviderUnavailable("context_token_count_unavailable")
+            self._counts[key] = value
+            self._request_count += 1
+        return self._counts[key]
+
+    @property
+    def request_count(self):
+        return self._request_count
+
 
 @lru_cache(maxsize=1)
 def native_counter():
@@ -74,21 +134,35 @@ def native_counter():
 
 def context_runtime(cfg):
     if (
-        cfg.chat_model_name not in MANIFEST["models"]
-        or cfg.tokenizer_id != MANIFEST["repo"]
-        or cfg.tokenizer_revision != MANIFEST["revision"]
-    ):
-        raise ProviderUnavailable("context_tokenizer_unavailable")
-    if (
         cfg.context_window_tokens <= 0
         or cfg.max_completion_tokens <= 0
         or cfg.max_completion_tokens + cfg.context_safety_tokens
         >= cfg.context_window_tokens
     ):
         raise ProviderUnavailable("context_invalid_budget")
+    api_format = getattr(cfg, "chat_api_format", "openai_compatible")
+    if api_format == "anthropic_messages":
+        from .ai_service import AIService
+
+        return AnthropicCounter(), {
+            "tag": "anthropic_messages",
+            "context_length": cfg.context_window_tokens,
+            "supported_parameters": [],
+            "api_format": api_format,
+            "effective_provider_url": AIService.effective_chat_provider_url(cfg),
+        }
+    if api_format != "openai_compatible":
+        raise ProviderUnavailable("context_provider_unsupported")
+    if (
+        cfg.chat_model_name not in MANIFEST["models"]
+        or cfg.tokenizer_id != MANIFEST["repo"]
+        or cfg.tokenizer_revision != MANIFEST["revision"]
+    ):
+        raise ProviderUnavailable("context_tokenizer_unavailable")
     # Metadata is public and contains no message text; read only from the configured provider.
     url = checked_url(
-        f"{cfg.chat_provider_url.rstrip('/')}/models/{quote(cfg.chat_model_name, safe='/')}/endpoints"
+        f"{cfg.chat_provider_url.rstrip('/')}/models/{quote(cfg.chat_model_name, safe='/')}/endpoints",
+        allowed_hosts=settings.OPENAI_PROVIDER_ALLOWED_HOSTS,
     )
     key = "model-endpoints:" + hashlib.sha256(url.encode()).hexdigest()
     endpoints = cache.get(key)
@@ -135,7 +209,11 @@ def context_runtime(cfg):
             eligible.append(endpoint)
     if not eligible:
         raise ProviderUnavailable("context_model_window_unavailable")
-    endpoint = min(eligible, key=lambda item: item["tag"])
+    endpoint = dict(min(eligible, key=lambda item: item["tag"]))
+    endpoint.update(
+        api_format=api_format,
+        effective_provider_url=cfg.chat_provider_url.rstrip("/"),
+    )
     return native_counter(), endpoint
 
 
@@ -158,6 +236,23 @@ def extraction_payload(
 ):
     from .ai_service import WORKER_PROMPT
 
+    user_content = extraction_input(
+        {
+            "content": content,
+            "sender": sender,
+            "sent_at": sent_at,
+            "timezone": source_timezone,
+            "context": context,
+            "known_projects": known_projects,
+        }
+    )
+    if getattr(cfg, "chat_api_format", "openai_compatible") == "anthropic_messages":
+        return {
+            "model": cfg.chat_model_name,
+            "max_tokens": cfg.max_completion_tokens,
+            "system": WORKER_PROMPT,
+            "messages": [{"role": "user", "content": user_content}],
+        }
     payload = {
         "model": cfg.chat_model_name,
         "temperature": 0,
@@ -171,19 +266,7 @@ def extraction_payload(
         "plugins": [{"id": "context-compression", "enabled": False}],
         "messages": [
             {"role": "system", "content": WORKER_PROMPT},
-            {
-                "role": "user",
-                "content": extraction_input(
-                    {
-                        "content": content,
-                        "sender": sender,
-                        "sent_at": sent_at,
-                        "timezone": source_timezone,
-                        "context": context,
-                        "known_projects": known_projects,
-                    }
-                ),
-            },
+            {"role": "user", "content": user_content},
         ],
     }
     if "response_format" in endpoint.get("supported_parameters", []):

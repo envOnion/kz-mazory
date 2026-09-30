@@ -20,7 +20,9 @@ x-env: &test-env
   BITRIX_WEBHOOK_URL: http://test-provider:9000/rest/1/e2e-environment/
   BITRIX_INBOUND_TOKEN: isolated-test-bitrix-inbound
   OPENROUTER_API_KEY: isolated-test-provider
+  ANTHROPIC_BASE_URL: http://test-provider:9000/anthropic
   ALLOWED_HOSTS: localhost,127.0.0.1,backend,192.168.0.193
+  CSRF_TRUSTED_ORIGINS: ${E2E_CSRF_TRUSTED_ORIGINS:-}
   OCR_URL: http://test-provider:9000/ocr
   TRANSCRIPTION_URL: http://test-provider:9000/transcribe
   E2E_ADMIN_PASSWORD: test-only-admin-password
@@ -59,6 +61,7 @@ services:
     environment:
       <<: *test-env
       Q_CLUSTER_NAME: ai
+      ANTHROPIC_API_KEY: isolated-test-anthropic
     command: [python, manage.py, qcluster]
   delivery:
     <<: *backend
