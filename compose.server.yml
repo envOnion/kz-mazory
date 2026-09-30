@@ -1,0 +1,47 @@
+services:
+  nginx:
+    container_name: mazory-nginx
+  backend:
+    container_name: mazory-backend
+  qcluster:
+    container_name: mazory-qcluster
+  qcluster_delivery:
+    container_name: mazory-qcluster-delivery
+  qcluster_history:
+    container_name: mazory-qcluster-history
+  qcluster_crm:
+    container_name: mazory-qcluster-crm
+  outbox:
+    container_name: mazory-outbox
+  postgres:
+    container_name: mazory-postgres
+  redis:
+    container_name: mazory-redis
+  qdrant:
+    container_name: mazory-qdrant
+  waha:
+    container_name: mazory-waha
+    volumes: !override
+      - ${WAHA_SESSIONS_PATH:-/home/joodexpert/mazory/waha_sessions}:/app/.sessions
+
+volumes:
+  postgres_data:
+    external: true
+    name: mazory_postgres_data
+  redis_data:
+    external: true
+    name: mazory_redis_data
+  qdrant_data:
+    external: true
+    name: mazory_qdrant_data
+  private_media:
+    external: true
+    name: mazory_private_media
+  static_files:
+    external: true
+    name: mazory_static_files
+
+networks:
+  internal:
+    external: true
+    name: mazory_mazory-network
