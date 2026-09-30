@@ -43,16 +43,4 @@ jobs:
           npm --prefix frontend audit --audit-level=high
           pipx run --spec pip-audit==2.9.0 pip-audit --no-deps --disable-pip -r backend/requirements.txt
       - name: Compose configuration
-        env:
-          SECRET_KEY: synthetic-ci-secret-key-abcdefghijklmnopqrstuvwxyz-0123456789
-          JWT_SIGNING_KEY: synthetic-ci-jwt-key-abcdefghijklmnopqrstuvwxyz-0123456789
-          MFA_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-          AI_CREDENTIAL_ENCRYPTION_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
-          ALLOWED_HOSTS: localhost
-          CSRF_TRUSTED_ORIGINS: https://localhost
-          POSTGRES_PASSWORD: synthetic-ci-password
-          WAHA_API_KEY: synthetic-ci-key
-          WAHA_WEBHOOK_SECRET: synthetic-ci-hook
-          QDRANT_API_KEY: synthetic-ci-vector-key
-          WAHA_IMAGE: devlikeapro/waha:2025.11.2
-        run: docker compose config --quiet
+        run: docker compose config --no-interpolate --quiet
