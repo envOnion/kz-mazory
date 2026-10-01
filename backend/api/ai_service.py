@@ -116,6 +116,7 @@ class AIService:
 
     @staticmethod
     def effective_chat_provider_url(cfg):
+        chat_api_format(cfg)
         return checked_base_url(cfg.chat_provider_url)
 
     @staticmethod
