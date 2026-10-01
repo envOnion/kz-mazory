@@ -1,0 +1,33 @@
+{
+  "repo": "Qwen/Qwen3.8-27B",
+  "revision": "1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0",
+  "models": [
+    "qwen3.8",
+    "qwen3.8:latest",
+    "qwen3.8:27b"
+  ],
+  "files": {
+    "tokenizer.json": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+    "chat_template.jinja": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041",
+    "tokenizer_config.json": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27"
+  },
+  "ollama": {
+    "architecture": "qwen35",
+    "renderer": "qwen3.8",
+    "version": "0.34.0",
+    "vocabulary_sha256": "feb2807e06a7673426c43e5dea2f27d93647a993dcf4d2d1b08cdec45eaded09",
+    "identity_fields": [
+      "tokenizer.ggml.model",
+      "tokenizer.ggml.pre",
+      "tokenizer.ggml.add_bos_token",
+      "tokenizer.ggml.bos_token_id",
+      "tokenizer.ggml.eos_token_id",
+      "tokenizer.ggml.padding_token_id",
+      "tokenizer.ggml.tokens",
+      "tokenizer.ggml.token_type",
+      "tokenizer.ggml.merges"
+    ],
+    "renderer_source": "https://github.com/ollama/ollama/blob/v0.34.0/model/renderers/qwen35.go",
+    "renderer_source_sha256": "a37c9ccf217c01e2558dce439198e9446e163e7f7a18e48e4848f6a6e2e35b23"
+  }
+}

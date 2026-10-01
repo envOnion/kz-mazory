@@ -131,6 +131,7 @@ class AIService:
         api_key=None,
         headers=None,
         response_validator=None,
+        http_method="POST",
     ):
         deadline = analytics_deadline.get()
         if deadline is not None:
@@ -157,9 +158,12 @@ class AIService:
                 if not api_key:
                     raise ProviderUnavailable("ai_not_configured")
                 headers = {"Authorization": f"Bearer {api_key}"}
-            response = requests.post(
+            if http_method not in ("GET", "POST"):
+                raise ProviderUnavailable("provider_invalid_request")
+            request = requests.get if http_method == "GET" else requests.post
+            response = request(
                 checked_ai_url(url),
-                json=payload,
+                **({"json": payload} if http_method == "POST" else {}),
                 headers=headers,
                 timeout=timeout,
                 allow_redirects=False,

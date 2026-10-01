@@ -6,9 +6,7 @@ from pathlib import Path
 from urllib.request import urlopen
 
 
-def main():
-    root = Path(__file__).resolve().parent / "tokenizers"
-    manifest = json.loads((root / "manifest.json").read_text())
+def fetch_manifest(root, manifest):
     target = root / manifest["revision"]
     target.mkdir(exist_ok=True)
     for name, checksum in manifest["files"].items():
@@ -22,6 +20,12 @@ def main():
             raise ValueError(f"Tokenizer checksum mismatch: {name}")
         path.write_bytes(data)
     print(f"Verified tokenizer: {manifest['repo']}@{manifest['revision']}")
+
+
+def main():
+    root = Path(__file__).resolve().parent / "tokenizers"
+    for path in sorted(root.glob("*manifest.json")):
+        fetch_manifest(root, json.loads(path.read_text()))
 
 
 if __name__ == "__main__":

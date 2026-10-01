@@ -67,3 +67,20 @@ class ProviderTransportTests(TestCase):
                 AIService._post(url, {}, 5, api_format=api_format, operation=operation, api_key="test-key")
                 self.assertEqual(post.call_args.args[0], url)
                 self.assertFalse(post.call_args.kwargs["allow_redirects"])
+
+    def test_metadata_get_uses_authenticated_transport_and_records_usage(self):
+        from .models import ProviderUsage
+
+        AISettings.objects.create(name="Metadata", is_active=True)
+        response = Mock(status_code=200, headers={})
+        response.json.return_value = {"version": "0.34.0"}
+        with patch("api.ai_service.requests.get", return_value=response) as get, patch("api.ai_service.requests.post") as post:
+            result = AIService._post("https://ollama.example/api/version", {"model": "qwen3.8"}, 5, api_key="test-key", operation="model_metadata", http_method="GET")
+        self.assertEqual(result, {"version": "0.34.0"})
+        self.assertEqual(get.call_args.kwargs["headers"], {"Authorization": "Bearer test-key"})
+        self.assertNotIn("json", get.call_args.kwargs)
+        self.assertFalse(get.call_args.kwargs["allow_redirects"])
+        post.assert_not_called()
+        usage = ProviderUsage.objects.get()
+        self.assertTrue(usage.succeeded)
+        self.assertEqual(usage.operation, "model_metadata")
