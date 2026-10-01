@@ -1,4 +1,4 @@
-import re
+from django.core.exceptions import ValidationError
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import transaction
@@ -21,6 +21,7 @@ from .models import (
     OutboxEvent,
 )
 from .security import Unavailable
+from .phone_numbers import normalize_phone
 
 OTP_TTL, COOLDOWN_TTL, MAX_ATTEMPTS = otp.OTP_TTL, otp.COOLDOWN_TTL, otp.MAX_ATTEMPTS
 
@@ -29,12 +30,10 @@ class PhoneInput(serializers.Serializer):
     phone = serializers.CharField(max_length=32)
 
     def validate_phone(self, value):
-        digits = re.sub(r"[^0-9]", "", value)
-        if len(digits) == 11 and digits.startswith("8"):
-            digits = "7" + digits[1:]
-        if not re.fullmatch(r"[1-9][0-9]{9,14}", digits):
-            raise serializers.ValidationError("Укажите корректный номер телефона.")
-        return digits
+        try:
+            return normalize_phone(value)
+        except ValidationError as exc:
+            raise serializers.ValidationError(exc.messages) from exc
 
 
 class VerifyInput(PhoneInput):
@@ -103,16 +102,21 @@ class SendVerificationCodeView(APIView):
             raise Unavailable("Отправка кода временно недоступна.")
         if not delivery_id:
             raise Throttled(wait=COOLDOWN_TTL)
-        user = User.objects.filter(username=phone, is_active=True).first()
-        if user and has_access(user, invited=True):
-            OutboxEvent.objects.create(
-                event_type="otp",
-                deduplication_key=f"otp:{delivery_id}",
-                payload={"user_id": user.id, "delivery_id": delivery_id},
-            )
+        user = User.objects.filter(username=phone).first()
+        if user is None:
+            return Response({"error": "Пользователя нет в системе"}, status=400)
+        if not user.is_active:
+            raise PermissionDenied("Пользователь отключён.")
+        if not has_access(user, invited=True):
+            raise PermissionDenied("Пользователю не предоставлен доступ.")
+        OutboxEvent.objects.create(
+            event_type="otp",
+            deduplication_key=f"otp:{delivery_id}",
+            payload={"user_id": user.id, "delivery_id": delivery_id},
+        )
         return Response(
             {
-                "message": "Если номеру предоставлен доступ, код будет отправлен.",
+                "message": "Код поставлен на отправку.",
                 "expires_in": OTP_TTL,
                 "cooldown": COOLDOWN_TTL,
             }

@@ -82,7 +82,7 @@
             Код подтверждения
           </h2>
           <p class="text-xs sm:text-sm text-slate-400 mt-1.5 mb-6 max-w-xs">
-            Код отправлен на номер <span class="text-indigo-200 font-semibold">{{ phone }}</span>
+            Код поставлен на отправку для номера <span class="text-indigo-200 font-semibold">{{ phone }}</span>
           </p>
 
           <form @submit.prevent="handleVerifyCode" class="w-full space-y-4">
