@@ -1,7 +1,7 @@
 {% extends "admin/change_form.html" %}
 {% load static %}
 {% block extrahead %}{{ block.super }}<script src="{% static 'mazory/js/history_job.js' %}" defer></script>{% endblock %}
-{% block form_top %}{{ block.super }}<p data-new-messages-help hidden>Проверка работает постоянно, пока задание включено. Новые сообщения анализируются с контекстом ранее сохранённой переписки. Для загрузки старой переписки используйте полный импорт.</p>{% endblock %}
+{% block form_top %}{{ block.super }}<p>Полный запуск заново анализирует все текстовые сообщения, включая сохранённые и обработанные ранее. «Только новые» включает обработку с сохранённой точки. Если анализ после импорта выключен, сообщения только сохраняются.</p><p data-new-messages-help hidden>Проверка работает постоянно, пока задание включено. Новые сообщения анализируются с контекстом ранее сохранённой переписки. Для загрузки старой переписки используйте полный импорт.</p>{% endblock %}
 {% block form_before %}
 {{ block.super }}
 <div class="flex flex-wrap gap-2 mb-4">

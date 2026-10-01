@@ -227,14 +227,24 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
     def analysis_errors(self, obj):
         from collections import Counter
 
-        latest = MessageProcessingTrace.objects.filter(
-            raw_message_id=OuterRef("pk")
-        ).order_by("-attempt_no", "-id")
-        codes = (
-            obj.messages.filter(processing_state="failed")
-            .annotate(latest_error=Subquery(latest.values("error_code")[:1]))
-            .values_list("latest_error", flat=True)
-        )
+        if obj.settings_snapshot.get("analysis_mode") == "reprocess_all":
+            codes = OutboxEvent.objects.filter(
+                event_type="extract_message", payload__history_run_id=obj.id,
+                state__in=["failed", "unknown", "done"],
+            ).exclude(
+                deduplication_key__in=MessageProcessingTrace.objects.filter(
+                    operation_key__startswith=f"history:{obj.id}:extract:", status="success",
+                ).values("operation_key"),
+            ).values_list("error_code", flat=True)
+        else:
+            latest = MessageProcessingTrace.objects.filter(
+                raw_message_id=OuterRef("pk")
+            ).order_by("-attempt_no", "-id")
+            codes = (
+                obj.messages.filter(processing_state="failed")
+                .annotate(latest_error=Subquery(latest.values("error_code")[:1]))
+                .values_list("latest_error", flat=True)
+            )
         counts = Counter(code or "unknown" for code in codes)
         rows = format_html_join(
             "",
