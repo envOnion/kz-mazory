@@ -703,7 +703,7 @@ class AISettings(models.Model):
         "Лимит запросов AI в сутки",
         default=0,
         help_text=(
-            "0 — лимит из настроек сервера. Учитываются все внешние AI-запросы: "
+            "0 — без ограничений. Учитываются все внешние AI-запросы: "
             "embeddings, chat и подсчёт токенов."
         ),
     )
@@ -712,7 +712,7 @@ class AISettings(models.Model):
         max_digits=12,
         decimal_places=2,
         default=0,
-        help_text="0 — бюджет из настроек сервера.",
+        help_text="0 — без ограничений.",
     )
     tokenizer_id = models.CharField(
         "Токенизатор",

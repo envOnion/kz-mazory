@@ -84,3 +84,81 @@ class ProviderTransportTests(TestCase):
         usage = ProviderUsage.objects.get()
         self.assertTrue(usage.succeeded)
         self.assertEqual(usage.operation, "model_metadata")
+
+
+@override_settings(AI_DAILY_REQUEST_LIMIT=1, AI_DAILY_BUDGET_USD=1)
+class DailyAILimitTests(TestCase):
+    def setUp(self):
+        from decimal import Decimal
+        from .models import ProviderUsage
+
+        self.cfg = AISettings.objects.create(name="Limits", is_active=True)
+        from django.contrib.auth.models import User
+        User.objects.create(username="limit-admin", is_staff=True)
+        ProviderUsage.objects.create(operation="chat", cost_usd=Decimal("10"), succeeded=True, duration_ms=1)
+        self.response = Mock(status_code=200, headers={})
+        self.response.json.return_value = {"usage": {"cost": "2", "prompt_tokens": 5}}
+
+    def request(self):
+        return AIService._post("https://example.com/v1/chat/completions", {}, 5, api_key="test-key")
+
+    def test_zero_limits_ignore_server_defaults_and_preserve_accounting(self):
+        from decimal import Decimal
+        from .models import ProviderUsage
+
+        with patch("api.ai_service.requests.post", return_value=self.response) as post:
+            self.request()
+        post.assert_called_once()
+        self.assertEqual(ProviderUsage.objects.count(), 2)
+        self.assertEqual(ProviderUsage.objects.latest("id").cost_usd, Decimal("2"))
+
+    def test_positive_limits_are_independent_and_exact_threshold_blocks(self):
+        from decimal import Decimal
+
+        for count, budget, blocked in [(1, 0, True), (0, 10, True), (2, 0, False), (0, 11, False)]:
+            with self.subTest(count=count, budget=budget):
+                self.cfg.daily_request_limit = count
+                self.cfg.daily_budget_usd = Decimal(budget)
+                self.cfg.save()
+                with patch("api.ai_service.requests.post", return_value=self.response) as post:
+                    if blocked:
+                        with self.assertRaisesMessage(ProviderUnavailable, "ai_daily_budget_exhausted"):
+                            self.request()
+                        post.assert_not_called()
+                    else:
+                        self.request()
+                        post.assert_called_once()
+                        from .models import ProviderUsage
+                        ProviderUsage.objects.latest("id").delete()
+
+    def alert(self, count=1, cost=10, failed=0):
+        from .notifications import plan_risks
+
+        usage = Mock()
+        usage.aggregate.return_value = {"total": cost}
+        usage.count.return_value = count
+        usage.filter.return_value.count.return_value = failed
+        with patch("api.models.ProviderUsage.objects.filter", return_value=usage), patch(
+            "api.notifications.access.integration_allowed", return_value=True
+        ), patch(
+            "api.notifications.create_notification"
+        ) as notification:
+            plan_risks()
+        return notification
+
+    def test_zero_limits_do_not_raise_usage_alerts(self):
+        self.alert(count=10000, cost=10000).assert_not_called()
+
+    def test_positive_active_limits_raise_alerts_without_server_fallback(self):
+        self.cfg.daily_request_limit = 10
+        self.cfg.save()
+        self.alert(count=7, cost=10000).assert_not_called()
+        self.alert(count=8, cost=0).assert_called_once()
+        self.cfg.daily_request_limit = 0
+        self.cfg.daily_budget_usd = 10
+        self.cfg.save()
+        self.alert(count=10000, cost=7).assert_not_called()
+        self.alert(count=0, cost=8).assert_called_once()
+
+    def test_unlimited_config_still_alerts_on_repeated_failures(self):
+        self.alert(failed=10).assert_called_once()

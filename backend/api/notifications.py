@@ -368,9 +368,8 @@ def plan_digests(now=None):
 
 
 def plan_risks(now=None):
-    from .models import Project, Team, ProviderUsage
+    from .models import AISettings, Project, Team, ProviderUsage
     from .datamart import datamart
-    from django.conf import settings
     from django.db.models import Sum
 
     now = now or timezone.now()
@@ -456,9 +455,10 @@ def plan_risks(now=None):
     day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     usage = ProviderUsage.objects.filter(created_at__gte=day)
     spent = usage.aggregate(total=Sum("cost_usd"))["total"] or 0
+    cfg = AISettings.get_active()
     if (
-        usage.count() >= settings.AI_DAILY_REQUEST_LIMIT * 0.8
-        or spent >= settings.AI_DAILY_BUDGET_USD * Decimal("0.8")
+        (cfg.daily_request_limit > 0 and usage.count() >= cfg.daily_request_limit * 0.8)
+        or (cfg.daily_budget_usd > 0 and spent >= cfg.daily_budget_usd * Decimal("0.8"))
         or usage.filter(succeeded=False).count() >= 10
     ):
         for user in User.objects.filter(is_staff=True, is_active=True):
