@@ -126,6 +126,7 @@ export function valueLabel(
   field: ReviewField,
   value: unknown,
   currencyCode = "",
+  deadlinePrecision?: unknown,
 ): string {
   if (value === null || value === undefined || value === "")
     return "Не указано";
@@ -149,7 +150,12 @@ export function valueLabel(
     return new Date(
       `${String(value).slice(0, 10)}T12:00:00`,
     ).toLocaleDateString("ru-RU");
-  if (field.type === "datetime-local") return dateLabel(String(value));
+  if (field.type === "datetime-local") {
+    if (deadlinePrecision === "unknown") return "Срок не указан";
+    if (deadlinePrecision === "date")
+      return new Date(String(value)).toLocaleDateString("ru-RU");
+    return dateLabel(String(value));
+  }
   return typeof value === "string" || typeof value === "number"
     ? String(value)
     : "Значение требует уточнения";
@@ -249,7 +255,10 @@ export function draftFor(item: Candidate): FactDraft {
         date.getTime() - date.getTimezoneOffset() * 60000,
       )
         .toISOString()
-        .slice(0, 16);
+        .slice(
+          0,
+          item.proposed_changes.deadline_precision === "date" ? 10 : 16,
+        );
     } else
       draft[field.key] =
         value === null || value === undefined ? "" : String(value);
@@ -275,7 +284,11 @@ export function changedValues(
     else if (field.type === "datetime-local") {
       if (value && Number.isNaN(Date.parse(value)))
         throw new Error("Укажите корректный срок.");
-      result[field.key] = value ? new Date(value).toISOString() : null;
+      result[field.key] = value
+        ? new Date(
+            value.length === 10 ? `${value}T00:00:00` : value,
+          ).toISOString()
+        : null;
     } else if (field.type === "date") {
       if (
         value &&

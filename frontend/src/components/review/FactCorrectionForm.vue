@@ -64,7 +64,14 @@
         <input
           v-else
           class="field w-full mt-1"
-          :type="['money', 'text'].includes(field.type) ? 'text' : field.type"
+          :type="
+            field.type === 'datetime-local' &&
+            draft.deadline_precision === 'date'
+              ? 'date'
+              : ['money', 'text'].includes(field.type)
+                ? 'text'
+                : field.type
+          "
           :inputmode="field.type === 'money' ? 'decimal' : undefined"
           v-model="draft[field.key]"
           :maxlength="field.type === 'text' ? 255 : undefined"
@@ -157,6 +164,15 @@ watch(
   },
   { immediate: true },
 );
+watch(
+  () => draft.value.deadline_precision,
+  (precision, previous) => {
+    if (precision === "date")
+      draft.value.deadline_at = (draft.value.deadline_at || "").slice(0, 10);
+    else if (precision === "unknown" || previous === "date")
+      draft.value.deadline_at = "";
+  },
+);
 function submit() {
   error.value = "";
   try {
@@ -185,6 +201,12 @@ function submit() {
       );
     if (props.item.fact_type === "payment" && !draft.value.payment_date)
       throw new Error("Укажите подтверждённую дату платежа.");
+    if (
+      props.item.fact_type === "commitment" &&
+      draft.value.deadline_precision !== "unknown" &&
+      !draft.value.deadline_at
+    )
+      throw new Error("Укажите срок с выбранной точностью.");
     if (!reason.value.trim()) throw new Error("Укажите причину исправления.");
     emit("save", changes, reason.value.trim());
   } catch (e) {
