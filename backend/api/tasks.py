@@ -8,6 +8,7 @@ import requests
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django_q.tasks import async_task
 from . import access
@@ -183,6 +184,20 @@ def run_outbox(pk):
             event.next_attempt_at = timezone.now() + timedelta(seconds=10)
             event.save(update_fields=["state", "lease_until", "next_attempt_at"])
             return
+        if event.event_type == "extract_message":
+            # Lock the message while claiming work so two workers cannot claim
+            # different attempts for the same message concurrently.
+            RawMessage.objects.select_for_update().get(pk=event.payload["raw_id"])
+            earlier = OutboxEvent.objects.filter(
+                event_type="extract_message", payload__raw_id=event.payload["raw_id"],
+            ).exclude(pk=event.pk).filter(
+                Q(state="processing") | Q(pk__lt=event.pk, state__in=["pending", "enqueued"])
+            ).exists()
+            if earlier:
+                event.state, event.lease_until = "pending", None
+                event.next_attempt_at = timezone.now() + timedelta(seconds=10)
+                event.save(update_fields=["state", "lease_until", "next_attempt_at"])
+                return
         event.state, event.lease_until = (
             "processing",
             timezone.now()

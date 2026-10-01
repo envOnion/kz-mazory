@@ -14,6 +14,7 @@ from django.utils import timezone
 from .models import (
     HISTORY_ACTIVE_STATES,
     AuditEvent,
+    MessageProcessingTrace,
     OutboxEvent,
     RawMessage,
     WhatsAppConfig,
@@ -132,6 +133,8 @@ def start_job(job_id, user=None, *, scheduled=False):
         },
         status_message="Проверяем подключение к WhatsApp.",
     )
+    if not job.only_new:
+        run.settings_snapshot["analysis_mode"] = "reprocess_all"
     enqueue_step(run)
     job.next_run_at = (
         timezone.now()
@@ -224,6 +227,24 @@ def schedule_due_jobs():
 
 def progress(run):
     total = run.messages.count()
+    if run.settings_snapshot.get("analysis_mode") == "reprocess_all":
+        events = OutboxEvent.objects.filter(
+            event_type="extract_message",
+            payload__history_run_id=run.id,
+        )
+        successful = MessageProcessingTrace.objects.filter(
+            operation_key__startswith=f"history:{run.id}:extract:", status="success",
+        )
+        errors = events.filter(state__in=["failed", "unknown", "done"]).exclude(
+            payload__trace_id__in=successful.values("id"),
+        ).count()
+        processed = successful.count() + run.no_text_count
+        return {
+            "total": total,
+            "processed": processed,
+            "errors": errors,
+            "pending": max(0, total - processed - errors),
+        }
     processed = run.messages.filter(processed=True).count()
     errors = run.messages.filter(processing_state="failed").count()
     return {
@@ -388,8 +409,6 @@ def persist_items(run, config, batch):
                 "pk", flat=True
             )
         )
-        if run.settings_snapshot.get("only_new")
-        else set()
     )
     queued = set(
         OutboxEvent.objects.filter(
@@ -412,6 +431,28 @@ def persist_items(run, config, batch):
             if run.settings_snapshot.get("only_new"):
                 run.fetched_count += 1
         if (
+            run.settings_snapshot.get("analysis_mode") == "reprocess_all"
+            and raw.content.strip()
+            and run.settings_snapshot["analyze_after_import"]
+        ):
+            from .processing_attempts import reserve_attempt
+
+            operation = f"history:{run.id}:extract:{raw.id}"
+            locked = RawMessage.objects.select_for_update().get(pk=raw.id)
+            trace = reserve_attempt(locked, operation)
+            _, created = OutboxEvent.objects.get_or_create(
+                deduplication_key=operation,
+                defaults={
+                    "event_type": "extract_message",
+                    "payload": {
+                        "raw_id": raw.id,
+                        "trace_id": trace.id,
+                        "history_run_id": run.id,
+                    },
+                },
+            )
+            run.scheduled_count += int(created)
+        elif (
             raw.content.strip()
             and not raw.processed
             and run.settings_snapshot["analyze_after_import"]
@@ -604,10 +645,15 @@ def process_step(payload, waha):
         elif run.state == "analyzing":
             counts = progress(run)
             # Failed messages may still have a scheduled provider retry.
+            scope = (
+                {"payload__history_run_id": run.id}
+                if settings.get("analysis_mode") == "reprocess_all"
+                else {"payload__raw_id__in": run.messages.values_list("id", flat=True)}
+            )
             unfinished = OutboxEvent.objects.filter(
                 event_type="extract_message",
                 state__in=["pending", "enqueued", "processing"],
-                payload__raw_id__in=list(run.messages.values_list("id", flat=True)),
+                **scope,
             ).exists()
             if counts["pending"] or unfinished:
                 run.status_message = f"Обработано {counts['processed']} из {counts['total']}; ошибок: {counts['errors']}."
