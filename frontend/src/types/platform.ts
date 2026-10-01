@@ -33,6 +33,7 @@ export interface CrmMatchOption {
   company_name: string
   object_label: string
   stage_id: string
+  stage_label?: string
   opportunity: Money | null
   currency: string
   score: number
@@ -55,6 +56,10 @@ export interface Candidate {
   manager_id: number | null
   fact_type: CandidateFactType
   proposed_changes: Record<string, unknown>
+  source_available?: boolean
+  current_values?: Record<string, unknown>
+  chat_name?: string
+  conversation_key?: string
   status: CandidateStatus
   base_version: number
   current_version: number

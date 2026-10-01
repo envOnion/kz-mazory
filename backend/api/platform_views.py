@@ -1,6 +1,7 @@
 from datetime import timedelta
 from decimal import Decimal
 from django.contrib.auth.models import User
+from django.conf import settings
 from django.db import transaction
 from django.db.models import Max, Count, Sum, Avg
 from django.utils import timezone
@@ -37,20 +38,33 @@ from .security import Conflict
 from .views import Filters, filters_for, create_operation
 
 
-def candidate_data(candidate, user):
-    source_ids = access.messages_for(user).values_list("id", flat=True)
+def candidate_data(candidate, user, source_map=None, project_ids=None):
+    evidence_records = list(candidate.evidence.all())
+    if source_map is None:
+        ids = [e.raw_message_id for e in evidence_records] + [candidate.trace.raw_message_id]
+        source_map = {m.id: m for m in access.messages_for(user).filter(pk__in=ids).select_related("config")}
     evidence = [
-        {
-            "id": e.id,
-            "quote": e.quote,
-            "source_id": e.raw_message_id,
-            "source_url": f"/api/messages/{e.raw_message_id}/",
-        }
-        for e in candidate.evidence.filter(raw_message_id__in=source_ids)
+        {"id": e.id, "quote": e.quote, "source_id": e.raw_message_id,
+         "source_url": f"/api/messages/{e.raw_message_id}/"}
+        for e in evidence_records if e.raw_message_id in source_map
     ]
     values = dict(candidate.proposed_changes)
     if not evidence:
         values.pop("evidence", None)
+    project = candidate.project
+    current_values = {}
+    if project_ids is None:
+        project_ids = set(access.projects_for(user).filter(pk=candidate.project_id).values_list("id", flat=True))
+    if project and project.pk in project_ids:
+        current_values = {
+            "object_name": project.name,
+            "company_name": project.company.name if project.company else "",
+            "contract_amount": str(project.contract_amount),
+            "cost_amount": str(project.cost_amount), "currency": project.currency,
+            "stage": project.status, "current_action": project.current_action,
+            "next_action": project.next_action,
+        }
+    source = source_map.get(candidate.trace.raw_message_id)
     crm_matches = [
         match
         for match in candidate.crm_matches.all()
@@ -67,6 +81,8 @@ def candidate_data(candidate, user):
             "company_name": match.company_name,
             "object_label": match.object_label,
             "stage_id": match.stage_id,
+            "stage_label": next((label for stage, label in Project.STATUS_CHOICES
+                                 if settings.BITRIX_STAGE_MAP.get(stage) == match.stage_id), ""),
             "opportunity": (
                 str(match.opportunity) if match.opportunity is not None else None
             ),
@@ -90,6 +106,11 @@ def candidate_data(candidate, user):
         "manager_id": candidate.manager_id,
         "fact_type": candidate.fact_type,
         "proposed_changes": values,
+        "current_values": current_values,
+        "source_available": source is not None,
+        "chat_name": source.config.name if source and source.config else "",
+        "conversation_key": str(source.config_id) + ":" + source.chat_id if source else "",
+
         "status": candidate.status,
         "base_version": candidate.base_project_version or 0,
         "current_version": candidate.project.version if candidate.project else 0,
@@ -118,14 +139,18 @@ class CandidateListView(APIView):
         qs = (
             access.candidates_for(request.user)
             .filter(status=state)
-            .select_related("project")
+            .select_related("project__company", "trace")
             .prefetch_related("evidence", "crm_matches__project")
             .order_by("id")
         )
         pagination = PageNumberPagination()
         page = pagination.paginate_queryset(qs, request)
+        source_ids = {c.trace.raw_message_id for c in page}
+        source_ids.update(e.raw_message_id for c in page for e in c.evidence.all())
+        source_map = {m.id: m for m in access.messages_for(request.user).filter(pk__in=source_ids).select_related("config")}
+        project_ids = set(access.projects_for(request.user).filter(pk__in=[c.project_id for c in page]).values_list("id", flat=True))
         return pagination.get_paginated_response(
-            [candidate_data(c, request.user) for c in page]
+            [candidate_data(c, request.user, source_map, project_ids) for c in page]
         )
 
 
@@ -734,7 +759,7 @@ class CandidateDetailView(APIView):
     def get(self, request, pk):
         candidate = get_object_or_404(
             access.candidates_for(request.user)
-            .select_related("project")
+            .select_related("project__company", "trace")
             .prefetch_related("evidence", "crm_matches__project"),
             pk=pk,
         )
