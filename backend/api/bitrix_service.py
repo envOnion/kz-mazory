@@ -51,7 +51,6 @@ COMPANY_LEGAL_FORMS = re.compile(
     re.IGNORECASE,
 )
 CRM_MATCH_DEADLINE_SECONDS = 60
-CRM_MATCH_MAX_REQUESTS = 16
 CRM_MATCH_MAX_PAGES_PER_LIST = 10
 CRM_MATCH_REQUEST_TIMEOUT_SECONDS = 8
 STRONG_MATCH_REASONS = frozenset(
@@ -174,12 +173,10 @@ class CrmReadBudget:
         self,
         *,
         deadline_seconds=CRM_MATCH_DEADLINE_SECONDS,
-        request_limit=CRM_MATCH_MAX_REQUESTS,
         clock=None,
     ):
         self._clock = clock or time.monotonic
         self._deadline = self._clock() + deadline_seconds
-        self._request_limit = request_limit
         self.request_count = 0
 
     def ensure_active(self):
@@ -190,8 +187,6 @@ class CrmReadBudget:
 
     def next_timeout(self):
         remaining = self.ensure_active()
-        if self.request_count >= self._request_limit:
-            raise ProviderUnavailable("crm_match_request_limit")
         self.request_count += 1
         return min(CRM_MATCH_REQUEST_TIMEOUT_SECONDS, remaining - 0.5)
 
