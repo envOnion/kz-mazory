@@ -1,4 +1,5 @@
 import { API_BASE, accessToken, sessionVersion, refreshSession, clearSession } from './session'
+import { friendlyApiError } from '../components/review/presentation'
 import type { ApiError, Operation } from '../types/platform'
 
 export async function api<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
@@ -15,7 +16,7 @@ export async function api<T>(path: string, init: RequestInit = {}, retry = true)
   }
   if (!response.ok) {
     const error: ApiError = await response.json().catch(() => ({}))
-    throw new Error(error.error || `Ошибка запроса (${response.status})`)
+    throw new Error(friendlyApiError(error, response.status))
   }
   if (response.status === 204) return undefined as T
   const data: T = await response.json()

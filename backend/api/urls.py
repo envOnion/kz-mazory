@@ -1,5 +1,6 @@
 from django.urls import path
 from .health import health
+from .candidate_context import CandidateContextView, CandidatePaymentsView
 from .views import (
     KpiSummaryView,
     ChatQueryView,
@@ -83,6 +84,8 @@ urlpatterns = [
     path("candidates/manual/", ManualProposalView.as_view()),
     path("projects/<int:pk>/assign/", AssignmentView.as_view()),
     path("candidates/<int:pk>/", CandidateDetailView.as_view()),
+    path("candidates/<int:pk>/payments/", CandidatePaymentsView.as_view()),
+    path("candidates/<int:pk>/context/", CandidateContextView.as_view()),
     path("candidates/<int:pk>/review/", CandidateReviewView.as_view()),
     path("commitments/", CommitmentListView.as_view()),
     path("commitments/<int:pk>/action/", CommitmentActionView.as_view()),
