@@ -12,6 +12,7 @@ from django.urls import reverse
 from django.utils.decorators import method_decorator
 from django.views.decorators.debug import sensitive_post_parameters
 from .admin_forms import AISettingsForm, BitrixSettingsForm
+from .user_admin import ProfileIdentityForm
 from .bitrix_config import effective_webhook_url, masked_webhook_url
 from .trace_context_ui import badge_text, render_context, context_view_data, retry_view, ERRORS
 from django.utils.safestring import mark_safe
@@ -366,6 +367,20 @@ def _crm_card(candidate, portal_base):
 
 @admin.register(UserProfile)
 class UserProfileAdmin(ScopedReadOnlyAdmin):
+    form = ProfileIdentityForm
+    fields = ("user", "full_name", "phone", "email", "department")
+
+    def get_readonly_fields(self, request, obj=None):
+        if not request.user.is_superuser:
+            return self.fields
+        return ("user",) if obj else ()
+
+    def has_add_permission(self, request):
+        return request.user.is_superuser
+
+    def has_change_permission(self, request, obj=None):
+        return request.user.is_superuser
+
     list_display = (
         "full_name",
         "role",
