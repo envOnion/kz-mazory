@@ -28,7 +28,7 @@ from .models import AISettings, ProviderUsage
 from .providers import (
     ProviderUnavailable,
     checked_base_url,
-    checked_url,
+    checked_ai_url,
     provider_error,
     retry_after_seconds,
 )
@@ -106,10 +106,7 @@ class AIService:
         if not cfg.is_active:
             raise ProviderUnavailable("ai_disabled")
         if operation == "embedding":
-            checked_base_url(
-                cfg.embedding_provider_url,
-                allowed_hosts=settings.OPENAI_PROVIDER_ALLOWED_HOSTS,
-            )
+            checked_base_url(cfg.embedding_provider_url)
             AIService._credential(cfg, operation="embedding")
             return cfg
         api_format = chat_api_format(cfg)
@@ -119,15 +116,7 @@ class AIService:
 
     @staticmethod
     def effective_chat_provider_url(cfg):
-        api_format = chat_api_format(cfg)
-        return checked_base_url(
-            cfg.chat_provider_url,
-            allowed_hosts=(
-                settings.ANTHROPIC_PROVIDER_ALLOWED_HOSTS
-                if api_format == ANTHROPIC_MESSAGES
-                else settings.OPENAI_PROVIDER_ALLOWED_HOSTS
-            ),
-        )
+        return checked_base_url(cfg.chat_provider_url)
 
     @staticmethod
     @sensitive_variables("api_key", "headers")
@@ -168,14 +157,7 @@ class AIService:
                     raise ProviderUnavailable("ai_not_configured")
                 headers = {"Authorization": f"Bearer {api_key}"}
             response = requests.post(
-                checked_url(
-                    url,
-                    allowed_hosts=(
-                        settings.ANTHROPIC_PROVIDER_ALLOWED_HOSTS
-                        if api_format == ANTHROPIC_MESSAGES
-                        else settings.OPENAI_PROVIDER_ALLOWED_HOSTS
-                    ),
-                ),
+                checked_ai_url(url),
                 json=payload,
                 headers=headers,
                 timeout=timeout,
@@ -351,15 +333,7 @@ class AIService:
         if expected_api_format is None:
             api_format = active_api_format
             if provider_url is not None:
-                allowed_hosts = (
-                    settings.ANTHROPIC_PROVIDER_ALLOWED_HOSTS
-                    if api_format == ANTHROPIC_MESSAGES
-                    else settings.OPENAI_PROVIDER_ALLOWED_HOSTS
-                )
-                if (
-                    checked_base_url(provider_url, allowed_hosts=allowed_hosts)
-                    != active_provider_url
-                ):
+                if checked_base_url(provider_url) != active_provider_url:
                     raise ProviderUnavailable("context_configuration_changed")
             provider_url = active_provider_url
         else:
@@ -371,14 +345,7 @@ class AIService:
                 raise ProviderUnavailable("provider_configuration_invalid")
             if not isinstance(provider_url, str) or not provider_url:
                 raise ProviderUnavailable("context_snapshot_mismatch")
-            provider_url = checked_base_url(
-                provider_url,
-                allowed_hosts=(
-                    settings.ANTHROPIC_PROVIDER_ALLOWED_HOSTS
-                    if api_format == ANTHROPIC_MESSAGES
-                    else settings.OPENAI_PROVIDER_ALLOWED_HOSTS
-                ),
-            )
+            provider_url = checked_base_url(provider_url)
             if api_format != active_api_format or provider_url != active_provider_url:
                 raise ProviderUnavailable("context_configuration_changed")
         api_key = AIService._credential(cfg, api_format=api_format)

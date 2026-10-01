@@ -12,7 +12,7 @@ from django.core.cache import cache
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 from tokenizers import Tokenizer
 
-from .providers import ProviderUnavailable, checked_url
+from .providers import ProviderUnavailable, checked_ai_url
 
 ROOT = Path(__file__).resolve().parents[1] / "tokenizers"
 MANIFEST = json.loads((ROOT / "manifest.json").read_text())
@@ -160,9 +160,8 @@ def context_runtime(cfg):
     ):
         raise ProviderUnavailable("context_tokenizer_unavailable")
     # Metadata is public and contains no message text; read only from the configured provider.
-    url = checked_url(
+    url = checked_ai_url(
         f"{cfg.chat_provider_url.rstrip('/')}/models/{quote(cfg.chat_model_name, safe='/')}/endpoints",
-        allowed_hosts=settings.OPENAI_PROVIDER_ALLOWED_HOSTS,
     )
     key = "model-endpoints:" + hashlib.sha256(url.encode()).hexdigest()
     endpoints = cache.get(key)

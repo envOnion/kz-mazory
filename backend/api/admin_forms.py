@@ -2,7 +2,6 @@ import re
 from urllib.parse import urlsplit
 
 from django import forms
-from django.conf import settings
 from django.views.decorators.debug import sensitive_variables
 from unfold.widgets import INPUT_CLASSES
 
@@ -153,35 +152,25 @@ class AISettingsForm(forms.ModelForm):
         except (TypeError, ValueError):
             return ""
 
-    def _clean_base_url(self, field_name, allowed_hosts):
+    def _clean_base_url(self, field_name):
         value = self.cleaned_data.get(field_name)
         if not value:
             return
         try:
-            self.cleaned_data[field_name] = checked_base_url(
-                value, allowed_hosts=allowed_hosts
-            )
+            self.cleaned_data[field_name] = checked_base_url(value)
         except ProviderUnavailable:
             self.add_error(
                 field_name,
-                "Используйте разрешённый HTTPS Base URL без логина, параметров, "
-                "фрагмента и нестандартного порта. Для нового хоста обновите "
-                "серверный allowlist.",
+                "Используйте HTTPS Base URL с хостом, без логина, параметров, "
+                "фрагмента и нестандартного порта.",
             )
 
     @sensitive_variables()
     def clean(self):
         cleaned_data = super().clean()
         chat_format = cleaned_data.get("chat_api_format")
-        chat_hosts = (
-            settings.ANTHROPIC_PROVIDER_ALLOWED_HOSTS
-            if chat_format == AISettings.ChatApiFormat.ANTHROPIC_MESSAGES
-            else settings.OPENAI_PROVIDER_ALLOWED_HOSTS
-        )
-        self._clean_base_url("chat_provider_url", chat_hosts)
-        self._clean_base_url(
-            "embedding_provider_url", settings.OPENAI_PROVIDER_ALLOWED_HOSTS
-        )
+        self._clean_base_url("chat_provider_url")
+        self._clean_base_url("embedding_provider_url")
 
         replacements = (
             ("chat", "new_chat_api_key", "clear_chat_api_key"),
