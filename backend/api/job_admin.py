@@ -232,9 +232,9 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
                 event_type="extract_message", payload__history_run_id=obj.id,
                 state__in=["failed", "unknown", "done"],
             ).exclude(
-                payload__trace_id__in=MessageProcessingTrace.objects.filter(
+                deduplication_key__in=MessageProcessingTrace.objects.filter(
                     operation_key__startswith=f"history:{obj.id}:extract:", status="success",
-                ).values("id"),
+                ).values("operation_key"),
             ).values_list("error_code", flat=True)
         else:
             latest = MessageProcessingTrace.objects.filter(

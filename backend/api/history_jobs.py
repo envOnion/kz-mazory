@@ -236,7 +236,7 @@ def progress(run):
             operation_key__startswith=f"history:{run.id}:extract:", status="success",
         )
         errors = events.filter(state__in=["failed", "unknown", "done"]).exclude(
-            payload__trace_id__in=successful.values("id"),
+            deduplication_key__in=successful.values("operation_key"),
         ).count()
         processed = successful.count() + run.no_text_count
         return {
