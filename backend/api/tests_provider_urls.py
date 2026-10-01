@@ -162,3 +162,33 @@ class DailyAILimitTests(TestCase):
 
     def test_unlimited_config_still_alerts_on_repeated_failures(self):
         self.alert(failed=10).assert_called_once()
+
+
+class CRMReadRequestTests(SimpleTestCase):
+    def test_more_than_16_read_requests_reach_transport(self):
+        from .bitrix_service import BitrixService, CrmReadBudget
+
+        budget = CrmReadBudget(clock=lambda: 0)
+        cfg = SimpleNamespace(webhook_base="https://crm.example/rest/1/test/")
+        with patch.object(BitrixService, "_request", return_value={"result": {}}) as request:
+            for i in range(40):
+                BitrixService.read_call("crm.company.get", {"id": str(i + 1)}, config=cfg, budget=budget)
+        self.assertEqual(request.call_count, 40)
+        self.assertEqual(budget.request_count, 40)
+
+    def test_deadline_still_stops_read_requests(self):
+        from .bitrix_service import CrmReadBudget
+
+        clock = Mock(return_value=0)
+        budget = CrmReadBudget(clock=clock)
+        clock.return_value = 60
+        with self.assertRaisesMessage(ProviderUnavailable, "crm_match_deadline"):
+            budget.next_timeout()
+
+    def test_write_methods_never_reach_transport(self):
+        from .bitrix_service import BitrixService, CrmReadBudget
+
+        with patch.object(BitrixService, "_request") as request:
+            with self.assertRaisesMessage(ProviderUnavailable, "crm_read_method_forbidden"):
+                BitrixService.read_call("crm.deal.add", {}, config=SimpleNamespace(), budget=CrmReadBudget())
+        request.assert_not_called()
