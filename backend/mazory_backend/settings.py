@@ -93,19 +93,6 @@ PROVIDER_ALLOWED_HOSTS = [
     ).split(",")
     if h
 ]
-OPENAI_PROVIDER_ALLOWED_HOSTS = [
-    h
-    for h in os.getenv("OPENAI_PROVIDER_ALLOWED_HOSTS", "openrouter.ai").split(",")
-    if h
-]
-ANTHROPIC_PROVIDER_ALLOWED_HOSTS = [
-    h
-    for h in os.getenv(
-        "ANTHROPIC_PROVIDER_ALLOWED_HOSTS", "ru.cheapvibecode.ru"
-    ).split(",")
-    if h
-]
-
 # CSRF & Reverse Proxy settings (поддержка localhost, ai.mazory.best и Nginx)
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost",

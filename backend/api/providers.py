@@ -82,16 +82,16 @@ def provider_error(status, *, retry_after=None, detail=None):
     )
 
 
-def checked_url(url, *, allowed_hosts=None):
+def checked_ai_url(url):
+    """Validate an administrator-selected AI endpoint without a host allowlist."""
     try:
         parsed = urlparse(url)
         port = parsed.port
     except (TypeError, ValueError):
         raise ProviderUnavailable("provider_not_allowed") from None
-    hosts = settings.PROVIDER_ALLOWED_HOSTS if allowed_hosts is None else allowed_hosts
     if (
         parsed.scheme != "https"
-        or parsed.hostname not in hosts
+        or not parsed.hostname
         or parsed.username is not None
         or parsed.password is not None
         or port not in (None, 443)
@@ -100,7 +100,15 @@ def checked_url(url, *, allowed_hosts=None):
     return url
 
 
-def checked_base_url(url, *, allowed_hosts=None):
+def checked_url(url):
+    """Validate CRM and attachment destinations against their configured hosts."""
+    checked_ai_url(url)
+    if urlparse(url).hostname not in settings.PROVIDER_ALLOWED_HOSTS:
+        raise ProviderUnavailable("provider_not_allowed")
+    return url
+
+
+def checked_base_url(url):
     """Validate and normalize a provider base before appending fixed routes."""
     if not isinstance(url, str) or not url:
         raise ProviderUnavailable("ai_not_configured")
@@ -114,5 +122,5 @@ def checked_base_url(url, *, allowed_hosts=None):
     if any(delimiter in url for delimiter in (";", "?", "#")):
         raise ProviderUnavailable("provider_not_allowed")
     normalized = url.rstrip("/")
-    checked_url(normalized, allowed_hosts=allowed_hosts)
+    checked_ai_url(normalized)
     return normalized

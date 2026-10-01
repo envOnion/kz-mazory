@@ -660,8 +660,7 @@ class AISettings(models.Model):
         choices=ChatApiFormat.choices,
         default=ChatApiFormat.OPENAI_COMPATIBLE,
         help_text=(
-            "Определяет протокол запросов и проверку разрешённых хостов для "
-            "редактируемого Chat Base URL."
+            "Определяет протокол запросов к редактируемому Chat Base URL."
         ),
     )
     chat_provider_url = models.CharField(
