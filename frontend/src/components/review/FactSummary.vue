@@ -56,6 +56,7 @@
                   field,
                   item.proposed_changes[field.key],
                   proposedCurrency,
+                  item.proposed_changes.deadline_precision,
                 )
               }}
             </td>

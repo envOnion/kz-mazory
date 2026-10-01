@@ -129,6 +129,26 @@ describe("Fact review presentation and forms", () => {
       }),
     ).toEqual({ commitment_text: "Отправить предложение" });
   });
+  it("shows only a date when the deadline time is unknown, preserving unchanged source values", () => {
+    const item = candidate({
+      fact_type: "commitment",
+      proposed_changes: {
+        commitment_text: "Отправить список",
+        deadline_at: "2026-08-20T12:00:00Z",
+        deadline_precision: "date",
+      },
+    });
+    const summary = mount(FactSummary, { props: { item } });
+    expect(summary.text()).toContain("20.08.2026");
+    expect(summary.findAll("tr").find(row => row.text().includes("Срок выполнения"))!.text()).not.toContain(":");
+    expect(draftFor(item).deadline_at).toHaveLength(10);
+    expect(changedValues(item, draftFor(item))).toEqual({});
+    const form = mount(FactCorrectionForm, {
+      props: { item, busy: false, canApprove: true },
+    });
+    expect(form.find('input[type="date"]').exists()).toBe(true);
+    expect(form.find('input[type="datetime-local"]').exists()).toBe(false);
+  });
   it("explains server validation and version conflicts in Russian", () => {
     expect(
       friendlyApiError(
