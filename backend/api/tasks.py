@@ -42,6 +42,34 @@ CLUSTERS = {
 NON_IDEMPOTENT = {"otp", "notification", "waha_control"}
 
 
+def verify_ai_context():
+    """Run a queue-only deployment check using synthetic, non-business data."""
+    from .ai_service import AIService
+    from .context_tokens import context_runtime, extraction_payload
+
+    cfg = AIService._config()
+    counter, endpoint = context_runtime(cfg)
+    payload = extraction_payload(
+        cfg, endpoint, "Тестовое сообщение без фактов.", "Проверка подключения",
+        [], [], None, "Asia/Almaty",
+    )
+    expected = counter.count_payload(payload)
+    _, usage, diagnostics = AIService.analyze_payload(
+        payload, provider_url=endpoint["effective_provider_url"],
+        expected_api_format=endpoint["api_format"],
+    )
+    actual = usage.get("prompt_tokens")
+    if type(actual) is not int or actual != expected:
+        raise ProviderUnavailable("context_token_count_invalid")
+    return {
+        "model": cfg.chat_model_name, "token_counter": counter.strategy,
+        "context_window_tokens": cfg.context_window_tokens,
+        "max_completion_tokens": cfg.max_completion_tokens,
+        "input_tokens_expected": expected, "input_tokens_actual": actual,
+        "finish_reason": diagnostics.get("finish_reason"),
+    }
+
+
 def dispatch_outbox(limit=100):
     now = timezone.now()
     # A crash after a non-idempotent HTTP request has an unknown external outcome.

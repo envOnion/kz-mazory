@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 from functools import lru_cache
 from pathlib import Path
 from urllib.parse import quote
@@ -16,6 +17,7 @@ from .providers import ProviderUnavailable, checked_ai_url
 
 ROOT = Path(__file__).resolve().parents[1] / "tokenizers"
 MANIFEST = json.loads((ROOT / "manifest.json").read_text())
+QWEN_MANIFEST = json.loads((ROOT / "qwen38_manifest.json").read_text())
 MAX_REMOTE_COUNT_REQUESTS = 32
 
 
@@ -27,13 +29,17 @@ def payload_hash(payload):
     return hashlib.sha256(canonical_json(payload).encode()).hexdigest()
 
 
+def _invalid_template(message):
+    raise ValueError(message)
+
+
 class NativeCounter:
     strategy = "nemotron_local_manifest"
     remote = False
 
-    def __init__(self):
-        root = ROOT / MANIFEST["revision"]
-        for name, checksum in MANIFEST["files"].items():
+    def __init__(self, manifest=MANIFEST):
+        root = ROOT / manifest["revision"]
+        for name, checksum in manifest["files"].items():
             if hashlib.sha256((root / name).read_bytes()).hexdigest() != checksum:
                 raise ValueError("Invalid tokenizer assets")
         self.tokenizer = Tokenizer.from_file(str(root / "tokenizer.json"))
@@ -43,6 +49,7 @@ class NativeCounter:
         env.filters["tojson"] = lambda value, **kwargs: json.dumps(
             value, ensure_ascii=False, **kwargs
         )
+        env.globals["raise_exception"] = _invalid_template
         self.template = env.from_string((root / "chat_template.jinja").read_text())
 
     def count_text(self, text):
@@ -70,6 +77,29 @@ class NativeCounter:
     @property
     def request_count(self):
         return 0
+
+
+class QwenCounter(NativeCounter):
+    strategy = "qwen38_ollama_local_manifest"
+
+    def __init__(self):
+        super().__init__(QWEN_MANIFEST)
+
+    def count_payload(self, payload):
+        # Only the extraction shape is supported. Reject unsupported modes rather
+        # than undercounting tools, images, prefill or thinking instructions.
+        messages = payload.get("messages", [])
+        if (
+            payload.get("reasoning_effort") != "none"
+            or payload.get("tools")
+            or [message.get("role") for message in messages] != ["system", "user"]
+            or any(not isinstance(message.get("content"), str) for message in messages)
+        ):
+            raise ProviderUnavailable("context_token_count_unavailable")
+        rendered = self.template.render(
+            messages=messages, add_generation_prompt=True, enable_thinking=False,
+        )
+        return self.count_text(rendered)
 
 
 class AnthropicCounter:
@@ -132,6 +162,78 @@ def native_counter():
         raise ProviderUnavailable("context_tokenizer_unavailable") from exc
 
 
+@lru_cache(maxsize=1)
+def qwen_counter():
+    try:
+        return QwenCounter()
+    except (OSError, ValueError, KeyError) as exc:
+        raise ProviderUnavailable("context_tokenizer_unavailable") from exc
+
+
+def ollama_context_runtime(cfg):
+    """Verify the installed model in the worker before trusting local counts."""
+    from .ai_service import AIService
+
+    if (
+        cfg.chat_model_name not in QWEN_MANIFEST["models"]
+        or cfg.tokenizer_id != QWEN_MANIFEST["repo"]
+        or cfg.tokenizer_revision != QWEN_MANIFEST["revision"]
+    ):
+        raise ProviderUnavailable("context_tokenizer_unavailable")
+    base = AIService.effective_chat_provider_url(cfg)
+    if not base.endswith("/v1"):
+        raise ProviderUnavailable("context_provider_unsupported")
+    api_key = AIService._credential(cfg)
+    key = "ollama-context:" + payload_hash({
+        "url": base, "model": cfg.chat_model_name,
+        "credential": cfg.chat_api_key_encrypted,
+        "profile": payload_hash(QWEN_MANIFEST),
+    })
+    endpoint = cache.get(key)
+    if endpoint is None:
+        version = AIService._post(
+            base[:-3] + "/api/version", {"model": cfg.chat_model_name},
+            (5, 15), api_key=api_key, operation="model_metadata", http_method="GET",
+        )
+        if not isinstance(version, dict) or version.get("version") != QWEN_MANIFEST["ollama"]["version"]:
+            raise ProviderUnavailable("context_tokenizer_unavailable")
+        data = AIService._post(
+            base[:-3] + "/api/show", {"model": cfg.chat_model_name, "verbose": True},
+            (5, 30), api_key=api_key, operation="model_metadata",
+        )
+        try:
+            identity = {
+                field: data["model_info"][field]
+                for field in QWEN_MANIFEST["ollama"]["identity_fields"]
+            }
+            metadata = data["model_info"]
+            if (
+                payload_hash(identity) != QWEN_MANIFEST["ollama"]["vocabulary_sha256"]
+                or metadata["general.architecture"] != QWEN_MANIFEST["ollama"]["architecture"]
+                or not re.search(r"^RENDERER qwen3\.8$", data["modelfile"], re.MULTILINE)
+                or data["template"] != "{{ .Prompt }}"
+            ):
+                raise ProviderUnavailable("context_tokenizer_unavailable")
+            window = metadata["qwen35.context_length"]
+            configured_window = re.search(
+                r"^num_ctx\s+(\d+)\s*$", data["parameters"], re.MULTILINE,
+            )
+            if type(window) is not int or not configured_window:
+                raise ProviderUnavailable("context_model_window_unavailable")
+            window = min(window, int(configured_window.group(1)))
+        except (TypeError, KeyError, ValueError, AttributeError) as exc:
+            raise ProviderUnavailable("context_model_metadata_unavailable") from exc
+        endpoint = {
+            "tag": "ollama", "transport": "ollama", "context_length": window,
+            "supported_parameters": ["max_tokens", "response_format", "reasoning_effort"],
+            "api_format": "openai_compatible", "effective_provider_url": base,
+        }
+        cache.set(key, endpoint, timeout=300)
+    if endpoint["context_length"] < cfg.context_window_tokens:
+        raise ProviderUnavailable("context_model_window_unavailable")
+    return qwen_counter(), endpoint
+
+
 def context_runtime(cfg):
     if (
         cfg.context_window_tokens <= 0
@@ -153,6 +255,8 @@ def context_runtime(cfg):
         }
     if api_format != "openai_compatible":
         raise ProviderUnavailable("context_provider_unsupported")
+    if cfg.chat_model_name in QWEN_MANIFEST["models"] or cfg.tokenizer_id == QWEN_MANIFEST["repo"]:
+        return ollama_context_runtime(cfg)
     if (
         cfg.chat_model_name not in MANIFEST["models"]
         or cfg.tokenizer_id != MANIFEST["repo"]
@@ -267,6 +371,11 @@ def extraction_payload(
             {"role": "user", "content": user_content},
         ],
     }
+    if endpoint.get("transport") == "ollama":
+        payload.pop("provider")
+        payload.pop("plugins")
+        payload.pop("reasoning")
+        payload["reasoning_effort"] = "none"
     if "response_format" in endpoint.get("supported_parameters", []):
         payload["response_format"] = {"type": "json_object"}
     return payload
