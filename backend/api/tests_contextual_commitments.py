@@ -286,6 +286,21 @@ class ContextualCommitmentTests(TestCase):
             access.commitments_for(self.user).filter(pk=hidden.pk).exists()
         )
 
+    def test_unassigned_general_task_cannot_be_completed_by_finance_only(self):
+        from rest_framework.exceptions import PermissionDenied
+        from .notifications import change_commitment
+
+        finance = User.objects.create_user("finance")
+        TeamMembership.objects.create(
+            user=finance, team=self.team, role="finance", status="active"
+        )
+        task = Commitment.objects.create(
+            team=self.team, commitment_text="Task", is_verified=True
+        )
+        self.assertTrue(access.commitments_for(finance).filter(pk=task.id).exists())
+        with self.assertRaises(PermissionDenied):
+            change_commitment(finance, task.id, task.version, "fulfill")
+
     def test_partial_context_scans_all_remaining_messages_in_bounded_batches(self):
         later = [
             self.message(

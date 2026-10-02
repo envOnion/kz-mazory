@@ -278,7 +278,7 @@ def change_commitment(
         )
         if c.version != version:
             raise Conflict()
-        if c.manager_id != getattr(getattr(user, "profile", None), "id", None):
+        if c.manager_id is None or c.manager_id != getattr(getattr(user, "profile", None), "id", None):
             access.require_team_role(
                 user, c.team_id or (c.project.team_id if c.project else None), ["team_lead"]
             )
