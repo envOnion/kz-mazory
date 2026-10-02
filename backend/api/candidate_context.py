@@ -1,5 +1,7 @@
 """Authorized conversation and the exact saved AI history for fact review."""
 
+import json
+
 from django.db.models import (
     Q,
     Case,
@@ -28,10 +30,13 @@ class ContextInput(serializers.Serializer):
 
 
 def message_data(raw, target_id, ai_ids, target_message_id=None):
+    from .message_time import source_metadata
+    original = source_metadata(raw)
     return {
+        "source_metadata": original,
         "id": raw.id,
-        "sender_name": raw.sender_name or "Автор не указан",
-        "sent_at": raw.timestamp if raw.sent_at_known else None,
+        "sender_name": original["sender"] or "Автор не указан",
+        "sent_at": original["sent_at"],
         "received_at": raw.received_at,
         "content": raw.content,
         "is_source": raw.id == target_id,
@@ -72,7 +77,14 @@ class CandidateContextView(APIView):
                     "history_available": False,
                 }
             )
-        snapshots = trace.earlier_messages_context
+        snapshots = list(trace.earlier_messages_context) if isinstance(trace.earlier_messages_context, list) else []
+        for batch in trace.context_metadata.get("commitment_resolution_batches", []):
+            try:
+                payload = batch["request"]
+                request_message = next(item for item in payload["messages"] if item["role"] == "user")
+                snapshots.extend(json.loads(request_message["content"])["context"])
+            except (KeyError, TypeError, ValueError, StopIteration):
+                continue
         snapshots = snapshots if isinstance(snapshots, list) else []
         snapshots = [
             m
@@ -101,12 +113,18 @@ class CandidateContextView(APIView):
                 item.get("content", "") if isinstance(item.get("content"), str) else ""
             )
             data["partial"] = bool(item.get("partial"))
+            if isinstance(item.get("sender_name"), str):
+                data["sender_name"] = item["sender_name"] or "Автор не указан"
+            if "timestamp" in item:
+                data["sent_at"] = item["timestamp"]
             ai_messages.append(data)
         metadata = (
             trace.context_metadata if isinstance(trace.context_metadata, dict) else {}
         )
         if not snapshots:
             coverage = "Сохранённой истории для этого анализа нет. Ниже можно посмотреть окружающую переписку."
+        elif metadata.get("commitment_resolution_batches"):
+            coverage = "Основной анализ получил ближайшую переписку; оставшаяся история проверена последовательными частями для поиска выполнения обязательства."
         elif metadata.get("history_complete_in_request") is True:
             coverage = (
                 "В анализ вошла вся история, доступная системе на момент обработки."

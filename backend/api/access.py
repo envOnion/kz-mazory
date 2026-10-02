@@ -139,7 +139,8 @@ def commitments_for(user):
         return Commitment.objects.all()
     condition = Q(project__in=projects_for(user))
     if memberships(user).exists():
-        condition |= Q(project__isnull=True, manager__user=user)
+        condition |= Q(project__isnull=True, team_id__in=team_ids(user, ["team_lead", "finance"]))
+        condition |= Q(project__isnull=True, team_id__in=team_ids(user, ["manager"]), manager__user=user)
     return Commitment.objects.filter(condition)
 
 

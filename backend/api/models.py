@@ -360,6 +360,7 @@ class Commitment(models.Model):
         ("low", "Низкий"),
     ]
 
+    team = models.ForeignKey("Team", on_delete=models.PROTECT, null=True, blank=True, related_name="commitments")
     project = models.ForeignKey(
         Project,
         on_delete=models.PROTECT,
@@ -400,6 +401,7 @@ class Commitment(models.Model):
     counterparty_person = models.CharField(
         "Кому обещано / ЛПР", max_length=255, blank=True, default=""
     )
+    responsible_name = models.CharField("Исполнитель по переписке", max_length=255, blank=True, default="")
     commitment_text = models.TextField("Суть обещания")
     promised_at = models.DateTimeField(auto_now_add=True)
     deadline = models.DateField("Дедлайн", null=True, blank=True)

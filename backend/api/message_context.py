@@ -1,6 +1,9 @@
 """The complete source history, bounded only by the native model token budget."""
 
-from django.db.models import Exists, OuterRef, Q
+from django.db.models import Exists, OuterRef, Q, F
+from django.db.models.functions import Abs
+from django.utils import timezone
+from .message_time import source_metadata, source_zone
 
 from .context_tokens import (
     canonical_json,
@@ -12,7 +15,7 @@ from .models import RawMessage
 from .plain_text import plain_text
 from .providers import ProviderUnavailable
 
-POLICY = "chat-history-256k-v1"
+POLICY = "chat-history-contextual-v2"
 MAX_REMOTE_PREFLIGHT_PROBES = 4
 MAX_REMOTE_BOUNDARY_PROBES = 12
 
@@ -40,7 +43,7 @@ def source_scope(raw):
     )
 
 
-def history_queryset(raw, snapshot_id):
+def history_queryset(raw, snapshot_id, include_following=False):
     scope = source_scope(raw).filter(id__lte=snapshot_id)
     # Resolve revisions before applying time filters, so an old revision cannot reappear.
     newer = scope.filter(
@@ -61,6 +64,8 @@ def history_queryset(raw, snapshot_id):
         )
         .exclude(processing_state__in=["superseded", "deleted"])
     )
+    if include_following:
+        return qs.annotate(distance=Abs(F("id") - raw.id)).order_by("distance", "id"), "received_at"
     time_field = "timestamp" if raw.sent_at_known else "received_at"
     before = getattr(raw, time_field)
     qs = qs.filter(
@@ -71,25 +76,29 @@ def history_queryset(raw, snapshot_id):
     return qs.order_by(f"-{time_field}", "-id"), time_field
 
 
-def build_context(raw, cfg, known_projects, snapshot_id):
+def build_context(raw, cfg, known_projects, snapshot_id, include_following=False):
     counter, endpoint = context_runtime(cfg)
-    qs, time_field = history_queryset(raw, snapshot_id)
-    source_timezone = (
-        raw.config.snapshot.get("timezone", "Asia/Almaty")
-        if raw.config_id
-        else "Asia/Almaty"
-    )
+    qs, time_field = history_queryset(raw, snapshot_id, include_following)
+    source = source_metadata(raw)
+    source_timezone = source["timezone"]
+    analysis_time = timezone.now().astimezone(source_zone(raw)).isoformat()
+
+    def ordered(items):
+        if not include_following:
+            return list(reversed(items))
+        return sorted(items, key=lambda item: (item["timestamp"] or item["received_at"], item["raw_message_id"]))
 
     def payload(nearest):
         return extraction_payload(
             cfg,
             endpoint,
             raw.content,
-            raw.sender_name,
-            list(reversed(nearest)),
+            source["sender"],
+            ordered(nearest),
             known_projects,
-            raw.timestamp.isoformat() if raw.sent_at_known else None,
+            source["sent_at"],
             source_timezone,
+            source_metadata=source, current_time=analysis_time, target_message_id=raw.id,
         )
 
     max_input = (
@@ -175,7 +184,9 @@ def build_context(raw, cfg, known_projects, snapshot_id):
         "received_at",
         "sent_at_known",
     )
-    for row in qs.values(*fields).iterator(chunk_size=256):
+    for message in qs.select_related("config").iterator(chunk_size=256):
+        row = {field: getattr(message, field) for field in fields}
+        original = source_metadata(message)
         text = plain_text(row["content"])
         if not text:
             empty += 1
@@ -192,8 +203,9 @@ def build_context(raw, cfg, known_projects, snapshot_id):
             "message_id": row["message_id"],
             "source_revision": row["source_revision"],
             "content": text,
-            "sender_name": plain_text(row["sender_name"]),
-            "timestamp": row["timestamp"].isoformat() if row["sent_at_known"] else None,
+            "sender_name": plain_text(original["sender"]),
+            "timestamp": original["sent_at"],
+            "source_metadata": original,
             "received_at": row["received_at"].isoformat(),
             "partial": False,
         }
@@ -218,7 +230,7 @@ def build_context(raw, cfg, known_projects, snapshot_id):
     input_tokens = counter.count_payload(request)
     if input_tokens > max_input:
         raise ProviderUnavailable("context_preflight_overflow")
-    context = list(reversed(nearest))
+    context = ordered(nearest)
     partial_count = sum(item["partial"] for item in context)
     included = len(context)
     metadata = {
@@ -237,6 +249,9 @@ def build_context(raw, cfg, known_projects, snapshot_id):
         "tokenizer_revision": None if counter.remote else cfg.tokenizer_revision,
         "snapshot_max_id": snapshot_id,
         "time_basis": time_field,
+        "target_source_metadata": source,
+        "analysis_time": analysis_time,
+        "includes_following_messages": include_following,
         "window_tokens": cfg.context_window_tokens,
         "completion_reserve_tokens": cfg.max_completion_tokens,
         "safety_tokens": cfg.context_safety_tokens,
@@ -260,6 +275,7 @@ def build_context(raw, cfg, known_projects, snapshot_id):
         "included_period": [context[0][time_field], context[-1][time_field]]
         if context
         else [None, None],
+        "source_period": [context[0]["timestamp"], context[-1]["timestamp"]] if context else [None, None],
         "external_import_completeness": "unknown",
     }
     return context, metadata, request

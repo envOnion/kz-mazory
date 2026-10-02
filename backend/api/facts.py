@@ -30,9 +30,16 @@ from .models import (
     Team,
 )
 from .security import Conflict
+from .message_time import source_zone
 
 
 SUPPORTED_CURRENCIES = ("KZT", "USD", "EUR", "RUB")
+
+
+class EvidenceSchema(serializers.Serializer):
+    raw_message_id = serializers.IntegerField(min_value=1)
+    quote = serializers.CharField(max_length=32000)
+    role = serializers.ChoiceField(choices=["request", "promise", "deadline", "fulfillment"])
 
 
 class FactSchema(serializers.Serializer):
@@ -66,6 +73,17 @@ class FactSchema(serializers.Serializer):
     deadline_precision = serializers.ChoiceField(
         choices=["unknown", "date", "datetime"], default="unknown"
     )
+    assignment_kind = serializers.ChoiceField(choices=["promise", "assignment"], default="promise")
+    responsible_name = serializers.CharField(max_length=255, allow_blank=True, default="")
+    commitment_status = serializers.ChoiceField(choices=["pending", "fulfilled"], default="pending")
+    deadline_basis = serializers.ChoiceField(choices=["explicit", "morning_default", "unknown"], default="unknown")
+    deadline_message_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
+    fulfillment_message_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
+    fulfilled_at = serializers.DateTimeField(required=False, allow_null=True)
+    commitment_id = serializers.IntegerField(min_value=1, required=False)
+    base_commitment_version = serializers.IntegerField(min_value=1, required=False)
+    promise_message_id = serializers.IntegerField(min_value=1, required=False)
+    evidence_messages = EvidenceSchema(many=True, default=list)
     sender_phone = serializers.CharField(max_length=32, allow_blank=True, default="")
     evidence = serializers.CharField(max_length=32000, allow_blank=False)
     confidence = serializers.FloatField(min_value=0, max_value=1, default=0)
@@ -100,6 +118,16 @@ def json_value(value):
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return value
+
+
+def same_commitment_origin(left, right):
+    """Compare the actual promise evidence; wording/date changes are proposals."""
+    def promises(data):
+        return {(item.get("raw_message_id"), " ".join(item.get("quote", "").split())) for item in data.get("evidence_messages", []) if item.get("role") == "promise"}
+    a, b = promises(left), promises(right)
+    if a and b:
+        return a == b
+    return bool(left.get("evidence") and " ".join(left["evidence"].split()) == " ".join(right.get("evidence", "").split()))
 
 
 def fact_identity(data):
@@ -591,10 +619,12 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                     trace__raw_message__session_name=raw.session_name,
                     trace__raw_message__message_id=raw.message_id,
                 ).exclude(pk=candidate.pk)
+                if candidate.fact_type == "commitment" and not data.get("commitment_id") and any(item.fact_type == "commitment" and same_commitment_origin(item.proposed_changes, data) for item in approved):
+                    raise Conflict("Это обещание уже подтверждено. Проверяйте изменение существующего обязательства.")
                 if any(
                     fact_identity(item.proposed_changes) == fact_identity(data)
                     for item in approved
-                ):
+                ) and not data.get("commitment_id"):
                     raise Conflict(
                         "Этот факт из исходного сообщения уже подтверждён в другой попытке."
                     )
@@ -658,7 +688,7 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                     project.cost_confirmed = True
                 if "stage" in data:
                     project.status = data["stage"]
-            elif not project:
+            elif not project and candidate.fact_type != "commitment":
                 raise serializers.ValidationError(
                     "Сначала сопоставьте и подтвердите проект."
                 )
@@ -762,56 +792,94 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                     is_verified=True, status="received"
                 ).aggregate(s=Sum("amount"))["s"] or Decimal(0)
             elif candidate.fact_type == "commitment":
+                from .commitment_evidence import validate_commitment
+                from .pipeline import _source_quote
+                reviewed_deadline = data.get("deadline_at")
+                reviewed_precision = data["deadline_precision"]
+                if not raw or not validate_commitment(data, raw, candidate.trace.context_metadata.get("snapshot_max_id", raw.id), _source_quote):
+                    raise serializers.ValidationError("Нужны конкретное действие и доказательства обязательства.")
+                evidence_ids = set(candidate.evidence.values_list("raw_message_id", flat=True))
+                if set(access.messages_for(user).filter(pk__in=evidence_ids).values_list("pk", flat=True)) != evidence_ids:
+                    raise serializers.ValidationError("Для подтверждения необходим доступ ко всем доказательствам.")
+                saved = set(candidate.evidence.values_list("raw_message_id", "quote"))
+                if any((ref["raw_message_id"], ref["quote"]) not in saved for ref in data["evidence_messages"]):
+                    raise serializers.ValidationError("Доказательства должны соответствовать сохранённой переписке.")
+                if changes and "deadline_at" in changes and reason.strip():
+                    data["deadline_at"], data["deadline_precision"] = reviewed_deadline, reviewed_precision
+                    data["deadline_basis"] = "explicit" if reviewed_deadline else "unknown"
+                    data["uncertainties"] = [note for note in data["uncertainties"] if not note.startswith("Время 09:00 уточнено")]
                 deadline = data.get("deadline_at")
-                Commitment.objects.create(
+                commitment_values = dict(
                     project=project,
-                    manager=candidate.manager or project.manager,
+                    team=candidate.team,
+                    manager=candidate.manager,
                     source_message=candidate.trace.raw_message,
                     candidate=candidate,
                     commitment_text=data["commitment_text"],
+                    responsible_name=data["responsible_name"],
+                    status=data["commitment_status"],
+                    fulfilled_at=data.get("fulfilled_at") if data["commitment_status"] == "fulfilled" else None,
                     deadline_at=deadline,
                     original_deadline_at=deadline,
-                    deadline=timezone.localtime(deadline).date() if deadline else None,
+                    deadline=deadline.astimezone(source_zone(raw)).date() if deadline else None,
                     deadline_precision=data["deadline_precision"],
                     is_verified=True,
                 )
-            if project.pk:
-                project.paid_amount = project.financial_records.filter(
-                    is_verified=True, status="received"
-                ).aggregate(s=Sum("amount"))["s"] or Decimal(0)
-            project.is_verified = True
-            project.version += 1
-            project.needs_bitrix_sync = True
-            try:
-                with transaction.atomic():
-                    project.save()
-            except IntegrityError as exc:
-                raise Conflict("Проект конфликтует с существующей записью.") from exc
-            candidate.project = project
-            candidate.proposed_changes = json_value(data)
-            record_revision(project, user, old_stage)
-            AuditEvent.objects.create(
-                actor=user,
-                target_type="Project",
-                target_id=project.id,
-                action="approve_fact",
-                before_after={
-                    "before": before,
-                    "after": snapshot(project),
-                    "candidate_id": candidate.id,
-                },
-            )
-            if BitrixSettings.objects.filter(is_active=True).exists():
-                OutboxEvent.objects.get_or_create(
-                    deduplication_key=f"crm:{project.id}:{project.version}",
-                    defaults={
-                        "event_type": "crm_sync",
-                        "payload": {
-                            "project_id": project.id,
-                            "version": project.version,
-                        },
+                if data.get("commitment_id"):
+                    if data["commitment_id"] != candidate.proposed_changes.get("commitment_id"):
+                        raise serializers.ValidationError("Связь с обязательством нельзя изменить.")
+                    existing = Commitment.objects.select_for_update().get(pk=data["commitment_id"], team=candidate.team)
+                    if existing.version != candidate.proposed_changes.get("base_commitment_version"):
+                        raise Conflict("Обязательство изменилось. Повторите проверку.")
+                    if existing.source_message_id != raw.id or data["commitment_status"] != "fulfilled":
+                        raise serializers.ValidationError("Это предложение может только подтвердить выполнение исходного обязательства.")
+                    before_commitment = {"status": existing.status, "version": existing.version}
+                    existing.status, existing.fulfilled_at = "fulfilled", data["fulfilled_at"]
+                    existing.version += 1
+                    existing.save(update_fields=["status", "fulfilled_at", "version"])
+                    AuditEvent.objects.create(actor=user, target_type="Commitment", target_id=existing.id, action="approve_fulfillment", before_after={"before": before_commitment, "candidate_id": candidate.id, "status": "fulfilled"})
+                else:
+                    Commitment.objects.create(**commitment_values)
+            if project is not None:
+                if project.pk:
+                    project.paid_amount = project.financial_records.filter(
+                        is_verified=True, status="received"
+                    ).aggregate(s=Sum("amount"))["s"] or Decimal(0)
+                project.is_verified = True
+                project.version += 1
+                project.needs_bitrix_sync = True
+                try:
+                    with transaction.atomic():
+                        project.save()
+                except IntegrityError as exc:
+                    raise Conflict("Проект конфликтует с существующей записью.") from exc
+                candidate.project = project
+                candidate.proposed_changes = json_value(data)
+                record_revision(project, user, old_stage)
+                AuditEvent.objects.create(
+                    actor=user,
+                    target_type="Project",
+                    target_id=project.id,
+                    action="approve_fact",
+                    before_after={
+                        "before": before,
+                        "after": snapshot(project),
+                        "candidate_id": candidate.id,
                     },
                 )
+                if BitrixSettings.objects.filter(is_active=True).exists():
+                    OutboxEvent.objects.get_or_create(
+                        deduplication_key=f"crm:{project.id}:{project.version}",
+                        defaults={
+                            "event_type": "crm_sync",
+                            "payload": {
+                                "project_id": project.id,
+                                "version": project.version,
+                            },
+                        },
+                    )
+        if action == "approve":
+            candidate.proposed_changes = json_value(data)
         candidate.status = "approved" if action == "approve" else "rejected"
         candidate.reviewed_by, candidate.reviewed_at, candidate.review_reason = (
             user,

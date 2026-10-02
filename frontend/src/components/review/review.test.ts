@@ -140,7 +140,12 @@ describe("Fact review presentation and forms", () => {
     });
     const summary = mount(FactSummary, { props: { item } });
     expect(summary.text()).toContain("20.08.2026");
-    expect(summary.findAll("tr").find(row => row.text().includes("Срок выполнения"))!.text()).not.toContain(":");
+    expect(
+      summary
+        .findAll("tr")
+        .find((row) => row.text().includes("Срок выполнения"))!
+        .text(),
+    ).not.toContain(":");
     expect(draftFor(item).deadline_at).toHaveLength(10);
     expect(changedValues(item, draftFor(item))).toEqual({});
     const form = mount(FactCorrectionForm, {
@@ -228,5 +233,61 @@ describe("Fact review presentation and forms", () => {
     expect(wrapper.text()).toContain("Уточнение");
     expect(wrapper.text()).toContain("AI получил только часть текста");
     expect(wrapper.text()).not.toContain("Начало обсуждения");
+  });
+});
+
+describe("Contextual obligation dates and explanations", () => {
+  it("displays the supplied English explanations in Russian even with quoted Russian words", () => {
+    const wrapper = mount(FactSummary, {
+      props: {
+        item: candidate({
+          uncertainties: [
+            "Individual projects not listed; only aggregate figures provided",
+            "Stage inferred as in_execution because projects are described as 'действующие' (active)",
+          ],
+        }),
+      },
+    });
+    expect(wrapper.text()).toContain("Отдельные проекты не перечислены");
+    expect(wrapper.text()).toContain("Стадия «В исполнении» предположена");
+    expect(wrapper.text()).not.toContain("Stage inferred");
+    expect(wrapper.text()).not.toContain("Individual projects");
+    wrapper.unmount();
+  });
+  it("edits precise deadlines in UTC+6 regardless of the browser timezone", () => {
+    const item = candidate({
+      fact_type: "commitment",
+      proposed_changes: {
+        commitment_text: "Отправить список",
+        deadline_at: "2026-08-20T03:00:00Z",
+        deadline_precision: "datetime",
+      },
+    });
+    const draft = draftFor(item);
+    expect(draft.deadline_at).toBe("2026-08-20T09:00");
+    expect(
+      changedValues(item, { ...draft, deadline_at: "2026-08-21T09:00" }),
+    ).toEqual({ deadline_at: "2026-08-21T03:00:00.000Z" });
+    expect(changedValues(item, draft)).toEqual({});
+  });
+  it("shows completed obligations with proof instead of a warning about a past deadline", () => {
+    const wrapper = mount(FactSummary, {
+      props: {
+        item: candidate({
+          fact_type: "commitment",
+          proposed_changes: {
+            commitment_text: "Отправить список",
+            commitment_status: "fulfilled",
+            deadline_at: "2026-08-20T03:00:00Z",
+            deadline_precision: "datetime",
+            fulfilled_at: "2026-08-20T02:45:00Z",
+          },
+        }),
+      },
+    });
+    expect(wrapper.text()).toContain("Выполнено — есть подтверждение");
+    expect(wrapper.text()).not.toContain("Срок уже прошёл");
+    expect(wrapper.text()).toContain("UTC+6");
+    wrapper.unmount();
   });
 });

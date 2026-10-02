@@ -135,3 +135,44 @@ describe("Review workflow", () => {
     wrapper.unmount();
   });
 });
+
+describe("General commitments and project discovery", () => {
+  it("allows review of a general team commitment with an empty project directory", async () => {
+    const wrapper = await screen({
+      ...fact,
+      fact_type: "commitment",
+      project_id: null,
+      project_name: "",
+      base_version: 0,
+      current_version: 0,
+      proposed_changes: {
+        commitment_text: "Отправить список объектов",
+        commitment_status: "pending",
+        responsible_name: "Жанат",
+      },
+    });
+    expect(wrapper.text()).not.toContain(
+      "Сначала выберите существующий подтверждённый проект",
+    );
+    const approve = wrapper
+      .findAll("button")
+      .find((b) => b.text() === "Подтвердить факт")!;
+    expect(approve.attributes("disabled")).toBeUndefined();
+    expect(wrapper.text()).toContain(
+      "Общие задачи команды можно подтверждать без проекта",
+    );
+    wrapper.unmount();
+  });
+  it("takes an empty project directory to pending project proposals", async () => {
+    const wrapper = await screen();
+    await wrapper
+      .findAll("button")
+      .find((b) => b.text() === "Показать предложения по проектам")!
+      .trigger("click");
+    await flushPromises();
+    expect(mocks.api).toHaveBeenCalledWith(
+      "/candidates/?status=pending&page=1&fact_type=project",
+    );
+    wrapper.unmount();
+  });
+});

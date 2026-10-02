@@ -10,6 +10,9 @@
       Укажите проверенные значения. Исходная цитата сохранится вместе с причиной
       исправления.
     </p>
+    <p class="text-xs text-slate-400">
+      Сроки вводятся в UTC+6. Время «утром» по принятому правилу — 09:00.
+    </p>
     <div class="grid sm:grid-cols-2 gap-4">
       <label
         v-for="field in visibleFields"

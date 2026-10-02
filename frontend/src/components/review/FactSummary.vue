@@ -6,6 +6,13 @@
         statusLabels[item.status]
       }}</span>
     </div>
+    <p v-if="item.source_metadata" class="text-xs text-slate-400">
+      Исходная отправка: {{ dateLabel(item.source_metadata.sent_at)
+      }}<template v-if="item.source_metadata.time_basis === 'export_header'">
+        · дата из экспорта; получено системой
+        {{ dateLabel(item.source_metadata.received_at) }}</template
+      >
+    </p>
     <p class="text-sm text-indigo-200">{{ effectLabel(item) }}</p>
     <p v-if="compare" class="text-xs text-slate-400">
       Название объекта и компания используются для сопоставления. Подтверждение
@@ -64,6 +71,17 @@
         </tbody>
       </table>
     </div>
+    <p
+      v-if="
+        item.fact_type === 'commitment' &&
+        item.proposed_changes.commitment_status !== 'fulfilled' &&
+        typeof item.proposed_changes.deadline_at === 'string' &&
+        Date.parse(item.proposed_changes.deadline_at) < Date.now()
+      "
+      class="text-sm text-amber-300"
+    >
+      Срок уже прошёл; выполнение по переписке пока не подтверждено.
+    </p>
     <p class="text-xs text-slate-400">
       Оценка AI: {{ Math.round(item.confidence * 100) }}%. Проверяйте значения
       по переписке, даже при высокой оценке.
@@ -83,7 +101,7 @@
         {{ item.current_version }}.
       </p>
       <p v-for="text in technicalUncertainties" :key="text">
-        Исходное пояснение AI: {{ text }}
+        Пояснение AI: {{ uncertaintyLabel(text) }}
       </p>
     </details>
   </section>

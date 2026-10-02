@@ -56,6 +56,7 @@ export interface Candidate {
   manager_id: number | null
   fact_type: CandidateFactType
   proposed_changes: Record<string, unknown>
+  source_metadata?: { sent_at: string | null; received_at: string; time_basis: string; timezone: string } | null
   source_available?: boolean
   current_values?: Record<string, unknown>
   chat_name?: string
@@ -70,7 +71,7 @@ export interface Candidate {
   created_at: string
   crm_resolution: CrmResolution
 }
-export interface Evidence { id: number; quote: string; source_id: number; source_url: string }
+export interface Evidence { role?: string; id: number; quote: string; source_id: number; source_url: string }
 export interface Source { id: number; content: string; sender_name: string; sent_at: string | null; received_at: string; processing_state: string; revision: string }
 export interface Directory { teams: { id: number; name: string; history_complete_from: string | null }[]; profiles: { id: number; user_id: number; full_name: string }[]; projects: { id: number; name: string; version: number; currency: string; team_id: number }[] }
 export interface Payment { id: number; project_id: number; amount: Money; currency: string; payment_date: string; candidate_id: number | null; reverses_id: number | null; credited_profile_id: number | null }

@@ -52,7 +52,7 @@ def verify_ai_context():
     counter, endpoint = context_runtime(cfg)
     payload = extraction_payload(
         cfg, endpoint, "Тестовое сообщение без фактов.", "Проверка подключения",
-        [], [], None, "Asia/Almaty",
+        [], [], None, "UTC+06:00",
     )
     expected = counter.count_payload(payload)
     _, usage, diagnostics = AIService.analyze_payload(
@@ -471,6 +471,7 @@ def extract_message(payload):
         payload["raw_id"],
         trace_id=payload.get("trace_id"),
         requested_by_id=payload.get("requested_by_id"),
+        commitment_refresh=payload.get("commitment_refresh", False),
     )
 
 

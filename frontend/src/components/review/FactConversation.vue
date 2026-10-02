@@ -39,7 +39,11 @@
               : "Здесь показан сохранённый текст, переданный AI. Частичные сообщения отмечены отдельно."
           }}
         </p>
-        <p class="text-xs text-slate-400">Автор и дата показаны по данным сообщения в системе. Пересланный или импортированный текст может содержать собственную дату и подпись.</p>
+        <p class="text-xs text-slate-400">
+          Исходная дата отправки показана в UTC+6. Для распознанного экспорта
+          используется дата из исходной переписки; время получения хранится
+          отдельно.
+        </p>
         <button
           v-if="mode === 'chat' && context.before"
           class="btn"
@@ -65,6 +69,10 @@
                 ? dateLabel(message.sent_at)
                 : `Время отправки неизвестно · получено ${dateLabel(message.received_at)}`
             }}</span
+            ><span
+              v-if="message.source_metadata?.time_basis === 'export_header'"
+              >Дата из экспорта · получено системой
+              {{ dateLabel(message.received_at) }}</span
             ><span v-if="message.is_source" class="text-indigo-200"
               >Исходное сообщение</span
             ><span v-else-if="message.is_source_revision" class="text-amber-300"
