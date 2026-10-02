@@ -3,7 +3,7 @@
 from django.db.models import Exists, OuterRef, Q, F
 from django.db.models.functions import Abs
 from django.utils import timezone
-from .message_time import source_metadata
+from .message_time import source_metadata, source_zone
 
 from .context_tokens import (
     canonical_json,
@@ -81,7 +81,7 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
     qs, time_field = history_queryset(raw, snapshot_id, include_following)
     source = source_metadata(raw)
     source_timezone = source["timezone"]
-    analysis_time = timezone.now().isoformat()
+    analysis_time = timezone.now().astimezone(source_zone(raw)).isoformat()
 
     def ordered(items):
         if not include_following:

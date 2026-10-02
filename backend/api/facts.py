@@ -30,6 +30,7 @@ from .models import (
     Team,
 )
 from .security import Conflict
+from .message_time import source_zone
 
 
 SUPPORTED_CURRENCIES = ("KZT", "USD", "EUR", "RUB")
@@ -117,6 +118,16 @@ def json_value(value):
     if hasattr(value, "isoformat"):
         return value.isoformat()
     return value
+
+
+def same_commitment_origin(left, right):
+    """Compare the actual promise evidence; wording/date changes are proposals."""
+    def promises(data):
+        return {(item.get("raw_message_id"), " ".join(item.get("quote", "").split())) for item in data.get("evidence_messages", []) if item.get("role") == "promise"}
+    a, b = promises(left), promises(right)
+    if a and b:
+        return a == b
+    return bool(left.get("evidence") and " ".join(left["evidence"].split()) == " ".join(right.get("evidence", "").split()))
 
 
 def fact_identity(data):
@@ -608,10 +619,12 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                     trace__raw_message__session_name=raw.session_name,
                     trace__raw_message__message_id=raw.message_id,
                 ).exclude(pk=candidate.pk)
+                if candidate.fact_type == "commitment" and not data.get("commitment_id") and any(item.fact_type == "commitment" and same_commitment_origin(item.proposed_changes, data) for item in approved):
+                    raise Conflict("Это обещание уже подтверждено. Проверяйте изменение существующего обязательства.")
                 if any(
                     fact_identity(item.proposed_changes) == fact_identity(data)
                     for item in approved
-                ):
+                ) and not data.get("commitment_id"):
                     raise Conflict(
                         "Этот факт из исходного сообщения уже подтверждён в другой попытке."
                     )
@@ -781,6 +794,8 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
             elif candidate.fact_type == "commitment":
                 from .commitment_evidence import validate_commitment
                 from .pipeline import _source_quote
+                reviewed_deadline = data.get("deadline_at")
+                reviewed_precision = data["deadline_precision"]
                 if not raw or not validate_commitment(data, raw, candidate.trace.context_metadata.get("snapshot_max_id", raw.id), _source_quote):
                     raise serializers.ValidationError("Нужны конкретное действие и доказательства обязательства.")
                 evidence_ids = set(candidate.evidence.values_list("raw_message_id", flat=True))
@@ -789,6 +804,10 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                 saved = set(candidate.evidence.values_list("raw_message_id", "quote"))
                 if any((ref["raw_message_id"], ref["quote"]) not in saved for ref in data["evidence_messages"]):
                     raise serializers.ValidationError("Доказательства должны соответствовать сохранённой переписке.")
+                if changes and "deadline_at" in changes and reason.strip():
+                    data["deadline_at"], data["deadline_precision"] = reviewed_deadline, reviewed_precision
+                    data["deadline_basis"] = "explicit" if reviewed_deadline else "unknown"
+                    data["uncertainties"] = [note for note in data["uncertainties"] if not note.startswith("Время 09:00 уточнено")]
                 deadline = data.get("deadline_at")
                 commitment_values = dict(
                     project=project,
@@ -802,7 +821,7 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                     fulfilled_at=data.get("fulfilled_at") if data["commitment_status"] == "fulfilled" else None,
                     deadline_at=deadline,
                     original_deadline_at=deadline,
-                    deadline=timezone.localtime(deadline).date() if deadline else None,
+                    deadline=deadline.astimezone(source_zone(raw)).date() if deadline else None,
                     deadline_precision=data["deadline_precision"],
                     is_verified=True,
                 )

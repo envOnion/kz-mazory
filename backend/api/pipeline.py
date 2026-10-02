@@ -12,7 +12,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from .ai_service import AIService, usage_event_id
 from .context_tokens import canonical_json, extraction_input, payload_hash
 from .deduplication import normalize_deal_name
-from .facts import FactSchema, fact_identity, json_value
+from .facts import FactSchema, fact_identity, json_value, same_commitment_origin
 from .message_context import build_context, source_scope
 from .message_time import source_time
 from .models import (
@@ -292,7 +292,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             )
             proposed, duplicates = 0, []
             for index, fact in enumerate(facts):
-                approved_obligation = next((item for item in accepted if item.fact_type == "commitment" and fact_identity(item.proposed_changes) == fact_identity(fact) and hasattr(item, "accepted_commitment")), None) if fact["fact_type"] == "commitment" else None
+                approved_obligation = next((item for item in accepted if item.fact_type == "commitment" and same_commitment_origin(item.proposed_changes, fact) and hasattr(item, "accepted_commitment")), None) if fact["fact_type"] == "commitment" else None
                 fulfillment_update = bool(approved_obligation and fact.get("commitment_status") == "fulfilled" and approved_obligation.accepted_commitment.status not in ("fulfilled", "cancelled"))
                 if approved_obligation and fulfillment_update:
                     fact["commitment_id"] = approved_obligation.accepted_commitment.id

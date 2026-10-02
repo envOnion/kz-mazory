@@ -261,6 +261,22 @@ class ContextualCommitmentTests(TestCase):
         self.assertEqual(event.payload["raw_id"], self.promise.id)
         self.assertEqual(Commitment.objects.count(), 0)
 
+    def test_human_deadline_correction_is_not_silently_overwritten(self):
+        candidate = self.candidate(self.validated())
+        review(
+            candidate.id,
+            self.user,
+            "approve",
+            reason="Срок уточнён по договорённости",
+            changes={
+                "deadline_at": "2026-08-21T10:00:00+06:00",
+                "deadline_precision": "datetime",
+            },
+            base_version=0,
+        )
+        task = Commitment.objects.get(candidate=candidate)
+        self.assertEqual(task.deadline_at, datetime(2026, 8, 21, 10, tzinfo=ZONE))
+
     def test_team_lead_cannot_read_another_teams_general_task(self):
         other = Team.objects.create(name="Other")
         hidden = Commitment.objects.create(
