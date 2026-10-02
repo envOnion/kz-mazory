@@ -14,6 +14,7 @@ from .context_tokens import canonical_json, extraction_input, payload_hash
 from .deduplication import normalize_deal_name
 from .facts import FactSchema, fact_identity, json_value
 from .message_context import build_context, source_scope
+from .message_time import source_time
 from .models import (
     FactCandidate,
     FactEvidence,
@@ -42,7 +43,7 @@ def _source_quote(quote, content):
     return match.group()
 
 
-def _facts(result, raw, diagnostics=None):
+def _facts(result, raw, diagnostics=None, snapshot_id=None):
     # A missing optional value and an explicit null both mean unknown. Required
     # values, enums and evidence still go through the full serializer validation.
     fields = FactSchema().fields
@@ -63,6 +64,7 @@ def _facts(result, raw, diagnostics=None):
     ]
     schema = FactSchema(data=normalized, many=True)
     schema.is_valid(raise_exception=True)
+    accepted_facts = []
     for index, fact in enumerate(schema.validated_data):
         if fact["fact_type"] == "payment" and fact["payment_kind"] == "increment":
             if re.search(
@@ -84,12 +86,13 @@ def _facts(result, raw, diagnostics=None):
         if quote != fact["evidence"] and diagnostics is not None:
             diagnostics.setdefault("source_whitespace_restored", []).append(index)
         fact["evidence"] = quote
-        if not raw.sent_at_known and fact.get("deadline_at"):
-            fact["deadline_at"], fact["deadline_precision"] = None, "unknown"
-            fact["uncertainties"].append(
-                "Время исходного сообщения неизвестно: срок требует проверки."
-            )
-    return schema.validated_data
+        if fact["fact_type"] == "commitment":
+            from .commitment_evidence import validate_commitment
+            if not validate_commitment(fact, raw, snapshot_id or raw.id, _source_quote):
+                continue
+        accepted_facts.append(fact)
+    return accepted_facts
+
 
 
 def _restore_request(trace):
@@ -131,7 +134,7 @@ def _extraction_user_message(payload):
     return matches[0]
 
 
-def extract_message(raw_id, trace_id=None, requested_by_id=None):
+def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refresh=False):
     explicit = trace_id is not None
     with transaction.atomic():
         raw = (
@@ -154,6 +157,9 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
             return
     try:
         source_scope(raw)
+        if commitment_refresh and trace.context_metadata.get("request_state") == "not_sent":
+            from django.db.models import Max
+            trace.context_metadata["snapshot_max_id"] = source_scope(raw).aggregate(last=Max("id"))["last"] or raw.id
         if requested_by_id:
             try:
                 require_reanalysis(User.objects.get(pk=requested_by_id), raw)
@@ -189,7 +195,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
                 )
             )
             context, metadata, payload = build_context(
-                raw, cfg, known, trace.context_metadata["snapshot_max_id"]
+                raw, cfg, known, trace.context_metadata["snapshot_max_id"], include_following=True
             )
             envelope = copy.deepcopy(payload)
             user_message = _extraction_user_message(envelope)
@@ -202,6 +208,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
                 effective_provider_url=effective_provider_url,
                 api_format=api_format,
             )
+            metadata.setdefault("snapshot_max_id", trace.context_metadata["snapshot_max_id"])
             trace.earlier_messages_context, trace.earlier_messages_count = (
                 context,
                 len(context),
@@ -227,7 +234,10 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
         trace.context_metadata["input_tokens_actual"] = (
             value if type(value) is int and value >= 0 else None
         )
-        facts = _facts(result, raw, diagnostics)
+        facts = _facts(result, raw, diagnostics, trace.context_metadata["snapshot_max_id"])
+        from .commitment_resolution import resolve_remaining
+        resolved = resolve_remaining(facts, raw, cfg, trace)
+        facts = _facts({"facts": json_value(resolved)}, raw, diagnostics, trace.context_metadata["snapshot_max_id"])
         with transaction.atomic():
             locked = (
                 RawMessage.objects.select_for_update(of=("self",))
@@ -253,6 +263,11 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
                     locked.processing_state, locked.processed = "superseded", True
                     locked.save(update_fields=["processing_state", "processed"])
                 return
+            if locked.traces.filter(attempt_no__gt=trace.attempt_no, status="success").exists():
+                trace.status, trace.result_summary = "warning", "Более новая попытка уже обработана; её предложения сохранены."
+                trace.context_metadata["request_state"] = "superseded"
+                trace.save()
+                return
             team = locked.config.team if locked.config_id else locked.team
             origin = RawMessage.objects.filter(
                 source=raw.source,
@@ -277,7 +292,15 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
             )
             proposed, duplicates = 0, []
             for index, fact in enumerate(facts):
-                if fact_identity(fact) in accepted_ids:
+                approved_obligation = next((item for item in accepted if item.fact_type == "commitment" and fact_identity(item.proposed_changes) == fact_identity(fact) and hasattr(item, "accepted_commitment")), None) if fact["fact_type"] == "commitment" else None
+                fulfillment_update = bool(approved_obligation and fact.get("commitment_status") == "fulfilled" and approved_obligation.accepted_commitment.status not in ("fulfilled", "cancelled"))
+                if approved_obligation and fulfillment_update:
+                    fact["commitment_id"] = approved_obligation.accepted_commitment.id
+                    fact["base_commitment_version"] = approved_obligation.accepted_commitment.version
+                if fact_identity(fact) in accepted_ids and not fulfillment_update:
+                    duplicates.append(index)
+                    continue
+                if approved_obligation and not fulfillment_update:
                     duplicates.append(index)
                     continue
                 matches = Project.objects.filter(
@@ -294,13 +317,17 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
                     fact["uncertainties"].append(
                         "Есть ранее подтверждённый факт из этого сообщения. Проверьте, является ли предложение корректировкой."
                     )
+                if fact["fact_type"] == "commitment" and raw.config_id and source_time(raw)[2] == "export_header":
+                    # Transport sender is the person who imported the chat, not the author.
+                    authors = UserProfile.objects.filter(full_name=fact.get("responsible_name", ""), user__memberships__team=team, user__memberships__status="active").distinct()
+                    sender = authors.first() if authors.count() == 1 else None
                 candidate, created = FactCandidate.objects.get_or_create(
                     source_key=f"message:{raw.id}:attempt:{trace.attempt_no}:fact:{index}",
                     defaults={
                         "trace": trace,
                         "project": project,
                         "team": team,
-                        "manager": sender or (project.manager if project else None),
+                        "manager": sender if fact["fact_type"] == "commitment" else sender or (project.manager if project else None),
                         "fact_type": fact["fact_type"],
                         "proposed_changes": json_value(fact),
                         "base_project_version": project.version if project else 0,
@@ -308,12 +335,14 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
                         "uncertainties": fact["uncertainties"],
                     },
                 )
-                FactEvidence.objects.get_or_create(
-                    candidate=candidate,
-                    raw_message=raw,
-                    quote=fact["evidence"],
-                    field_name="source",
-                )
+                references = fact.get("evidence_messages") or [{"raw_message_id": raw.id, "quote": fact["evidence"], "role": "source"}]
+                for reference in references:
+                    FactEvidence.objects.get_or_create(
+                        candidate=candidate,
+                        raw_message_id=reference["raw_message_id"],
+                        quote=reference["quote"],
+                        field_name=reference["role"],
+                    )
                 if created and candidate.fact_type == "project":
                     from .tasks import enqueue_crm_match
 
@@ -337,6 +366,9 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None):
                 deduplication_key=f"index:{raw.id}",
                 defaults={"event_type": "index_message", "payload": {"raw_id": raw.id}},
             )
+        if not explicit:
+            from .commitment_refresh import schedule_commitment_refresh
+            schedule_commitment_refresh(raw)
     except (
         ProviderUnavailable,
         ValidationError,

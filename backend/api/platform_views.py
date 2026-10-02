@@ -12,6 +12,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
+from .message_time import source_metadata
 from . import access
 from .models import (
     FactCandidate,
@@ -45,12 +46,14 @@ def candidate_data(candidate, user, source_map=None, project_ids=None):
         source_map = {m.id: m for m in access.messages_for(user).filter(pk__in=ids).select_related("config")}
     evidence = [
         {"id": e.id, "quote": e.quote, "source_id": e.raw_message_id,
-         "source_url": f"/api/messages/{e.raw_message_id}/"}
+         "source_url": f"/api/messages/{e.raw_message_id}/", "role": e.field_name}
         for e in evidence_records if e.raw_message_id in source_map
     ]
     values = dict(candidate.proposed_changes)
     if not evidence:
         values.pop("evidence", None)
+    if "evidence_messages" in values:
+        values["evidence_messages"] = [ref for ref in values["evidence_messages"] if ref.get("raw_message_id") in source_map]
     project = candidate.project
     current_values = {}
     if project_ids is None:
@@ -116,6 +119,7 @@ def candidate_data(candidate, user, source_map=None, project_ids=None):
         "current_version": candidate.project.version if candidate.project else 0,
         "confidence": candidate.confidence,
         "uncertainties": candidate.uncertainties,
+        "source_metadata": source_metadata(source) if source else None,
         "evidence": evidence,
         "review_reason": candidate.review_reason,
         "created_at": candidate.created_at,
@@ -143,6 +147,11 @@ class CandidateListView(APIView):
             .prefetch_related("evidence", "crm_matches__project")
             .order_by("id")
         )
+        fact_type = request.query_params.get("fact_type", "")
+        if fact_type:
+            if fact_type not in ("project", "payment", "commitment"):
+                raise ValidationError("Неизвестный тип факта.")
+            qs = qs.filter(fact_type=fact_type)
         pagination = PageNumberPagination()
         page = pagination.paginate_queryset(qs, request)
         source_ids = {c.trace.raw_message_id for c in page}

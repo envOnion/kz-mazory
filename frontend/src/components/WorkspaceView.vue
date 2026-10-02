@@ -9,13 +9,15 @@
   <template v-if="tab === 'review'">
     <p class="text-sm text-slate-400">AI предлагает изменения. Утверждённые суммы остаются прежними до подтверждения. Платежи проверяет финансист.</p>
     <label>Статус <select class="field" v-model="candidateStatus" @change="candidatePage = 1; load()"><option value="pending">На проверке</option><option value="approved">Принято</option><option value="rejected">Отклонено</option><option value="superseded">Заменено</option></select></label>
+    <label class="ml-3">Тип <select class="field" v-model="candidateFactType" @change="candidatePage = 1; load()"><option value="">Все факты</option><option value="project">Проекты — проверить и создать</option><option value="commitment">Обязательства</option><option value="payment">Платежи</option></select></label>
+    <p v-if="!directory.projects.length" class="panel text-amber-200">Подтверждённых доступных проектов пока нет. Проекты из переписки сначала появляются как предложения и добавляются в справочник после проверки. <button class="underline" @click="candidateFactType = 'project'; candidateStatus = 'pending'; candidatePage = 1; load()">Показать предложения по проектам</button>. Общие задачи команды можно подтверждать без проекта.</p>
     <p class="text-sm text-slate-400">Предложений: {{ candidateCount }}. Связанные факты на этой странице собраны по проекту или чату.</p>
     <template v-for="group in candidateGroups" :key="group.key">
     <h2 class="text-lg font-semibold pt-3">{{ group.label }} <span class="text-sm text-slate-400">· {{ group.items.length }} на этой странице</span></h2>
     <article v-for="item in group.items" :key="item.id" class="panel space-y-4" :data-testid="`candidate-${item.id}`">
       <FactSummary :item="item" />
       <section class="space-y-2"><h3 class="text-sm font-semibold">Чем подтверждается факт</h3>
-      <blockquote v-for="evidence in item.evidence" :key="evidence.id" class="border-l-2 border-indigo-400 pl-3 text-sm whitespace-pre-wrap">{{ evidence.quote }}</blockquote>
+      <blockquote v-for="evidence in item.evidence" :key="evidence.id" class="border-l-2 border-indigo-400 pl-3 text-sm whitespace-pre-wrap"><strong v-if="evidence.role" class="block text-xs text-indigo-200">{{ ({request: 'Просьба / предмет задачи', promise: 'Обещание / назначение', deadline: 'Срок', fulfillment: 'Доказательство выполнения'} as Record<string, string>)[evidence.role] || 'Первоисточник' }}</strong>{{ evidence.quote }}</blockquote>
       <p v-if="!item.evidence.length" class="text-amber-300 text-sm">Первоисточник недоступен. Подтверждение невозможно без доступа к нему.</p></section>
       <FactConversation :candidate-id="item.id" />
       <label v-if="item.status === 'pending' && (canReview(item) || canApprove(item) || canSelectCrm(item))" class="block text-sm">Основание / причина<input class="field w-full mt-1" v-model="reasons[item.id]" /></label>
@@ -52,14 +54,14 @@
         <p v-if="requiresFinanceForCrmMaterialization(item) && !financeRole" class="text-sm text-amber-300">Выбрать CRM-сделку или отклонить предложение можно сейчас, но сумму из CRM должен подтвердить пользователь с ролью финансиста.</p>
         <div v-if="editing !== item.id" class="flex flex-wrap gap-2"><button class="btn-primary" :disabled="busy || Boolean(approvalHint(item))" @click="reviewItem(item, 'approve')">Подтвердить факт</button><button v-if="canReview(item)" class="btn" :disabled="busy" @click="editing = item.id">Исправить значения</button><button v-if="canReview(item)" class="btn" :disabled="busy || !reasons[item.id]?.trim()" @click="reviewItem(item, 'reject')">Отклонить</button></div>
         <p v-if="!reasons[item.id]?.trim() && editing !== item.id" class="text-xs text-slate-400">Для отклонения или сопоставления укажите причину в поле выше.</p>
-        <details v-if="canReview(item)"><summary class="text-sm text-slate-400 cursor-pointer">Выбрать существующий проект / обновить данные перед проверкой</summary><div class="flex gap-2 flex-wrap mt-2"><select class="field" v-model="matches[item.id]" aria-label="Сопоставить с проектом"><option :value="undefined">Выберите проект</option><option v-for="p in directory.projects.filter(p => p.team_id === item.team_id)" :key="p.id" :value="p.id">{{ p.name }}</option></select><button class="btn" :disabled="busy || !matches[item.id] || !reasons[item.id]?.trim()" @click="matchItem(item)">Связать с проектом и обновить</button></div></details>
+        <details v-if="canReview(item) && directory.projects.some(p => p.team_id === item.team_id)"><summary class="text-sm text-slate-400 cursor-pointer">Выбрать существующий проект / обновить данные перед проверкой</summary><div class="flex gap-2 flex-wrap mt-2"><select class="field" v-model="matches[item.id]" aria-label="Сопоставить с проектом"><option :value="undefined">Выберите проект</option><option v-for="p in directory.projects.filter(p => p.team_id === item.team_id)" :key="p.id" :value="p.id">{{ p.name }}</option></select><button class="btn" :disabled="busy || !matches[item.id] || !reasons[item.id]?.trim()" @click="matchItem(item)">Связать с проектом и обновить</button></div></details>
         <FactCorrectionForm v-if="canReview(item) && editing === item.id" :key="item.id" :item="item" :busy="busy" :initial-reason="reasons[item.id] || ''" :can-approve="Boolean(item.evidence.length && item.source_available !== false && canApprove(item))" @cancel="editing = null" @save="(changes, reason) => saveCorrection(item, changes, reason)" />
       </template><p v-else class="text-sm text-slate-400">{{ statusLabels[item.status] }}<template v-if="item.review_reason"> · {{ item.review_reason }}</template></p>
     </article></template>
     <nav class="flex gap-3 items-center" aria-label="Страницы предложений"><button class="btn" :disabled="loading || busy || candidatePage === 1" @click="changeCandidatePage(-1)">Предыдущая</button><span class="text-sm">Страница {{ candidatePage }}</span><button class="btn" :disabled="loading || busy || !candidateNext" @click="changeCandidatePage(1)">Следующая</button></nav><p v-if="!candidates.length && !loading" class="panel">Предложений с этим статусом нет.</p>
   </template>
   <template v-if="tab === 'tasks'">
-    <p class="text-sm text-slate-400">Чтение уведомления не закрывает обязательство. Перенос сохраняет исходный срок.</p>
+    <p class="text-sm text-slate-400">Сроки указаны в UTC+6. Чтение уведомления не закрывает обязательство. Перенос сохраняет исходный срок.</p>
     <article v-for="item in commitments?.commitments" :key="item.id" class="panel space-y-3"><h2 class="font-semibold">{{ item.project_name }} · {{ item.manager_name }}</h2><p>{{ item.text }}</p><p :class="item.status_color === 'red' ? 'text-rose-300' : 'text-slate-400'">{{ item.deadline_formatted }} · {{ item.status }}</p><p v-if="item.postponed_reason">Причина переноса: {{ item.postponed_reason }}</p><div v-if="['pending','overdue'].includes(item.status_code)" class="flex flex-wrap gap-2"><button class="btn-primary" :disabled="busy" @click="taskAction(item, 'fulfill')">Выполнено</button><button class="btn" :disabled="busy" @click="taskAction(item, 'help')">Нужна помощь</button><button v-if="lead" class="btn" :disabled="busy" @click="taskAction(item, 'postpone')">Перенести</button><input type="datetime-local" class="field" v-if="lead" v-model="deadlines[item.id]" aria-label="Новый срок" /><input class="field flex-1" v-model="reasons[item.id]" placeholder="Причина переноса или запрос помощи" /></div></article>
     <p v-if="commitments && !commitments.total_count" class="panel">Подтверждённых обязательств пока нет.</p>
   </template>
@@ -105,7 +107,7 @@ const assignments = ref<Record<number, number>>({}), transferTasks = ref<Record<
 const legacy = ref<LegacyProject[]>([]), legacyTeams = ref<Record<number, number>>({})
 const projects = ref<ManagerProjectSummary[]>([]), candidates = ref<Candidate[]>([]), commitments = ref<CommitmentData | null>(null), financeData = ref<Finance | null>(null)
 const attachments = ref<Attachment[]>([]), health = ref<Health | null>(null), directory = ref<Directory>({ teams: [], profiles: [], projects: [] })
-const candidateStatus = ref('pending'), editing = ref<number | null>(null), reasons = ref<Record<number, string>>({}), deadlines = ref<Record<number, string>>({}), matches = ref<Record<number, number>>({})
+const candidateFactType = ref(''), candidateStatus = ref('pending'), editing = ref<number | null>(null), reasons = ref<Record<number, string>>({}), deadlines = ref<Record<number, string>>({}), matches = ref<Record<number, number>>({})
 const candidatePage = ref(1), candidateCount = ref(0), candidateNext = ref(false)
 const candidateGroups = computed(() => {
   const groups = new Map<string, { key: string; label: string; items: Candidate[] }>()
@@ -142,7 +144,7 @@ function canApprove(item: Candidate) { return requiresFinanceForCrmMaterializati
 function approvalHint(item: Candidate) {
   if (!item.evidence.length || item.source_available === false) return 'Для подтверждения нужен доступ к первоисточнику.'
   if (!canApprove(item)) return 'Для подтверждения финансовых данных требуется роль финансиста.'
-  if (item.fact_type !== 'project' && !item.project_id) return 'Сначала выберите существующий подтверждённый проект.'
+  if (item.fact_type === 'payment' && !item.project_id) return 'Сначала выберите существующий подтверждённый проект.'
   if (item.project_id && item.base_version !== item.current_version) return 'Данные проекта изменились. Выберите проект и обновите данные перед проверкой.'
   if (item.fact_type === 'payment' && !['increment', 'reversal'].includes(String(item.proposed_changes.payment_kind || 'increment'))) return 'Обещание и накопленный итог нельзя принять как новый платёж. Исправляйте вид только при подтверждении в переписке, иначе отклоните предложение.'
   if (item.fact_type === 'payment' && !item.proposed_changes.payment_date) return 'Укажите подтверждённую дату платежа через форму исправления.'
@@ -168,7 +170,7 @@ async function load() {
     if (tab.value === 'legacy') legacy.value = (await api<Page<LegacyProject>>('/legacy/projects/')).results
     if (tab.value === 'projects') projects.value = (await api<Page<ManagerProjectSummary>>('/projects/')).results
     if (tab.value === 'review') {
-      const page = await api<Page<Candidate>>(`/candidates/?status=${candidateStatus.value}&page=${candidatePage.value}`)
+      const page = await api<Page<Candidate>>(`/candidates/?status=${candidateStatus.value}&page=${candidatePage.value}${candidateFactType.value ? `&fact_type=${candidateFactType.value}` : ''}`)
       candidates.value = page.results; candidateCount.value = page.count; candidateNext.value = Boolean(page.next)
       crmSelections.value = {}
       for (const candidate of candidates.value) {
@@ -208,7 +210,7 @@ async function matchCrm(item: Candidate) {
     reason: reasons.value[item.id],
   }), 'CRM-сделка выбрана; подтвердите AI-факт отдельно.')
 }
-async function taskAction(item: CommitmentItem, action: string) { await perform(() => post(`/commitments/${item.id}/action/`, { action, version: item.version, reason: reasons.value[item.id] || '', ...(action === 'postpone' && deadlines.value[item.id] ? { deadline_at: new Date(deadlines.value[item.id]!).toISOString() } : {}) })) }
+async function taskAction(item: CommitmentItem, action: string) { await perform(() => post(`/commitments/${item.id}/action/`, { action, version: item.version, reason: reasons.value[item.id] || '', ...(action === 'postpone' && deadlines.value[item.id] ? { deadline_at: new Date(`${deadlines.value[item.id]}:00+06:00`).toISOString() } : {}) })) }
 async function assignProject(project: ManagerProjectSummary) { await perform(() => post(`/projects/${project.id}/assign/`, { manager_id: assignments.value[project.id], base_version: project.version, reason: reasons.value[project.id], transfer_open_commitments: transferTasks.value[project.id] || false })) }
 async function proposeLegacy(project: LegacyProject) { await perform(() => post('/candidates/manual/', { project_id: project.id, team_id: project.team_id || legacyTeams.value[project.id], reason: reasons.value[project.id], changes: { fact_type: 'project', contract_amount: project.contract_amount } }), 'Предложение создано. Подтвердите проверенные значения в разделе проверки фактов.') }
 async function retryEvent(id: number) { await perform(() => post(`/outbox/${id}/retry/`, { reason: reasons.value[id], provider_confirmed_not_delivered: confirmedUndelivered.value[id] || false }), 'Повтор поставлен в очередь') }

@@ -614,6 +614,7 @@ class DataMartService:
 
     def get_commitments_sla_mart(self, user, period="this_month"):
         from .notifications import effective_deadline
+        from .message_time import KAZAKHSTAN_OFFSET
 
         start, end, today = period_bounds(period)
         items = []
@@ -647,10 +648,10 @@ class DataMartService:
                     "id": c.id,
                     "text": c.commitment_text,
                     "project_id": c.project_id,
-                    "project_name": c.project.name if c.project else "",
-                    "manager_name": c.manager.full_name if c.manager else "Не назначен",
+                    "project_name": c.project.name if c.project else "Общая задача команды",
+                    "manager_name": c.manager.full_name if c.manager else c.responsible_name or "Не назначен",
                     "deadline": deadline.isoformat() if deadline else None,
-                    "deadline_formatted": timezone.localtime(deadline).strftime(
+                    "deadline_formatted": deadline.astimezone(KAZAKHSTAN_OFFSET).strftime(
                         "%d.%m.%Y %H:%M"
                     )
                     if deadline

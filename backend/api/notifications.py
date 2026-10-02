@@ -169,9 +169,8 @@ def effective_deadline(commitment):
     if commitment.deadline_at:
         return commitment.deadline_at
     if commitment.deadline:
-        zone = ZoneInfo(
-            commitment.manager.timezone if commitment.manager else "Asia/Almaty"
-        )
+        from .message_time import KAZAKHSTAN_OFFSET
+        zone = KAZAKHSTAN_OFFSET
         return datetime.combine(commitment.deadline, time(18), tzinfo=zone)
     return None
 
@@ -184,10 +183,10 @@ def plan_reminders(now=None):
     ).select_related("manager__user", "project")
     for c in qs:
         deadline = effective_deadline(c)
-        if deadline is None or not c.project or not c.project.team_id:
+        if deadline is None or not (c.team_id or (c.project and c.project.team_id)):
             continue
         user = c.manager.user
-        if not access.projects_for(user).filter(pk=c.project_id).exists():
+        if not access.commitments_for(user).filter(pk=c.pk).exists():
             continue
         rules = [
             ("before_24h", deadline - timedelta(hours=24), user),
@@ -196,7 +195,7 @@ def plan_reminders(now=None):
         ]
         if now >= deadline + timedelta(hours=24):
             leaders = User.objects.filter(
-                memberships__team=c.project.team,
+                memberships__team_id=c.team_id or c.project.team_id,
                 memberships__role="team_lead",
                 memberships__status="active",
                 is_active=True,
@@ -281,7 +280,7 @@ def change_commitment(
             raise Conflict()
         if c.manager_id != getattr(getattr(user, "profile", None), "id", None):
             access.require_team_role(
-                user, c.project.team_id if c.project else None, ["team_lead"]
+                user, c.team_id or (c.project.team_id if c.project else None), ["team_lead"]
             )
         before = {
             "status": c.status,
@@ -293,7 +292,7 @@ def change_commitment(
             if not reason.strip() or deadline_at is None:
                 raise ValidationError("Нужны новый срок и причина.")
             access.require_team_role(
-                user, c.project.team_id if c.project else None, ["team_lead"]
+                user, c.team_id or (c.project.team_id if c.project else None), ["team_lead"]
             )
             c.original_deadline_at = c.original_deadline_at or effective_deadline(c)
             c.deadline_at, c.deadline, c.deadline_precision = (
@@ -305,9 +304,9 @@ def change_commitment(
         elif action == "help":
             if not reason.strip():
                 raise ValidationError("Опишите, какая помощь нужна.")
-            if c.project:
+            if c.team_id or c.project:
                 for leader in User.objects.filter(
-                    memberships__team=c.project.team,
+                    memberships__team_id=c.team_id or c.project.team_id,
                     memberships__role="team_lead",
                     memberships__status="active",
                     is_active=True,

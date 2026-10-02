@@ -86,6 +86,21 @@ export const fields: Record<FactType, ReviewField[]> = {
   ],
   commitment: [
     ...common,
+    {
+      key: "responsible_name",
+      label: "Кто обещал / исполнитель",
+      type: "text",
+    },
+    {
+      key: "commitment_status",
+      label: "Состояние по переписке",
+      type: "select",
+      options: options({
+        pending: "В работе",
+        fulfilled: "Выполнено — есть подтверждение в переписке",
+      }),
+    },
+    { key: "fulfilled_at", label: "Когда выполнено", type: "text" },
     { key: "commitment_text", label: "Обязательство", type: "textarea" },
     { key: "deadline_at", label: "Срок выполнения", type: "datetime-local" },
     {
@@ -119,7 +134,8 @@ export const fieldLabel = (key: string) =>
   "Данные предложения";
 export function dateLabel(value: string | null) {
   return value && !Number.isNaN(Date.parse(value))
-    ? new Date(value).toLocaleString("ru-RU")
+    ? new Date(value).toLocaleString("ru-RU", { timeZone: "Etc/GMT-6" }) +
+        " (UTC+6)"
     : "Время не указано";
 }
 export function valueLabel(
@@ -130,6 +146,7 @@ export function valueLabel(
 ): string {
   if (value === null || value === undefined || value === "")
     return "Не указано";
+  if (field.key === "fulfilled_at") return dateLabel(String(value));
   if (field.options)
     return (
       field.options.find((o) => o.value === value)?.label ||
@@ -153,7 +170,9 @@ export function valueLabel(
   if (field.type === "datetime-local") {
     if (deadlinePrecision === "unknown") return "Срок не указан";
     if (deadlinePrecision === "date")
-      return new Date(String(value)).toLocaleDateString("ru-RU");
+      return new Date(String(value)).toLocaleDateString("ru-RU", {
+        timeZone: "Etc/GMT-6",
+      });
     return dateLabel(String(value));
   }
   return typeof value === "string" || typeof value === "number"
@@ -165,6 +184,11 @@ export function effectLabel(item: Candidate) {
     return item.project_id
       ? "После подтверждения будут обновлены указанные данные проекта."
       : "После подтверждения будет создан проект. Проверьте название и связь со сделкой.";
+  if (
+    item.fact_type === "commitment" &&
+    item.proposed_changes.commitment_status === "fulfilled"
+  )
+    return "После подтверждения обязательство будет учтено как выполненное. Проверьте доказательства результата.";
   if (item.fact_type === "commitment")
     return "После подтверждения будет записано обязательство с указанным сроком.";
   return (
@@ -212,10 +236,20 @@ export const crmErrors: Record<string, string> = {
     "Сохранён старый результат проверки с ограничением запросов. Запустите новую обработку сообщения.",
 };
 export function uncertaintyLabel(text: string) {
-  return /[а-яё]/i.test(text)
-    ? text
-    : "В извлечённых данных есть неопределённость. Сверьте значения с перепиской перед подтверждением.";
+  if (/individual projects not listed/i.test(text))
+    return "Отдельные проекты не перечислены; приведены только общие суммы.";
+  if (/stage inferred.*in_execution/i.test(text))
+    return "Стадия «В исполнении» предположена, поскольку проекты названы действующими. Проверьте стадию по переписке.";
+  if (
+    /^(stage inferred|deadline inferred|no |not |unclear|unknown|missing|only |individual |project |amount |currency )/i.test(
+      text,
+    ) ||
+    !/[а-яё]/i.test(text)
+  )
+    return "AI не нашёл однозначного подтверждения. Сверьте значения с перепиской.";
+  return text;
 }
+
 export function friendlyApiError(error: ApiError, status: number): string {
   const validation: string[] = [];
   function collect(value: unknown, key: string) {
@@ -251,9 +285,7 @@ export function draftFor(item: Candidate): FactDraft {
       !Number.isNaN(Date.parse(value))
     ) {
       const date = new Date(value);
-      draft[field.key] = new Date(
-        date.getTime() - date.getTimezoneOffset() * 60000,
-      )
+      draft[field.key] = new Date(date.getTime() + 6 * 3600000)
         .toISOString()
         .slice(
           0,
@@ -286,7 +318,9 @@ export function changedValues(
         throw new Error("Укажите корректный срок.");
       result[field.key] = value
         ? new Date(
-            value.length === 10 ? `${value}T00:00:00` : value,
+            value.length === 10
+              ? `${value}T18:00:00+06:00`
+              : `${value}:00+06:00`,
           ).toISOString()
         : null;
     } else if (field.type === "date") {

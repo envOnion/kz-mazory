@@ -1,4 +1,6 @@
 import copy
+import json
+from pathlib import Path
 from datetime import timedelta
 from unittest.mock import patch
 
@@ -39,7 +41,7 @@ class QwenCounterTests(SimpleTestCase):
         from .tasks import verify_ai_context
 
         cfg = config()
-        payload = extraction_payload(cfg, endpoint(), "Тестовое сообщение без фактов.", "Проверка подключения", [], [], None, "Asia/Almaty")
+        payload = extraction_payload(cfg, endpoint(), "Тестовое сообщение без фактов.", "Проверка подключения", [], [], None, "UTC+06:00")
         expected = qwen_counter().count_payload(payload)
         for actual in (expected, expected + 1):
             with self.subTest(actual=actual), patch.object(AIService, "_config", return_value=cfg), patch("api.context_tokens.context_runtime", return_value=(qwen_counter(), endpoint())), patch.object(AIService, "analyze_payload", return_value=({"facts": []}, {"prompt_tokens": actual}, {"finish_reason": "stop"})):
@@ -58,7 +60,9 @@ class QwenCounterTests(SimpleTestCase):
         )
         for content, history, expected in fixtures:
             with self.subTest(content=content):
-                payload = extraction_payload(config(), endpoint(), content, "Тест", history, [], None, "Asia/Almaty")
+                measured = json.loads((Path(__file__).parent / "test_fixtures/ollama_measured_prompt.json").read_text())
+                with patch("api.ai_service.WORKER_PROMPT", measured["system"]):
+                    payload = extraction_payload(config(), endpoint(), content, "Тест", history, [], None, "Asia/Almaty")
                 self.assertEqual(qwen_counter().count_payload(payload), expected)
                 self.assertNotIn("provider", payload)
                 self.assertNotIn("plugins", payload)
@@ -180,10 +184,10 @@ class QwenHistoryBudgetTests(TestCase):
         for index in range(3):
             RawMessage.objects.create(team=team, project=project, source="test", message_id=str(index), sender_name="Sender", content="История café 中文 👋 " * 500, timestamp=now - timedelta(minutes=3-index), sent_at_known=True)
         raw = RawMessage.objects.create(team=team, project=project, source="test", message_id="target", sender_name="Sender", content="Тест", timestamp=now, sent_at_known=True)
-        cfg = config(context_window_tokens=2048, max_completion_tokens=512, context_safety_tokens=128)
+        cfg = config(context_window_tokens=4096, max_completion_tokens=512, context_safety_tokens=128)
         with patch("api.message_context.context_runtime", return_value=(qwen_counter(), endpoint())):
             history, metadata, payload = build_context(raw, cfg, [], raw.id)
-        self.assertLessEqual(metadata["input_tokens_preflight"], 2048-512-128)
+        self.assertLessEqual(metadata["input_tokens_preflight"], cfg.context_window_tokens-512-128)
         self.assertEqual(metadata["input_tokens_preflight"], qwen_counter().count_payload(payload))
         self.assertGreater(metadata["partial_messages_count"], 0)
         self.assertFalse(metadata["history_complete_in_request"])

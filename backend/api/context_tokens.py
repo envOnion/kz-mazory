@@ -334,7 +334,8 @@ def extraction_input(value):
 
 
 def extraction_payload(
-    cfg, endpoint, content, sender, context, known_projects, sent_at, source_timezone
+    cfg, endpoint, content, sender, context, known_projects, sent_at, source_timezone,
+    source_metadata=None, current_time=None, target_message_id=None,
 ):
     from .ai_service import WORKER_PROMPT
 
@@ -344,6 +345,9 @@ def extraction_payload(
             "sender": sender,
             "sent_at": sent_at,
             "timezone": source_timezone,
+            **({"source_metadata": source_metadata} if source_metadata is not None else {}),
+            **({"current_time": current_time} if current_time is not None else {}),
+            **({"target_message_id": target_message_id} if target_message_id is not None else {}),
             "context": context,
             "known_projects": known_projects,
         }

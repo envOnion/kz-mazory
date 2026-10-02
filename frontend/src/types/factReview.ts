@@ -1,5 +1,10 @@
 import type { CandidateFactType } from "./platform";
 export interface ConversationMessage {
+  source_metadata?: {
+    time_basis: string;
+    sent_at: string | null;
+    received_at: string;
+  };
   id: number;
   sender_name: string;
   sent_at: string | null;
