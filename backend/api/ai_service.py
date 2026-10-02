@@ -187,9 +187,11 @@ class AIService:
             if http_method not in ("GET", "POST"):
                 raise ProviderUnavailable("provider_invalid_request")
             request = requests.get if http_method == "GET" else requests.post
+            if http_method == "POST":
+                headers = {**headers, "Content-Type": "application/json"}
             response = request(
                 checked_ai_url(url),
-                **({"json": payload} if http_method == "POST" else {}),
+                **({"data": json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")} if http_method == "POST" else {}),
                 headers=headers,
                 timeout=timeout,
                 allow_redirects=False,

@@ -68,6 +68,21 @@ class ProviderTransportTests(TestCase):
                 self.assertEqual(post.call_args.args[0], url)
                 self.assertFalse(post.call_args.kwargs["allow_redirects"])
 
+    def test_unicode_history_is_sent_as_compact_utf8_without_changing_content(self):
+        import json
+        AISettings.objects.create(name="UTF8", is_active=True)
+        payload = {"messages": [{"role": "user", "content": "Завтра с утра отправлю список 👋" * 15000}]}
+        response = Mock(status_code=200, headers={})
+        response.json.return_value = {"usage": {}}
+        with patch("api.ai_service.requests.post", return_value=response) as post:
+            AIService._post("https://ai.kk-minsk.by/v1/chat/completions", payload, 5, api_key="test-key")
+        wire = post.call_args.kwargs["data"]
+        self.assertEqual(json.loads(wire), payload)
+        self.assertLess(len(wire), 1048576)
+        self.assertGreater(len(json.dumps(payload).encode()), 1048576)
+        self.assertEqual(post.call_args.kwargs["headers"]["Content-Type"], "application/json")
+        self.assertNotIn(b"\\u0417", wire)
+
     def test_metadata_get_uses_authenticated_transport_and_records_usage(self):
         from .models import ProviderUsage
 
