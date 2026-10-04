@@ -47,16 +47,17 @@
             class="w-7 h-7 rounded-xl flex items-center justify-center shrink-0 mt-0.5"
             :class="{
               'bg-rose-500/15 text-rose-400 border border-rose-500/30': item.type === 'urgent',
+              'bg-cyan-500/15 text-cyan-400 border border-indigo-500/40': item.type === 'commitment_detected',
               'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30': item.type === 'deal',
               'bg-amber-500/15 text-amber-400 border border-amber-500/30': item.type === 'warning',
-              'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30': item.type === 'kpi' || item.type === 'success',
+              'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30': item.type === 'kpi' || item.type === 'success' || item.type === 'fact_approved',
               'bg-indigo-500/15 text-indigo-400 border border-indigo-500/30': item.type === 'info'
             }"
           >
             <AlertOctagon v-if="item.type === 'urgent'" class="w-3.5 h-3.5" />
-            <Briefcase v-else-if="item.type === 'deal'" class="w-3.5 h-3.5" />
+            <Briefcase v-else-if="item.type === 'deal' || item.type === 'commitment_detected'" class="w-3.5 h-3.5" />
             <AlertTriangle v-else-if="item.type === 'warning'" class="w-3.5 h-3.5" />
-            <Trophy v-else-if="item.type === 'kpi' || item.type === 'success'" class="w-3.5 h-3.5" />
+            <Trophy v-else-if="item.type === 'kpi' || item.type === 'success' || item.type === 'fact_approved'" class="w-3.5 h-3.5" />
             <Sparkles v-else class="w-3.5 h-3.5" />
           </div>
 
@@ -66,7 +67,7 @@
               <span class="text-xs font-semibold text-white truncate">{{ item.title }}</span>
               <span class="text-[10px] text-slate-500 shrink-0">{{ new Date(item.created_at).toLocaleString('ru-RU') }}</span>
             </div>
-            <p class="text-[11px] text-slate-300 mt-0.5 leading-snug">
+            <p class="text-[11px] text-slate-300 mt-0.5 leading-snug whitespace-pre-line">
               {{ item.message }}
             </p>
             <p v-for="(delivery, index) in item.deliveries" :key="index" class="text-xs text-slate-400">WhatsApp: {{ delivery.state === 'sent' ? 'Отправлено' : delivery.state === 'delivered' ? 'Доставлено' : delivery.state === 'unknown' ? 'Результат неизвестен' : delivery.state }}</p>

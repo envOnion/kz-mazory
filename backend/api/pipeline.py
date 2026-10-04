@@ -373,6 +373,10 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                     from .tasks import enqueue_crm_match
 
                     enqueue_crm_match(candidate.id)
+                if created:
+                    from .notifications import notify_on_new_candidate
+
+                    notify_on_new_candidate(candidate)
                 proposed += 1
                 retained.append(candidate.pk)
             previous.filter(status="pending").exclude(pk__in=retained).update(status="superseded")

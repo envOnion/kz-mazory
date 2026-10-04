@@ -1,6 +1,6 @@
 """Durable notifications and versioned reminders; Redis is never the source of truth."""
 
-from datetime import datetime, timedelta, time
+from datetime import datetime, timedelta, time, date
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 from django.db import transaction
@@ -16,6 +16,7 @@ from .models import (
     UserProfile,
     TeamMembership,
     AuditEvent,
+    FactCandidate,
 )
 from . import access
 
@@ -470,3 +471,257 @@ def plan_risks(now=None):
                     f"ai-alert:{day.date()}",
                     whatsapp=False,
                 )
+
+
+def _format_candidate_amount(val):
+    if val is None or val == "":
+        return None
+    s = str(val).strip().rstrip("₸").strip()
+    try:
+        dec = Decimal(s.replace(" ", "").replace(",", "."))
+        if dec <= 0:
+            return None
+        if dec == dec.to_integral_value():
+            formatted = f"{int(dec):,}".replace(",", " ")
+        else:
+            formatted = f"{dec:,.2f}".replace(",", " ")
+        return f"{formatted} ₸"
+    except Exception:
+        return f"{s} ₸" if s else None
+
+
+def _format_candidate_deadline(val):
+    if not val:
+        return None
+    if isinstance(val, datetime):
+        return (
+            val.strftime("%d.%m.%Y %H:%M")
+            if (val.hour or val.minute)
+            else val.strftime("%d.%m.%Y")
+        )
+    if isinstance(val, date):
+        return val.strftime("%d.%m.%Y")
+    s = str(val).strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.fromisoformat(s)
+        return (
+            dt.strftime("%d.%m.%Y %H:%M")
+            if (dt.hour or dt.minute)
+            else dt.strftime("%d.%m.%Y")
+        )
+    except Exception:
+        return s
+
+
+def _extract_candidate_sender_name(candidate):
+    if getattr(candidate, "trace", None) and candidate.trace.raw_message:
+        raw = candidate.trace.raw_message
+        if raw.sender_name:
+            return raw.sender_name
+        if raw.sender_phone:
+            return raw.sender_phone
+    evidence = getattr(candidate, "evidence", None)
+    if evidence:
+        first_ev = evidence.select_related("raw_message").first()
+        if first_ev and first_ev.raw_message:
+            if first_ev.raw_message.sender_name:
+                return first_ev.raw_message.sender_name
+            if first_ev.raw_message.sender_phone:
+                return first_ev.raw_message.sender_phone
+    changes = candidate.proposed_changes or {}
+    return changes.get("sender_name") or changes.get("responsible_name") or None
+
+
+def _format_candidate_message(candidate):
+    changes = candidate.proposed_changes or {}
+    lines = []
+
+    # Контрагент (Bitrix): <company_name> (from candidate.project.company or proposed_changes.company_name)
+    company_name = None
+    if (
+        candidate.project_id
+        and candidate.project
+        and getattr(candidate.project, "company", None)
+    ):
+        company_name = candidate.project.company.name
+    if not company_name:
+        company_name = changes.get("company_name")
+    if company_name:
+        lines.append(f"Контрагент (Bitrix): {company_name}")
+
+    # Сделка / Объект: <project_name> (from candidate.project or proposed_changes.object_name)
+    project_name = None
+    if candidate.project_id and candidate.project and candidate.project.name:
+        project_name = candidate.project.name
+    if not project_name:
+        project_name = (
+            changes.get("object_name")
+            or changes.get("project_name")
+            or changes.get("deal_name")
+        )
+    if project_name:
+        lines.append(f"Сделка / Объект: {project_name}")
+
+    # Суть: <commitment_text / description>
+    description = (
+        changes.get("commitment_text")
+        or changes.get("description")
+        or changes.get("current_action")
+        or changes.get("next_action")
+    )
+    if description:
+        lines.append(f"Суть: {description}")
+
+    # Сумма: <amount> ₸ (if present)
+    amount_raw = (
+        changes.get("amount")
+        or changes.get("contract_amount")
+        or (
+            getattr(candidate.project, "contract_amount", None)
+            if candidate.project_id
+            else None
+        )
+    )
+    amount_formatted = _format_candidate_amount(amount_raw)
+    if amount_formatted:
+        lines.append(f"Сумма: {amount_formatted}")
+
+    # Срок: <deadline> (if present)
+    deadline_raw = changes.get("deadline") or changes.get("deadline_at")
+    deadline_formatted = _format_candidate_deadline(deadline_raw)
+    if deadline_formatted:
+        lines.append(f"Срок: {deadline_formatted}")
+
+    # Отправитель WhatsApp: <sender_name>
+    sender_name = _extract_candidate_sender_name(candidate)
+    if sender_name:
+        lines.append(f"Отправитель WhatsApp: {sender_name}")
+
+    return "\n".join(lines)
+
+
+def notify_on_new_candidate(candidate):
+    if not candidate or not candidate.id:
+        return []
+
+    if candidate.fact_type == "commitment":
+        title = "Новое обязательство из чата"
+    elif candidate.fact_type == "project":
+        title = "Выявлена новая сделка"
+    elif candidate.fact_type == "payment":
+        title = "Договоренность об оплате"
+    else:
+        title = "Новое обязательство из чата"
+
+    message = _format_candidate_message(candidate)
+    if not message:
+        message = title
+
+    recipients = {}
+    manager_profile = candidate.manager or (
+        candidate.project.manager if candidate.project_id else None
+    )
+    if manager_profile and manager_profile.user and manager_profile.user.is_active:
+        recipients[manager_profile.user.id] = manager_profile.user
+
+    team_id = candidate.team_id or (
+        candidate.project.team_id if candidate.project_id else None
+    )
+    if team_id:
+        leads = User.objects.filter(
+            memberships__team_id=team_id,
+            memberships__role="team_lead",
+            memberships__status="active",
+            is_active=True,
+        ).distinct()
+        for lead in leads:
+            recipients[lead.id] = lead
+
+    notifications = []
+    for user in recipients.values():
+        recipient_project = (
+            candidate.project
+            if (
+                candidate.project_id
+                and candidate.project
+                and access.projects_for(user, include_client=True)
+                .filter(pk=candidate.project_id)
+                .exists()
+            )
+            else None
+        )
+        notif = create_notification(
+            user=user,
+            title=title,
+            message=message,
+            category="commitment_detected",
+            key=f"candidate_detected:{candidate.id}",
+            project=recipient_project,
+            whatsapp=True,
+        )
+        notifications.append(notif)
+    return notifications
+
+
+def notify_on_candidate_approved(candidate):
+    if not candidate or not candidate.id:
+        return []
+
+    if candidate.fact_type == "project":
+        title = "Подтверждена сделка"
+    elif candidate.fact_type == "payment":
+        title = "Подтверждена договоренность об оплате"
+    else:
+        title = "Подтверждено обязательство"
+
+    message = _format_candidate_message(candidate)
+    if not message:
+        message = title
+
+    recipients = {}
+    manager_profile = candidate.manager or (
+        candidate.project.manager if candidate.project_id else None
+    )
+    if manager_profile and manager_profile.user and manager_profile.user.is_active:
+        recipients[manager_profile.user.id] = manager_profile.user
+
+    team_id = candidate.team_id or (
+        candidate.project.team_id if candidate.project_id else None
+    )
+    if team_id:
+        leads = User.objects.filter(
+            memberships__team_id=team_id,
+            memberships__role="team_lead",
+            memberships__status="active",
+            is_active=True,
+        ).distinct()
+        for lead in leads:
+            recipients[lead.id] = lead
+
+    notifications = []
+    for user in recipients.values():
+        recipient_project = (
+            candidate.project
+            if (
+                candidate.project_id
+                and candidate.project
+                and access.projects_for(user, include_client=True)
+                .filter(pk=candidate.project_id)
+                .exists()
+            )
+            else None
+        )
+        notif = create_notification(
+            user=user,
+            title=title,
+            message=message,
+            category="commitment_detected",
+            key=f"candidate_approved:{candidate.id}",
+            project=recipient_project,
+            whatsapp=True,
+        )
+        notifications.append(notif)
+    return notifications
+

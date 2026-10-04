@@ -321,6 +321,10 @@ class CandidateReviewView(APIView):
                 values["changes"],
                 values["base_version"],
             )
+            if candidate.status == "approved":
+                from .notifications import notify_on_candidate_approved
+
+                notify_on_candidate_approved(candidate)
         return Response(candidate_data(candidate, request.user))
 
 
