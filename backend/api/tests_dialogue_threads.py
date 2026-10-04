@@ -207,6 +207,26 @@ class DialogueTests(TestCase):
             later.refresh_from_db()
             self.assertEqual(later.state, "done")
 
+    def test_history_wait_does_not_exhaust_retry_budget(self):
+        from .tasks import run_outbox
+        raw = self.messages(["Обсуждение"])[0]
+        OutboxEvent.objects.create(
+            event_type="extract_message", deduplication_key="active",
+            payload={"raw_id": raw.id},
+        )
+        page = OutboxEvent.objects.create(
+            event_type="thread_backfill", deduplication_key="waiting-page",
+            payload={"config_id": self.cfg.id, "requested_by_id": self.user.id,
+                     "request_key": "wait", "cursor": 0},
+        )
+        for _ in range(5):
+            page.next_attempt_at = timezone.now()
+            page.save(update_fields=["next_attempt_at"])
+            run_outbox(page.id)
+            page.refresh_from_db()
+            self.assertEqual(page.state, "pending")
+            self.assertEqual(page.attempt_count, 0)
+
     def test_anonymized_dialogue_quality_cases(self):
         for case in CASES:
             with self.subTest(case=case["name"]):

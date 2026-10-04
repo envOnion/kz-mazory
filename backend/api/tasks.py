@@ -286,6 +286,14 @@ def run_outbox(pk):
             if isinstance(exc, ProviderUnavailable)
             else type(exc).__name__
         )
+        if event.event_type == "thread_backfill" and code == "thread_history_busy":
+            # Waiting for earlier pages is normal progress, not a failed attempt.
+            OutboxEvent.objects.filter(pk=pk).update(
+                state="pending", error_code="", lease_until=None,
+                next_attempt_at=timezone.now() + timedelta(seconds=10),
+                attempt_count=max(0, event.attempt_count - 1),
+            )
+            return
         if code == "ai_daily_budget_exhausted":
             tomorrow = (timezone.now() + timedelta(days=1)).replace(
                 hour=0, minute=0, second=1, microsecond=0
