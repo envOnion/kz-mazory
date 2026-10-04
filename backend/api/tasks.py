@@ -228,7 +228,10 @@ def run_outbox(pk):
             "waha_control": waha_control,
             "history_import": import_history_step,
         }
-        handlers[event.event_type](event.payload)
+        result = handlers[event.event_type](event.payload)
+        if event.event_type == "delivery_ack":
+            event.payload = {**event.payload, "receipt_outcome": result}
+            event.save(update_fields=["payload"])
         OutboxEvent.objects.filter(pk=pk, state="processing").update(
             state="done", error_code="", lease_until=None
         )
@@ -446,12 +449,19 @@ def deliver_notification(payload):
 def apply_delivery_ack(payload):
     # A provider receipt can arrive before the send response; durable retry preserves it.
     if payload["session"] != "default" or payload["ack"] in (0, 1):
-        return
+        return "ignored"
     deliveries = NotificationDelivery.objects.filter(
         provider_message_id=payload["message_id"]
     ).exclude(provider_message_id="")
     if not deliveries.exists():
-        raise ProviderUnavailable("delivery_receipt_waiting_for_send")
+        # WAHA reports receipts for messages sent outside Mazory too. Retry only
+        # while a real Mazory send can still be awaiting its provider message ID.
+        if NotificationDelivery.objects.filter(
+            channel="whatsapp", state="sending", provider_message_id="",
+            updated_at__gte=timezone.now() - timedelta(minutes=10),
+        ).exists():
+            raise ProviderUnavailable("delivery_receipt_waiting_for_send")
+        return "unrelated"
     if payload["ack"] >= 2:
         deliveries.filter(state__in=["sending", "sent", "unknown"]).update(
             state="delivered", error_code="", updated_at=timezone.now()
@@ -462,6 +472,7 @@ def apply_delivery_ack(payload):
             error_code="provider_delivery_error",
             updated_at=timezone.now(),
         )
+    return "matched"
 
 
 def extract_message(payload):
