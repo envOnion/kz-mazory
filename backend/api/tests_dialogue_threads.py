@@ -227,6 +227,21 @@ class DialogueTests(TestCase):
             self.assertEqual(page.state, "pending")
             self.assertEqual(page.attempt_count, 0)
 
+    def test_history_page_enqueues_scoped_message_attempts(self):
+        from .thread_backfill import backfill_page
+        rows = self.messages(["Первая тема", "Ответ по теме"])
+        payload = {"config_id": self.cfg.id, "requested_by_id": self.user.id,
+                   "request_key": "scoped-page", "cursor": 0}
+        backfill_page(payload)
+        events = list(OutboxEvent.objects.filter(event_type="extract_message"))
+        self.assertEqual({event.payload["raw_id"] for event in events},
+                         {row.id for row in rows})
+        for event in events:
+            self.assertEqual(event.payload["requested_by_id"], self.user.id)
+            self.assertEqual(RawMessage.objects.get(pk=event.payload["raw_id"]).traces.get(
+                pk=event.payload["trace_id"]).prompt_version, "facts-v5-dialogue-threads")
+        self.assertEqual(OutboxEvent.objects.get(event_type="thread_backfill").payload["cursor"], rows[-1].id)
+
     def test_anonymized_dialogue_quality_cases(self):
         for case in CASES:
             with self.subTest(case=case["name"]):
