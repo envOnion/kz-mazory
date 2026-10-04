@@ -277,11 +277,23 @@ class DialogueTests(TestCase):
                     )
                     self.assertEqual(candidate.thread_revision.state, "ready")
 
-    def test_intermediate_fact_is_not_published_even_if_model_returns_it(self):
+    def test_open_thread_fact_is_published_with_in_progress_flag(self):
         case = CASES[2]
         rows = self.messages(case["messages"])
         result = fixture_result(case, rows)
         result["threads"][0]["state"] = "open"
+        self.run_result(rows[-1], result)
+        self.assertTrue(FactCandidate.objects.exists())
+        candidate = FactCandidate.objects.get(status="pending")
+        self.assertTrue(candidate.proposed_changes.get("in_progress"))
+        self.assertEqual(self.api.get("/api/threads/").data["count"], 2)
+        self.assertEqual(self.api.get("/api/candidates/").data["count"], 1)
+
+    def test_unknown_thread_fact_is_discarded(self):
+        case = CASES[2]
+        rows = self.messages(case["messages"])
+        result = fixture_result(case, rows)
+        result["threads"][0]["state"] = "unknown"
         self.run_result(rows[-1], result)
         self.assertFalse(FactCandidate.objects.exists())
         self.assertEqual(self.api.get("/api/threads/").data["count"], 2)
@@ -590,6 +602,225 @@ class DialogueTests(TestCase):
             ).exists()
         )
 
+    def test_thread_list_hierarchy_and_annotations(self):
+        company = Company.objects.create(name="ТОО BI Group", bitrix_company_id="1042")
+        project = Project.objects.create(
+            name="ЖК Grand Park",
+            team=self.team,
+            company=company,
+            bitrix_id="8920",
+        )
+        case = CASES[2]
+        rows = self.messages(case["messages"])
+        result = fixture_result(case, rows)
+        result["threads"][0]["parent_key"] = "south"
+        self.run_result(rows[-1], result)
+
+        parent_thread = DialogueThread.objects.get(topic="Доставка БЦ Южный")
+        child_thread = DialogueThread.objects.get(topic="Смета БЦ Север")
+        self.assertEqual(child_thread.parent, parent_thread)
+
+        parent_thread.project = project
+        parent_thread.save()
+
+        resp = self.api.get("/api/threads/")
+        self.assertEqual(resp.status_code, 200)
+        items = {item["id"]: item for item in resp.data["results"]}
+
+        parent_item = items[parent_thread.id]
+        self.assertEqual(parent_item["project_id"], project.id)
+        self.assertEqual(parent_item["project_name"], "ЖК Grand Park")
+        self.assertEqual(parent_item["company_id"], company.id)
+        self.assertEqual(parent_item["company_name"], "ТОО BI Group")
+        self.assertEqual(parent_item["children_count"], 1)
+        self.assertIsNone(parent_item["parent_id"])
+
+        child_item = items[child_thread.id]
+        self.assertEqual(child_item["parent_id"], parent_thread.id)
+        self.assertEqual(child_item["children_count"], 0)
+        self.assertEqual(child_item["commitments_count"], 1)
+
+    def test_thread_list_filters(self):
+        company1 = Company.objects.create(name="Alpha", bitrix_company_id="111")
+        company2 = Company.objects.create(name="Beta", bitrix_company_id="222")
+        p1 = Project.objects.create(name="Proj A", team=self.team, company=company1, bitrix_id="11")
+        p2 = Project.objects.create(name="Proj B", team=self.team, company=company2, bitrix_id="22")
+
+        case = CASES[2]
+        rows = self.messages(case["messages"])
+        result = fixture_result(case, rows)
+        result["threads"][0]["parent_key"] = "south"
+        self.run_result(rows[-1], result)
+
+        t_north = DialogueThread.objects.get(topic="Смета БЦ Север")
+        t_south = DialogueThread.objects.get(topic="Доставка БЦ Южный")
+        t_north.project = p1
+        t_north.save()
+        t_south.project = p2
+        t_south.save()
+
+        # filter by state
+        resp_ready = self.api.get("/api/threads/", {"state": "ready"})
+        self.assertEqual(resp_ready.data["count"], 1)
+        self.assertEqual(resp_ready.data["results"][0]["id"], t_north.id)
+
+        resp_open = self.api.get("/api/threads/", {"state": "open"})
+        self.assertEqual(resp_open.data["count"], 1)
+        self.assertEqual(resp_open.data["results"][0]["id"], t_south.id)
+
+        resp_all = self.api.get("/api/threads/", {"state": "all"})
+        self.assertEqual(resp_all.data["count"], 2)
+
+        # filter by company_id
+        resp_c1 = self.api.get("/api/threads/", {"company_id": company1.id})
+        self.assertEqual(resp_c1.data["count"], 1)
+        self.assertEqual(resp_c1.data["results"][0]["id"], t_north.id)
+
+        # filter by project_id
+        resp_p2 = self.api.get("/api/threads/", {"project_id": p2.id})
+        self.assertEqual(resp_p2.data["count"], 1)
+        self.assertEqual(resp_p2.data["results"][0]["id"], t_south.id)
+
+        # filter by parent_id
+        resp_root = self.api.get("/api/threads/", {"parent_id": "null"})
+        self.assertEqual(resp_root.data["count"], 1)
+        self.assertEqual(resp_root.data["results"][0]["id"], t_south.id)
+
+        resp_child = self.api.get("/api/threads/", {"parent_id": t_south.id})
+        self.assertEqual(resp_child.data["count"], 1)
+        self.assertEqual(resp_child.data["results"][0]["id"], t_north.id)
+
+        # search
+        resp_search = self.api.get("/api/threads/", {"search": "Север"})
+        self.assertEqual(resp_search.data["count"], 1)
+        self.assertEqual(resp_search.data["results"][0]["id"], t_north.id)
+
+    def test_thread_detail_children_and_facts(self):
+        company = Company.objects.create(name="ТОО BI Group", bitrix_company_id="1042")
+        project = Project.objects.create(
+            name="ЖК Grand Park",
+            team=self.team,
+            company=company,
+            bitrix_id="8920",
+        )
+        case = CASES[2]
+        rows = self.messages(case["messages"])
+        result = fixture_result(case, rows)
+        result["threads"][0]["parent_key"] = "south"
+        self.run_result(rows[-1], result)
+
+        parent_thread = DialogueThread.objects.get(topic="Доставка БЦ Южный")
+        child_thread = DialogueThread.objects.get(topic="Смета БЦ Север")
+        parent_thread.project = project
+        parent_thread.save()
+
+        # Check detail of parent thread
+        resp = self.api.get(f"/api/threads/{parent_thread.id}/")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data
+        self.assertEqual(data["project_name"], "ЖК Grand Park")
+        self.assertEqual(data["company_name"], "ТОО BI Group")
+        self.assertEqual(len(data["children"]), 1)
+        self.assertEqual(data["children"][0]["id"], child_thread.id)
+        self.assertEqual(data["children"][0]["topic"], "Смета БЦ Север")
+
+        # Check detail of child thread
+        resp_child = self.api.get(f"/api/threads/{child_thread.id}/")
+        self.assertEqual(resp_child.status_code, 200)
+        self.assertEqual(len(resp_child.data["facts"]), 1)
+        fact = resp_child.data["facts"][0]
+        self.assertEqual(fact["fact_type"], "commitment")
+        self.assertEqual(fact["status"], "pending")
+        self.assertIn("commitment_text", fact["proposed_changes"])
+
+    def test_thread_list_hierarchy_and_filters(self):
+        company = Company.objects.create(name="ТОО BI Group", bitrix_company_id="1042")
+        project = Project.objects.create(
+            name="ЖК Grand Park",
+            team=self.team,
+            company=company,
+            bitrix_id="8920",
+        )
+        case = CASES[2]
+        rows = self.messages(case["messages"])
+        result = fixture_result(case, rows)
+        result["threads"][0]["parent_key"] = "south"
+        self.run_result(rows[-1], result)
+
+        root = DialogueThread.objects.get(topic="Доставка БЦ Южный")
+        child = DialogueThread.objects.get(topic="Смета БЦ Север")
+        self.assertEqual(child.parent, root)
+        root.project = project
+        root.save()
+
+        # Query /api/threads/ and assert that items contain parent_id, project_name, company_name, children_count
+        resp = self.api.get("/api/threads/")
+        self.assertEqual(resp.status_code, 200)
+        items = {item["id"]: item for item in resp.data["results"]}
+
+        root_item = items[root.id]
+        self.assertEqual(root_item["project_name"], "ЖК Grand Park")
+        self.assertEqual(root_item["company_name"], "ТОО BI Group")
+        self.assertEqual(root_item["children_count"], 1)
+        self.assertIsNone(root_item["parent_id"])
+
+        child_item = items[child.id]
+        self.assertEqual(child_item["parent_id"], root.id)
+        self.assertEqual(child_item["children_count"], 0)
+
+        # Test filtering by state, company_id, project_id
+        resp_state = self.api.get("/api/threads/", {"state": "open"})
+        self.assertEqual(resp_state.status_code, 200)
+        self.assertEqual(resp_state.data["count"], 1)
+        self.assertEqual(resp_state.data["results"][0]["id"], root.id)
+
+        resp_comp = self.api.get("/api/threads/", {"company_id": company.id})
+        self.assertEqual(resp_comp.status_code, 200)
+        self.assertEqual(resp_comp.data["count"], 1)
+        self.assertEqual(resp_comp.data["results"][0]["id"], root.id)
+
+        resp_proj = self.api.get("/api/threads/", {"project_id": project.id})
+        self.assertEqual(resp_proj.status_code, 200)
+        self.assertEqual(resp_proj.data["count"], 1)
+        self.assertEqual(resp_proj.data["results"][0]["id"], root.id)
+
+        # Query /api/threads/<root_id>/ and assert children list contains the child thread, and company/project details are present
+        resp_detail = self.api.get(f"/api/threads/{root.id}/")
+        self.assertEqual(resp_detail.status_code, 200)
+        detail_data = resp_detail.data
+        self.assertEqual(detail_data["project_name"], "ЖК Grand Park")
+        self.assertEqual(detail_data["company_name"], "ТОО BI Group")
+        self.assertEqual(detail_data["company_id"], company.id)
+        self.assertEqual(detail_data["project_id"], project.id)
+        self.assertEqual(len(detail_data["children"]), 1)
+        self.assertEqual(detail_data["children"][0]["id"], child.id)
+        self.assertEqual(detail_data["children"][0]["topic"], "Смета БЦ Север")
+
+    def test_open_thread_facts_retained(self):
+        from .dialogue_threads import ready_facts
+
+        themes = {
+            "theme_open": {
+                "state": "open",
+                "messages": [{"raw_message_id": 10}],
+            }
+        }
+        result = {
+            "facts": [
+                {
+                    "thread_key": "theme_open",
+                    "evidence_message_id": 10,
+                    "fact_type": "project",
+                    "evidence": "Объект открытый",
+                }
+            ]
+        }
+        filtered = ready_facts(result, themes)
+        self.assertEqual(len(filtered["facts"]), 1)
+        self.assertTrue(filtered["facts"][0].get("in_progress"))
+
+
+
 
 @override_settings(
     ALLOWED_HOSTS=["testserver"],
@@ -800,4 +1031,5 @@ class CatalogTests(TestCase):
         search_resp = self.api.get("/api/directory/", {"project_search": "Байтерек"})
         self.assertEqual(len(search_resp.data["projects"]), 1)
         self.assertEqual(search_resp.data["projects"][0]["id"], p1.id)
+
 

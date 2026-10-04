@@ -15,9 +15,40 @@ export interface ConversationMessage {
   partial?: boolean;
   is_source_revision?: boolean;
 }
+export interface DialogueThreadChild {
+  id: number;
+  topic: string;
+  state: string;
+  version: number;
+  updated_at: string;
+}
+
+export interface DialogueThreadFact {
+  id: number;
+  fact_type: string;
+  status: string;
+  proposed_changes: any;
+  in_progress?: boolean;
+}
+
 export interface DialogueThread {
-  id: number; topic: string; summary: string; state: 'open' | 'ready' | 'unknown' | 'superseded';
-  version: number; parent_id: number | null; project_id: number | null;
+  id: number;
+  topic: string;
+  summary: string;
+  state: 'open' | 'ready' | 'unknown' | 'superseded';
+  version: number;
+  parent_id: number | null;
+  project_id: number | null;
+  project_name?: string | null;
+  company_id?: number | null;
+  company_name?: string | null;
+  children_count?: number;
+  messages_count?: number;
+  commitments_count?: number;
+  total_amount?: number | string | null;
+  updated_at?: string;
+  children?: { id: number; topic: string; state: string; version: number; updated_at: string }[];
+  facts?: { id: number; fact_type: string; status: string; proposed_changes: any; in_progress?: boolean }[];
   messages: (ConversationMessage & { thought_state: 'intermediate' | 'final' | 'unknown'; relation: string; rationale: string })[];
 }
 export interface CandidateContext {

@@ -193,8 +193,10 @@ def ready_facts(result, themes):
     selected = []
     for fact in result["facts"]:
         theme = themes[fact["thread_key"]]
-        if theme["state"] != "ready":
+        if theme["state"] not in ("ready", "open"):
             continue
+        if theme["state"] == "open":
+            fact["in_progress"] = True
         member_ids = {link["raw_message_id"] for link in theme["messages"]}
         references = fact.get("evidence_messages", [])
         anchor = fact.get("evidence_message_id") or fact.get("promise_message_id")

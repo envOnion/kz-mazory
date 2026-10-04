@@ -1,5 +1,7 @@
 """Authorized themes, including open thoughts outside the fact review inbox."""
 
+from decimal import Decimal
+from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers
 from rest_framework.permissions import IsAuthenticated
@@ -8,7 +10,7 @@ from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
 from . import access
 from .candidate_context import message_data
-from .models import DialogueThread
+from .models import DialogueThread, FactCandidate, ThreadRevision
 
 
 def visible_threads(user):
@@ -21,7 +23,104 @@ def visible_threads(user):
     )
 
 
+def parse_amount(val):
+    if val is None or val == "":
+        return Decimal(0)
+    try:
+        cleaned = str(val).replace(" ", "").replace("\xa0", "").replace(",", ".")
+        return Decimal(cleaned)
+    except (ValueError, TypeError, ArithmeticError):
+        return Decimal(0)
+
+
 def thread_data(thread, user, revision=None):
+    has_project_access = (
+        bool(thread.project_id)
+        and access.projects_for(user).filter(pk=thread.project_id).exists()
+    )
+    project = thread.project if has_project_access else None
+    project_id = project.id if project else None
+    project_name = project.name if project else None
+    company = project.company if project else None
+    company_id = company.id if company else None
+    company_name = company.name if company else None
+
+    children_qs = (
+        visible_threads(user)
+        .filter(parent=thread)
+        .order_by("id")
+    )
+    children = [
+        {
+            "id": child.id,
+            "topic": child.topic,
+            "state": child.state,
+            "version": child.version,
+            "updated_at": child.updated_at,
+        }
+        for child in children_qs
+    ]
+
+    if revision:
+        candidates = FactCandidate.objects.filter(thread_revision=revision).order_by("id")
+    else:
+        candidates = (
+            FactCandidate.objects.filter(thread_revision__thread=thread)
+            .exclude(status="superseded")
+            .select_related("thread_revision")
+            .order_by("id")
+        )
+        if not candidates.exists():
+            latest_rev = thread.revisions.order_by("-version").first()
+            if latest_rev:
+                candidates = latest_rev.candidates.order_by("id")
+
+    if candidates.exists():
+        facts = [
+            {
+                "id": c.id,
+                "fact_type": c.fact_type,
+                "status": c.status,
+                "proposed_changes": c.proposed_changes,
+                "in_progress": bool(
+                    (
+                        c.proposed_changes.get("in_progress", False)
+                        if isinstance(c.proposed_changes, dict)
+                        else False
+                    )
+                    or (c.thread_revision and c.thread_revision.state == "open")
+                    or (revision.state == "open" if revision else thread.state == "open")
+                ),
+            }
+            for c in candidates
+        ]
+    else:
+        rev = revision or thread.revisions.order_by("-version").first()
+        if rev and rev.extraction:
+            facts = [
+                {
+                    "id": idx + 1,
+                    "fact_type": item.get("fact_type", "commitment"),
+                    "status": "pending",
+                    "proposed_changes": item,
+                    "in_progress": bool(
+                        item.get("in_progress", False)
+                        or (rev.state == "open")
+                        or (thread.state == "open")
+                    ),
+                }
+                for idx, item in enumerate(rev.extraction)
+                if isinstance(item, dict)
+            ]
+        else:
+            facts = []
+
+    parent_id = (
+        thread.parent_id
+        if thread.parent_id and visible_threads(user).filter(pk=thread.parent_id).exists()
+        else None
+    )
+
     if revision:
         snapshot = {link["raw_message_id"]: link for link in revision.message_snapshot}
         rows = (
@@ -36,10 +135,13 @@ def thread_data(thread, user, revision=None):
             "summary": revision.summary,
             "state": revision.state,
             "version": revision.version,
-            "parent_id": None,
-            "project_id": thread.project_id
-            if access.projects_for(user).filter(pk=thread.project_id).exists()
-            else None,
+            "parent_id": parent_id,
+            "project_id": project_id,
+            "project_name": project_name,
+            "company_id": company_id,
+            "company_name": company_name,
+            "children": children,
+            "facts": facts,
             "messages": [
                 {
                     **message_data(row, 0, set()),
@@ -61,14 +163,15 @@ def thread_data(thread, user, revision=None):
         "id": thread.id,
         "topic": thread.topic,
         "state": thread.state,
-        "version": revision.version if revision else thread.version,
-        "parent_id": thread.parent_id
-        if visible_threads(user).filter(pk=thread.parent_id).exists()
-        else None,
-        "project_id": thread.project_id
-        if access.projects_for(user).filter(pk=thread.project_id).exists()
-        else None,
+        "version": thread.version,
+        "parent_id": parent_id,
+        "project_id": project_id,
+        "project_name": project_name,
+        "company_id": company_id,
+        "company_name": company_name,
         "summary": thread.summary,
+        "children": children,
+        "facts": facts,
         "messages": [
             {
                 **message_data(link.raw_message, 0, set()),
@@ -85,24 +188,159 @@ class ThreadListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = visible_threads(request.user).order_by("-updated_at", "-id")
-        search = request.query_params.get("search", "")[:255]
+        qs = visible_threads(request.user)
+        search = request.query_params.get("search", "").strip()[:255]
         if search:
-            qs = qs.filter(topic__icontains=search)
+            qs = qs.filter(
+                Q(topic__icontains=search)
+                | Q(project__name__icontains=search)
+                | Q(project__company__name__icontains=search)
+                | Q(summary__icontains=search)
+            )
+
+        state = request.query_params.get("state", "").strip()
+        if state in ("open", "ready"):
+            qs = qs.filter(state=state)
+
+        company_id = request.query_params.get("company_id")
+        if company_id:
+            try:
+                qs = qs.filter(project__company_id=int(company_id))
+            except (ValueError, TypeError):
+                pass
+
+        project_id = request.query_params.get("project_id")
+        if project_id:
+            try:
+                qs = qs.filter(project_id=int(project_id))
+            except (ValueError, TypeError):
+                pass
+
+        parent_id = request.query_params.get("parent_id")
+        if parent_id is not None and parent_id != "":
+            if parent_id.lower() in ("null", "none", "root"):
+                qs = qs.filter(parent__isnull=True)
+            else:
+                try:
+                    qs = qs.filter(parent_id=int(parent_id))
+                except (ValueError, TypeError):
+                    pass
+
+        qs = (
+            qs.select_related("project__company")
+            .annotate(
+                children_count=Count(
+                    "children",
+                    filter=~Q(children__state="superseded"),
+                    distinct=True,
+                ),
+                messages_count=Count("message_links", distinct=True),
+            )
+            .order_by("-updated_at", "-id")
+        )
+
         pagination = PageNumberPagination()
         page = pagination.paginate_queryset(qs, request)
-        return pagination.get_paginated_response(
-            [
+
+        thread_ids = [item.id for item in page]
+        candidates = (
+            FactCandidate.objects.filter(
+                thread_revision__thread_id__in=thread_ids
+            )
+            .exclude(status="superseded")
+            .select_related("thread_revision")
+        )
+        candidates_by_thread = {}
+        for c in candidates:
+            candidates_by_thread.setdefault(c.thread_revision.thread_id, []).append(c)
+
+        revisions_by_thread = {}
+        missing_ids = [tid for tid in thread_ids if tid not in candidates_by_thread]
+        if missing_ids:
+            for rev in (
+                ThreadRevision.objects.filter(thread_id__in=missing_ids)
+                .order_by("thread_id", "-version")
+            ):
+                if rev.thread_id not in revisions_by_thread:
+                    revisions_by_thread[rev.thread_id] = rev
+
+        accessible_project_ids = set(
+            access.projects_for(request.user).values_list("id", flat=True)
+        )
+
+        results = []
+        for item in page:
+            if item.project_id and item.project_id in accessible_project_ids:
+                proj = item.project
+                proj_id = proj.id
+                proj_name = proj.name
+                comp = proj.company
+                comp_id = comp.id if comp else None
+                comp_name = comp.name if comp else None
+            else:
+                proj_id = None
+                proj_name = None
+                comp_id = None
+                comp_name = None
+
+            item_candidates = candidates_by_thread.get(item.id, [])
+            total_amount = Decimal(0)
+            if item_candidates:
+                commitments = [c for c in item_candidates if c.fact_type == "commitment"]
+                commitments_count = len(commitments) if commitments else len(item_candidates)
+                for c in item_candidates:
+                    if isinstance(c.proposed_changes, dict):
+                        val = (
+                            c.proposed_changes.get("amount")
+                            or c.proposed_changes.get("contract_amount")
+                            or c.proposed_changes.get("payment_amount")
+                            or c.proposed_changes.get("total_amount")
+                            or c.proposed_changes.get("sum")
+                        )
+                        total_amount += parse_amount(val)
+            elif item.id in revisions_by_thread:
+                ext = revisions_by_thread[item.id].extraction or []
+                commitments = [
+                    f for f in ext if isinstance(f, dict) and f.get("fact_type") == "commitment"
+                ]
+                commitments_count = len(commitments) if commitments else len(ext)
+                for f in ext:
+                    if isinstance(f, dict):
+                        val = (
+                            f.get("amount")
+                            or f.get("contract_amount")
+                            or f.get("payment_amount")
+                            or f.get("total_amount")
+                            or f.get("sum")
+                        )
+                        total_amount += parse_amount(val)
+            else:
+                commitments_count = 0
+
+            amt_float = float(total_amount)
+            total_amount_val = int(amt_float) if amt_float.is_integer() else round(amt_float, 2)
+
+            results.append(
                 {
                     "id": item.id,
                     "topic": item.topic,
                     "state": item.state,
                     "version": item.version,
+                    "parent_id": item.parent_id,
+                    "project_id": proj_id,
+                    "project_name": proj_name,
+                    "company_id": comp_id,
+                    "company_name": comp_name,
+                    "summary": item.summary,
                     "updated_at": item.updated_at,
+                    "children_count": item.children_count,
+                    "messages_count": item.messages_count,
+                    "commitments_count": commitments_count,
+                    "total_amount": total_amount_val,
                 }
-                for item in page
-            ]
-        )
+            )
+
+        return pagination.get_paginated_response(results)
 
 
 class ThreadDetailView(APIView):

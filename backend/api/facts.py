@@ -93,6 +93,7 @@ class FactSchema(serializers.Serializer):
     uncertainties = serializers.ListField(
         child=serializers.CharField(max_length=255), max_length=20, default=list
     )
+    in_progress = serializers.BooleanField(required=False, default=False)
 
     def validate_confidence(self, value):
         if not math.isfinite(value):
