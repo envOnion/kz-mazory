@@ -49,7 +49,7 @@ def backfill_page(payload):
         raise ProviderUnavailable("thread_history_busy", retry_after=10)
     with transaction.atomic():
         for raw in (
-            RawMessage.objects.select_for_update()
+            RawMessage.objects.select_for_update(of=("self",))
             .filter(pk__in=ids)
             .select_related("config__team", "team", "project")
             .order_by("id")
