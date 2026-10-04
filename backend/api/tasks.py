@@ -199,8 +199,13 @@ def run_outbox(pk):
                 from .models import Team
                 Team.objects.select_for_update().get(pk=raw.team_id)
             RawMessage.objects.select_for_update().get(pk=raw.id)
-            earlier = OutboxEvent.objects.filter(
-                event_type="extract_message", payload__raw_id__in=source_scope(raw).values_list("id", flat=True),
+            from django.db.models import BigIntegerField
+            from django.db.models.fields.json import KeyTextTransform
+            from django.db.models.functions import Cast
+            earlier = OutboxEvent.objects.alias(
+                source_raw_id=Cast(KeyTextTransform("raw_id", "payload"), BigIntegerField())
+            ).filter(
+                event_type="extract_message", source_raw_id__in=source_scope(raw).values_list("id", flat=True),
             ).exclude(pk=event.pk).filter(
                 Q(state="processing") | Q(pk__lt=event.pk, state__in=["pending", "enqueued"])
             ).exists()

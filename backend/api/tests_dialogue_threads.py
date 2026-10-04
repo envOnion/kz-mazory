@@ -180,6 +180,33 @@ class DialogueTests(TestCase):
         ):
             extract_message(raw.id, trace_id=trace_id)
 
+    def test_queue_serializes_messages_of_one_source(self):
+        from .tasks import run_outbox
+        first, second = self.messages(["Первый вопрос", "Поздний ответ"])
+        earlier = OutboxEvent.objects.create(
+            event_type="extract_message", deduplication_key="earlier",
+            payload={"raw_id": first.id},
+        )
+        later = OutboxEvent.objects.create(
+            event_type="extract_message", deduplication_key="later",
+            payload={"raw_id": second.id},
+        )
+        with patch("api.tasks.AISettings.get_active", return_value=self.ai), patch(
+            "api.tasks.extract_message"
+        ) as handler:
+            run_outbox(later.id)
+            handler.assert_not_called()
+            later.refresh_from_db()
+            self.assertEqual(later.state, "pending")
+            earlier.state = "done"
+            earlier.save(update_fields=["state"])
+            later.next_attempt_at = timezone.now()
+            later.save(update_fields=["next_attempt_at"])
+            run_outbox(later.id)
+            handler.assert_called_once_with({"raw_id": second.id})
+            later.refresh_from_db()
+            self.assertEqual(later.state, "done")
+
     def test_anonymized_dialogue_quality_cases(self):
         for case in CASES:
             with self.subTest(case=case["name"]):
