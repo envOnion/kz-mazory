@@ -49,6 +49,7 @@ export interface CrmResolution {
   options: CrmMatchOption[]
 }
 export interface Candidate {
+  thread?: { id: number; topic: string; version: number } | null
   id: number
   project_id: number | null
   project_name: string
@@ -73,7 +74,8 @@ export interface Candidate {
 }
 export interface Evidence { role?: string; id: number; quote: string; source_id: number; source_url: string }
 export interface Source { id: number; content: string; sender_name: string; sent_at: string | null; received_at: string; processing_state: string; revision: string }
-export interface Directory { teams: { id: number; name: string; history_complete_from: string | null }[]; profiles: { id: number; user_id: number; full_name: string }[]; projects: { id: number; name: string; version: number; currency: string; team_id: number }[] }
+export interface CrmCatalogStatus { team_id: number; state: string; imported_count: number; last_success_at: string | null; error_code: string }
+export interface Directory { chats?: { id: number; name: string; team_id: number }[]; crm_catalog?: CrmCatalogStatus[]; projects_count?: number; projects_next_page?: number | null; teams: { id: number; name: string; history_complete_from: string | null }[]; profiles: { id: number; user_id: number; full_name: string }[]; projects: { id: number; name: string; version: number; currency: string; team_id: number }[] }
 export interface Payment { id: number; project_id: number; amount: Money; currency: string; payment_date: string; candidate_id: number | null; reverses_id: number | null; credited_profile_id: number | null }
 export interface ScheduleRow { id: number; project_id: number; amount: Money; remaining: Money; due_date: string; bucket: string }
 export interface Receivables { buckets: Record<string, Money>; overdue: Money; rows: ScheduleRow[]; unknown_schedule_projects: number; currency: string }

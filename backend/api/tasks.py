@@ -36,9 +36,11 @@ CLUSTERS = {
     "delivery_ack": "delivery",
     "crm_sync": "crm",
     "crm_import": "crm",
+    "crm_catalog": "crm",
     "crm_match": "crm",
     "waha_control": "delivery",
     "history_import": "history",
+    "thread_backfill": "history",
 }
 NON_IDEMPOTENT = {"otp", "notification", "waha_control"}
 
@@ -120,10 +122,12 @@ def enqueue_crm_match(candidate_id, allowed_states=("not_requested",)):
     with transaction.atomic():
         candidate = (
             FactCandidate.objects.select_for_update(of=("self",))
-            .filter(pk=candidate_id, status="pending", fact_type="project")
+            .filter(pk=candidate_id, status="pending")
             .first()
         )
         if not candidate:
+            return None
+        if candidate.fact_type != "project" and not candidate.project_id and not candidate.proposed_changes.get("object_name"):
             return None
         if candidate.crm_match_state == "queued" and candidate.crm_match_revision:
             key = f"crm_match:{candidate.id}:{candidate.crm_match_revision}"
@@ -187,9 +191,16 @@ def run_outbox(pk):
         if event.event_type == "extract_message":
             # Lock the message while claiming work so two workers cannot claim
             # different attempts for the same message concurrently.
-            RawMessage.objects.select_for_update().get(pk=event.payload["raw_id"])
+            from .message_context import source_scope
+            raw = RawMessage.objects.select_related("config__team", "team", "project").get(pk=event.payload["raw_id"])
+            if raw.config_id:
+                WhatsAppConfig.objects.select_for_update().get(pk=raw.config_id)
+            else:
+                from .models import Team
+                Team.objects.select_for_update().get(pk=raw.team_id)
+            RawMessage.objects.select_for_update().get(pk=raw.id)
             earlier = OutboxEvent.objects.filter(
-                event_type="extract_message", payload__raw_id=event.payload["raw_id"],
+                event_type="extract_message", payload__raw_id__in=source_scope(raw).values_list("id", flat=True),
             ).exclude(pk=event.pk).filter(
                 Q(state="processing") | Q(pk__lt=event.pk, state__in=["pending", "enqueued"])
             ).exists()
@@ -223,10 +234,12 @@ def run_outbox(pk):
             "operation": run_operation,
             "crm_sync": sync_crm,
             "crm_import": import_crm,
+            "crm_catalog": sync_catalog,
             "crm_match": match_crm,
             "attachment": process_attachment,
             "waha_control": waha_control,
             "history_import": import_history_step,
+            "thread_backfill": backfill_threads,
         }
         result = handlers[event.event_type](event.payload)
         if event.event_type == "delivery_ack":
@@ -486,6 +499,12 @@ def extract_message(payload):
     )
 
 
+def backfill_threads(payload):
+    from .thread_backfill import backfill_page
+
+    backfill_page(payload)
+
+
 def import_history_step(payload):
     from .history_jobs import ERROR_LABELS, process_step
     from .models import WhatsAppHistoryRun
@@ -553,6 +572,12 @@ def sync_crm(payload):
     from .bitrix_service import BitrixService
 
     BitrixService.sync_project(payload["project_id"], payload["version"])
+
+
+def sync_catalog(payload):
+    from .crm_catalog import sync_page
+
+    sync_page(payload)
 
 
 def import_crm(payload):
@@ -770,8 +795,15 @@ def monitor_kpi_risks_and_anomalies_task():
 def enqueue_hourly_bitrix_sync_task():
     from .models import Project
 
+    from .models import BitrixSettings, CrmCatalogSync, Team
+    from .crm_catalog import enqueue_catalog
+    cfg = BitrixSettings.get_active()
+    if cfg.is_active and cfg.auto_import_deals and cfg.hourly_sync_enabled and Team.objects.filter(pk=settings.BITRIX_TEAM_ID, is_active=True).exists():
+        state = CrmCatalogSync.objects.filter(team_id=settings.BITRIX_TEAM_ID).first()
+        if not state or (state.state == "succeeded" and state.last_success_at and state.last_success_at <= timezone.now() - timedelta(hours=1)):
+            enqueue_catalog(settings.BITRIX_TEAM_ID, refresh=True)
     for p in Project.objects.filter(
-        is_verified=True, needs_bitrix_sync=True, team__isnull=False
+        Q(is_verified=True) | Q(identity_confirmed=True), needs_bitrix_sync=True, team__isnull=False
     ):
         OutboxEvent.objects.get_or_create(
             deduplication_key=f"crm:{p.id}:{p.version}",

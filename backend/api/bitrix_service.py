@@ -446,6 +446,8 @@ class BitrixService:
         if not project.bitrix_id:
             return ""
         with transaction.atomic():
+            from .dialogue_threads import lock_candidate_source
+            lock_candidate_source(candidate)
             locked = FactCandidate.objects.select_for_update(of=("self",)).get(
                 pk=candidate.id
             )
@@ -517,7 +519,6 @@ class BitrixService:
             FactCandidate.objects.select_related("project__company")
             .filter(
                 pk=candidate_id,
-                fact_type="project",
             )
             .first()
         )
@@ -753,6 +754,8 @@ class BitrixService:
 
         budget.ensure_active()
         with transaction.atomic():
+            from .dialogue_threads import lock_candidate_source
+            lock_candidate_source(candidate)
             locked = FactCandidate.objects.select_for_update(of=("self",)).get(
                 pk=candidate.id
             )
@@ -819,6 +822,9 @@ class BitrixService:
                     "crm_checked_at",
                 ]
             )
+            if locked.thread_revision_id and locked.project_id:
+                from .models import DialogueThread
+                DialogueThread.objects.filter(pk=locked.thread_revision.thread_id, team_id=locked.team_id).update(project_id=locked.project_id)
         return state
 
     @staticmethod
@@ -843,13 +849,14 @@ class BitrixService:
         cfg = BitrixSettings.get_active()
         if not cfg.is_active:
             raise ProviderUnavailable("crm_disabled")
-        project = Project.objects.get(pk=project_id, is_verified=True)
+        from django.db.models import Q
+        project = Project.objects.filter(Q(is_verified=True) | Q(identity_confirmed=True)).get(pk=project_id)
         if not project.team_id or project.version != version:
             return
         revision = ProjectRevision.objects.get(project=project, version=version)
         snapshot = revision.snapshot
         stage = settings.BITRIX_STAGE_MAP.get(snapshot["status"])
-        if not stage:
+        if not stage and project.is_verified:
             raise ProviderUnavailable("crm_stage_mapping_required")
         fields = {
             "STAGE_ID": stage,
@@ -862,6 +869,8 @@ class BitrixService:
             + "\n"
             + escape(snapshot.get("next_action", "")),
         }
+        if not project.is_verified:
+            fields = {"TITLE": snapshot["name"], "ORIGINATOR_ID": "MAZORY", "ORIGIN_ID": str(project.id)}
         # Stable external key permits reconciliation after an unknown create outcome.
         if not project.bitrix_id:
             matches = BitrixService.call(

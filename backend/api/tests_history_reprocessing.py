@@ -124,7 +124,7 @@ class HistoryReprocessingTests(TestCase):
 
     def test_explicit_attempt_reprocesses_success_and_preserves_approved_facts(self):
         first = self.run_record()
-        self.persist(first, [self.item(first)])
+        self.persist(first, [self.item(first, text="Оплата 10 тенге получена по объекту")])
         raw = first.messages.get()
         old = raw.traces.get()
         old.status = "success"
@@ -132,22 +132,25 @@ class HistoryReprocessingTests(TestCase):
         raw.processed = True
         raw.save()
         fact = {"fact_type": "payment", "object_name": "Объект", "evidence": raw.content,
-                "confidence": "0.9", "uncertainties": []}
+                "confidence": "0.9", "uncertainties": [], "amount": "10", "currency": "KZT", "payment_kind": "increment"}
         approved = FactCandidate.objects.create(trace=old, team=self.config.team,
             fact_type="payment", proposed_changes=fact, source_key="approved", status="approved")
         pending = FactCandidate.objects.create(trace=old, team=self.config.team,
             fact_type="payment", proposed_changes=fact, source_key="pending")
         second = self.run_record()
-        self.persist(second, [self.item(second)])
+        self.persist(second, [self.item(second, text="Оплата 10 тенге получена по объекту")])
         event = OutboxEvent.objects.get(payload__history_run_id=second.id)
         cfg = AISettings(chat_model_name="test")
         envelope = {"messages": [{"role": "user", "content": '{"context": []}'}]}
+        result = {"threads": [{"key": "payment", "topic": "Оплата объекта", "state": "ready", "completion_reason": "Сообщено о получении платежа",
+                               "messages": [{"raw_message_id": raw.id, "thought_state": "final"}]}],
+                  "facts": [{**fact, "thread_key": "payment", "evidence_message_id": raw.id}]}
         from .pipeline import extract_message
         with patch("api.pipeline.AIService._config", return_value=cfg), patch(
             "api.pipeline.AIService.effective_chat_provider_url", return_value="https://example.com/v1"
         ), patch("api.pipeline.build_context", return_value=([], {"request_state": "not_sent"}, envelope)), patch(
-            "api.pipeline.AIService.analyze_payload", return_value=({"facts": []}, {}, {})
-        ) as analyze, patch("api.pipeline._facts", return_value=[fact]):
+            "api.pipeline.AIService.analyze_payload", return_value=(result, {}, {})
+        ) as analyze:
             extract_message(raw.id, trace_id=event.payload["trace_id"])
             extract_message(raw.id, trace_id=event.payload["trace_id"])
         self.assertEqual(analyze.call_count, 1)

@@ -159,19 +159,19 @@ describe("General commitments and project discovery", () => {
       .find((b) => b.text() === "Подтвердить факт")!;
     expect(approve.attributes("disabled")).toBeUndefined();
     expect(wrapper.text()).toContain(
-      "Общие задачи команды можно подтверждать без проекта",
+      "общие обязательства команды можно подтверждать без проекта",
     );
     wrapper.unmount();
   });
-  it("takes an empty project directory to pending project proposals", async () => {
+  it("refreshes the CRM directory when available projects are missing", async () => {
     const wrapper = await screen();
     await wrapper
       .findAll("button")
-      .find((b) => b.text() === "Показать предложения по проектам")!
+      .find((b) => b.text() === "Обновить справочник")!
       .trigger("click");
     await flushPromises();
     expect(mocks.api).toHaveBeenCalledWith(
-      "/candidates/?status=pending&page=1&fact_type=project",
+      "/directory/",
     );
     wrapper.unmount();
   });

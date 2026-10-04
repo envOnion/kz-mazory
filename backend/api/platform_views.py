@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.contrib.auth.models import User
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Max, Count, Sum, Avg
+from django.db.models import Max, Count, Sum, Avg, Q
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers
@@ -14,6 +14,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
 from .message_time import source_metadata
 from . import access
+from .dialogue_threads import lock_candidate_source
 from .models import (
     FactCandidate,
     Project,
@@ -108,6 +109,7 @@ def candidate_data(candidate, user, source_map=None, project_ids=None):
         "team_id": candidate.team_id,
         "manager_id": candidate.manager_id,
         "fact_type": candidate.fact_type,
+        "thread": ({"id": candidate.thread_revision.thread_id, "topic": candidate.thread_revision.topic or candidate.thread_revision.thread.topic, "version": candidate.thread_revision.version} if candidate.thread_revision_id and source else None),
         "proposed_changes": values,
         "current_values": current_values,
         "source_available": source is not None,
@@ -143,7 +145,7 @@ class CandidateListView(APIView):
         qs = (
             access.candidates_for(request.user)
             .filter(status=state)
-            .select_related("project__company", "trace")
+            .select_related("project__company", "trace", "thread_revision__thread")
             .prefetch_related("evidence", "crm_matches__project")
             .order_by("id")
         )
@@ -207,6 +209,7 @@ class CandidateReviewView(APIView):
                     "Укажите основание сопоставления или новой проверки."
                 )
             with transaction.atomic():
+                lock_candidate_source(candidate)
                 candidate = (
                     access.candidates_for(request.user)
                     .select_for_update(of=("self",))
@@ -576,28 +579,78 @@ class ExportView(APIView):
         return Response({"operation_id": op.id, "status": op.status}, status=202)
 
 
+def catalog_status(user):
+    from .models import CrmCatalogSync, BitrixSettings
+    from .crm_catalog import enqueue_catalog
+
+    cfg = BitrixSettings.get_active()
+    team = Team.objects.filter(pk=settings.BITRIX_TEAM_ID, is_active=True).first()
+    allowed = bool(team and (user.is_superuser or team.id in access.team_ids(user)))
+    if allowed and cfg.is_active and cfg.auto_import_deals:
+        if not CrmCatalogSync.objects.filter(team=team).exists():
+            enqueue_catalog(team.id)
+    elif allowed:
+        return [{"team_id": team.id, "state": "error", "imported_count": 0, "last_success_at": None, "error_code": "crm_import_disabled"}]
+    elif not team and (user.is_superuser or access.memberships(user).filter(role="team_lead").exists()):
+        teams = Team.objects.filter(is_active=True) if user.is_superuser else Team.objects.filter(pk__in=access.team_ids(user, ["team_lead"]))
+        return [{"team_id": item.id, "state": "error", "imported_count": 0, "last_success_at": None, "error_code": "crm_team_mapping_required"} for item in teams]
+    states = CrmCatalogSync.objects.filter(team__is_active=True)
+    if not user.is_superuser:
+        states = states.filter(team_id__in=access.team_ids(user))
+    return list(states.values("team_id", "state", "imported_count", "last_success_at", "error_code"))
+
+
 class DirectoryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
+        from .crm_catalog import available_projects
         teams = Team.objects.filter(is_active=True)
         if not request.user.is_superuser:
             teams = teams.filter(pk__in=access.team_ids(request.user))
-        return Response(
-            {
-                "teams": list(teams.values("id", "name", "history_complete_from")),
-                "profiles": list(
-                    access.profiles_for(request.user).values(
-                        "id", "user_id", "full_name"
-                    )
-                ),
-                "projects": list(
-                    access.projects_for(request.user)
-                    .filter(is_verified=True)
-                    .values("id", "name", "version", "currency", "team_id")[:500]
-                ),
-            }
-        )
+        schema = DirectoryQuery(data=request.query_params)
+        schema.is_valid(raise_exception=True)
+        values = schema.validated_data
+        projects = available_projects(access.projects_for(request.user)).order_by("name", "id")
+        if values["project_search"]:
+            projects = projects.filter(name__icontains=values["project_search"])
+        count = projects.count()
+        start = (values["project_page"] - 1) * 100
+        return Response({
+            "teams": list(teams.values("id", "name", "history_complete_from")),
+            "profiles": list(access.profiles_for(request.user).values("id", "user_id", "full_name")),
+            "projects": list(projects.values("id", "name", "version", "currency", "team_id")[start:start + 100]),
+            "projects_count": count,
+            "projects_next_page": values["project_page"] + 1 if start + 100 < count else None,
+            "crm_catalog": catalog_status(request.user),
+            "chats": list(access.configs_for(request.user).values("id", "name", "team_id")),
+        })
+
+
+class DirectoryQuery(serializers.Serializer):
+    project_page = serializers.IntegerField(min_value=1, default=1)
+    project_search = serializers.CharField(max_length=255, allow_blank=True, default="")
+
+
+class CrmCatalogSyncView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .crm_catalog import enqueue_catalog
+        schema = CatalogSyncInput(data=request.data)
+        schema.is_valid(raise_exception=True)
+        team_id = schema.validated_data["team_id"]
+        if not request.user.is_superuser and team_id not in access.team_ids(request.user, ["team_lead"]):
+            raise PermissionDenied("Загрузку справочника запускает руководитель команды.")
+        if team_id != settings.BITRIX_TEAM_ID:
+            raise ValidationError("Для команды не настроена интеграция CRM.")
+        get_object_or_404(Team, pk=team_id, is_active=True)
+        state = enqueue_catalog(team_id, refresh=True)
+        return Response({"state": state.state, "team_id": team_id}, status=202)
+
+
+class CatalogSyncInput(serializers.Serializer):
+    team_id = serializers.IntegerField(min_value=1)
 
 
 class AccessAdminView(APIView):
@@ -768,7 +821,7 @@ class CandidateDetailView(APIView):
     def get(self, request, pk):
         candidate = get_object_or_404(
             access.candidates_for(request.user)
-            .select_related("project__company", "trace")
+            .select_related("project__company", "trace", "thread_revision__thread")
             .prefetch_related("evidence", "crm_matches__project"),
             pk=pk,
         )

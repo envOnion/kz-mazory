@@ -152,6 +152,7 @@ class Project(models.Model):
     source = models.CharField(
         "Источник сделки", max_length=32, choices=SOURCE_CHOICES, default="chat"
     )
+    identity_confirmed = models.BooleanField(default=False, db_index=True)
     bitrix_id = models.CharField(
         "Bitrix24 ID сделки", max_length=64, blank=True, null=True, unique=True
     )
@@ -1277,7 +1278,60 @@ class AdminMFA(models.Model):
     last_counter = models.BigIntegerField(default=-1)
 
 
+class DialogueThread(models.Model):
+    team = models.ForeignKey(Team, on_delete=models.PROTECT)
+    config = models.ForeignKey(WhatsAppConfig, null=True, blank=True, on_delete=models.PROTECT)
+    source_key = models.CharField(max_length=64, db_index=True)
+    identity = models.CharField(max_length=64, unique=True)
+    parent = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT, related_name="children")
+    project = models.ForeignKey(Project, null=True, blank=True, on_delete=models.PROTECT)
+    topic = models.CharField(max_length=255)
+    summary = models.TextField(blank=True)
+    state = models.CharField(max_length=16, choices=[(s, s) for s in ("open", "ready", "unknown", "superseded")], default="open", db_index=True)
+    version = models.PositiveIntegerField(default=0)
+    snapshot_max_id = models.PositiveBigIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class ThreadMessage(models.Model):
+    thread = models.ForeignKey(DialogueThread, on_delete=models.PROTECT, related_name="message_links")
+    raw_message = models.ForeignKey(RawMessage, on_delete=models.PROTECT, related_name="thread_links")
+    thought_state = models.CharField(max_length=16, choices=[(s, s) for s in ("intermediate", "final", "unknown")])
+    relation = models.CharField(max_length=16, choices=[(s, s) for s in ("discusses", "answers", "clarifies", "cancels", "fulfills")], default="discusses")
+    rationale = models.CharField(max_length=1000, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["thread", "raw_message"], name="thread_message_unique")]
+
+
+class ThreadRevision(models.Model):
+    thread = models.ForeignKey(DialogueThread, on_delete=models.PROTECT, related_name="revisions")
+    version = models.PositiveIntegerField()
+    state = models.CharField(max_length=16)
+    topic = models.CharField(max_length=255, blank=True, default="")
+    summary = models.TextField(blank=True, default="")
+    message_snapshot = models.JSONField(default=list)
+    extraction = models.JSONField(default=list)
+    completion_reason = models.CharField(max_length=1000, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["thread", "version"], name="thread_revision_unique")]
+
+
+class CrmCatalogSync(models.Model):
+    team = models.OneToOneField(Team, on_delete=models.PROTECT)
+    generation = models.PositiveIntegerField(default=0)
+    state = models.CharField(max_length=16, default="idle")
+    cursor = models.PositiveIntegerField(default=0)
+    imported_count = models.PositiveIntegerField(default=0)
+    last_success_at = models.DateTimeField(null=True, blank=True)
+    error_code = models.CharField(max_length=64, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
 class FactCandidate(models.Model):
+    thread_revision = models.ForeignKey(ThreadRevision, null=True, blank=True, on_delete=models.PROTECT, related_name="candidates")
     CRM_MATCH_STATE_CHOICES = [
         ("not_requested", "Не запускалось"),
         ("queued", "В очереди"),

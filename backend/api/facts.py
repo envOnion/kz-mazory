@@ -5,7 +5,7 @@ from datetime import datetime
 import math
 from zoneinfo import ZoneInfo
 from django.db import IntegrityError, transaction
-from django.db.models import Sum
+from django.db.models import Sum, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework import serializers
@@ -31,6 +31,7 @@ from .models import (
 )
 from .security import Conflict
 from .message_time import source_zone
+from .dialogue_threads import lock_candidate_source
 
 
 SUPPORTED_CURRENCIES = ("KZT", "USD", "EUR", "RUB")
@@ -43,6 +44,8 @@ class EvidenceSchema(serializers.Serializer):
 
 
 class FactSchema(serializers.Serializer):
+    thread_key = serializers.CharField(max_length=64, required=False)
+    evidence_message_id = serializers.IntegerField(min_value=1, required=False)
     fact_type = serializers.ChoiceField(choices=["project", "payment", "commitment"])
     object_name = serializers.CharField(max_length=255, allow_blank=True, default="")
     company_name = serializers.CharField(max_length=255, allow_blank=True, default="")
@@ -220,7 +223,7 @@ def _project_identity_conflict(team_id, name, normalized):
         return True
     return any(
         normalize_deal_name(project.name) == canonical
-        for project in projects.filter(normalized_name="").only("name")
+        for project in projects.filter(Q(normalized_name="") | Q(source="bitrix_crm")).only("name")
     )
 
 
@@ -291,6 +294,7 @@ def select_crm_match(
         raise serializers.ValidationError("Укажите причину выбора сделки CRM.")
 
     with transaction.atomic():
+        lock_candidate_source(access.candidates_for(user).get(pk=candidate_id))
         candidate = (
             access.candidates_for(user)
             .select_for_update(of=("self",))
@@ -299,10 +303,6 @@ def select_crm_match(
         access.require_team_role(user, candidate.team_id, ["team_lead"])
         if candidate.status != "pending":
             raise Conflict("Предложение уже рассмотрено или заменено.")
-        if candidate.fact_type != "project":
-            raise serializers.ValidationError(
-                "CRM-сделку можно выбрать только для факта проекта."
-            )
         if candidate.crm_match_state not in ("ambiguous", "matched"):
             raise Conflict("Текущий результат CRM не допускает выбор сделки.")
         if candidate.crm_match_revision != crm_match_revision:
@@ -324,6 +324,8 @@ def select_crm_match(
             ) from None
 
         project = _crm_project_for_match(candidate, crm_match)
+        if candidate.fact_type != "project" and not project:
+            raise serializers.ValidationError("Сначала загрузите выбранную сделку в справочник CRM.")
         selected_matches = list(
             CandidateCrmMatch.objects.select_for_update(of=("self",)).filter(
                 candidate=candidate, selection_state="selected"
@@ -413,6 +415,9 @@ def select_crm_match(
                 "crm_match_error_code",
             ]
         )
+        if candidate.thread_revision_id and project:
+            from .models import DialogueThread
+            DialogueThread.objects.filter(pk=candidate.thread_revision.thread_id, team_id=candidate.team_id).update(project=project)
         AuditEvent.objects.create(
             actor=user,
             target_type="FactCandidate",
@@ -541,6 +546,7 @@ def _materialize_crm_project(candidate, crm_match, data):
 
 def review(candidate_id, user, action, reason="", changes=None, base_version=None):
     with transaction.atomic():
+        lock_candidate_source(access.candidates_for(user).get(pk=candidate_id))
         candidate = (
             access.candidates_for(user)
             .select_for_update(of=("self",))
@@ -631,11 +637,13 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
             old_stage = project.status if project else ""
             if candidate.fact_type == "project":
                 if project is None:
+                    if candidate.thread_revision_id and not crm_match and candidate.crm_match_state != "not_found":
+                        raise serializers.ValidationError("Перед созданием проекта нужен успешный поиск CRM без совпадений.")
                     if crm_match:
                         if base_version != 0:
                             raise Conflict()
                         project = _materialize_crm_project(candidate, crm_match, data)
-                    elif not data["object_name"] or data.get("contract_amount", 0) <= 0:
+                    elif not data["object_name"] or ("contract_amount" in data and data["contract_amount"] <= 0):
                         raise serializers.ValidationError(
                             "Нужны название и положительная сумма договора."
                         )
@@ -796,7 +804,9 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                 from .pipeline import _source_quote
                 reviewed_deadline = data.get("deadline_at")
                 reviewed_precision = data["deadline_precision"]
-                if not raw or not validate_commitment(data, raw, candidate.trace.context_metadata.get("snapshot_max_id", raw.id), _source_quote):
+                if candidate.thread_revision_id:
+                    raw = access.messages_for(user).filter(pk=data.get("promise_message_id"), pk__in=candidate.evidence.values_list("raw_message_id", flat=True)).select_related("config").first()
+                if not raw or not validate_commitment(data, raw, candidate.trace.context_metadata.get("snapshot_max_id", raw.id), _source_quote, threaded=bool(candidate.thread_revision_id)):
                     raise serializers.ValidationError("Нужны конкретное действие и доказательства обязательства.")
                 evidence_ids = set(candidate.evidence.values_list("raw_message_id", flat=True))
                 if set(access.messages_for(user).filter(pk__in=evidence_ids).values_list("pk", flat=True)) != evidence_ids:
@@ -813,7 +823,7 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                     project=project,
                     team=candidate.team,
                     manager=candidate.manager,
-                    source_message=candidate.trace.raw_message,
+                    source_message=raw,
                     candidate=candidate,
                     commitment_text=data["commitment_text"],
                     responsible_name=data["responsible_name"],
@@ -845,9 +855,11 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                     project.paid_amount = project.financial_records.filter(
                         is_verified=True, status="received"
                     ).aggregate(s=Sum("amount"))["s"] or Decimal(0)
-                project.is_verified = True
+                if candidate.fact_type == "project":
+                    project.identity_confirmed = True
+                project.is_verified = project.is_verified or (candidate.fact_type == "project" and "contract_amount" in data)
                 project.version += 1
-                project.needs_bitrix_sync = True
+                project.needs_bitrix_sync = project.is_verified or (candidate.fact_type == "project" and project.identity_confirmed)
                 try:
                     with transaction.atomic():
                         project.save()
@@ -867,7 +879,7 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                         "candidate_id": candidate.id,
                     },
                 )
-                if BitrixSettings.objects.filter(is_active=True).exists():
+                if project.needs_bitrix_sync and BitrixSettings.objects.filter(is_active=True).exists():
                     OutboxEvent.objects.get_or_create(
                         deduplication_key=f"crm:{project.id}:{project.version}",
                         defaults={
@@ -880,6 +892,10 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                     )
         if action == "approve":
             candidate.proposed_changes = json_value(data)
+            if project and candidate.thread_revision_id:
+                from .models import DialogueThread
+                DialogueThread.objects.filter(pk=candidate.thread_revision.thread_id, team_id=candidate.team_id).update(project=project)
+                FactCandidate.objects.filter(thread_revision__thread_id=candidate.thread_revision.thread_id, team_id=candidate.team_id, status="pending", project__isnull=True).exclude(pk=candidate.pk).update(project=project, base_project_version=project.version)
         candidate.status = "approved" if action == "approve" else "rejected"
         candidate.reviewed_by, candidate.reviewed_at, candidate.review_reason = (
             user,

@@ -1,6 +1,6 @@
 """The complete source history, bounded only by the native model token budget."""
 
-from django.db.models import Exists, OuterRef, Q, F
+from django.db.models import Exists, OuterRef, Q, F, Case, When, Value, IntegerField
 from django.db.models.functions import Abs
 from django.utils import timezone
 from .message_time import source_metadata, source_zone
@@ -15,7 +15,7 @@ from .models import RawMessage
 from .plain_text import plain_text
 from .providers import ProviderUnavailable
 
-POLICY = "chat-history-contextual-v2"
+POLICY = "chat-history-threads-v3"
 MAX_REMOTE_PREFLIGHT_PROBES = 4
 MAX_REMOTE_BOUNDARY_PROBES = 12
 
@@ -77,8 +77,13 @@ def history_queryset(raw, snapshot_id, include_following=False):
 
 
 def build_context(raw, cfg, known_projects, snapshot_id, include_following=False):
+    from .dialogue_threads import context_threads
+    themes = context_threads(raw)
     counter, endpoint = context_runtime(cfg)
     qs, time_field = history_queryset(raw, snapshot_id, include_following)
+    if themes and include_following:
+        relevant_ids = [message_id for theme in themes for message_id in theme["message_ids"]]
+        qs = qs.annotate(theme_priority=Case(When(pk__in=relevant_ids, then=Value(0)), default=Value(1), output_field=IntegerField())).order_by("theme_priority", "distance", "id")
     source = source_metadata(raw)
     source_timezone = source["timezone"]
     analysis_time = timezone.now().astimezone(source_zone(raw)).isoformat()
@@ -99,6 +104,7 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
             source["sent_at"],
             source_timezone,
             source_metadata=source, current_time=analysis_time, target_message_id=raw.id,
+            known_threads=themes,
         )
 
     max_input = (
@@ -235,6 +241,7 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
     included = len(context)
     metadata = {
         "schema_version": 1,
+        "known_threads": themes,
         "input_serialization": "target-last-v1",
         "policy_version": POLICY,
         "source": "chat_history",

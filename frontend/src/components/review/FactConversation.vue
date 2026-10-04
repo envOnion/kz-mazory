@@ -16,6 +16,14 @@
         <h3 class="font-semibold">
           {{ context.chat_name || "Первоисточник" }}
         </h3>
+        <section v-if="context.thread" class="space-y-2" aria-label="Тематический тред">
+          <h4 class="font-semibold">Тема #{{ context.thread.id }}: {{ context.thread.topic }}</h4>
+          <p>{{ context.thread.summary }}</p>
+          <article v-for="message in context.thread.messages" :key="message.id" class="border-l-2 border-indigo-400 pl-3 whitespace-pre-wrap text-sm">
+            <strong>{{ message.sender_name }}</strong> · {{ ({ intermediate: 'Промежуточная реплика', final: 'Завершает мысль', unknown: 'Связь требует уточнения' })[message.thought_state] }}
+            <p>{{ message.content }}</p>
+          </article>
+        </section>
         <p class="text-sm text-amber-200">{{ context.coverage }}</p>
         <div class="flex gap-2">
           <button

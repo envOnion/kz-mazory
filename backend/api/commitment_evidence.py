@@ -7,7 +7,7 @@ from .message_time import EXPORT_HEADER, source_time, source_zone
 from .providers import ProviderUnavailable
 
 
-def validate_commitment(fact, raw, snapshot_id, quote_match):
+def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False):
     scope = source_scope(raw).filter(id__lte=snapshot_id)
     refs = fact.get("evidence_messages") or [
         {"raw_message_id": raw.id, "quote": fact["evidence"], "role": "promise"}
@@ -24,7 +24,7 @@ def validate_commitment(fact, raw, snapshot_id, quote_match):
     ):
         raise ProviderUnavailable("commitment_promise_evidence_unavailable")
     body = EXPORT_HEADER.sub("", raw.content).strip().casefold().rstrip(".! ")
-    if body in {
+    short_reply = body in {
         "тогда завтра",
         "принято",
         "ок",
@@ -33,7 +33,10 @@ def validate_commitment(fact, raw, snapshot_id, quote_match):
         "да",
         "хорошо",
         "спасибо",
-    }:
+    }
+    if short_reply and not (threaded and any(ref["role"] == "request" and ref["raw_message_id"] != raw.id for ref in refs) and len(fact.get("commitment_text", "").strip()) >= 12):
+        return False
+    if threaded and (body.endswith("?") or not fact.get("commitment_text", "").strip()):
         return False
     if fact.get("promise_message_id", raw.id) != raw.id:
         return False
