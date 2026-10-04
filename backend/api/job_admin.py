@@ -230,10 +230,12 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
         if obj.settings_snapshot.get("analysis_mode") == "reprocess_all":
             codes = OutboxEvent.objects.filter(
                 event_type="extract_message", payload__history_run_id=obj.id,
-                state__in=["failed", "unknown", "done"],
+                state__in=["failed", "unknown", "done", "cancelled"],
             ).exclude(
                 deduplication_key__in=MessageProcessingTrace.objects.filter(
-                    operation_key__startswith=f"history:{obj.id}:extract:", status="success",
+                    operation_key__in=OutboxEvent.objects.filter(
+                        event_type="extract_message", payload__history_run_id=obj.id,
+                    ).values("deduplication_key"), status="success",
                 ).values("operation_key"),
             ).values_list("error_code", flat=True)
         else:
@@ -250,7 +252,7 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
             "",
             "<li>{} — {} <code>{}</code></li>",
             (
-                (count, ERRORS.get(code, "Причина не записана"), code)
+                (count, "Задание заменено тематическим разбором" if code == "replaced_by_thread_backfill" else ERRORS.get(code, "Причина не записана"), code)
                 for code, count in counts.most_common()
             ),
         )

@@ -188,3 +188,52 @@ class HistoryReprocessingTests(TestCase):
         MessageProcessingTrace.objects.filter(pk=older.payload["trace_id"]).update(status="error")
         self.assertEqual(progress(first)["pending"], 1)
         self.assertEqual(progress(first)["errors"], 0)
+
+    def test_cancelled_extractions_do_not_leave_monitor_waiting_forever(self):
+        run = self.run_record()
+        self.persist(run, [self.item(run)])
+        OutboxEvent.objects.filter(payload__history_run_id=run.id).update(
+            state="cancelled", error_code="replaced_by_thread_backfill",
+        )
+        run.state = "analyzing"
+        run.save()
+        self.assertEqual(progress(run), {"total": 1, "processed": 0, "errors": 1, "pending": 0})
+        process_step({"history_run_id": run.id, "step": run.step}, None)
+        run.refresh_from_db()
+        self.assertEqual(run.state, "completed_with_errors")
+        self.assertIsNotNone(run.finished_at)
+
+    def test_backfill_monitor_counts_its_events_not_old_successes(self):
+        from django.contrib.auth.models import User
+        from .models import TeamMembership
+        from .thread_backfill import track_backfill
+        from .processing_attempts import reserve_attempt
+
+        user = User.objects.create_user(username="history-lead")
+        TeamMembership.objects.create(user=user, team=self.config.team, role="team_lead", status="active")
+        old = self.run_record()
+        self.persist(old, [self.item(old, "text"), self.item(old, "empty", "")])
+        raw = old.messages.exclude(content="").get()
+        MessageProcessingTrace.objects.filter(raw_message=raw).update(status="success")
+        RawMessage.objects.filter(pk=raw.id).update(processed=True)
+        trace = reserve_attempt(raw, f"thread-rebuild:{user.id}:tracking:{raw.id}")
+        event = OutboxEvent.objects.create(event_type="extract_message", deduplication_key=trace.operation_key,
+            payload={"raw_id": raw.id, "trace_id": trace.id}, state="processing")
+        other = RawMessage.objects.create(config=self.config, team=self.config.team, source="waha",
+            session_name="default", chat_id="another@g.us", message_id="other", source_revision="r", content="Другой чат", timestamp=timezone.now())
+        other_event = OutboxEvent.objects.create(event_type="extract_message",
+            deduplication_key=f"thread-rebuild:{user.id}:tracking:{other.id}", payload={"raw_id": other.id})
+        count = OutboxEvent.objects.count()
+        run = track_backfill(user, self.job.id, "tracking")
+        self.assertEqual(run.messages.count(), 2)
+        self.assertEqual(progress(run), {"total": 2, "processed": 1, "errors": 0, "pending": 1})
+        self.assertEqual(OutboxEvent.objects.count(), count + 1)  # monitor only; no duplicate AI
+        self.assertEqual(track_backfill(user, self.job.id, "tracking").id, run.id)
+        other_event.refresh_from_db()
+        self.assertNotIn("history_run_id", other_event.payload)
+        MessageProcessingTrace.objects.filter(pk=trace.id).update(status="success")
+        OutboxEvent.objects.filter(pk=event.id).update(state="done")
+        self.assertEqual(progress(run), {"total": 2, "processed": 2, "errors": 0, "pending": 0})
+        process_step({"history_run_id": run.id, "step": run.step}, None)
+        run.refresh_from_db()
+        self.assertEqual(run.state, "completed")
