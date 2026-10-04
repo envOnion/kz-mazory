@@ -233,12 +233,14 @@ def progress(run):
             payload__history_run_id=run.id,
         )
         successful = MessageProcessingTrace.objects.filter(
-            operation_key__startswith=f"history:{run.id}:extract:", status="success",
+            operation_key__in=events.values("deduplication_key"), status="success",
         )
-        errors = events.filter(state__in=["failed", "unknown", "done"]).exclude(
+        errors = events.filter(state__in=["failed", "unknown", "done", "cancelled"]).exclude(
             deduplication_key__in=successful.values("operation_key"),
         ).count()
-        processed = successful.count() + run.no_text_count
+        processed = successful.filter(
+            raw_message_id__in=run.messages.exclude(content__regex=r"^\s*$").values("id"),
+        ).values("raw_message_id").distinct().count() + run.no_text_count
         return {
             "total": total,
             "processed": processed,
