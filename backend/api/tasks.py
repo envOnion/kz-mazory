@@ -199,8 +199,13 @@ def run_outbox(pk):
                 from .models import Team
                 Team.objects.select_for_update().get(pk=raw.team_id)
             RawMessage.objects.select_for_update().get(pk=raw.id)
-            earlier = OutboxEvent.objects.filter(
-                event_type="extract_message", payload__raw_id__in=source_scope(raw).values_list("id", flat=True),
+            from django.db.models import BigIntegerField
+            from django.db.models.fields.json import KeyTextTransform
+            from django.db.models.functions import Cast
+            earlier = OutboxEvent.objects.alias(
+                source_raw_id=Cast(KeyTextTransform("raw_id", "payload"), BigIntegerField())
+            ).filter(
+                event_type="extract_message", source_raw_id__in=source_scope(raw).values_list("id", flat=True),
             ).exclude(pk=event.pk).filter(
                 Q(state="processing") | Q(pk__lt=event.pk, state__in=["pending", "enqueued"])
             ).exists()
@@ -281,6 +286,14 @@ def run_outbox(pk):
             if isinstance(exc, ProviderUnavailable)
             else type(exc).__name__
         )
+        if event.event_type == "thread_backfill" and code == "thread_history_busy":
+            # Waiting for earlier pages is normal progress, not a failed attempt.
+            OutboxEvent.objects.filter(pk=pk).update(
+                state="pending", error_code="", lease_until=None,
+                next_attempt_at=timezone.now() + timedelta(seconds=10),
+                attempt_count=max(0, event.attempt_count - 1),
+            )
+            return
         if code == "ai_daily_budget_exhausted":
             tomorrow = (timezone.now() + timedelta(days=1)).replace(
                 hour=0, minute=0, second=1, microsecond=0
