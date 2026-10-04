@@ -856,9 +856,13 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                     project.paid_amount = project.financial_records.filter(
                         is_verified=True, status="received"
                     ).aggregate(s=Sum("amount"))["s"] or Decimal(0)
-                if candidate.fact_type == "project":
+                if candidate.fact_type in ("project", "payment"):
                     project.identity_confirmed = True
-                project.is_verified = project.is_verified or (candidate.fact_type == "project" and "contract_amount" in data)
+                project.is_verified = (
+                    project.is_verified
+                    or (candidate.fact_type == "project" and "contract_amount" in data)
+                    or candidate.fact_type == "payment"
+                )
                 project.version += 1
                 project.needs_bitrix_sync = project.is_verified or (candidate.fact_type == "project" and project.identity_confirmed)
                 try:

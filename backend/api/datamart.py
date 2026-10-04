@@ -56,7 +56,18 @@ def period_bounds(period, zone="Asia/Almaty", today=None):
 
 def scoped_projects(user, filters=None):
     filters = filters or {}
-    qs = access.projects_for(user).filter(is_verified=True, version__gt=0)
+    qs = (
+        access.projects_for(user)
+        .filter(
+            Q(is_verified=True)
+            | Q(
+                financial_records__is_verified=True,
+                financial_records__status="received",
+            )
+        )
+        .filter(version__gt=0)
+        .distinct()
+    )
     for field in ("team_id", "manager_id", "project_id"):
         if filters.get(field):
             value = filters[field]

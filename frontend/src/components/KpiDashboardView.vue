@@ -16,32 +16,75 @@
     <p v-if="responseText" class="panel whitespace-pre-wrap" data-testid="chat-response">{{ responseText }}</p>
     <PresentationRenderer v-if="presentation" :document="presentation" @open-source="$emit('openSource', $event)" />
     <template v-else-if="widget">
-      <PresetChart v-if="widget.type === 'chart'" :data="widget.data" />
+      <PresetChart v-if="widget.type === 'chart'" :data="widget.data" data-testid="chart-kpi" />
       <PresetCommitmentList v-else-if="widget.type === 'commitments_list'" :data="widget.data" />
       <PresetProjectTable v-else-if="widget.type === 'project_table'" :data="widget.data" />
     </template>
     <template v-if="data && !presentation && !isLoading && ((!hasChatResponse && !widget) || widget?.type === 'kpi_grid')">
       <p class="text-sm text-slate-400">{{ data.querySubtitle }} · {{ data.updatedAtText }}</p>
       <p class="panel" :class="data.coverage.status === 'partial' ? 'text-amber-300' : 'text-emerald-300'">{{ data.coverage.message }}</p>
-      <div class="grid md:grid-cols-3 gap-4">
-        <button v-for="metric in data.summaryMetrics" :key="metric.id" class="panel text-left hover:border-indigo-400" @click="detail = metric.id">
-          <span class="text-sm text-slate-400">{{ metric.title }}</span><strong class="block text-2xl mt-2">{{ metric.value }}</strong><span class="block text-xs text-slate-400 mt-2">{{ metric.trend }} · Детализация</span>
+      <div class="grid md:grid-cols-3 gap-4" data-testid="kpi-metrics-grid">
+        <button
+          v-for="metric in data.summaryMetrics"
+          :key="metric.id"
+          class="panel text-left hover:border-indigo-400 cursor-pointer"
+          :data-testid="getMetricTestId(metric.id)"
+          :data-metric="metric.id"
+          @click="detail = metric.id"
+        >
+          <span class="text-sm text-slate-400 block" data-testid="metric-title">{{ metric.title }}</span>
+          <strong class="block text-2xl mt-2" data-testid="metric-value">{{ metric.value }}</strong>
+          <span class="block text-xs text-slate-400 mt-2">{{ metric.trend }} · Детализация</span>
         </button>
       </div>
-      <div v-if="detail" class="panel overflow-auto">
-        <button class="btn float-right" @click="detail = ''">Закрыть детализацию</button>
+      <div v-if="detail" class="panel overflow-auto" data-testid="kpi-detail-dialog">
+        <button class="btn float-right" data-testid="btn-close-detail" @click="detail = ''">Закрыть детализацию</button>
         <h2 class="font-semibold mb-3">{{ detail === 'overdue' ? 'График погашения' : detail === 'target' ? 'Планы менеджеров' : 'Операции периода' }}</h2>
-        <table v-if="detail === 'receipts'" class="data-table"><thead><tr><th>Дата</th><th>Проект</th><th>Сумма</th></tr></thead><tbody><tr v-for="row in paymentRows" :key="row.id"><td>{{ row.payment_date }}</td><td>#{{ row.project_id }}</td><td>{{ row.amount }} {{ row.currency }}</td></tr></tbody></table>
-        <table v-else-if="detail === 'overdue'" class="data-table"><thead><tr><th>Срок</th><th>Проект</th><th>Осталось</th></tr></thead><tbody><tr v-for="row in data.receivables.rows" :key="row.id"><td>{{ row.due_date }}</td><td>#{{ row.project_id }}</td><td>{{ row.remaining }} {{ data.currency }}</td></tr></tbody></table>
-        <p v-else v-for="manager in data.managers" :key="manager.id">{{ manager.name }}: {{ manager.targetFormatted }}</p>
-        <p v-if="detail === 'receipts'" class="text-xs text-slate-400 mt-3">Загружено {{ paymentRows.length }} из {{ data.source_count }} операций. <button v-if="paymentRows.length < data.source_count" class="btn" @click="loadPayments">Загрузить ещё</button></p>
+        <table v-if="detail === 'receipts'" class="data-table" data-testid="operations-table">
+          <thead><tr><th>Дата</th><th>Проект</th><th>Сумма</th></tr></thead>
+          <tbody>
+            <tr v-for="row in paymentRows" :key="row.id" class="operation-row" data-testid="operation-row">
+              <td class="cell-date">{{ row.payment_date }}</td>
+              <td class="cell-project">#{{ row.project_id }}</td>
+              <td class="cell-amount">{{ row.amount }} {{ row.currency }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <table v-else-if="detail === 'overdue'" class="data-table" data-testid="overdue-table">
+          <thead><tr><th>Срок</th><th>Проект</th><th>Осталось</th></tr></thead>
+          <tbody>
+            <tr v-for="row in data.receivables.rows" :key="row.id" class="receivable-row" data-testid="receivable-row">
+              <td class="cell-date">{{ row.due_date }}</td>
+              <td class="cell-project">#{{ row.project_id }}</td>
+              <td class="cell-remaining">{{ row.remaining }} {{ data.currency }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <div v-else class="space-y-1" data-testid="manager-plans-list">
+          <p v-for="manager in data.managers" :key="manager.id" class="manager-plan-row" data-testid="manager-plan-row">
+            <span class="manager-name">{{ manager.name }}</span>: <strong class="manager-target">{{ manager.targetFormatted }}</strong>
+          </p>
+        </div>
+        <p v-if="detail === 'receipts'" class="text-xs text-slate-400 mt-3">
+          Загружено {{ paymentRows.length }} из {{ data.source_count }} операций.
+          <button v-if="paymentRows.length < data.source_count" class="btn ml-2" data-testid="btn-load-more" @click="loadPayments">Загрузить ещё</button>
+        </p>
         <p class="text-xs text-slate-400 mt-3">{{ data.definition }}</p>
       </div>
-      <div class="grid md:grid-cols-2 gap-5"><PresetChart :data="data.chartData" /><PresetChart :data="data.timeline" /></div>
-      <PresetChart :data="agingChart" v-if="agingChart" />
-      <div class="grid md:grid-cols-3 gap-4"><ManagerCard v-for="manager in data.managers" :key="manager.id" :manager="manager" /></div>
+      <div class="grid md:grid-cols-2 gap-5">
+        <PresetChart :data="data.chartData" data-testid="chart-kpi" />
+        <PresetChart :data="data.timeline" data-testid="chart-kpi" />
+      </div>
+      <PresetChart :data="agingChart" v-if="agingChart" data-testid="chart-kpi" />
+      <div class="grid md:grid-cols-3 gap-4">
+        <ManagerCard v-for="manager in data.managers" :key="manager.id" :manager="manager" />
+      </div>
       <p v-if="!data.managers.length" class="panel">Нет доступных показателей. Доступ к команде и полноту источников настраивает администратор.</p>
-      <div class="panel"><h2 class="font-semibold">Прогноз поступлений</h2><p v-if="data.forecast.available">{{ data.forecast.amount }} {{ data.forecast.currency }} · на {{ data.forecast.as_of }}</p><p class="text-xs text-slate-400">{{ data.forecast.reason }}</p></div>
+      <div class="panel" data-testid="kpi-forecast">
+        <h2 class="font-semibold" data-testid="kpi-forecast-heading">Прогноз поступлений</h2>
+        <p v-if="data.forecast.available" data-testid="kpi-forecast-value">{{ data.forecast.amount }} {{ data.forecast.currency }} · на {{ data.forecast.as_of }}</p>
+        <p class="text-xs text-slate-400" data-testid="kpi-forecast-reason">{{ data.forecast.reason }}</p>
+      </div>
     </template>
   </section>
 </template>
@@ -68,4 +111,11 @@ const paymentPage = ref(1)
 watch(() => props.data, value => { paymentRows.value = value?.source_rows || []; paymentPage.value = 1 }, { immediate: true })
 async function loadPayments() { if (props.data) { const page = await api<Page<Payment>>(`${props.data.source_path}&page=${paymentPage.value + 1}`); paymentRows.value.push(...page.results); paymentPage.value++ } }
 const agingChart = computed<ChartPayload | null>(() => props.data ? ({ title: 'Дебиторка по возрасту', unit: props.data.currency, labels: ['Срок не наступил', '1–30 дней', '31–60 дней', '61–90 дней', 'Более 90 дней'], datasets: [{ label: 'Непогашенная сумма', data: ['not_due', '1_30', '31_60', '61_90', 'over_90'].map(key => props.data!.receivables.buckets[key] || '0.00'), backgroundColor: '#fbbf24' }] }) : null)
+
+function getMetricTestId(id: string): string {
+  if (id === 'receipts') return 'kpi-metric-received'
+  if (id === 'target') return 'kpi-metric-plan'
+  if (id === 'overdue') return 'kpi-metric-overdue'
+  return `kpi-metric-${id}`
+}
 </script>

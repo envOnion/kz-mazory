@@ -1,7 +1,9 @@
 """Deterministic external HTTP fixtures; no application API is mocked."""
 
+import datetime
 import json
 from http.server import BaseHTTPRequestHandler
+from django.utils import timezone
 
 TOPICS = {
     "north": "Смета БЦ Север",
@@ -14,8 +16,11 @@ ASSIGNMENTS = {
     "БЦ Север: подготовь смету": ("north", "request"),
     "Сделаешь завтра?": ("north", "request"),
     "БЦ Север: да, подготовлю смету завтра": ("north", "promise"),
+    "БЦ Север: оплата 50 000 000 ₸ поступила сегодня": ("north", "payment"),
     "БЦ Южный: проверь доставку": ("south", "request"),
     "БЦ Южный: проверю доставку в пятницу": ("south", "promise"),
+    "БЦ Южный: согласуем график платежей": ("south", "request"),
+    "БЦ Южный: оплатим 30 000 000 ₸ до 15 октября": ("south", "promise"),
     "Подготовь список объектов команды": ("general", "request"),
     "Да, подготовлю список объектов завтра": ("general", "promise"),
 }
@@ -33,16 +38,17 @@ def classify(value):
         groups.setdefault(key, []).append((row, role))
     themes, facts = [], []
     for key, members in groups.items():
-        promise = next((row for row, role in members if role == "promise"), None)
+        promise = next((row for row, role in reversed(members) if role == "promise"), None)
         request = next(
             (
                 row
-                for row, role in members
+                for row, role in reversed(members)
                 if role == "request" and not row["content"].endswith("?")
             ),
             None,
         )
-        ready = bool(promise and request) or key == "east"
+        has_payment = any(role == "payment" for _, role in members)
+        ready = bool(promise and request) or key == "east" or has_payment
         topic = TOPICS.get(key, "Тема требует уточнения")
         themes.append(
             {
@@ -62,7 +68,7 @@ def classify(value):
                     {
                         "raw_message_id": row["raw_message_id"],
                         "thought_state": "final"
-                        if ready and role in ("promise", "project")
+                        if ready and role in ("promise", "project", "payment")
                         else "intermediate",
                         "relation": "answers" if role == "promise" else "discusses",
                     }
@@ -70,6 +76,22 @@ def classify(value):
                 ],
             }
         )
+        for row, role in members:
+            if role == "payment":
+                facts.append(
+                    {
+                        "thread_key": key,
+                        "evidence_message_id": row["raw_message_id"],
+                        "fact_type": "payment",
+                        "object_name": "БЦ Север",
+                        "amount": "50000000.00",
+                        "currency": "KZT",
+                        "payment_date": str(timezone.localdate()),
+                        "payment_kind": "increment",
+                        "evidence": row["content"],
+                        "confidence": 0.98,
+                    }
+                )
         if ready and key == "east":
             row = members[0][0]
             facts.append(
@@ -82,39 +104,93 @@ def classify(value):
                     "confidence": 0.95,
                 }
             )
-        elif ready:
-            fact = {
-                "thread_key": key,
-                "evidence_message_id": promise["raw_message_id"],
-                "promise_message_id": promise["raw_message_id"],
-                "fact_type": "commitment",
-                "object_name": "БЦ Север"
-                if key == "north"
-                else "БЦ Южный"
-                if key == "south"
-                else "",
-                "commitment_text": "Подготовить смету БЦ Север"
-                if key == "north"
-                else "Проверить доставку БЦ Южный"
-                if key == "south"
-                else "Подготовить список объектов команды",
-                "responsible_name": "Боб",
-                "evidence": promise["content"],
-                "confidence": 0.95,
-                "evidence_messages": [
+        elif ready and promise and request:
+            if key == "south" and "30 000 000" in promise["content"]:
+                facts.append(
                     {
-                        "raw_message_id": request["raw_message_id"],
-                        "quote": request["content"],
-                        "role": "request",
-                    },
+                        "thread_key": key,
+                        "evidence_message_id": promise["raw_message_id"],
+                        "promise_message_id": promise["raw_message_id"],
+                        "fact_type": "commitment",
+                        "object_name": "БЦ Южный",
+                        "commitment_text": "Оплатить 30 000 000 ₸ БЦ Южный",
+                        "responsible_name": "Боб",
+                        "amount": "30000000.00",
+                        "currency": "KZT",
+                        "deadline_at": (timezone.now() + datetime.timedelta(days=10)).isoformat(),
+                        "deadline_precision": "date",
+                        "evidence": promise["content"],
+                        "confidence": 0.95,
+                        "evidence_messages": [
+                            {
+                                "raw_message_id": request["raw_message_id"],
+                                "quote": request["content"],
+                                "role": "request",
+                            },
+                            {
+                                "raw_message_id": promise["raw_message_id"],
+                                "quote": promise["content"],
+                                "role": "promise",
+                            },
+                        ],
+                    }
+                )
+            elif key == "south":
+                facts.append(
                     {
-                        "raw_message_id": promise["raw_message_id"],
-                        "quote": promise["content"],
-                        "role": "promise",
-                    },
-                ],
-            }
-            facts.append(fact)
+                        "thread_key": key,
+                        "evidence_message_id": promise["raw_message_id"],
+                        "promise_message_id": promise["raw_message_id"],
+                        "fact_type": "commitment",
+                        "object_name": "БЦ Южный",
+                        "commitment_text": "Проверить доставку БЦ Южный",
+                        "responsible_name": "Боб",
+                        "evidence": promise["content"],
+                        "confidence": 0.95,
+                        "evidence_messages": [
+                            {
+                                "raw_message_id": request["raw_message_id"],
+                                "quote": request["content"],
+                                "role": "request",
+                            },
+                            {
+                                "raw_message_id": promise["raw_message_id"],
+                                "quote": promise["content"],
+                                "role": "promise",
+                            },
+                        ],
+                    }
+                )
+            else:
+                facts.append(
+                    {
+                        "thread_key": key,
+                        "evidence_message_id": promise["raw_message_id"],
+                        "promise_message_id": promise["raw_message_id"],
+                        "fact_type": "commitment",
+                        "object_name": "БЦ Север"
+                        if key == "north"
+                        else "",
+                        "commitment_text": "Подготовить смету БЦ Север"
+                        if key == "north"
+                        else "Подготовить список объектов команды",
+                        "responsible_name": "Боб",
+                        "evidence": promise["content"],
+                        "confidence": 0.95,
+                        "evidence_messages": [
+                            {
+                                "raw_message_id": request["raw_message_id"],
+                                "quote": request["content"],
+                                "role": "request",
+                            },
+                            {
+                                "raw_message_id": promise["raw_message_id"],
+                                "quote": promise["content"],
+                                "role": "promise",
+                            },
+                        ],
+                    }
+                )
     return {"threads": themes, "facts": facts}
 
 
@@ -138,17 +214,25 @@ class ProviderHandler(BaseHTTPRequestHandler):
             state = json.loads(self.control.read_text())
             if state.get("crm_error"):
                 return self.respond({"error": "CRM temporarily unavailable"}, 503)
+            if self.path.endswith("crm.company.list.json"):
+                rows = [
+                    {"ID": "201", "TITLE": "ТОО Север Холдинг"},
+                    {"ID": "202", "TITLE": "ТОО Юг Групп"},
+                ]
+                return self.respond({"result": rows})
             if self.path.endswith("crm.deal.list.json"):
                 rows = [
                     {
                         "ID": "101",
                         "TITLE": "БЦ Север",
+                        "COMPANY_ID": "201",
                         "ASSIGNED_BY_ID": "7",
                         "CURRENCY_ID": "KZT",
                     },
                     {
                         "ID": "102",
                         "TITLE": "БЦ Южный",
+                        "COMPANY_ID": "202",
                         "ASSIGNED_BY_ID": "7",
                         "CURRENCY_ID": "KZT",
                     },

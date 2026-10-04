@@ -1,7 +1,10 @@
+import datetime
+from decimal import Decimal
 import json
 from pathlib import Path
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.utils import timezone
 from api.authentication import create_session
 from api.ai_credentials import encrypt_credential
 from api.models import (
@@ -11,17 +14,41 @@ from api.models import (
     WhatsAppConfig,
     AISettings,
     BitrixSettings,
+    SalesTarget,
 )
 
 
 def seed():
-    team = Team.objects.create(id=1, name="Локальная команда")
+    team = Team.objects.create(
+        id=1,
+        name="Локальная команда",
+        history_complete_from=datetime.date(2026, 1, 1),
+    )
     user = User.objects.create_superuser("79990000001", password="local-e2e-only")
     UserProfile.objects.create(
-        user=user, full_name="Проверяющий", phone="79990000001", bitrix_user_id="7"
+        user=user, full_name="Проверяющий", phone="79990000001", bitrix_user_id="1"
     )
     TeamMembership.objects.create(
         user=user, team=team, role="team_lead", status="active"
+    )
+    manager_user = User.objects.create_user("79990000002", password="local-e2e-only")
+    manager_profile = UserProfile.objects.create(
+        user=manager_user,
+        full_name="Боб Менеджер",
+        phone="79990000002",
+        bitrix_user_id="7",
+    )
+    TeamMembership.objects.create(
+        user=manager_user, team=team, role="manager", status="active"
+    )
+    month = timezone.localdate().replace(day=1)
+    SalesTarget.objects.create(
+        team=team,
+        profile=manager_profile,
+        month=month,
+        amount=Decimal("100000000.00"),
+        currency="KZT",
+        is_active=True,
     )
     config = WhatsAppConfig.objects.create(
         team=team,

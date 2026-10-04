@@ -11,9 +11,9 @@
     />
 
     <nav v-if="isAuthenticated" class="relative z-30 max-w-6xl mx-auto w-full px-4 flex flex-wrap gap-2" aria-label="Главная навигация">
-      <button v-if="!currentUser?.roles.includes('client')" class="btn" @click="currentView = 'dashboard'; fetchKpiData()">KPI и чат</button>
-      <button class="btn" @click="currentView = 'workspace'">Рабочий кабинет</button>
-      <button class="btn" @click="currentView = 'profile'">Настройки профиля</button>
+      <button v-if="!currentUser?.roles.includes('client')" class="btn" data-testid="nav-kpi-dashboard" @click="currentView = 'dashboard'; fetchKpiData()">KPI и чат</button>
+      <button class="btn" data-testid="nav-workspace" @click="currentView = 'workspace'">Рабочий кабинет</button>
+      <button class="btn" data-testid="nav-profile" @click="currentView = 'profile'">Настройки профиля</button>
     </nav>
     <!-- Main Content Area -->
     <main class="relative z-10 flex-1 flex flex-col justify-center">

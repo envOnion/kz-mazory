@@ -1,5 +1,5 @@
 <template>
-  <div class="panel space-y-3">
+  <div class="panel space-y-3" data-testid="chart-kpi">
     <h3 class="font-semibold">{{ data.title }}</h3>
     <p class="text-xs text-slate-400">{{ data.unit }} · Подтверждённые значения</p>
     <div class="h-72 relative"><Bar :data="chart" :options="options" /></div>

@@ -182,7 +182,7 @@
                       class="px-1.5 py-0.5 rounded text-[10px] whitespace-nowrap font-medium"
                       :class="thread.state === 'open' ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40' : 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'"
                     >
-                      {{ thread.state === 'open' ? '⏳ open' : '✅ ready' }}
+                      {{ labels[thread.state] || thread.state }}
                     </span>
                   </div>
 
@@ -420,11 +420,11 @@ const error = ref('')
 
 const items = ref<ThreadSummary[]>([])
 const detail = ref<DialogueThread | null>(null)
-const openFolders = ref<Set<string>>(new Set())
+const closedFolders = ref<Set<string>>(new Set())
 
-const labels = {
-  open: 'Мысль продолжается (open)',
-  ready: 'Мысль определена (ready)',
+const labels: Record<string, string> = {
+  open: 'Мысль продолжается',
+  ready: 'Мысль определена',
   unknown: 'Требует уточнения',
   superseded: 'Заменена',
 }
@@ -553,26 +553,26 @@ const treeCompanies = computed(() => {
 })
 
 function isFolderOpen(key: string): boolean {
-  return openFolders.value.has(key)
+  return !closedFolders.value.has(key)
 }
 
 function toggleFolder(key: string) {
-  if (openFolders.value.has(key)) {
-    openFolders.value.delete(key)
+  if (closedFolders.value.has(key)) {
+    closedFolders.value.delete(key)
   } else {
-    openFolders.value.add(key)
+    closedFolders.value.add(key)
   }
 }
 
 function toggleAllFolders(expand: boolean) {
-  if (!expand) {
-    openFolders.value.clear()
+  if (expand) {
+    closedFolders.value.clear()
     return
   }
   for (const comp of treeCompanies.value) {
-    openFolders.value.add(comp.key)
+    closedFolders.value.add(comp.key)
     for (const proj of comp.projects) {
-      openFolders.value.add(proj.key)
+      closedFolders.value.add(proj.key)
     }
   }
 }
@@ -599,11 +599,6 @@ async function load(number: number) {
     items.value = result.results
     next.value = Boolean(result.next)
     page.value = number
-
-    // По умолчанию раскрываем все папки при первой загрузке
-    if (openFolders.value.size === 0) {
-      toggleAllFolders(true)
-    }
 
     // Если был выбран тред, проверяем остался ли он в списке
     if (detail.value && !items.value.some(it => it.id === detail.value!.id)) {

@@ -8,11 +8,27 @@ import type { DialogueThread } from '../src/types/factReview'
 const directory = process.env.MAZORY_E2E_DIR
 if (!directory) throw new Error('Use backend/e2e/run.py to start the isolated local stack')
 const session: { access: string; refresh: string; cookie_name: string; config_id: number } = JSON.parse(readFileSync(join(directory, 'session.json'), 'utf8'))
+let currentRefresh = session.refresh
+let currentAccess = session.access
 const headers = { Authorization: `Bearer ${session.access}` }
 test.describe.configure({ mode: 'serial' })
 
 async function authenticate(context: BrowserContext) {
-  await context.addCookies([{ name: session.cookie_name, value: session.refresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
+  context.on('response', async res => {
+    if (res.url().includes('/api/auth/refresh/') && res.request().method() === 'POST' && res.ok()) {
+      try {
+        const body = await res.json()
+        if (body.access) {
+          currentAccess = body.access
+          headers.Authorization = `Bearer ${currentAccess}`
+        }
+      } catch {}
+      const cookies = await context.cookies()
+      const c = cookies.find(x => x.name === session.cookie_name)
+      if (c) currentRefresh = c.value
+    }
+  })
+  await context.addCookies([{ name: session.cookie_name, value: currentRefresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
 }
 async function candidates(request: APIRequestContext, status = 'pending'): Promise<Page<Candidate>> {
   const response = await request.get(`/api/candidates/?status=${status}`, { headers }); expect(response.ok()).toBe(true); return response.json()
@@ -75,6 +91,7 @@ test('CRM catalog, incomplete thought, interleaved themes and review through rea
   }, { timeout: 45000 }).toBe(0)
   expect((await candidates(request)).count).toBe(0)
   expect((await candidates(request, 'approved')).count).toBe(1)
+  const endC = (await context.cookies()).find(x => x.name === session.cookie_name); if (endC) currentRefresh = endC.value
   await page.screenshot({ path: join(directory, 'desktop-review.png'), fullPage: true })
 })
 
@@ -118,3 +135,128 @@ test('new project requires completed CRM search and sends identity without fabri
   const catalog: Directory = await (await request.get('/api/directory/', { headers })).json()
   expect(catalog.projects_count).toBe(3)
 })
+
+test('full flow from WhatsApp messages to KPI plan/fact, timeline and forecasts', async ({ page, context, request }) => {
+  await authenticate(context)
+  await page.goto('/')
+  await expect(page.getByRole('button', { name: 'KPI и чат', exact: true })).toBeVisible()
+
+  // 1. Ensure CRM catalog is synced (with ТОО «Север Холдинг» / БЦ Север and ТОО «Юг Групп» / БЦ Южный).
+  await expect.poll(async () => {
+    const response = await request.get('/api/directory/', { headers })
+    const value: Directory = await response.json()
+    return value.projects_count
+  }).toBeGreaterThanOrEqual(2)
+
+  const dir: Directory = await (await request.get('/api/directory/', { headers })).json()
+  const northProject = dir.projects.find(p => p.name === 'БЦ Север')
+  const southProject = dir.projects.find(p => p.name === 'БЦ Южный')
+  expect(northProject).toBeDefined()
+  expect(southProject).toBeDefined()
+
+  // 2. WhatsApp Message 1 (Payment):
+  //    Send: "БЦ Север: оплата 50 000 000 ₸ поступила сегодня"
+  await message(request, 'north-payment', 'БЦ Север: оплата 50 000 000 ₸ поступила сегодня')
+
+  //    Wait for fact candidate with fact_type="payment", amount="50000000.00", project="БЦ Север".
+  await expect.poll(async () => {
+    const list = await candidates(request)
+    return list.results.find(c => c.fact_type === 'payment' && c.project_name === 'БЦ Север' && c.proposed_changes.amount === '50000000.00')
+  }, { timeout: 20000 }).toBeTruthy()
+
+  const payFact = (await candidates(request)).results.find(
+    c => c.fact_type === 'payment' && c.project_name === 'БЦ Север' && c.proposed_changes.amount === '50000000.00'
+  )!
+  expect(payFact.fact_type).toBe('payment')
+  expect(payFact.project_name).toBe('БЦ Север')
+  expect(payFact.proposed_changes.amount).toBe('50000000.00')
+
+  //    Verify notification was generated.
+  await expect.poll(async () => {
+    const notifs = await (await request.get('/api/notifications/', { headers })).json()
+    return notifs.notifications.some((n: { title: string; message: string; project_id: number | null }) =>
+      n.title.includes('оплат') || n.message.includes('50 000 000') || n.project_id === payFact.project_id
+    )
+  }, { timeout: 15000 }).toBe(true)
+
+  //    Go to Workspace Review (or approve via API/UI): POST `/api/candidates/${fact.id}/review/` with action: 'approve'.
+  const payReviewResp = await request.post(`/api/candidates/${payFact.id}/review/`, {
+    headers,
+    data: { action: 'approve', base_version: payFact.base_version, changes: {}, reason: '' }
+  })
+  expect(payReviewResp.status()).toBe(200)
+
+  //    Verify candidate is approved.
+  await expect.poll(async () => {
+    const approved = await candidates(request, 'approved')
+    return approved.results.some(c => c.id === payFact.id)
+  }).toBe(true)
+
+  // 3. WhatsApp Message 2 & 3 (Commitment):
+  //    Send: "БЦ Южный: согласуем график платежей"
+  //    Send: "БЦ Южный: оплатим 30 000 000 ₸ до 15 октября"
+  await message(request, 'south-commit-request', 'БЦ Южный: согласуем график платежей')
+  await message(request, 'south-commit-promise', 'БЦ Южный: оплатим 30 000 000 ₸ до 15 октября')
+
+  //    Wait for fact candidate with fact_type="commitment", amount="30000000.00", project="БЦ Южный".
+  await expect.poll(async () => {
+    const list = await candidates(request)
+    return list.results.find(c => c.fact_type === 'commitment' && c.project_name === 'БЦ Южный' && c.proposed_changes.amount === '30000000.00')
+  }, { timeout: 20000 }).toBeTruthy()
+
+  const commitFact = (await candidates(request)).results.find(
+    c => c.fact_type === 'commitment' && c.project_name === 'БЦ Южный' && c.proposed_changes.amount === '30000000.00'
+  )!
+  expect(commitFact.fact_type).toBe('commitment')
+  expect(commitFact.project_name).toBe('БЦ Южный')
+  expect(commitFact.proposed_changes.amount).toBe('30000000.00')
+
+  //    Approve commitment candidate.
+  const commitReviewResp = await request.post(`/api/candidates/${commitFact.id}/review/`, {
+    headers,
+    data: { action: 'approve', base_version: commitFact.base_version, changes: {}, reason: '' }
+  })
+  expect(commitReviewResp.status()).toBe(200)
+
+  //    Verify candidate is approved.
+  await expect.poll(async () => {
+    const approved = await candidates(request, 'approved')
+    return approved.results.some(c => c.id === commitFact.id)
+  }).toBe(true)
+
+  // 4. Verify KPI Dashboard:
+  //    Navigate to `/` -> Click 'KPI и чат'.
+  await page.goto('/')
+  await page.getByRole('button', { name: 'KPI и чат', exact: true }).click()
+
+  //    Fetch or wait for KPI data:
+  //    - Expect summary metrics: 50 000 000 ₸ fact, 100 000 000 ₸ target/plan, 50% KPI completion.
+  await expect(page.getByTestId('kpi-metric-received')).toContainText('50 000 000')
+  await expect(page.getByTestId('kpi-metric-plan')).toContainText('100 000 000')
+  await expect(page.getByTestId('manager-card')).toContainText('50%')
+
+  //    - Expect chart canvases to render (plan vs fact by manager, timeline by days).
+  await expect(page.locator('canvas').first()).toBeVisible()
+  expect(await page.locator('canvas').count()).toBeGreaterThanOrEqual(2)
+
+  //    - Expect 'Прогноз поступлений' to be visible with amount and reasoning.
+  await expect(page.getByTestId('kpi-forecast')).toBeVisible()
+  await expect(page.getByTestId('kpi-forecast-heading')).toHaveText('Прогноз поступлений')
+  await expect(page.getByTestId('kpi-forecast-value')).toBeVisible()
+  await expect(page.getByTestId('kpi-forecast-reason')).toBeVisible()
+
+  //    - Click 'Детализация' / metric -> expect payment row (50000000.00 KZT) in the table.
+  await page.getByTestId('kpi-metric-received').click()
+  await expect(page.getByTestId('kpi-detail-dialog')).toBeVisible()
+  await expect(page.getByTestId('operation-row').first()).toContainText('50000000.00 KZT')
+  await page.getByTestId('btn-close-detail').click()
+
+  // 5. In AI chat:
+  //    - Fill input: 'покажи kpi команды' -> press Enter -> expect KPI widget or chart to be displayed.
+  const chatInput = page.getByPlaceholder('Спросите Mazory...')
+  await chatInput.fill('покажи kpi команды')
+  await chatInput.press('Enter')
+  await expect(page.getByTestId('chart-kpi').first()).toBeVisible({ timeout: 20000 })
+  await expect(page.locator('canvas').first()).toBeVisible()
+})
+
