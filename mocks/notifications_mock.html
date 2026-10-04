@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Центр Уведомлений Mazory & WhatsApp WAHA Simulator</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background-color: #060912; color: #f8fafc; font-family: system-ui, -apple-system, sans-serif; }
+    .panel { background-color: rgba(15, 23, 42, 0.75); border: 1px solid rgba(51, 65, 85, 0.6); backdrop-filter: blur(12px); border-radius: 1rem; }
+  </style>
+</head>
+<body class="p-4 md:p-8 min-h-screen">
+  <div class="max-w-6xl mx-auto space-y-8">
+
+    <!-- Заголовок -->
+    <header class="pb-4 border-b border-slate-800">
+      <span class="px-2.5 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20 text-xs font-semibold">
+        ЭКРАН 4 · СИСТЕМА ОПОВЕЩЕНИЙ
+      </span>
+      <h1 class="text-2xl md:text-3xl font-bold tracking-tight text-white mt-1">
+        Центр Уведомлений (In-App) и WhatsApp WAHA Шлюз
+      </h1>
+      <p class="text-sm text-slate-400 mt-0.5">
+        Демонстрация генерации и мгновенной доставки уведомлений при обнаружении сделок, обязательств и дедлайнов из переписки.
+      </p>
+    </header>
+
+    <div class="grid lg:grid-cols-2 gap-8 items-start">
+
+      <!-- ========================================================================================= -->
+      <!-- БЛОК 1: IN-APP УВЕДОМЛЕНИЯ (ВЕБ-ИНТЕРФЕЙС / КОЛОКОЛЬЧИК) -->
+      <!-- ========================================================================================= -->
+      <div class="panel p-6 space-y-6 border-indigo-900/40 bg-gradient-to-b from-slate-900 to-[#0a1024]">
+        <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+          <div class="flex items-center gap-3">
+            <!-- Кнопка колокольчика -->
+            <div class="relative p-2.5 rounded-2xl bg-indigo-600/20 border border-indigo-500/30 text-indigo-300">
+              <span class="text-xl">🔔</span>
+              <span class="absolute -top-1 -right-1 min-w-[20px] h-5 px-1.5 rounded-full bg-cyan-400 text-[#060912] font-black text-xs flex items-center justify-center shadow-[0_0_10px_rgba(34,211,238,0.9)] animate-pulse">
+                3
+              </span>
+            </div>
+            <div>
+              <h2 class="font-bold text-white text-base">In-App Уведомления (Веб)</h2>
+              <p class="text-xs text-slate-400">Всплывающее окно в шапке Рабочего кабинета</p>
+            </div>
+          </div>
+          <button class="text-xs text-indigo-400 hover:text-white transition-colors" onclick="markAllRead()">
+            Прочитать все
+          </button>
+        </div>
+
+        <!-- Выпадающий список уведомлений -->
+        <div class="space-y-3" id="notifications-list">
+
+          <!-- УВЕДОМЛЕНИЕ 1: СРОЧНОЕ ОБЯЗАТЕЛЬСТВО -->
+          <div class="p-3.5 rounded-2xl bg-rose-950/20 border border-rose-500/40 hover:bg-rose-950/30 transition-all flex items-start gap-3">
+            <div class="w-8 h-8 rounded-xl bg-rose-500/20 text-rose-400 border border-rose-500/30 flex items-center justify-center shrink-0 text-sm font-bold">
+              🚨
+            </div>
+            <div class="space-y-1 flex-1 min-w-0">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-xs font-bold text-rose-300">Приближение дедлайна обязательства (2ч)</span>
+                <span class="text-[10px] text-slate-400">10:00</span>
+              </div>
+              <p class="text-xs text-slate-200">
+                <b>Нурлан Касымов</b>, сегодня до <b>12:00</b> необходимо направить скорректированную схему ТУ по газу для <b>ТОО «BI Group Development»</b> (ЖК Grand Park).
+              </p>
+              <div class="flex items-center gap-2 pt-1 text-[11px]">
+                <a href="#review" class="text-indigo-400 hover:underline font-semibold">Перейти к обязательству #142 →</a>
+                <span class="text-slate-500">·</span>
+                <span class="text-emerald-400">Продублировано в WhatsApp ✓</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- УВЕДОМЛЕНИЕ 2: НОВАЯ СДЕЛКА -->
+          <div class="p-3.5 rounded-2xl bg-cyan-950/20 border border-cyan-500/40 hover:bg-cyan-950/30 transition-all flex items-start gap-3">
+            <div class="w-8 h-8 rounded-xl bg-cyan-500/20 text-cyan-400 border border-cyan-500/30 flex items-center justify-center shrink-0 text-sm font-bold">
+              💼
+            </div>
+            <div class="space-y-1 flex-1 min-w-0">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-xs font-bold text-cyan-300">Обнаружена новая сделка в чате</span>
+                <span class="text-[10px] text-slate-400">Вчера 17:42</span>
+              </div>
+              <p class="text-xs text-slate-200">
+                В переписке с <b>BI Group</b> согласована поставка 4 БМК на сумму <b class="text-emerald-400 font-mono">148 500 000 ₸</b> (ЖК Grand Park). Требуется подтверждение в кабинете.
+              </p>
+              <div class="flex items-center gap-2 pt-1 text-[11px]">
+                <a href="#review" class="text-indigo-400 hover:underline font-semibold">Подтвердить в проверке →</a>
+              </div>
+            </div>
+          </div>
+
+          <!-- УВЕДОМЛЕНИЕ 3: ФАКТ ОПЛАТЫ -->
+          <div class="p-3.5 rounded-2xl bg-teal-950/20 border border-teal-500/40 hover:bg-teal-950/30 transition-all flex items-start gap-3">
+            <div class="w-8 h-8 rounded-xl bg-teal-500/20 text-teal-400 border border-teal-500/30 flex items-center justify-center shrink-0 text-sm font-bold">
+              💰
+            </div>
+            <div class="space-y-1 flex-1 min-w-0">
+              <div class="flex items-center justify-between gap-2">
+                <span class="text-xs font-bold text-teal-300">Поступление оплаты (Аванс)</span>
+                <span class="text-[10px] text-slate-400">Вчера 16:15</span>
+              </div>
+              <p class="text-xs text-slate-200">
+                Зафиксировано подтверждение платежа от <b>ТОО «BAZIS-A Corporation»</b> на сумму <b class="text-teal-400 font-mono">+19 260 000 ₸</b> по договору №148-АК.
+              </p>
+              <div class="flex items-center gap-2 pt-1 text-[11px]">
+                <span class="text-slate-400">Финансы проверены финансистом ✓</span>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ========================================================================================= -->
+      <!-- БЛОК 2: СИМУЛЯТОР СМАРТФОНА WHATSAPP (ОТПРАВКА ЧЕРЕЗ WAHA) -->
+      <!-- ========================================================================================= -->
+      <div class="flex flex-col items-center">
+        <!-- Рамка смартфона -->
+        <div class="w-full max-w-[340px] rounded-[2.5rem] bg-[#111b21] p-3 shadow-2xl border-4 border-slate-700/80 ring-1 ring-slate-800">
+          <!-- Верхний вырез (динамический остров) -->
+          <div class="w-28 h-4 bg-black rounded-full mx-auto mb-2"></div>
+
+          <!-- Шапка чата WhatsApp -->
+          <div class="flex items-center gap-2.5 pb-2.5 px-2 border-b border-[#222e35] text-white">
+            <div class="w-8 h-8 rounded-full bg-indigo-600 flex items-center justify-center font-bold text-xs shadow-md">
+              🤖
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="font-bold text-xs truncate flex items-center gap-1">
+                <span>Mazory AI Assistant</span>
+                <span class="text-emerald-400 text-[10px]">✓</span>
+              </div>
+              <div class="text-[10px] text-emerald-400">онлайн · WAHA Gateway</div>
+            </div>
+            <span class="text-slate-400 text-xs">📞 ⋮</span>
+          </div>
+
+          <!-- Область сообщений WhatsApp -->
+          <div class="py-4 px-1 space-y-3 min-h-[380px] bg-[#0b141a] rounded-xl text-slate-100 text-xs overflow-y-auto">
+
+            <!-- Системный разделитель даты -->
+            <div class="text-center">
+              <span class="px-2 py-0.5 rounded bg-[#182229] text-[10px] text-slate-400 shadow-sm">СЕГОДНЯ</span>
+            </div>
+
+            <!-- Входящее сообщение 1: Оповещение о сделке -->
+            <div class="max-w-[90%] bg-[#202c33] p-2.5 rounded-lg rounded-tl-none shadow-sm space-y-1">
+              <div class="text-[11px] font-bold text-cyan-400 flex items-center gap-1">
+                <span>⚡ Новая сделка в переписке</span>
+              </div>
+              <div class="text-[11px] leading-relaxed text-slate-200">
+                🏢 <b>Компания:</b> ТОО «BI Group Development»<br>
+                🏗️ <b>Объект:</b> ЖК Grand Park (4 БМК × 3 МВт)<br>
+                💰 <b>Сумма:</b> 148 500 000 ₸<br>
+                📋 <b>Статус:</b> КП отправлено / Согласовано
+              </div>
+              <div class="text-[10px] text-slate-400 text-right">04.10 17:42 ✓✓</div>
+            </div>
+
+            <!-- Входящее сообщение 2: Напоминание об обязательстве -->
+            <div class="max-w-[90%] bg-[#202c33] p-2.5 rounded-lg rounded-tl-none shadow-sm space-y-1">
+              <div class="text-[11px] font-bold text-amber-400 flex items-center gap-1">
+                <span>⏰ Напоминание по обязательству</span>
+              </div>
+              <div class="text-[11px] leading-relaxed text-slate-200">
+                Нурлан, сегодня до <b>12:00</b> необходимо отправить схему ТУ по газу заказчику.<br><br>
+                👤 <b>Кому:</b> Бауржан Сагинтаев (BI Group)<br>
+                ⚠️ <b>Важность:</b> Критично (блокер договора)<br><br>
+                👉 <a href="#confirm" class="text-indigo-300 underline">Подтвердить выполнение в Mazory</a>
+              </div>
+              <div class="text-[10px] text-slate-400 text-right">10:00 ✓✓</div>
+            </div>
+
+            <!-- Исходящий ответ менеджера -->
+            <div class="max-w-[80%] ml-auto bg-[#005c4b] p-2 rounded-lg rounded-tr-none shadow-sm text-[11px] text-white">
+              Принято, ТУ скорректировали, отправляю на согласование Бауржану 👍
+              <div class="text-[9px] text-emerald-200 text-right">10:02 ✓✓</div>
+            </div>
+
+          </div>
+
+          <!-- Нижняя панель ввода -->
+          <div class="pt-2 px-1 flex items-center gap-2 text-slate-400 text-xs">
+            <span class="p-1 rounded-full hover:bg-slate-800">😊</span>
+            <div class="flex-1 bg-[#2a3942] rounded-full px-3 py-1 text-slate-400 text-[11px]">
+              Сообщение...
+            </div>
+            <span class="p-1 rounded-full bg-emerald-600 text-white text-xs">🎤</span>
+          </div>
+
+        </div>
+        <div class="text-center mt-3 text-xs text-slate-400">
+          Сквозная доставка на телефон ответственного через <b>WAHA Noweb API</b>
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+
+  <script>
+    function markAllRead() {
+      const list = document.getElementById('notifications-list');
+      const items = list.querySelectorAll('.rounded-2xl');
+      items.forEach(el => {
+        el.style.opacity = '0.5';
+      });
+      alert('Все уведомления отмечены как прочитанные.');
+    }
+  </script>
+</body>
+</html>

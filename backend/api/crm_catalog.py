@@ -7,6 +7,7 @@ from django.utils import timezone
 from .bitrix_service import BitrixService, CrmReadConfig, CrmReadBudget
 from .models import (
     BitrixSettings,
+    Company,
     CrmCatalogSync,
     OutboxEvent,
     Project,
@@ -22,7 +23,40 @@ def available_projects(queryset):
     )
 
 
-def enqueue_catalog(team_id, *, refresh=False):
+def upsert_company(company_id, title="", phone=""):
+    cid = str(company_id or "").strip()[:64]
+    if not cid or cid == "0":
+        return None
+
+    company = Company.objects.filter(bitrix_company_id=cid).first()
+    clean_title = (title or "").strip()[:255] or f"Компания #{cid}"
+    if company:
+        if company.name != clean_title:
+            if not Company.objects.filter(name=clean_title).exclude(pk=company.pk).exists():
+                company.name = clean_title
+        if phone and not company.phone:
+            company.phone = str(phone).strip()[:64]
+        company.save()
+        return company
+
+    existing = Company.objects.filter(name=clean_title).first()
+    if existing and not existing.bitrix_company_id:
+        existing.bitrix_company_id = cid
+        if phone and not existing.phone:
+            existing.phone = str(phone).strip()[:64]
+        existing.save()
+        return existing
+    elif existing:
+        clean_title = f"{clean_title} (#{cid})"[:255]
+
+    return Company.objects.create(
+        bitrix_company_id=cid,
+        name=clean_title,
+        phone=str(phone).strip()[:64] if phone else "",
+    )
+
+
+def enqueue_catalog(team_id, *, refresh=False, sync_companies=False):
     with transaction.atomic():
         team = Team.objects.select_for_update().get(pk=team_id, is_active=True)
         sync, _ = CrmCatalogSync.objects.get_or_create(team=team)
@@ -38,22 +72,168 @@ def enqueue_catalog(team_id, *, refresh=False):
             "",
         )
         sync.save()
-        queue_page(sync)
+        queue_page(sync, phase="companies" if sync_companies else "deals")
         return sync
 
 
-def queue_page(sync):
+def queue_page(sync, phase="deals"):
+    phase_suffix = f":{phase}" if phase != "deals" else ""
     return OutboxEvent.objects.get_or_create(
-        deduplication_key=f"crm-catalog:{sync.team_id}:{sync.generation}:{sync.cursor}",
+        deduplication_key=f"crm-catalog:{sync.team_id}:{sync.generation}:{sync.cursor}{phase_suffix}",
         defaults={
             "event_type": "crm_catalog",
             "payload": {
                 "team_id": sync.team_id,
                 "generation": sync.generation,
                 "cursor": sync.cursor,
+                "phase": phase,
             },
         },
     )[0]
+
+
+def _sync_companies_page(sync, config, payload):
+    response = BitrixService.read_call(
+        "crm.company.list",
+        {
+            "start": sync.cursor,
+            "order": {"ID": "ASC"},
+            "select": ["ID", "TITLE", "PHONE", "ASSIGNED_BY_ID"],
+        },
+        config=config,
+        budget=CrmReadBudget(),
+    )
+    rows, next_cursor = response.get("result"), response.get("next")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ProviderUnavailable("crm_invalid_response")
+    if next_cursor is not None and (
+        type(next_cursor) is not int or next_cursor <= sync.cursor
+    ):
+        raise ProviderUnavailable("crm_invalid_pagination")
+
+    for row in rows:
+        cid = str(row.get("ID", "")).strip()
+        if not cid or not cid.isascii() or not cid.isdigit() or len(cid) > 64:
+            raise ProviderUnavailable("crm_invalid_response")
+        phone = ""
+        raw_phone = row.get("PHONE")
+        if isinstance(raw_phone, list) and raw_phone:
+            phone = str(raw_phone[0].get("VALUE", "")).strip()[:64]
+        upsert_company(cid, row.get("TITLE"), phone)
+
+    with transaction.atomic():
+        locked = CrmCatalogSync.objects.select_for_update().get(pk=sync.pk)
+        if (
+            locked.generation != sync.generation
+            or locked.cursor != sync.cursor
+            or locked.state == "succeeded"
+        ):
+            return
+        locked.imported_count += len(rows)
+        locked.error_code = ""
+        if next_cursor is None:
+            locked.cursor = 0
+            locked.save()
+            queue_page(locked, phase="deals")
+        else:
+            locked.cursor = next_cursor
+            locked.save()
+            queue_page(locked, phase="companies")
+
+
+def _sync_deals_page(sync, config, cfg, payload):
+    response = BitrixService.read_call(
+        "crm.deal.list",
+        {
+            "start": sync.cursor,
+            "order": {"ID": "ASC"},
+            "filter": {"CATEGORY_ID": cfg.deal_category_id},
+            "select": ["ID", "TITLE", "COMPANY_ID", "ASSIGNED_BY_ID", "CURRENCY_ID"],
+        },
+        config=config,
+        budget=CrmReadBudget(),
+    )
+    rows, next_cursor = response.get("result"), response.get("next")
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise ProviderUnavailable("crm_invalid_response")
+    if next_cursor is not None and (
+        type(next_cursor) is not int or next_cursor <= sync.cursor
+    ):
+        raise ProviderUnavailable("crm_invalid_pagination")
+    for row in rows:
+        if (
+            not isinstance(row.get("ID"), str)
+            or not row["ID"].isascii()
+            or not row["ID"].isdigit()
+            or len(row["ID"]) > 64
+            or not str(row.get("TITLE", "")).strip()
+        ):
+            raise ProviderUnavailable("crm_invalid_response")
+    with transaction.atomic():
+        locked = CrmCatalogSync.objects.select_for_update().get(pk=sync.pk)
+        if (
+            locked.generation != sync.generation
+            or locked.cursor != sync.cursor
+            or locked.state == "succeeded"
+        ):
+            return
+        for row in rows:
+            project = (
+                Project.objects.select_for_update()
+                .filter(bitrix_id=row["ID"])
+                .first()
+            )
+            if project and project.team_id != locked.team_id:
+                raise ProviderUnavailable("crm_project_scope_conflict")
+            profiles = (
+                UserProfile.objects.filter(
+                    bitrix_user_id=row.get("ASSIGNED_BY_ID", ""),
+                    user__memberships__team_id=locked.team_id,
+                    user__memberships__status="active",
+                    user__is_active=True,
+                ).distinct()
+                if row.get("ASSIGNED_BY_ID")
+                else UserProfile.objects.none()
+            )
+            manager = profiles.first() if profiles.count() == 1 else None
+
+            company = None
+            company_id = str(row.get("COMPANY_ID") or "").strip()
+            if company_id and company_id != "0":
+                company = upsert_company(company_id, row.get("COMPANY_TITLE", ""))
+
+            if project is None:
+                project = Project(
+                    team_id=locked.team_id,
+                    bitrix_id=row["ID"],
+                    source="bitrix_crm",
+                    is_verified=False,
+                )
+            if not project.is_verified:
+                project.name = str(row["TITLE"]).strip()[:255]
+                project.normalized_name = f"bitrix:{row['ID']}"
+                project.manager = manager
+                if company:
+                    project.company = company
+                currency = row.get("CURRENCY_ID", "KZT")
+                project.currency = (
+                    currency if currency in ("KZT", "USD", "EUR", "RUB") else "KZT"
+                )
+            elif company and not project.company:
+                project.company = company
+
+            project.last_bitrix_synced_at = timezone.now()
+            project.identity_confirmed = True
+            project.save()
+        locked.imported_count += len(rows)
+        locked.error_code = ""
+        if next_cursor is None:
+            locked.state, locked.last_success_at = "succeeded", timezone.now()
+        else:
+            locked.state, locked.cursor = "queued", next_cursor
+        locked.save()
+        if next_cursor is not None:
+            queue_page(locked, phase="deals")
 
 
 def sync_page(payload):
@@ -74,89 +254,12 @@ def sync_page(payload):
         CrmCatalogSync.objects.filter(pk=sync.pk, generation=sync.generation).update(
             state="running", error_code=""
         )
-        response = BitrixService.read_call(
-            "crm.deal.list",
-            {
-                "start": sync.cursor,
-                "order": {"ID": "ASC"},
-                "filter": {"CATEGORY_ID": cfg.deal_category_id},
-                "select": ["ID", "TITLE", "ASSIGNED_BY_ID", "CURRENCY_ID"],
-            },
-            config=config,
-            budget=CrmReadBudget(),
-        )
-        rows, next_cursor = response.get("result"), response.get("next")
-        if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
-            raise ProviderUnavailable("crm_invalid_response")
-        if next_cursor is not None and (
-            type(next_cursor) is not int or next_cursor <= sync.cursor
-        ):
-            raise ProviderUnavailable("crm_invalid_pagination")
-        for row in rows:
-            if (
-                not isinstance(row.get("ID"), str)
-                or not row["ID"].isascii()
-                or not row["ID"].isdigit()
-                or len(row["ID"]) > 64
-                or not str(row.get("TITLE", "")).strip()
-            ):
-                raise ProviderUnavailable("crm_invalid_response")
-        with transaction.atomic():
-            locked = CrmCatalogSync.objects.select_for_update().get(pk=sync.pk)
-            if (
-                locked.generation != sync.generation
-                or locked.cursor != sync.cursor
-                or locked.state == "succeeded"
-            ):
-                return
-            for row in rows:
-                # Never move an identity between teams through a CRM import.
-                project = (
-                    Project.objects.select_for_update()
-                    .filter(bitrix_id=row["ID"])
-                    .first()
-                )
-                if project and project.team_id != locked.team_id:
-                    raise ProviderUnavailable("crm_project_scope_conflict")
-                profiles = (
-                    UserProfile.objects.filter(
-                        bitrix_user_id=row.get("ASSIGNED_BY_ID", ""),
-                        user__memberships__team_id=locked.team_id,
-                        user__memberships__status="active",
-                        user__is_active=True,
-                    ).distinct()
-                    if row.get("ASSIGNED_BY_ID")
-                    else UserProfile.objects.none()
-                )
-                manager = profiles.first() if profiles.count() == 1 else None
-                if project is None:
-                    project = Project(
-                        team_id=locked.team_id,
-                        bitrix_id=row["ID"],
-                        source="bitrix_crm",
-                        is_verified=False,
-                    )
-                if not project.is_verified:
-                    project.name = str(row["TITLE"]).strip()[:255]
-                    # Two CRM deals may share a title; external identity is authoritative.
-                    project.normalized_name = f"bitrix:{row['ID']}"
-                    project.manager = manager
-                    currency = row.get("CURRENCY_ID", "KZT")
-                    project.currency = (
-                        currency if currency in ("KZT", "USD", "EUR", "RUB") else "KZT"
-                    )
-                project.last_bitrix_synced_at = timezone.now()
-                project.identity_confirmed = True
-                project.save()
-            locked.imported_count += len(rows)
-            locked.error_code = ""
-            if next_cursor is None:
-                locked.state, locked.last_success_at = "succeeded", timezone.now()
-            else:
-                locked.state, locked.cursor = "queued", next_cursor
-            locked.save()
-            if next_cursor is not None:
-                queue_page(locked)
+
+        phase = payload.get("phase")
+        if phase == "companies":
+            _sync_companies_page(sync, config, payload)
+        else:
+            _sync_deals_page(sync, config, cfg, payload)
     except Exception as exc:
         code = (
             str(exc)[:64]

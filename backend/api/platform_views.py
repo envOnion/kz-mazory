@@ -605,21 +605,54 @@ class DirectoryView(APIView):
 
     def get(self, request):
         from .crm_catalog import available_projects
+        from .models import Company
         teams = Team.objects.filter(is_active=True)
         if not request.user.is_superuser:
             teams = teams.filter(pk__in=access.team_ids(request.user))
         schema = DirectoryQuery(data=request.query_params)
         schema.is_valid(raise_exception=True)
         values = schema.validated_data
-        projects = available_projects(access.projects_for(request.user)).order_by("name", "id")
+        projects = available_projects(access.projects_for(request.user)).select_related("company").order_by("name", "id")
         if values["project_search"]:
-            projects = projects.filter(name__icontains=values["project_search"])
+            projects = projects.filter(
+                Q(name__icontains=values["project_search"])
+                | Q(company__name__icontains=values["project_search"])
+            )
         count = projects.count()
         start = (values["project_page"] - 1) * 100
+        slice_projects = projects[start:start + 100]
+        projects_data = [
+            {
+                "id": p.id,
+                "name": p.name,
+                "version": p.version,
+                "currency": p.currency,
+                "team_id": p.team_id,
+                "company_id": p.company_id,
+                "company_name": p.company.name if p.company else None,
+                "bitrix_id": p.bitrix_id,
+            }
+            for p in slice_projects
+        ]
+        company_ids = [p["company_id"] for p in projects_data if p["company_id"]]
+        companies_qs = Company.objects.filter(
+            Q(pk__in=company_ids) | Q(bitrix_company_id__isnull=False)
+        ).order_by("name")[:100]
+        companies_data = [
+            {
+                "id": c.id,
+                "bitrix_company_id": c.bitrix_company_id or "",
+                "name": c.name,
+                "client_type": c.client_type,
+                "phone": c.phone,
+            }
+            for c in companies_qs
+        ]
         return Response({
             "teams": list(teams.values("id", "name", "history_complete_from")),
             "profiles": list(access.profiles_for(request.user).values("id", "user_id", "full_name")),
-            "projects": list(projects.values("id", "name", "version", "currency", "team_id")[start:start + 100]),
+            "projects": projects_data,
+            "companies": companies_data,
             "projects_count": count,
             "projects_next_page": values["project_page"] + 1 if start + 100 < count else None,
             "crm_catalog": catalog_status(request.user),
@@ -640,17 +673,19 @@ class CrmCatalogSyncView(APIView):
         schema = CatalogSyncInput(data=request.data)
         schema.is_valid(raise_exception=True)
         team_id = schema.validated_data["team_id"]
+        sync_companies = schema.validated_data.get("sync_companies", True)
         if not request.user.is_superuser and team_id not in access.team_ids(request.user, ["team_lead"]):
             raise PermissionDenied("Загрузку справочника запускает руководитель команды.")
         if team_id != settings.BITRIX_TEAM_ID:
             raise ValidationError("Для команды не настроена интеграция CRM.")
         get_object_or_404(Team, pk=team_id, is_active=True)
-        state = enqueue_catalog(team_id, refresh=True)
+        state = enqueue_catalog(team_id, refresh=True, sync_companies=sync_companies)
         return Response({"state": state.state, "team_id": team_id}, status=202)
 
 
 class CatalogSyncInput(serializers.Serializer):
     team_id = serializers.IntegerField(min_value=1)
+    sync_companies = serializers.BooleanField(default=True, required=False)
 
 
 class AccessAdminView(APIView):

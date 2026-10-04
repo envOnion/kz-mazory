@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Django Admin Mazory — WhatsApp History Run & Processing Trace</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background-color: #0b0f19; color: #f1f5f9; font-family: system-ui, -apple-system, sans-serif; }
+    .unfold-card { background-color: #111827; border: 1px solid #1f2937; border-radius: 0.75rem; }
+    .badge-good { background-color: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }
+    .badge-warn { background-color: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-info { background-color: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
+    .badge-neutral { background-color: rgba(148, 163, 184, 0.15); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3); }
+  </style>
+</head>
+<body class="p-4 md:p-8 space-y-12">
+
+  <div class="max-w-7xl mx-auto space-y-10">
+
+    <!-- Админский заголовок -->
+    <div class="flex items-center justify-between pb-4 border-b border-gray-800 text-xs text-gray-400">
+      <div class="flex items-center gap-2">
+        <span class="font-bold text-indigo-400 tracking-wider">MAZORY ADMIN (DJANGO UNFOLD)</span>
+        <span>/</span>
+        <span>api</span>
+        <span>/</span>
+        <span class="text-white font-medium">whatsapphistoryrun & messageprocessingtrace</span>
+      </div>
+      <div>ai.mazory.best / admin</div>
+    </div>
+
+    <!-- ========================================================================================= -->
+    <!-- ЭКРАН 2: WHATSAPP HISTORY RUN (ДРЕВОВИДНЫЙ ИМПОРТ) -->
+    <!-- ========================================================================================= -->
+    <section class="space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 class="text-xl font-bold text-white flex items-center gap-2">
+            <span>⚙️ Запуск импорта WhatsApp #42</span>
+            <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold badge-good">COMPLETED</span>
+          </h2>
+          <p class="text-xs text-gray-400 mt-1">
+            Группа: <b>КОМАНДА ПОДДЕРЖКИ ПРОДАЖ</b> (<code class="text-indigo-300">120363024823904923@g.us</code>) · Сессия: <code>default</code>
+          </p>
+        </div>
+        <div class="flex items-center gap-2 text-xs">
+          <span class="px-3 py-1 rounded-lg bg-gray-900 border border-gray-800 text-gray-300">Получено из WAHA: <b>250</b></span>
+          <span class="px-3 py-1 rounded-lg bg-gray-900 border border-gray-800 text-emerald-400">Новых сообщений: <b>48</b></span>
+          <span class="px-3 py-1 rounded-lg bg-gray-900 border border-gray-800 text-indigo-400">Распознано тредсов: <b>6</b></span>
+        </div>
+      </div>
+
+      <!-- НОВЫЙ ИЕРАРХИЧЕСКИЙ БЛОК В АДМИНКЕ -->
+      <div class="unfold-card p-5 space-y-4 border-indigo-900/40 bg-gradient-to-b from-gray-900 to-[#0c1222]">
+        <div class="flex items-center justify-between pb-3 border-b border-gray-800">
+          <div>
+            <h3 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
+              <span>🌳 Иерархический разбор импорта по Проектам и Тредсам диалогов</span>
+            </h3>
+            <p class="text-xs text-gray-400 mt-0.5">
+              Сообщения сгруппированы по компаниям Bitrix24 и связным тематическим веткам
+            </p>
+          </div>
+          <span class="text-xs text-indigo-400 font-mono">3 компании · 4 ветки · 6 фактов</span>
+        </div>
+
+        <!-- Дерево в админке -->
+        <div class="space-y-3 font-sans text-xs">
+
+          <!-- ВЕТКА КОМПАНИИ 1 -->
+          <div class="p-3 rounded-lg bg-gray-950/70 border border-gray-800 space-y-2">
+            <div class="flex items-center justify-between font-semibold text-white">
+              <div class="flex items-center gap-2">
+                <span class="text-indigo-400 font-bold">📁 Проект (Компания Bitrix):</span>
+                <span class="text-sm font-bold text-indigo-200">ТОО «BI Group Development»</span>
+                <a href="/admin/api/company/12/change/" class="text-[11px] text-indigo-400 underline">#1042 ↗</a>
+              </div>
+              <span class="badge-good px-2 py-0.5 rounded-full text-[10px]">2 диалога · 3 факта</span>
+            </div>
+
+            <!-- Тред внутри компании -->
+            <div class="ml-4 pl-3 border-l-2 border-indigo-500/40 space-y-2">
+              <div class="flex items-center justify-between text-gray-300">
+                <div class="flex items-center gap-2">
+                  <span>📂</span>
+                  <span class="font-medium text-white">Тред #42: Поставка 4 БМК для ЖК Grand Park</span>
+                  <span class="badge-warn px-1.5 py-0.2 rounded text-[10px]">open (мысль в процессе)</span>
+                </div>
+                <span class="text-gray-500 font-mono">3 сообщения WA</span>
+              </div>
+
+              <!-- Вложенные распознанные сущности -->
+              <div class="ml-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div class="p-2 rounded bg-gray-900 border border-emerald-500/30 flex items-center justify-between">
+                  <div>
+                    <div class="font-bold text-emerald-400">Сделка: ЖК Grand Park</div>
+                    <div class="text-[11px] text-gray-400">Сумма: 148 500 000 ₸ · Стадия: КП</div>
+                  </div>
+                  <span class="badge-good text-[10px]">Сопоставлено Bitrix</span>
+                </div>
+                <div class="p-2 rounded bg-gray-900 border border-amber-500/30 flex items-center justify-between">
+                  <div>
+                    <div class="font-bold text-amber-300">Обязательство: ТУ до 10.10 12:00</div>
+                    <div class="text-[11px] text-gray-400">Исполнитель: Нурлан Касымов</div>
+                  </div>
+                  <span class="badge-warn text-[10px]">Ожидает review</span>
+                </div>
+              </div>
+
+              <!-- Поддиалог -->
+              <div class="ml-4 pl-3 border-l-2 border-indigo-400/20 text-gray-400 flex items-center justify-between">
+                <span>↳ 📂 Поддиалог #42.1: Согласование ТУ по газу и аванса</span>
+                <span class="badge-good text-[10px]">ready (закончен)</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- ВЕТКА КОМПАНИИ 2 -->
+          <div class="p-3 rounded-lg bg-gray-950/70 border border-gray-800 space-y-2">
+            <div class="flex items-center justify-between font-semibold text-white">
+              <div class="flex items-center gap-2">
+                <span class="text-indigo-400 font-bold">📁 Проект (Компания Bitrix):</span>
+                <span class="text-sm font-bold text-indigo-200">ТОО «BAZIS-A Corporation»</span>
+                <a href="/admin/api/company/18/change/" class="text-[11px] text-indigo-400 underline">#2180 ↗</a>
+              </div>
+              <span class="badge-good px-2 py-0.5 rounded-full text-[10px]">1 диалог · 2 факта</span>
+            </div>
+
+            <div class="ml-4 pl-3 border-l-2 border-indigo-500/40 space-y-2">
+              <div class="flex items-center justify-between text-gray-300">
+                <div class="flex items-center gap-2">
+                  <span>📂</span>
+                  <span class="font-medium text-white">Тред #45: БТП на ЖК River Park (очередь 2) и оплата</span>
+                  <span class="badge-good px-1.5 py-0.2 rounded text-[10px]">ready (закончен)</span>
+                </div>
+                <span class="text-gray-500 font-mono">2 сообщения WA</span>
+              </div>
+
+              <div class="ml-4 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div class="p-2 rounded bg-gray-900 border border-teal-500/30 flex items-center justify-between">
+                  <div>
+                    <div class="font-bold text-teal-400">Платеж: Аванс 19 260 000 ₸</div>
+                    <div class="text-[11px] text-gray-400">Договор №148-АК от 04.10.2026</div>
+                  </div>
+                  <span class="badge-good text-[10px]">Подтвержден</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- ========================================================================================= -->
+    <!-- ЭКРАН 3: MESSAGE PROCESSING TRACE (СКВОЗНАЯ ТРАССИРОВКА С ДИРЕКТОРИЯМИ) -->
+    <!-- ========================================================================================= -->
+    <section class="space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 class="text-xl font-bold text-white flex items-center gap-2">
+            <span>🔍 Трассировка сообщения #512</span>
+            <span class="px-2.5 py-0.5 rounded-full text-xs font-semibold badge-good">SUCCESS</span>
+          </h2>
+          <p class="text-xs text-gray-400 mt-1">
+            Сквозная цепочка принятия решений: WhatsApp вход → Иерархический контекст тредса → Bitrix24 → AI факты → Уведомление
+          </p>
+        </div>
+      </div>
+
+      <!-- 5-ШАГОВЫЙ БАННЕР -->
+      <div class="unfold-card p-5 bg-gradient-to-r from-gray-900 via-indigo-950 to-gray-900 border-indigo-800/40">
+        <div class="text-xs font-mono uppercase tracking-wider text-indigo-400 mb-3 flex items-center justify-between">
+          <span>End-to-End Data Lineage Audit Trail</span>
+          <span>Trace ID: #512</span>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-5 gap-3">
+          <!-- Шаг 1 -->
+          <div class="p-2.5 rounded-lg bg-white/5 border border-emerald-500/40">
+            <div class="text-[11px] font-bold text-emerald-400 uppercase">1. WhatsApp Вход</div>
+            <div class="text-xs font-bold text-white mt-1 truncate">Бауржан Сагинтаев</div>
+            <div class="text-[10px] text-gray-400 font-mono">+7 777 210 4455</div>
+          </div>
+          <!-- Шаг 2 -->
+          <div class="p-2.5 rounded-lg bg-white/5 border border-purple-500/40">
+            <div class="text-[11px] font-bold text-purple-400 uppercase">2. Тред / Контекст</div>
+            <div class="text-xs font-bold text-white mt-1 truncate">Тред #42 (ЖК Grand Park)</div>
+            <div class="text-[10px] text-purple-300">Состояние: open ⏳</div>
+          </div>
+          <!-- Шаг 3 -->
+          <div class="p-2.5 rounded-lg bg-white/5 border border-sky-500/40">
+            <div class="text-[11px] font-bold text-sky-400 uppercase">3. Bitrix24 Сверка</div>
+            <div class="text-xs font-bold text-white mt-1 truncate">ТОО «BI Group Development»</div>
+            <div class="text-[10px] text-sky-300">Сделка #8920 (148.5 млн ₸)</div>
+          </div>
+          <!-- Шаг 4 -->
+          <div class="p-2.5 rounded-lg bg-white/5 border border-amber-500/40">
+            <div class="text-[11px] font-bold text-amber-400 uppercase">4. AI Факты</div>
+            <div class="text-xs font-bold text-white mt-1 truncate">Сделка + Обязательство</div>
+            <div class="text-[10px] text-amber-300">Уверенность: 94%</div>
+          </div>
+          <!-- Шаг 5 -->
+          <div class="p-2.5 rounded-lg bg-white/5 border border-teal-500/40">
+            <div class="text-[11px] font-bold text-teal-400 uppercase">5. Уведомление</div>
+            <div class="text-xs font-bold text-white mt-1 truncate">WAHA WhatsApp Alert</div>
+            <div class="text-[10px] text-emerald-400">Доставлено менеджеру ✓</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ДЕТАЛЬНЫЕ КАРТОЧКИ ЭТАПОВ ТРАССИРОВКИ -->
+      <div class="grid md:grid-cols-2 gap-4">
+        <!-- КАРТОЧКА 1: ВХОДНОЕ СООБЩЕНИЕ -->
+        <div class="unfold-card p-4 space-y-3">
+          <div class="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center justify-between border-b border-gray-800 pb-2">
+            <span>Этап 1: Входное сообщение WhatsApp</span>
+            <span class="font-mono text-gray-500">waha-msg-99214</span>
+          </div>
+          <div class="p-3 rounded-lg bg-gray-950 border border-gray-800 text-xs text-gray-200 leading-relaxed font-sans whitespace-pre-wrap">«По ЖК Grand Park проект согласован на техсовете. Нужно 4 блочные котельные по 3 МВт. Сумму 148.5 млн тенге мы предварительно подтверждаем, но нужен четкий график финансирования.»</div>
+          <div class="text-[11px] text-gray-400 flex justify-between">
+            <span>Отправитель: <b>Бауржан Сагинтаев</b></span>
+            <span>04.10.2026 17:40:12</span>
+          </div>
+        </div>
+
+        <!-- КАРТОЧКА 2: ИЕРАРХИЯ ТРЕДА -->
+        <div class="unfold-card p-4 space-y-3">
+          <div class="text-xs font-bold text-purple-400 uppercase tracking-wider flex items-center justify-between border-b border-gray-800 pb-2">
+            <span>Этап 2: Положение в директории тредсов</span>
+            <span class="badge-warn text-[10px]">Мысль продолжается (open)</span>
+          </div>
+          <div class="text-xs space-y-2">
+            <div>📁 Родительская папка: <b class="text-white">ТОО «BI Group Development»</b> (Bitrix #1042)</div>
+            <div>📂 Тема треда: <b class="text-indigo-300">Тред #42 «Поставка 4 БМК для ЖК Grand Park»</b></div>
+            <div>↳ Реплик в контексте: <b class="text-gray-300">4 сообщения (бюджет токенов: 2,140)</b></div>
+            <div class="text-gray-400 text-[11px]">Обоснование незавершенности: продолжается согласование ТУ и графика платежей между менеджером и техсоветом.</div>
+          </div>
+        </div>
+
+        <!-- КАРТОЧКА 3: BITRIX СВЕРКА -->
+        <div class="unfold-card p-4 space-y-3">
+          <div class="text-xs font-bold text-sky-400 uppercase tracking-wider flex items-center justify-between border-b border-gray-800 pb-2">
+            <span>Этап 3: Сопоставление с Bitrix24 CRM</span>
+            <span class="badge-good text-[10px]">Exact match 100/100</span>
+          </div>
+          <div class="text-xs space-y-1.5">
+            <div>Компания: <b class="text-white">ТОО «BI Group Development»</b> (Bitrix ID: 1042)</div>
+            <div>Сделка в воронке: <b class="text-sky-300">#8920 «ЖК Grand Park (БМК 12 МВт)»</b></div>
+            <div>Сумма в CRM: <b class="text-emerald-400">148 500 000 ₸</b> (Стадия: C1:PROPOSAL)</div>
+            <div class="text-[11px] text-gray-400">Ответственный менеджер в CRM: Нурлан Касымов (User ID: 44)</div>
+          </div>
+        </div>
+
+        <!-- КАРТОЧКА 4: СГЕНЕРИРОВАННОЕ УВЕДОМЛЕНИЕ -->
+        <div class="unfold-card p-4 space-y-3">
+          <div class="text-xs font-bold text-teal-400 uppercase tracking-wider flex items-center justify-between border-b border-gray-800 pb-2">
+            <span>Этап 5: Автоматическое уведомление</span>
+            <span class="badge-good text-[10px]">WhatsApp Sent via WAHA</span>
+          </div>
+          <div class="p-2.5 rounded bg-gray-950 border border-teal-500/30 text-xs text-gray-300 space-y-1">
+            <div class="font-bold text-white">🔔 Текст оповещения:</div>
+            <div>«В чате BI Group зафиксировано согласование сделки ЖК Grand Park на сумму 148,500,000 ₸. Также зафиксировано обязательство: предоставить схему ТУ до 10.10.2026 12:00.»</div>
+          </div>
+          <div class="text-[11px] text-gray-400 flex justify-between">
+            <span>Получатель: <b>Нурлан Касымов (+7 701 555 1234)</b></span>
+            <span>Статус WAHA: <b class="text-emerald-400">DELIVERED</b></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+</body>
+</html>

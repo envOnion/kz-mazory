@@ -20,6 +20,7 @@ from .models import (
     UserProfile,
     WhatsAppConfig,
     OutboxEvent,
+    Company,
 )
 from .pipeline import extract_message
 from .crm_catalog import enqueue_catalog, sync_page
@@ -735,3 +736,68 @@ class CatalogTests(TestCase):
         )
         self.assertEqual(Project.objects.get(bitrix_id="10").manager, profile)
         self.assertIsNone(Project.objects.get(bitrix_id="11").manager)
+
+    def test_company_sync_and_deal_company_association(self):
+        enqueue_catalog(self.team.id, sync_companies=True)
+        state = CrmCatalogSync.objects.get(team=self.team)
+        comp_payload = {
+            "team_id": self.team.id,
+            "generation": state.generation,
+            "cursor": state.cursor,
+            "phase": "companies",
+        }
+        with patch(
+            "api.crm_catalog.BitrixService.read_call",
+            return_value={
+                "result": [
+                    {"ID": "101", "TITLE": "ТОО Байтерек", "PHONE": [{"VALUE": "+77011112233"}]},
+                    {"ID": "102", "TITLE": "ТОО Астана Моторс", "PHONE": []},
+                ],
+                "next": None,
+            },
+        ):
+            sync_page(comp_payload)
+
+        self.assertEqual(Company.objects.count(), 2)
+        c1 = Company.objects.get(bitrix_company_id="101")
+        self.assertEqual(c1.name, "ТОО Байтерек")
+        self.assertEqual(c1.phone, "+77011112233")
+
+        deal_payload = {
+            "team_id": self.team.id,
+            "generation": state.generation,
+            "cursor": 0,
+            "phase": "deals",
+        }
+        with patch(
+            "api.crm_catalog.BitrixService.read_call",
+            return_value={
+                "result": [
+                    {"ID": "201", "TITLE": "Строительство ЖК", "COMPANY_ID": "101", "COMPANY_TITLE": "ТОО Байтерек"},
+                    {"ID": "202", "TITLE": "Поставка авто", "COMPANY_ID": "102"},
+                ],
+                "next": None,
+            },
+        ):
+            sync_page(deal_payload)
+
+        p1 = Project.objects.get(bitrix_id="201")
+        self.assertEqual(p1.company, c1)
+        self.assertEqual(p1.name, "Строительство ЖК")
+
+        p2 = Project.objects.get(bitrix_id="202")
+        self.assertEqual(p2.company.bitrix_company_id, "102")
+
+        resp = self.api.get("/api/directory/")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.data
+        self.assertIn("companies", data)
+        self.assertEqual(len(data["companies"]), 2)
+        proj_dict = {p["id"]: p for p in data["projects"]}
+        self.assertEqual(proj_dict[p1.id]["company_name"], "ТОО Байтерек")
+        self.assertEqual(proj_dict[p1.id]["company_id"], c1.id)
+
+        search_resp = self.api.get("/api/directory/", {"project_search": "Байтерек"})
+        self.assertEqual(len(search_resp.data["projects"]), 1)
+        self.assertEqual(search_resp.data["projects"][0]["id"], p1.id)
+

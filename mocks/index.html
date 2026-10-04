@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mazory — Интерактивные макеты (Мастер-прототип)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { background-color: #060912; color: #f8fafc; font-family: system-ui, -apple-system, sans-serif; }
+    .tab-btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.6rem 1.1rem; border-radius: 0.75rem; font-size: 0.85rem; font-weight: 600; transition: all 0.2s; cursor: pointer; border: 1px solid transparent; }
+    .tab-btn.active { background-color: #4f46e5; color: #ffffff; border-color: #6366f1; box-shadow: 0 0 20px rgba(99, 102, 241, 0.35); }
+    .tab-btn:not(.active) { background-color: rgba(255, 255, 255, 0.04); color: #94a3b8; border-color: rgba(255, 255, 255, 0.08); }
+    .tab-btn:not(.active):hover { background-color: rgba(255, 255, 255, 0.08); color: #f1f5f9; }
+    iframe { width: 100%; border: none; height: calc(100vh - 120px); border-radius: 1rem; }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col bg-[#060912]">
+
+  <!-- Top Global Bar -->
+  <header class="w-full bg-[#0a0f20]/90 backdrop-blur-xl border-b border-slate-800/80 px-6 py-3.5 flex flex-wrap items-center justify-between gap-4 z-50 sticky top-0">
+    <div class="flex items-center gap-3">
+      <div class="w-8 h-8 rounded-xl bg-gradient-to-tr from-indigo-600 to-cyan-400 flex items-center justify-center font-black text-white text-base shadow-lg shadow-indigo-500/20">
+        M
+      </div>
+      <div>
+        <span class="text-white font-bold text-base tracking-tight">Mazory AI OS</span>
+        <span class="text-xs text-indigo-400 block font-mono">Интерактивные дизайн-макеты решения</span>
+      </div>
+    </div>
+
+    <!-- Навигационные вкладки по 4 экранам -->
+    <nav class="flex items-center gap-2 flex-wrap">
+      <button class="tab-btn active" onclick="switchView('workspace', this)">
+        📁 1. Рабочий кабинет: Проверка (Дерево тредсов)
+      </button>
+      <button class="tab-btn" onclick="switchView('history_run', this)">
+        ⚙️ 2. Django Admin: WhatsApp History Run
+      </button>
+      <button class="tab-btn" onclick="switchView('trace', this)">
+        🔍 3. Django Admin: Processing Trace
+      </button>
+      <button class="tab-btn" onclick="switchView('notifications', this)">
+        🔔 4. Уведомления & WAHA WhatsApp
+      </button>
+    </nav>
+
+    <!-- Прямые ссылки на файлы -->
+    <div class="text-xs text-slate-400 flex items-center gap-2">
+      <span class="px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 font-semibold">
+        ● Прототип активен
+      </span>
+    </div>
+  </header>
+
+  <!-- Контейнер для отображения экранов -->
+  <main class="flex-1 p-4 md:p-6 max-w-[1600px] w-full mx-auto">
+    <iframe id="viewport" src="workspace_review_mock.html" title="Mazory UI Mockup Viewport"></iframe>
+  </main>
+
+  <script>
+    function switchView(view, btn) {
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+
+      const frame = document.getElementById('viewport');
+      if (view === 'workspace') {
+        frame.src = 'workspace_review_mock.html';
+      } else if (view === 'history_run') {
+        frame.src = 'admin_views_mock.html#history';
+      } else if (view === 'trace') {
+        frame.src = 'admin_views_mock.html#trace';
+      } else if (view === 'notifications') {
+        frame.src = 'notifications_mock.html';
+      }
+    }
+  </script>
+</body>
+</html>

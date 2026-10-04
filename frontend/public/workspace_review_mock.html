@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="ru" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Рабочий кабинет — Проверка фактов и диалогов (Дерево тредсов)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { background-color: #060912; color: #f8fafc; font-family: system-ui, -apple-system, sans-serif; }
+    .panel { background-color: rgba(15, 23, 42, 0.75); border: 1px solid rgba(51, 65, 85, 0.6); backdrop-filter: blur(12px); border-radius: 1rem; }
+    .btn { display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.85rem; border-radius: 0.6rem; font-size: 0.825rem; font-weight: 500; transition: all 0.15s ease; cursor: pointer; }
+    .btn-primary { background-color: #4f46e5; color: #ffffff; border: 1px solid #6366f1; }
+    .btn-primary:hover { background-color: #4338ca; }
+    .btn-secondary { background-color: rgba(255, 255, 255, 0.06); color: #cbd5e1; border: 1px solid rgba(255, 255, 255, 0.12); }
+    .btn-secondary:hover { background-color: rgba(255, 255, 255, 0.12); color: #ffffff; }
+    .btn-danger { background-color: rgba(244, 63, 94, 0.15); color: #fda4af; border: 1px solid rgba(244, 63, 94, 0.3); }
+    .btn-danger:hover { background-color: rgba(244, 63, 94, 0.25); color: #fff; }
+    .badge { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.2rem 0.6rem; border-radius: 9999px; font-size: 0.72rem; font-weight: 600; letter-spacing: 0.02em; }
+    .folder-toggle { cursor: pointer; user-select: none; }
+  </style>
+</head>
+<body class="p-4 md:p-8 min-h-screen">
+
+  <div class="max-w-7xl mx-auto space-y-6">
+
+    <!-- Заголовок кабинета -->
+    <header class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-slate-800">
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="px-2.5 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 text-xs font-semibold">
+            РАБОЧИЙ КАБИНЕТ · ПРОВЕРКА ДАННЫХ
+          </span>
+          <span class="text-slate-500 text-xs font-mono">v2.4-tree</span>
+        </div>
+        <h1 class="text-2xl md:text-3xl font-bold tracking-tight text-white mt-1">
+          Дерево тредсов и фактов переписки
+        </h1>
+        <p class="text-sm text-slate-400 mt-0.5">
+          Список проектов сформирован из Компаний Bitrix24 (<code class="text-indigo-300">crm.company</code>). Внутри — связные диалоги и поддиалоги в виде директорий.
+        </p>
+      </div>
+
+      <!-- Сводные метрики -->
+      <div class="flex flex-wrap gap-2 text-xs">
+        <div class="px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-700/60">
+          <div class="text-slate-400">Компаний (Проектов) Bitrix</div>
+          <div class="text-lg font-bold text-white">4</div>
+        </div>
+        <div class="px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-700/60">
+          <div class="text-slate-400">Диалогов в процессе (Open)</div>
+          <div class="text-lg font-bold text-amber-400">3</div>
+        </div>
+        <div class="px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-700/60">
+          <div class="text-slate-400">Завершенных мыслей (Ready)</div>
+          <div class="text-lg font-bold text-emerald-400">5</div>
+        </div>
+        <div class="px-3 py-2 rounded-xl bg-slate-900/90 border border-slate-700/60">
+          <div class="text-slate-400">Обязательств на проверке</div>
+          <div class="text-lg font-bold text-cyan-400">6</div>
+        </div>
+      </div>
+    </header>
+
+    <!-- Фильтры и поиск -->
+    <div class="flex flex-wrap items-center justify-between gap-3 p-3 rounded-2xl bg-slate-900/60 border border-slate-800 text-sm">
+      <div class="flex flex-wrap items-center gap-2">
+        <label class="text-slate-400 text-xs">Фильтр по статусу мыслей:</label>
+        <button class="btn btn-primary text-xs" onclick="filterThreads('all')">Все ветки (8)</button>
+        <button class="btn btn-secondary text-xs" onclick="filterThreads('open')">⏳ В процессе обсуждения (3)</button>
+        <button class="btn btn-secondary text-xs" onclick="filterThreads('ready')">✅ Завершенные мысли (5)</button>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <button class="btn btn-secondary text-xs" onclick="toggleAllFolders(true)">Развернуть все папки</button>
+        <button class="btn btn-secondary text-xs" onclick="toggleAllFolders(false)">Свернуть</button>
+        <div class="relative">
+          <input type="text" placeholder="Поиск объекта, суммы или обязательства..." class="px-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white placeholder-slate-500 w-64 focus:outline-none focus:border-indigo-500">
+        </div>
+      </div>
+    </div>
+
+    <!-- ДЕРЕВО ДИРЕКТОРИЙ (КОМПАНИИ BITRIX -> ТРЕДСЫ -> ПОДДИАЛОГИ -> ФАКТЫ) -->
+    <div class="space-y-4">
+
+      <!-- ========================================================================================= -->
+      <!-- КОМПАНИЯ 1: BI GROUP DEVELOPMENT -->
+      <!-- ========================================================================================= -->
+      <div class="company-card panel overflow-hidden border-indigo-900/40">
+        <!-- Заголовок компании (директории верхнего уровня) -->
+        <div class="folder-header flex items-center justify-between p-4 bg-slate-900/90 border-b border-slate-800 cursor-pointer" onclick="toggleFolder('folder-bigroup')">
+          <div class="flex items-center gap-3">
+            <span id="icon-folder-bigroup" class="w-6 h-6 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center font-bold text-sm">📁</span>
+            <div>
+              <div class="flex items-center gap-2">
+                <h2 class="font-bold text-base text-white hover:text-indigo-300 transition-colors">
+                  ТОО «BI Group Development»
+                </h2>
+                <span class="badge bg-indigo-500/10 text-indigo-300 border border-indigo-500/30">
+                  Bitrix Company ID: #1042
+                </span>
+                <span class="badge bg-slate-800 text-slate-300 border border-slate-700">
+                  БИН: 050840003120
+                </span>
+              </div>
+              <p class="text-xs text-slate-400 mt-0.5">
+                Менеджер в Bitrix: <b>Нурлан Касымов</b> · Активных сделок в CRM: <b>3 на 412,000,000 ₸</b>
+              </p>
+            </div>
+          </div>
+          <div class="flex items-center gap-3 text-xs">
+            <span class="text-slate-400">2 диалога · 3 факта</span>
+            <span class="w-6 h-6 rounded-full bg-white/5 flex items-center justify-center text-slate-400">▼</span>
+          </div>
+        </div>
+
+        <!-- Содержимое директории компании -->
+        <div id="folder-bigroup" class="p-4 space-y-4 bg-slate-950/40">
+
+          <!-- ТРЕД 1 (ОСНОВНОЙ ДИАЛОГ): БМК ЖК GRAND PARK -->
+          <div class="thread-item p-4 rounded-xl border border-amber-500/30 bg-amber-950/10 space-y-3" data-status="open">
+            <div class="flex flex-wrap items-center justify-between gap-2 border-b border-amber-500/20 pb-2">
+              <div class="flex items-center gap-2">
+                <span class="text-lg">📂</span>
+                <span class="text-xs font-mono text-amber-300">Тред #42</span>
+                <h3 class="font-semibold text-sm text-white">
+                  Тема: Поставка 4 блочно-модульных котельных (БМК) для ЖК Grand Park
+                </h3>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="badge bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                  ⏳ В процессе обсуждения (Open)
+                </span>
+                <span class="text-xs text-slate-400">Обновлен: 04.10.2026 17:42</span>
+              </div>
+            </div>
+
+            <!-- Реплики из WhatsApp чата -->
+            <div class="space-y-1.5 text-xs bg-slate-900/60 p-3 rounded-lg border border-slate-800">
+              <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">
+                Цитаты из переписки WhatsApp группы «КОМАНДА ПОДДЕРЖКИ ПРОДАЖ»:
+              </div>
+              <div class="border-l-2 border-slate-600 pl-2 py-0.5 text-slate-300">
+                <span class="font-semibold text-indigo-300">Бауржан Сагинтаев (Гл. энергетик BI):</span>
+                «По ЖК Grand Park проект согласован на техсовете. Нужно 4 блочные котельные по 3 МВт. Сумму 148.5 млн тенге мы предварительно подтверждаем, но нужен четкий график финансирования.»
+              </div>
+              <div class="border-l-2 border-indigo-500 pl-2 py-0.5 text-slate-300">
+                <span class="font-semibold text-indigo-300">Нурлан Касымов (AquaKip):</span>
+                «Принято в работу! Спецификацию и график платежей готовим, привязываем к договору поставки.»
+              </div>
+            </div>
+
+            <!-- ИЗВЛЕЧЕННЫЙ ФАКТ 1: СДЕЛКА -->
+            <div class="fact-card p-3 rounded-xl bg-slate-900/90 border border-slate-700/80 space-y-2">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-bold text-xs">
+                    СДЕЛКА / ОБЪЕКТ
+                  </span>
+                  <span class="font-bold text-white text-sm">ЖК Grand Park (БМК 12 МВт)</span>
+                </div>
+                <div class="text-right">
+                  <span class="text-lg font-black text-emerald-400">148 500 000 ₸</span>
+                  <span class="text-xs text-slate-400 block">Стадия: КП отправлено / Согласование</span>
+                </div>
+              </div>
+
+              <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs pt-1 border-t border-slate-800 text-slate-300">
+                <div>Контрагент: <b class="text-white">ТОО «BI Group Development»</b></div>
+                <div>Оборудование: <b class="text-white">БМК (4 × 3 МВт)</b></div>
+                <div>ЛПР заказчика: <b class="text-white">Бауржан Сагинтаев</b></div>
+                <div>Bitrix Deal Match: <b class="text-sky-400">Создать сделку #8920 ↗</b></div>
+              </div>
+
+              <!-- Кнопки действий -->
+              <div class="flex flex-wrap items-center gap-2 pt-2 border-t border-slate-800">
+                <button class="btn btn-primary" onclick="approveFact(this, 'Сделка ЖК Grand Park (148.5 млн ₸)')">
+                  ✓ Подтвердить создание сделки в Bitrix
+                </button>
+                <button class="btn btn-secondary" onclick="editFact(this)">
+                  ✏️ Скорректировать сумму
+                </button>
+                <button class="btn btn-danger" onclick="rejectFact(this)">
+                  ✕ Отклонить
+                </button>
+                <span class="text-xs text-slate-400 ml-auto">Уверенность AI: 94%</span>
+              </div>
+            </div>
+
+            <!-- ПОДДИАЛОГ (ВЛОЖЕННЫЙ ТРЕД 1.1): СОГЛАСОВАНИЕ ТУ И АВАНСА -->
+            <div class="subthread p-3 rounded-lg border border-indigo-500/30 bg-indigo-950/20 space-y-2 ml-4">
+              <div class="flex items-center justify-between">
+                <div class="flex items-center gap-2">
+                  <span class="text-sm">↳ 📂</span>
+                  <span class="text-xs font-mono text-indigo-300">Поддиалог #42.1</span>
+                  <span class="font-semibold text-xs text-white">Тема: Согласование ТУ по газу и графика авансирования</span>
+                </div>
+                <span class="badge bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                  ✅ Законченная мысль (Ready)
+                </span>
+              </div>
+
+              <!-- ИЗВЛЕЧЕННОЕ ОБЯЗАТЕЛЬСТВО -->
+              <div class="p-2.5 rounded-lg bg-slate-900 border border-amber-500/40 flex flex-wrap items-start justify-between gap-3 text-xs">
+                <div class="space-y-1">
+                  <div class="flex items-center gap-2">
+                    <span class="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 font-bold text-[10px]">
+                      ОБЯЗАТЕЛЬСТВО (SLA)
+                    </span>
+                    <span class="font-semibold text-white">
+                      «Нурлан пообещал направить откорректированную схему ТУ по газу до 10.10.2026 12:00»
+                    </span>
+                  </div>
+                  <div class="text-slate-400">
+                    Ответственный: <b class="text-indigo-300">Нурлан Касымов</b> · Дедлайн: <b class="text-rose-400">10 октября 2026, 12:00</b> · Важность: <b class="text-amber-400">Критично</b>
+                  </div>
+                </div>
+
+                <div class="flex items-center gap-1.5 shrink-0">
+                  <button class="btn btn-primary text-xs" onclick="approveFact(this, 'Обязательство ТУ до 10.10')">
+                    ✓ Подтвердить
+                  </button>
+                  <button class="btn btn-danger text-xs" onclick="rejectFact(this)">✕</button>
+                </div>
+              </div>
+
+              <!-- ИЗВЛЕЧЕННОЕ ОБЕЩАНИЕ ОПЛАТЫ -->
+              <div class="p-2.5 rounded-lg bg-slate-900 border border-cyan-500/40 flex flex-wrap items-start justify-between gap-3 text-xs">
+                <div class="space-y-1">
+                  <div class="flex items-center gap-2">
+                    <span class="px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-bold text-[10px]">
+                      ФИНАНСОВОЕ ОБЕЩАНИЕ
+                    </span>
+                    <span class="font-semibold text-white">
+                      «Аванс 30% (44 550 000 ₸) после подписания спецификации до 15.10.2026»
+                    </span>
+                  </div>
+                  <div class="text-slate-400">
+                    Плательщик: <b class="text-white">BI Group</b> · Сумма к сбору: <b class="text-cyan-400 font-mono">44 550 000 ₸</b>
+                  </div>
+                </div>
+
+                <div class="flex items-center gap-1.5 shrink-0">
+                  <button class="btn btn-primary text-xs" onclick="approveFact(this, 'Ожидаемый платеж 44.55 млн ₸')">
+                    ✓ В план сбора денег
+                  </button>
+                  <button class="btn btn-danger text-xs" onclick="rejectFact(this)">✕</button>
+                </div>
+              </div>
+            </div>
+
+          </div>
+
+        </div>
+      </div>
+
+      <!-- ========================================================================================= -->
+      <!-- КОМПАНИЯ 2: BAZIS-A CORPORATION -->
+      <!-- ========================================================================================= -->
+      <div class="company-card panel overflow-hidden border-slate-800">
+        <div class="folder-header flex items-center justify-between p-4 bg-slate-900/90 border-b border-slate-800 cursor-pointer" onclick="toggleFolder('folder-bazis')">
+          <div class="flex items-center gap-3">
+            <span id="icon-folder-bazis" class="w-6 h-6 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center font-bold text-sm">📁</span>
+            <div>
+              <div class="flex items-center gap-2">
+                <h2 class="font-bold text-base text-white hover:text-indigo-300 transition-colors">
+                  ТОО «BAZIS-A Corporation»
+                </h2>
+                <span class="badge bg-indigo-500/10 text-indigo-300 border border-indigo-500/30">
+                  Bitrix Company ID: #2180
+                </span>
+                <span class="badge bg-slate-800 text-slate-300 border border-slate-700">
+                  БИН: 990440001852
+                </span>
+              </div>
+              <p class="text-xs text-slate-400 mt-0.5">
+                Менеджер: <b>Алия Серикова</b> · Действующий договор: <b>№148-АК</b>
+              </p>
+            </div>
+          </div>
+          <div class="flex items-center gap-3 text-xs">
+            <span class="text-slate-400">1 диалог · 2 факта</span>
+            <span class="w-6 h-6 rounded-full bg-white/5 flex items-center justify-center text-slate-400">▼</span>
+          </div>
+        </div>
+
+        <div id="folder-bazis" class="p-4 space-y-4 bg-slate-950/40">
+          <div class="thread-item p-4 rounded-xl border border-emerald-500/30 bg-emerald-950/10 space-y-3" data-status="ready">
+            <div class="flex flex-wrap items-center justify-between gap-2 border-b border-emerald-500/20 pb-2">
+              <div class="flex items-center gap-2">
+                <span class="text-lg">📂</span>
+                <span class="text-xs font-mono text-emerald-300">Тред #45</span>
+                <h3 class="font-semibold text-sm text-white">
+                  Тема: БТП на ЖК River Park (очередь 2) и оплата по договору №148-АК
+                </h3>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="badge bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                  ✅ Законченная мысль (Ready)
+                </span>
+                <span class="text-xs text-slate-400">Обновлен: 04.10.2026 16:15</span>
+              </div>
+            </div>
+
+            <!-- ИЗВЛЕЧЕННЫЙ ФАКТ ОПЛАТЫ -->
+            <div class="p-3 rounded-xl bg-slate-900/90 border border-teal-500/40 space-y-2">
+              <div class="flex flex-wrap items-center justify-between gap-2">
+                <div class="flex items-center gap-2">
+                  <span class="px-2 py-0.5 rounded bg-teal-500/20 text-teal-300 font-bold text-xs">
+                    ФАКТ ОПЛАТЫ (ПОСТУПЛЕНИЕ)
+                  </span>
+                  <span class="font-bold text-white text-sm">Аванс по договору №148-АК (ЖК River Park)</span>
+                </div>
+                <div class="text-right">
+                  <span class="text-lg font-black text-teal-400">+19 260 000 ₸</span>
+                  <span class="text-xs text-slate-400 block">Платежка №4012 от 04.10.2026</span>
+                </div>
+              </div>
+
+              <div class="text-xs text-slate-300">
+                Цитата бухгалтера Базис: <i>«Оплатили аванс 19.26 млн по платежке 4012, деньги ушли с Халыка.»</i>
+              </div>
+
+              <div class="flex items-center gap-2 pt-2 border-t border-slate-800">
+                <button class="btn btn-primary" onclick="approveFact(this, 'Оплата 19.26 млн ₸ подтверждена в 1С/Bitrix')">
+                  ✓ Подтвердить зачисление в финансы
+                </button>
+                <button class="btn btn-danger" onclick="rejectFact(this)">✕ Отклонить</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ========================================================================================= -->
+      <!-- КОМПАНИЯ 3: RAMS QAZAQSTAN -->
+      <!-- ========================================================================================= -->
+      <div class="company-card panel overflow-hidden border-slate-800">
+        <div class="folder-header flex items-center justify-between p-4 bg-slate-900/90 border-b border-slate-800 cursor-pointer" onclick="toggleFolder('folder-rams')">
+          <div class="flex items-center gap-3">
+            <span id="icon-folder-rams" class="w-6 h-6 rounded-lg bg-indigo-500/20 text-indigo-400 flex items-center justify-center font-bold text-sm">📁</span>
+            <div>
+              <div class="flex items-center gap-2">
+                <h2 class="font-bold text-base text-white hover:text-indigo-300 transition-colors">
+                  ТОО «RAMS Qazaqstan»
+                </h2>
+                <span class="badge bg-indigo-500/10 text-indigo-300 border border-indigo-500/30">
+                  Bitrix Company ID: #3305
+                </span>
+              </div>
+              <p class="text-xs text-slate-400 mt-0.5">
+                Менеджер: <b>Марат Омаров</b> · Новый запрос ТКП
+              </p>
+            </div>
+          </div>
+          <div class="flex items-center gap-3 text-xs">
+            <span class="text-slate-400">1 диалог · 1 сделка без суммы</span>
+            <span class="w-6 h-6 rounded-full bg-white/5 flex items-center justify-center text-slate-400">▼</span>
+          </div>
+        </div>
+
+        <div id="folder-rams" class="p-4 space-y-4 bg-slate-950/40">
+          <div class="thread-item p-4 rounded-xl border border-amber-500/30 bg-amber-950/10 space-y-3" data-status="open">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <span class="text-lg">📂</span>
+                <span class="text-xs font-mono text-amber-300">Тред #49</span>
+                <h3 class="font-semibold text-sm text-white">
+                  Тема: Запрос ТКП на насосные станции пожаротушения (ЖК RAMS Signature)
+                </h3>
+              </div>
+              <span class="badge bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                ⏳ В процессе обсуждения (Open)
+              </span>
+            </div>
+
+            <div class="p-3 rounded-xl bg-slate-900/90 border border-slate-700/80 space-y-2">
+              <div class="flex items-center justify-between">
+                <div>
+                  <span class="px-2 py-0.5 rounded bg-sky-500/20 text-sky-400 font-bold text-xs">
+                    ЛИД / НОВАЯ СДЕЛКА (БЕЗ ФИНАЛЬНОЙ СУММЫ)
+                  </span>
+                  <div class="font-bold text-white text-sm mt-1">ЖК RAMS Signature (Насосная станция Hydro-Pro)</div>
+                </div>
+                <div class="text-right">
+                  <span class="text-sm font-semibold text-amber-300">Расчет КП в процессе</span>
+                  <span class="text-xs text-slate-400 block">Стадия: Квалификация ТЗ</span>
+                </div>
+              </div>
+
+              <div class="flex items-center gap-2 pt-2 border-t border-slate-800">
+                <button class="btn btn-primary" onclick="approveFact(this, 'Лид RAMS Signature создан в Bitrix')">
+                  ✓ Создать сделку в Bitrix (Лид)
+                </button>
+                <button class="btn btn-secondary" onclick="editFact(this)">✏️ Добавить плановую сумму</button>
+                <button class="btn btn-danger" onclick="rejectFact(this)">✕ Отклонить</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- Toast Notification Container -->
+  <div id="toast" class="fixed bottom-6 right-6 p-4 rounded-2xl bg-indigo-600 text-white shadow-2xl transition-all duration-300 opacity-0 translate-y-4 pointer-events-none z-50 flex items-center gap-3">
+    <span class="text-xl">✅</span>
+    <span id="toast-text" class="text-sm font-medium">Действие успешно выполнено</span>
+  </div>
+
+  <script>
+    function toggleFolder(id) {
+      const folder = document.getElementById(id);
+      const icon = document.getElementById('icon-' + id);
+      if (folder.classList.contains('hidden')) {
+        folder.classList.remove('hidden');
+        if (icon) icon.innerText = '📁';
+      } else {
+        folder.classList.add('hidden');
+        if (icon) icon.innerText = '📁';
+      }
+    }
+
+    function toggleAllFolders(expand) {
+      const folders = document.querySelectorAll('[id^="folder-"]');
+      folders.forEach(f => {
+        if (expand) f.classList.remove('hidden');
+        else f.classList.add('hidden');
+      });
+    }
+
+    function filterThreads(status) {
+      const threads = document.querySelectorAll('.thread-item');
+      threads.forEach(t => {
+        if (status === 'all' || t.getAttribute('data-status') === status) {
+          t.style.display = 'block';
+        } else {
+          t.style.display = 'none';
+        }
+      });
+      showToast('Фильтр применен: ' + (status === 'all' ? 'Все ветки' : status === 'open' ? 'В процессе' : 'Завершенные'));
+    }
+
+    function approveFact(btn, label) {
+      const card = btn.closest('.fact-card') || btn.closest('.p-2.5') || btn.closest('.p-3');
+      card.style.opacity = '0.6';
+      card.style.borderColor = '#10b981';
+      btn.innerText = '✓ Подтверждено';
+      btn.disabled = true;
+      btn.className = 'btn bg-emerald-600 text-white';
+      showToast('Успешно подтверждено: ' + label);
+    }
+
+    function rejectFact(btn) {
+      const reason = prompt('Укажите причину отклонения факта:');
+      if (reason) {
+        const card = btn.closest('.fact-card') || btn.closest('.p-2.5') || btn.closest('.p-3');
+        card.style.display = 'none';
+        showToast('Факт отклонен: ' + reason);
+      }
+    }
+
+    function editFact(btn) {
+      const val = prompt('Введите скорректированное значение суммы (₸):', '150 000 000');
+      if (val) {
+        showToast('Значение скорректировано: ' + val + ' ₸');
+      }
+    }
+
+    function showToast(text) {
+      const toast = document.getElementById('toast');
+      const toastText = document.getElementById('toast-text');
+      toastText.innerText = text;
+      toast.classList.remove('opacity-0', 'translate-y-4', 'pointer-events-none');
+      setTimeout(() => {
+        toast.classList.add('opacity-0', 'translate-y-4', 'pointer-events-none');
+      }, 3000);
+    }
+  </script>
+</body>
+</html>
