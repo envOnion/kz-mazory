@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import re
 import time
 from contextvars import ContextVar
@@ -32,6 +33,24 @@ from .providers import (
     provider_error,
     retry_after_seconds,
 )
+
+
+def embedding_chunks(text, max_bytes=480):
+    """Keep complete Unicode text below the deployed model's 512-token input.
+
+    A conservative UTF-8 byte bound leaves room for special tokens without
+    guessing token counts from characters or truncating long messages.
+    """
+    chunks, current, size = [], [], 0
+    for char in text:
+        width = len(char.encode("utf-8"))
+        if size + width > max_bytes:
+            chunks.append("".join(current))
+            current, size = [], 0
+        current.append(char)
+        size += width
+    chunks.append("".join(current))
+    return chunks
 
 analytics_deadline = ContextVar("analytics_deadline", default=None)
 usage_event_id = ContextVar("usage_event_id", default=None)
@@ -308,23 +327,46 @@ class AIService:
     def get_embedding(text):
         cfg = AIService._config("embedding")
         api_key = AIService._credential(cfg, operation="embedding")
-        data = AIService._post(
-            f"{cfg.embedding_provider_url.rstrip('/')}/embeddings",
-            {"model": cfg.embedding_model_name, "input": text[:16000]},
-            15,
-            api_format=OPENAI_COMPATIBLE,
-            operation="embedding",
-            api_key=api_key,
-        )
-        try:
-            vector = [float(x) for x in data["data"][0]["embedding"]]
-            if len(vector) != cfg.embedding_dimension or not all(
-                __import__("math").isfinite(x) for x in vector
-            ):
-                raise ValueError()
-            return vector
-        except (ValueError, KeyError, TypeError):
-            raise ProviderUnavailable("invalid_embedding") from None
+        chunks = embedding_chunks(text)
+        total_weight = 0
+        pooled = [0.0] * cfg.embedding_dimension
+        for offset in range(0, len(chunks), 32):
+            batch = chunks[offset:offset + 32]
+            scalar = len(chunks) == 1
+            data = AIService._post(
+                f"{cfg.embedding_provider_url.rstrip('/')}/embeddings",
+                {"model": cfg.embedding_model_name, "input": batch[0] if scalar else batch},
+                15,
+                api_format=OPENAI_COMPATIBLE,
+                operation="embedding",
+                api_key=api_key,
+            )
+            try:
+                rows = data["data"]
+                if not isinstance(rows, list) or len(rows) != len(batch):
+                    raise ValueError()
+                vectors = {}
+                for row in rows:
+                    index = row.get("index", 0 if scalar else None)
+                    if type(index) is not int or index in vectors or not 0 <= index < len(batch):
+                        raise ValueError()
+                    vector = [float(x) for x in row["embedding"]]
+                    if len(vector) != cfg.embedding_dimension or not all(map(math.isfinite, vector)):
+                        raise ValueError()
+                    vectors[index] = vector
+                if scalar:
+                    return vectors[0]
+                for index, chunk in enumerate(batch):
+                    weight = max(1, len(chunk.encode("utf-8")))
+                    total_weight += weight
+                    for axis, value in enumerate(vectors[index]):
+                        pooled[axis] += value * weight
+            except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
+                raise ProviderUnavailable("invalid_embedding") from None
+        result = [value / total_weight for value in pooled]
+        if not all(map(math.isfinite, result)):
+            raise ProviderUnavailable("invalid_embedding")
+        return result
 
     @staticmethod
     @sensitive_variables("api_key")

@@ -524,7 +524,7 @@ def index_message(payload):
     from .qdrant_service import qdrant_service
 
     raw = RawMessage.objects.select_related("config").get(pk=payload["raw_id"])
-    if not raw.config_id or not raw.config.is_active:
+    if not raw.config_id or not raw.config.is_active or not raw.content.strip():
         return
     point = qdrant_service.upsert_message(
         raw.message_id,
