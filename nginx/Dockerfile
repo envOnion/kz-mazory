@@ -3,6 +3,7 @@ FROM node:22-alpine AS frontend-build
 WORKDIR /app
 
 COPY frontend/package.json frontend/package-lock.json ./
+COPY frontend/scripts ./scripts
 RUN npm ci
 
 COPY frontend/index.html frontend/postcss.config.js frontend/tailwind.config.js ./
