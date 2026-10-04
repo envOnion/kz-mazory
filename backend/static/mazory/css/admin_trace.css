@@ -300,3 +300,26 @@ body.dark .mazory-crm-link,
     .mazory-crm-fact-grid,
     .mazory-crm-option__facts { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* Dialogue Thread hierarchy and badge styling (Unfold) */
+.badge-good {
+    background-color: rgba(16, 185, 129, 0.15) !important;
+    color: #34d399 !important;
+    border: 1px solid rgba(16, 185, 129, 0.3) !important;
+}
+.badge-warn {
+    background-color: rgba(245, 158, 11, 0.15) !important;
+    color: #fbbf24 !important;
+    border: 1px solid rgba(245, 158, 11, 0.3) !important;
+}
+.badge-info {
+    background-color: rgba(56, 189, 248, 0.15) !important;
+    color: #38bdf8 !important;
+    border: 1px solid rgba(56, 189, 248, 0.3) !important;
+}
+.badge-neutral {
+    background-color: rgba(148, 163, 184, 0.15) !important;
+    color: #94a3b8 !important;
+    border: 1px solid rgba(148, 163, 184, 0.3) !important;
+}
+

@@ -1,12 +1,16 @@
 from datetime import timedelta
 from unittest.mock import patch
 
+from django.contrib.admin.sites import AdminSite
 from django.test import TestCase
 from django.utils import timezone
 
+from .admin import MessageProcessingTraceAdmin
 from .history_jobs import persist_items, progress, process_step, start_job
+from .job_admin import WhatsAppHistoryRunAdmin
 from .models import (
-    AISettings, FactCandidate, MessageProcessingTrace, OutboxEvent, RawMessage, Team,
+    AISettings, Company, DialogueThread, FactCandidate, MessageProcessingTrace,
+    OutboxEvent, Project, RawMessage, Team, ThreadMessage, ThreadRevision,
     WhatsAppConfig, WhatsAppHistoryItem, WhatsAppHistoryJob, WhatsAppHistoryRun,
 )
 from .tasks import run_outbox
@@ -237,3 +241,183 @@ class HistoryReprocessingTests(TestCase):
         process_step({"history_run_id": run.id, "step": run.step}, None)
         run.refresh_from_db()
         self.assertEqual(run.state, "completed")
+
+    def test_thematic_tree_card_and_summary_render(self):
+        company = Company.objects.create(name="ТОО BI Group", bitrix_company_id="1042")
+        project = Project.objects.create(
+            name="ЖК Grand Park",
+            team=self.config.team,
+            company=company,
+            bitrix_id="8920",
+            contract_amount=15000000,
+        )
+        run = self.run_record()
+        self.persist(run, [self.item(run, mid="m_tree", text="Поставка БТП на объект ЖК Grand Park")])
+        raw = run.messages.get()
+        trace = raw.traces.get()
+
+        root = DialogueThread.objects.create(
+            team=self.config.team,
+            config=self.config,
+            source_key="waha:test@g.us",
+            identity="id_tree_root",
+            topic="Поставка БТП",
+            state="ready",
+            project=project,
+        )
+        child = DialogueThread.objects.create(
+            team=self.config.team,
+            config=self.config,
+            source_key="waha:test@g.us",
+            identity="id_tree_child",
+            parent=root,
+            topic="Авансовый платеж",
+            state="open",
+            project=project,
+        )
+        ThreadMessage.objects.create(
+            thread=root,
+            raw_message=raw,
+            thought_state="final",
+            relation="discusses",
+        )
+        rev = ThreadRevision.objects.create(
+            thread=root,
+            version=1,
+            state="ready",
+            topic="Поставка БТП",
+            summary="Смета и согласование",
+        )
+        FactCandidate.objects.create(
+            trace=trace,
+            thread_revision=rev,
+            team=self.config.team,
+            project=project,
+            fact_type="commitment",
+            proposed_changes={"commitment_text": "Поставить БТП до 10.10", "amount": 15000000, "deadline": "2026-10-10"},
+            source_key="cand_tree_1",
+            status="approved",
+        )
+
+        site = AdminSite()
+        run_admin = WhatsAppHistoryRunAdmin(WhatsAppHistoryRun, site)
+
+        summary = run_admin.thematic_summary(run)
+        self.assertIn("тред", summary)
+        self.assertIn("ready", summary)
+        self.assertIn("обязательств", summary)
+
+        tree_html = run_admin.thematic_tree_card(run)
+        self.assertIn("ТОО BI Group", tree_html)
+        self.assertIn("ЖК Grand Park", tree_html)
+        self.assertIn("Поставка БТП", tree_html)
+        self.assertIn("Авансовый платеж", tree_html)
+        self.assertIn("15 000 000", tree_html)
+
+        empty_run = self.run_record()
+        self.assertEqual(run_admin.thematic_summary(empty_run), "0 тредов")
+        empty_html = run_admin.thematic_tree_card(empty_run)
+        self.assertIn("не распознаны", empty_html)
+
+    def test_dialogue_thread_hierarchy_card_and_thread_badge_render(self):
+        company = Company.objects.create(name="ТОО Bazis-A", bitrix_company_id="2048")
+        project = Project.objects.create(
+            name="БЦ Север",
+            team=self.config.team,
+            company=company,
+            bitrix_id="5544",
+            contract_amount=20000000,
+        )
+        run = self.run_record()
+        self.persist(run, [self.item(run, mid="m_trace", text="Согласовали договор и аванс")])
+        raw = run.messages.get()
+        trace = raw.traces.get()
+        trace.project = project
+        trace.status = "success"
+        trace.pipeline_action = "created_deal"
+        trace.whatsapp_sender_name = "Нурлан"
+        trace.whatsapp_sender_phone = "+77015551234"
+        trace.ai_extracted_facts = {"object_name": "БЦ Север", "contract_amount": 20000000, "stage": "C1:PROPOSAL"}
+        trace.save()
+
+        thread = DialogueThread.objects.create(
+            team=self.config.team,
+            config=self.config,
+            source_key="waha:test@g.us",
+            identity="id_trace_thread",
+            topic="Договор БЦ Север",
+            state="open",
+            project=project,
+        )
+        subthread = DialogueThread.objects.create(
+            team=self.config.team,
+            config=self.config,
+            source_key="waha:test@g.us",
+            identity="id_sub_trace",
+            parent=thread,
+            topic="График оплат",
+            state="open",
+            project=project,
+        )
+        ThreadMessage.objects.create(
+            thread=thread,
+            raw_message=raw,
+            thought_state="intermediate",
+            relation="discusses",
+        )
+        rev = ThreadRevision.objects.create(
+            thread=thread,
+            version=1,
+            state="open",
+            topic="Договор БЦ Север",
+            summary="Обсуждение договора",
+        )
+        FactCandidate.objects.create(
+            trace=trace,
+            thread_revision=rev,
+            team=self.config.team,
+            project=project,
+            fact_type="payment",
+            proposed_changes={"payment_type": "Аванс", "amount": 5000000, "payment_date": "05.10.2026"},
+            source_key="cand_trace_1",
+            status="approved",
+        )
+
+        site = AdminSite()
+        trace_admin = MessageProcessingTraceAdmin(MessageProcessingTrace, site)
+
+        badge_html = trace_admin.thread_badge(trace)
+        self.assertIn(f"Тред #{thread.id}", badge_html)
+        self.assertIn("open", badge_html)
+        self.assertIn("БЦ Север", badge_html)
+
+        card_html = trace_admin.dialogue_thread_hierarchy_card(trace)
+        self.assertIn("ТОО Bazis-A", card_html)
+        self.assertIn("БЦ Север", card_html)
+        self.assertIn("Договор БЦ Север", card_html)
+        self.assertIn("График оплат", card_html)
+        self.assertIn("5,000,000.00", card_html)
+        self.assertIn("open (мысль в процессе)", card_html)
+
+        empty_raw = RawMessage.objects.create(
+            config=self.config,
+            team=self.config.team,
+            source="waha",
+            session_name="default",
+            chat_id="test@g.us",
+            message_id="m_empty",
+            source_revision="r",
+            content="Автономное сообщение",
+            timestamp=timezone.now(),
+        )
+        empty_trace = MessageProcessingTrace.objects.create(
+            raw_message=empty_raw,
+            status="success",
+            pipeline_action="non_commercial",
+            attempt_no=1,
+        )
+        empty_badge = trace_admin.thread_badge(empty_trace)
+        self.assertIn("Вне треда", empty_badge)
+        empty_card = trace_admin.dialogue_thread_hierarchy_card(empty_trace)
+        self.assertIn("Сообщение ещё не включено в тред диалога", empty_card)
+

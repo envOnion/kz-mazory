@@ -29,5 +29,10 @@
   <a href="{% url 'admin:waha_dashboard' %}?config_id={{ original.source_snapshot.config_id }}">Проверить группы и ID в WAHA →</a>
 </div>
 </section>
+{% if thematic_tree_card %}
+<div class="mb-4" data-testid="thematic-tree-section">
+  {{ thematic_tree_card }}
+</div>
+{% endif %}
 {% endif %}
 {% endblock %}

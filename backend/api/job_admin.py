@@ -1,20 +1,24 @@
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db.models import OuterRef, Q, Subquery
+from django.db.models import Count, OuterRef, Prefetch, Q, Subquery
 from django.http import JsonResponse
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.formats import date_format
-from django.utils.html import format_html, format_html_join
+from django.utils.html import escape, format_html, format_html_join, mark_safe
 from django.views.decorators.http import require_POST
 
 from .admin_access import IntegrationAdmin, ScopedReadOnlyAdmin
 from .history_jobs import ERROR_LABELS, IMPORT_STATES, control_run, progress, start_job
 from .models import (
     AISettings,
+    DialogueThread,
+    FactCandidate,
     MessageProcessingTrace,
     OutboxEvent,
+    ThreadMessage,
+    ThreadRevision,
     WhatsAppHistoryJob,
     WhatsAppHistoryRun,
 )
@@ -150,6 +154,295 @@ class WhatsAppHistoryJobAdmin(IntegrationAdmin):
         sync_monitor_settings(obj, form.changed_data, request.user)
 
 
+def _pluralize_ru(n: int, one: str, few: str, many: str) -> str:
+    n_abs = abs(int(n))
+    if n_abs % 10 == 1 and n_abs % 100 != 11:
+        return f"{n} {one}"
+    elif 2 <= n_abs % 10 <= 4 and (n_abs % 100 < 10 or n_abs % 100 >= 20):
+        return f"{n} {few}"
+    return f"{n} {many}"
+
+
+def _format_tenge(val) -> str:
+    if val is None or val == "":
+        return ""
+    try:
+        from decimal import Decimal
+
+        cleaned = (
+            str(val)
+            .replace(" ", "")
+            .replace("\xa0", "")
+            .replace(",", ".")
+            .replace("₸", "")
+            .strip()
+        )
+        num = Decimal(cleaned)
+        if num == num.to_integral():
+            formatted = f"{int(num):,}".replace(",", " ")
+        else:
+            formatted = f"{num:,.2f}".replace(",", " ")
+        return f"{formatted} ₸"
+    except Exception:
+        s = str(val).strip()
+        return f"{s} ₸" if "₸" not in s else s
+
+
+def _get_thread_facts(thread):
+    revisions = sorted(thread.revisions.all(), key=lambda r: r.version, reverse=True)
+    facts = []
+    candidates = []
+    if revisions:
+        latest_rev = revisions[0]
+        candidates = [
+            c for c in latest_rev.candidates.all() if c.status != "superseded"
+        ]
+        if not candidates:
+            for rev in revisions:
+                candidates.extend(
+                    [c for c in rev.candidates.all() if c.status != "superseded"]
+                )
+    if candidates:
+        for c in candidates:
+            facts.append(
+                {
+                    "type": c.fact_type,
+                    "status": c.status,
+                    "crm_match_state": getattr(c, "crm_match_state", "not_requested"),
+                    "proposed_changes": (
+                        c.proposed_changes
+                        if isinstance(c.proposed_changes, dict)
+                        else {}
+                    ),
+                }
+            )
+    elif revisions and revisions[0].extraction:
+        for item in revisions[0].extraction:
+            if isinstance(item, dict):
+                facts.append(
+                    {
+                        "type": item.get("fact_type", "commitment"),
+                        "status": "pending",
+                        "crm_match_state": "not_requested",
+                        "proposed_changes": item,
+                    }
+                )
+    return facts
+
+
+def _render_fact_card(fact, thread_project=None):
+    ftype = fact.get("type", "commitment")
+    status = fact.get("status", "pending")
+    crm_state = fact.get("crm_match_state", "not_requested")
+    data = fact.get("proposed_changes", {})
+
+    if ftype == "project":
+        title_val = (
+            data.get("object_name")
+            or data.get("deal_title")
+            or data.get("name")
+            or (thread_project.name if thread_project else "Сделка")
+        )
+        title = f"Сделка: {title_val}"
+        amt_raw = (
+            data.get("contract_amount")
+            or data.get("amount")
+            or data.get("total_amount")
+        )
+        amt_str = (
+            _format_tenge(amt_raw)
+            if amt_raw
+            else (
+                _format_tenge(thread_project.contract_amount)
+                if thread_project and thread_project.contract_amount
+                else ""
+            )
+        )
+        stage = (
+            data.get("stage_id")
+            or data.get("stage")
+            or data.get("status")
+            or (thread_project.get_status_display() if thread_project else "")
+        )
+        details_parts = []
+        if amt_str:
+            details_parts.append(f"Сумма: {amt_str}")
+        if stage:
+            details_parts.append(f"Стадия: {stage}")
+        details = " · ".join(details_parts) if details_parts else "Данные сделки"
+
+        if crm_state == "matched":
+            badge_text = "Сопоставлено Bitrix"
+            badge_cls = "badge-good px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+        elif status == "approved":
+            badge_text = "Подтверждено"
+            badge_cls = "badge-good px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+        else:
+            badge_text = "Ожидает review"
+            badge_cls = "badge-warn px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30"
+
+        return (
+            f'<div class="p-2 rounded bg-gray-900 border border-emerald-500/30 flex items-center justify-between">'
+            f'<div>'
+            f'<div class="font-bold text-emerald-400">{escape(title)}</div>'
+            f'<div class="text-[11px] text-gray-400">{escape(details)}</div>'
+            f'</div>'
+            f'<span class="{badge_cls}">{escape(badge_text)}</span>'
+            f'</div>'
+        )
+
+    elif ftype == "payment":
+        amt_raw = data.get("payment_amount") or data.get("amount") or data.get("sum")
+        amt_str = _format_tenge(amt_raw) if amt_raw else ""
+        ptype = data.get("payment_type") or data.get("title") or "Аванс"
+        title = f"Платеж: {ptype} {amt_str}".strip() if amt_str else f"Платеж: {ptype}"
+        contract = data.get("contract_number") or data.get("contract")
+        details = (
+            f"Договор №{contract}"
+            if contract
+            else (f"Сумма: {amt_str}" if amt_str else "Платеж зафиксирован")
+        )
+
+        if status == "approved":
+            badge_text = "Подтвержден"
+            badge_cls = "badge-good px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+        else:
+            badge_text = "Ожидает review"
+            badge_cls = "badge-warn px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30"
+
+        return (
+            f'<div class="p-2 rounded bg-gray-900 border border-teal-500/30 flex items-center justify-between">'
+            f'<div>'
+            f'<div class="font-bold text-teal-400">{escape(title)}</div>'
+            f'<div class="text-[11px] text-gray-400">{escape(details)}</div>'
+            f'</div>'
+            f'<span class="{badge_cls}">{escape(badge_text)}</span>'
+            f'</div>'
+        )
+
+    else:  # commitment
+        comm_title = (
+            data.get("commitment_text")
+            or data.get("text")
+            or data.get("action")
+            or data.get("title")
+            or "Обязательство"
+        )
+        if len(comm_title) > 90:
+            comm_title = comm_title[:87] + "..."
+        title = f"Обязательство: {comm_title}"
+
+        assignee = (
+            data.get("assignee")
+            or data.get("executor")
+            or data.get("responsible")
+            or data.get("manager")
+        )
+        deadline = data.get("deadline") or data.get("due_date") or data.get("date")
+        amt_raw = data.get("amount")
+        amt_str = _format_tenge(amt_raw) if amt_raw else ""
+
+        details_parts = []
+        if assignee:
+            details_parts.append(f"Исполнитель: {assignee}")
+        if deadline:
+            details_parts.append(f"Срок: {deadline}")
+        if amt_str:
+            details_parts.append(f"Сумма: {amt_str}")
+        details = (
+            " · ".join(details_parts)
+            if details_parts
+            else "Обязательство зафиксировано"
+        )
+
+        if status == "approved":
+            badge_text = "Подтверждено"
+            badge_cls = "badge-good px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30"
+        else:
+            badge_text = "Ожидает review"
+            badge_cls = "badge-warn px-2 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30"
+
+        return (
+            f'<div class="p-2 rounded bg-gray-900 border border-amber-500/30 flex items-center justify-between">'
+            f'<div>'
+            f'<div class="font-bold text-amber-300">{escape(title)}</div>'
+            f'<div class="text-[11px] text-gray-400">{escape(details)}</div>'
+            f'</div>'
+            f'<span class="{badge_cls}">{escape(badge_text)}</span>'
+            f'</div>'
+        )
+
+
+def _render_state_badge(state: str) -> str:
+    if state == "open":
+        return '<span class="badge-warn px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">open (мысль в процессе)</span>'
+    elif state == "ready":
+        return '<span class="badge-good px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">ready (закончен)</span>'
+    return f'<span class="badge-neutral px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-500/15 text-slate-400 border border-slate-500/30">{escape(state)}</span>'
+
+
+def _render_thread_block(thread, children, facts):
+    msg_count = getattr(thread, "message_count", 0) or thread.message_links.count()
+    msg_text = _pluralize_ru(msg_count, "сообщение", "сообщения", "сообщений") + " WA"
+    state_badge = _render_state_badge(thread.state)
+
+    facts_html = ""
+    if facts:
+        fact_cards = "".join(_render_fact_card(f, thread.project) for f in facts)
+        facts_html = f'<div class="ml-4 grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">{fact_cards}</div>'
+
+    children_html = ""
+    if children:
+        child_rows = []
+        for child in children:
+            c_msg_count = (
+                getattr(child, "message_count", 0) or child.message_links.count()
+            )
+            c_msg_text = (
+                _pluralize_ru(c_msg_count, "сообщение", "сообщения", "сообщений")
+                + " WA"
+            )
+            c_state_badge = _render_state_badge(child.state)
+            c_facts = _get_thread_facts(child)
+            c_facts_html = ""
+            if c_facts:
+                c_cards = "".join(
+                    _render_fact_card(f, child.project or thread.project)
+                    for f in c_facts
+                )
+                c_facts_html = f'<div class="ml-4 grid grid-cols-1 sm:grid-cols-2 gap-2 mt-1.5">{c_cards}</div>'
+
+            child_rows.append(
+                f'<div class="ml-4 pl-3 border-l-2 border-indigo-400/20 text-gray-300 space-y-1.5 py-1">'
+                f'<div class="flex items-center justify-between">'
+                f'<div class="flex items-center gap-2">'
+                f'<span class="text-indigo-400">↳ 📂</span>'
+                f'<span class="font-medium text-white">Поддиалог #{child.id}: {escape(child.topic)}</span>'
+                f'{c_state_badge}'
+                f'</div>'
+                f'<span class="text-gray-500 font-mono text-xs">{c_msg_text}</span>'
+                f'</div>'
+                f'{c_facts_html}'
+                f'</div>'
+            )
+        children_html = "".join(child_rows)
+
+    return (
+        f'<div class="ml-4 pl-3 border-l-2 border-indigo-500/40 space-y-2 py-1.5">'
+        f'<div class="flex items-center justify-between text-gray-300">'
+        f'<div class="flex items-center gap-2">'
+        f'<span>📂</span>'
+        f'<span class="font-medium text-white">Тред #{thread.id}: {escape(thread.topic)}</span>'
+        f'{state_badge}'
+        f'</div>'
+        f'<span class="text-gray-500 font-mono text-xs">{msg_text}</span>'
+        f'</div>'
+        f'{facts_html}'
+        f'{children_html}'
+        f'</div>'
+    )
+
+
 @admin.register(WhatsAppHistoryRun)
 class WhatsAppHistoryRunAdmin(IntegrationAdmin):
     change_form_template = "admin/history_run_change.html"
@@ -157,6 +450,7 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
         "id",
         "job",
         "state",
+        "thematic_summary",
         "fetched_count",
         "imported_count",
         "existing_count",
@@ -171,6 +465,7 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
         "state",
         "status_message",
         "error_code",
+        "thematic_tree_card",
         "fetched_count",
         "imported_count",
         "existing_count",
@@ -276,6 +571,300 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
             obj.id,
             reverse("admin:api_outboxevent_changelist"),
             obj.id,
+        )
+
+    @admin.display(description="Тематический разбор")
+    def thematic_summary(self, obj):
+        if not obj or not obj.pk:
+            return "—"
+        thread_ids = (
+            ThreadMessage.objects.filter(raw_message__in=obj.messages.all())
+            .values_list("thread_id", flat=True)
+            .distinct()
+        )
+        if not thread_ids:
+            return "0 тредов"
+
+        threads = list(DialogueThread.objects.filter(id__in=thread_ids))
+        total_threads = len(threads)
+        if total_threads == 0:
+            return "0 тредов"
+
+        open_count = sum(1 for t in threads if t.state == "open")
+        ready_count = sum(1 for t in threads if t.state == "ready")
+        other_count = total_threads - open_count - ready_count
+
+        state_parts = []
+        if open_count:
+            state_parts.append(f"{open_count} open")
+        if ready_count:
+            state_parts.append(f"{ready_count} ready")
+        if other_count:
+            state_parts.append(f"{other_count} other")
+        state_str = f" ({' / '.join(state_parts)})" if state_parts else ""
+
+        commitments_count = (
+            FactCandidate.objects.filter(
+                thread_revision__thread_id__in=thread_ids,
+                fact_type="commitment",
+            )
+            .exclude(status="superseded")
+            .count()
+        )
+        if commitments_count == 0:
+            revisions = ThreadRevision.objects.filter(thread_id__in=thread_ids)
+            for rev in revisions:
+                if rev.extraction and isinstance(rev.extraction, list):
+                    commitments_count += sum(
+                        1
+                        for item in rev.extraction
+                        if isinstance(item, dict)
+                        and item.get("fact_type") == "commitment"
+                    )
+
+        threads_label = _pluralize_ru(total_threads, "тред", "треда", "тредов")
+        commitments_label = _pluralize_ru(
+            commitments_count, "обязательство", "обязательства", "обязательств"
+        )
+        return f"{threads_label}{state_str} · {commitments_label}"
+
+    @admin.display(description="Иерархический разбор диалогов")
+    def thematic_tree_card(self, obj):
+        if not obj or not obj.pk:
+            return format_html(
+                '<div class="text-sm text-gray-500">Нет данных импорта</div>'
+            )
+        thread_ids = list(
+            ThreadMessage.objects.filter(raw_message__in=obj.messages.all())
+            .values_list("thread_id", flat=True)
+            .distinct()
+        )
+        if not thread_ids:
+            return mark_safe(
+                '<style>'
+                '.unfold-card { background-color: #111827; border: 1px solid #1f2937; border-radius: 0.75rem; }'
+                '</style>'
+                '<div class="unfold-card p-5 border border-indigo-900/40 bg-gradient-to-b from-gray-900 to-[#0c1222] rounded-xl text-gray-400 text-xs">'
+                '<div class="flex items-center justify-between pb-2 border-b border-gray-800">'
+                '<h3 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">'
+                '<span>🌳 Иерархический разбор импорта по Проектам и Тредсам диалогов</span>'
+                '</h3>'
+                '<span class="text-xs text-gray-500 font-mono">0 диалогов · Диалоги не распознаны</span>'
+                '</div>'
+                '<p class="mt-2 text-gray-400">В данном импорте тематические диалоги пока не распознаны или сообщения ещё не обработаны AI.</p>'
+                '</div>'
+            )
+
+        child_qs = (
+            DialogueThread.objects.annotate(
+                message_count=Count("message_links", distinct=True)
+            ).prefetch_related("revisions__candidates")
+        )
+
+        threads_qs = (
+            DialogueThread.objects.filter(id__in=thread_ids)
+            .select_related("project__company")
+            .prefetch_related(
+                Prefetch("children", queryset=child_qs),
+                "revisions__candidates",
+            )
+            .annotate(message_count=Count("message_links", distinct=True))
+        )
+        threads = list(threads_qs)
+        thread_ids_set = set(thread_ids)
+
+        companies_map = {}
+        total_facts_count = 0
+        all_threads_count = 0
+
+        for t in threads:
+            is_root = (t.parent_id is None) or (t.parent_id not in thread_ids_set)
+            if not is_root:
+                continue
+
+            company = t.project.company if (t.project and t.project.company) else None
+            company_key = company.id if company else None
+            if company_key not in companies_map:
+                companies_map[company_key] = {
+                    "company": company,
+                    "name": company.name if company else "Без контрагента",
+                    "deals": {},
+                }
+
+            deal = t.project
+            deal_key = deal.id if deal else None
+            deals_map = companies_map[company_key]["deals"]
+            if deal_key not in deals_map:
+                deals_map[deal_key] = {
+                    "project": deal,
+                    "name": deal.name if deal else "Общие вопросы",
+                    "threads": [],
+                }
+
+            children = list(t.children.all())
+            facts = _get_thread_facts(t)
+            deals_map[deal_key]["threads"].append((t, children, facts))
+
+            all_threads_count += 1 + len(children)
+            total_facts_count += len(facts)
+            for child in children:
+                total_facts_count += len(_get_thread_facts(child))
+
+        total_companies_count = len(companies_map)
+        companies_summary_str = _pluralize_ru(
+            total_companies_count, "компания", "компании", "компаний"
+        )
+        threads_summary_str = _pluralize_ru(
+            all_threads_count, "ветка", "ветки", "веток"
+        )
+        facts_summary_str = _pluralize_ru(
+            total_facts_count, "факт", "факта", "фактов"
+        )
+        header_stats_str = (
+            f"{companies_summary_str} · {threads_summary_str} · {facts_summary_str}"
+        )
+
+        companies_html_list = []
+        for company_data in companies_map.values():
+            company = company_data["company"]
+            co_name = company_data["name"]
+
+            co_threads_count = 0
+            co_facts_count = 0
+            deals_html_list = []
+
+            for deal_data in company_data["deals"].values():
+                deal = deal_data["project"]
+                deal_threads = deal_data["threads"]
+                deal_threads_count = sum(1 + len(ch) for _, ch, _ in deal_threads)
+                co_threads_count += deal_threads_count
+
+                threads_html_list = []
+                for t, children, facts in deal_threads:
+                    co_facts_count += len(facts)
+                    for ch in children:
+                        co_facts_count += len(_get_thread_facts(ch))
+                    threads_html_list.append(_render_thread_block(t, children, facts))
+
+                deal_threads_html = "".join(threads_html_list)
+
+                if deal:
+                    try:
+                        deal_url = reverse("admin:api_project_change", args=[deal.id])
+                        deal_id_str = (
+                            f"#{deal.bitrix_id} ↗"
+                            if deal.bitrix_id
+                            else f"#{deal.id} ↗"
+                        )
+                        deal_link = f'<a href="{deal_url}" class="text-[11px] text-sky-400 hover:text-sky-300 underline font-mono">{deal_id_str}</a>'
+                    except Exception:
+                        deal_link = ""
+                    deal_amt_str = (
+                        f'<span class="text-emerald-400 font-mono text-[11px]">({_format_tenge(deal.contract_amount)})</span>'
+                        if getattr(deal, "contract_amount", None)
+                        else ""
+                    )
+                    deals_html_list.append(
+                        f'<div class="pt-2 border-t border-gray-800/80 space-y-2">'
+                        f'<div class="flex items-center justify-between text-xs">'
+                        f'<div class="flex items-center gap-2">'
+                        f'<span class="text-sky-400 font-bold">🏗️ Сделка:</span>'
+                        f'<span class="font-semibold text-sky-200">{escape(deal.name)}</span>'
+                        f'{deal_link}'
+                        f'{deal_amt_str}'
+                        f'</div>'
+                        f'<span class="text-gray-400 font-mono text-[11px]">{_pluralize_ru(deal_threads_count, "тред", "треда", "тредов")}</span>'
+                        f'</div>'
+                        f'{deal_threads_html}'
+                        f'</div>'
+                    )
+                else:
+                    deals_html_list.append(
+                        f'<div class="pt-2 border-t border-gray-800/80 space-y-2">'
+                        f'<div class="flex items-center justify-between text-xs">'
+                        f'<div class="flex items-center gap-2">'
+                        f'<span class="text-slate-400 font-bold">💬 Общие вопросы:</span>'
+                        f'<span class="font-semibold text-gray-300">Без привязки к сделке</span>'
+                        f'</div>'
+                        f'<span class="text-gray-400 font-mono text-[11px]">{_pluralize_ru(deal_threads_count, "тред", "треда", "тредов")}</span>'
+                        f'</div>'
+                        f'{deal_threads_html}'
+                        f'</div>'
+                    )
+
+            if company:
+                try:
+                    co_url = reverse("admin:api_company_change", args=[company.id])
+                    co_id_str = (
+                        f"#{company.bitrix_company_id} ↗"
+                        if company.bitrix_company_id
+                        else f"#{company.id} ↗"
+                    )
+                    co_link = f'<a href="{co_url}" class="text-[11px] text-indigo-400 hover:text-indigo-300 underline font-mono">{co_id_str}</a>'
+                except Exception:
+                    co_link = ""
+                co_label = (
+                    "Проект (Компания Bitrix)"
+                    if getattr(company, "bitrix_company_id", None)
+                    else "Компания"
+                )
+            else:
+                co_link = ""
+                co_label = "Контрагент"
+
+            co_dialogues_str = _pluralize_ru(
+                co_threads_count, "диалог", "диалога", "диалогов"
+            )
+            co_facts_str = _pluralize_ru(co_facts_count, "факт", "факта", "фактов")
+            co_badge_str = f"{co_dialogues_str} · {co_facts_str}"
+
+            deals_content = "".join(deals_html_list)
+            companies_html_list.append(
+                f'<div class="p-3 rounded-lg bg-gray-950/70 border border-gray-800 space-y-3">'
+                f'<div class="flex items-center justify-between font-semibold text-white">'
+                f'<div class="flex items-center gap-2">'
+                f'<span class="text-indigo-400 font-bold">📁 {co_label}:</span>'
+                f'<span class="text-sm font-bold text-indigo-200">{escape(co_name)}</span>'
+                f'{co_link}'
+                f'</div>'
+                f'<span class="badge-good px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">'
+                f'{co_badge_str}'
+                f'</span>'
+                f'</div>'
+                f'{deals_content}'
+                f'</div>'
+            )
+
+        companies_html = "".join(companies_html_list)
+
+        css_styles = (
+            "<style>"
+            ".unfold-card { background-color: #111827; border: 1px solid #1f2937; border-radius: 0.75rem; }"
+            ".badge-good { background-color: rgba(16, 185, 129, 0.15); color: #34d399; border: 1px solid rgba(16, 185, 129, 0.3); }"
+            ".badge-warn { background-color: rgba(245, 158, 11, 0.15); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.3); }"
+            ".badge-info { background-color: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }"
+            ".badge-neutral { background-color: rgba(148, 163, 184, 0.15); color: #94a3b8; border: 1px solid rgba(148, 163, 184, 0.3); }"
+            "</style>"
+        )
+
+        return mark_safe(
+            f"{css_styles}"
+            f'<div class="unfold-card p-5 space-y-4 border-indigo-900/40 bg-gradient-to-b from-gray-900 to-[#0c1222] rounded-xl text-gray-200">'
+            f'<div class="flex items-center justify-between pb-3 border-b border-gray-800">'
+            f"<div>"
+            f'<h3 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">'
+            f"<span>🌳 Иерархический разбор импорта по Проектам и Тредсам диалогов</span>"
+            f"</h3>"
+            f'<p class="text-xs text-gray-400 mt-0.5">'
+            f"Сообщения сгруппированы по компаниям Bitrix24 и связным тематическим веткам"
+            f"</p>"
+            f"</div>"
+            f'<span class="text-xs text-indigo-400 font-mono">{header_stats_str}</span>'
+            f"</div>"
+            f'<div class="space-y-3 font-sans text-xs">'
+            f"{companies_html}"
+            f"</div>"
+            f"</div>"
         )
 
     def get_urls(self):
@@ -387,6 +976,7 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
             {
                 **(extra_context or {}),
                 "history_field_names": self.fields,
+                "thematic_tree_card": self.thematic_tree_card(obj) if obj else "",
                 "can_control_import": can_control,
                 "can_pause_import": can_control and obj.state in IMPORT_STATES,
                 "can_resume_import": can_control and obj.state == "paused",

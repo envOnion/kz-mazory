@@ -13,11 +13,12 @@
     padding: 1rem;
     height: auto;
 }
-.model-messageprocessingtrace .column-trace_source { width: 21%; }
-.model-messageprocessingtrace .column-whatsapp_content_snippet { width: 32%; }
-.model-messageprocessingtrace .column-trace_context { width: 14%; }
-.model-messageprocessingtrace .column-trace_result { width: 17%; }
-.model-messageprocessingtrace .column-project_link { width: 16%; }
+.model-messageprocessingtrace .column-trace_source { width: 18%; }
+.model-messageprocessingtrace .column-whatsapp_content_snippet { width: 26%; }
+.model-messageprocessingtrace .column-thread_badge { width: 16%; }
+.model-messageprocessingtrace .column-trace_context { width: 13%; }
+.model-messageprocessingtrace .column-trace_result { width: 14%; }
+.model-messageprocessingtrace .column-project_link { width: 13%; }
 .model-bitrixsettings .column-name { width: 23%; }
 .model-bitrixsettings .column-webhook_summary { width: 32%; }
 .model-bitrixsettings .column-sync_summary { width: 27%; }
@@ -77,6 +78,7 @@ html.dark .mazory-admin-badge--error { background: #4c0519; color: #fecdd3; bord
     }
     .field-trace_source::before { content: 'Время / отправитель'; }
     .field-whatsapp_content_snippet::before { content: 'Сообщение'; }
+    .field-thread_badge::before { content: 'Тред диалога'; }
     .field-trace_context::before { content: 'Контекст / CRM'; }
     .field-trace_result::before { content: 'Результат'; }
     .field-project_link::before { content: 'Сделка'; }

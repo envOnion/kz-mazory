@@ -37,6 +37,8 @@ from api.models import (
     CandidateCrmMatch,
     FactCandidate,
     MessageProcessingTrace,
+    DialogueThread,
+    ThreadMessage,
 )
 
 
@@ -1283,6 +1285,7 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
     list_display = (
         "trace_source",
         "whatsapp_content_snippet",
+        "thread_badge",
         "trace_context",
         "trace_result",
         "project_link",
@@ -1307,6 +1310,7 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
         "status_badge",
         "result_summary_fmt",
         "stage_1_whatsapp_card",
+        "dialogue_thread_hierarchy_card",
         "stage_2_earlier_messages_card",
         "stage_3_bitrix_card",
         "stage_4_final_record_card",
@@ -1318,8 +1322,13 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
         ),
         ("Этап 1: «Входные данные WhatsApp»", {"fields": ("stage_1_whatsapp_card",)}),
         (
-            "Этап 2: История сообщений",
-            {"fields": ("stage_2_earlier_messages_card",)},
+            "Этап 2: «История сообщений и контекст треда»",
+            {
+                "fields": (
+                    "dialogue_thread_hierarchy_card",
+                    "stage_2_earlier_messages_card",
+                )
+            },
         ),
         (
             "Этап 3: Read-only сопоставление с Bitrix24 по каждому факту",
@@ -1335,7 +1344,7 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
 
     def get_queryset(self, request):
         return _with_trace_candidates(
-            super().get_queryset(request).select_related("project")
+            super().get_queryset(request).select_related("project", "raw_message")
         )
 
     def get_urls(self):
@@ -1526,6 +1535,46 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
 
     whatsapp_content_snippet.short_description = "Текст сообщения"
 
+    @admin.display(description="Тред диалога")
+    def thread_badge(self, obj):
+        if not obj.raw_message_id:
+            return mark_safe(
+                '<span class="mazory-admin-badge mazory-admin-badge--neutral">Без треда</span>'
+            )
+        tm = (
+            ThreadMessage.objects.filter(raw_message=obj.raw_message)
+            .select_related("thread__project")
+            .first()
+        )
+        if not tm or not tm.thread:
+            return mark_safe(
+                '<span class="mazory-admin-badge mazory-admin-badge--neutral">Вне треда</span>'
+            )
+        thread = tm.thread
+        state = thread.state or "open"
+        tone = "warn" if state == "open" else "good" if state == "ready" else "neutral"
+        project_name = ""
+        if thread.project and thread.project.name:
+            project_name = thread.project.name
+        elif obj.project and obj.project.name:
+            project_name = obj.project.name
+
+        badge_text_val = f"Тред #{thread.id} ({state})"
+        if project_name:
+            clean_proj = (
+                (project_name[:26] + "…")
+                if len(project_name) > 26
+                else project_name
+            )
+            badge_text_val += f" · {clean_proj}"
+
+        return format_html(
+            '<span class="mazory-admin-badge mazory-admin-badge--{}" title="{}">{}</span>',
+            tone,
+            thread.topic or "",
+            badge_text_val,
+        )
+
     def earlier_messages_badge(self, obj):
         return format_html(
             '<span class="mazory-admin-badge mazory-admin-badge--info">{}</span>',
@@ -1630,7 +1679,20 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
     def pipeline_overview_banner(self, obj):
         """Интерактивный 4-шаговый визуальный прогресс пайплайна"""
         s1_title = f"{obj.whatsapp_sender_name}"
-        s2_sub = badge_text(obj)
+        tm = (
+            ThreadMessage.objects.filter(raw_message=obj.raw_message)
+            .select_related("thread__project")
+            .first()
+            if obj.raw_message_id
+            else None
+        )
+        if tm and tm.thread:
+            s2_title = f"Тред #{tm.thread.id} ({tm.thread.state})"
+            s2_sub = tm.thread.project.name if tm.thread.project else badge_text(obj)
+        else:
+            s2_title = badge_text(obj)
+            s2_sub = "Сохранённый контекст"
+
         s3_sub = _crm_summary(obj)["text"]
         s4_sub = f"AI: {obj.get_status_display()}"
         projects = _candidate_projects(obj)
@@ -1642,10 +1704,11 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
             else "Ожидает review"
         )
         html = format_html(
-            '\n        <div class="mazory-trace-overview w-full my-3 p-5 rounded-2xl bg-gradient-to-r from-gray-900 via-indigo-950 to-gray-900 text-white shadow-lg border border-indigo-900/40">\n            <div class="text-xs font-mono uppercase tracking-wider text-indigo-400 mb-3 flex items-center justify-between">\n                <span>Data Lineage Audit Trail</span>\n                <span>ID Трассировки: #{}</span>\n            </div>\n            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 relative">\n                <!-- Step 1 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-emerald-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-emerald-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-emerald-500/20 flex items-center justify-center text-xs">1</span>\n                        WhatsApp Вход\n                    </div>\n                    <div class="mt-2 text-sm font-bold truncate text-white">{}</div>\n                    <div class="text-xs text-gray-400 font-mono mt-0.5">{}</div>\n                </div>\n\n                <!-- Step 2 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-purple-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-purple-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-purple-500/20 flex items-center justify-center text-xs">2</span>\n                        Контекст ранее\n                    </div>\n                    <div class="mt-2 text-sm font-bold text-white">{}</div>\n                    <div class="text-xs text-purple-300 mt-0.5">Сохранённый контекст</div>\n                </div>\n\n                <!-- Step 3 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-sky-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-sky-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-sky-500/20 flex items-center justify-center text-xs">3</span>\n                        Данные Bitrix24\n                    </div>\n                    <div class="mt-2 text-sm font-bold text-white truncate">{}</div>\n                    <div class="text-xs text-sky-300 mt-0.5 truncate">{}</div>\n                </div>\n\n                <!-- Step 4 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-amber-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-amber-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center text-xs">4</span>\n                        Итоговая запись\n                    </div>\n                    <div class="mt-2 text-sm font-bold text-white truncate">{}</div>\n                    <div class="text-xs text-amber-300 mt-0.5 truncate">{}</div>\n                </div>\n            </div>\n        </div>\n        ',
+            '\n        <div class="mazory-trace-overview w-full my-3 p-5 rounded-2xl bg-gradient-to-r from-gray-900 via-indigo-950 to-gray-900 text-white shadow-lg border border-indigo-900/40">\n            <div class="text-xs font-mono uppercase tracking-wider text-indigo-400 mb-3 flex items-center justify-between">\n                <span>Data Lineage Audit Trail</span>\n                <span>ID Трассировки: #{}</span>\n            </div>\n            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 relative">\n                <!-- Step 1 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-emerald-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-emerald-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-emerald-500/20 flex items-center justify-center text-xs">1</span>\n                        WhatsApp Вход\n                    </div>\n                    <div class="mt-2 text-sm font-bold truncate text-white">{}</div>\n                    <div class="text-xs text-gray-400 font-mono mt-0.5">{}</div>\n                </div>\n\n                <!-- Step 2 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-purple-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-purple-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-purple-500/20 flex items-center justify-center text-xs">2</span>\n                        Тред / Контекст\n                    </div>\n                    <div class="mt-2 text-sm font-bold truncate text-white">{}</div>\n                    <div class="text-xs text-purple-300 mt-0.5 truncate">{}</div>\n                </div>\n\n                <!-- Step 3 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-sky-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-sky-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-sky-500/20 flex items-center justify-center text-xs">3</span>\n                        Данные Bitrix24\n                    </div>\n                    <div class="mt-2 text-sm font-bold text-white truncate">{}</div>\n                    <div class="text-xs text-sky-300 mt-0.5 truncate">{}</div>\n                </div>\n\n                <!-- Step 4 -->\n                <div class="p-3 rounded-xl bg-white/5 border border-amber-500/30 flex flex-col justify-between">\n                    <div class="flex items-center gap-2 text-amber-400 font-semibold text-xs uppercase">\n                        <span class="w-5 h-5 rounded-full bg-amber-500/20 flex items-center justify-center text-xs">4</span>\n                        Итоговая запись\n                    </div>\n                    <div class="mt-2 text-sm font-bold text-white truncate">{}</div>\n                    <div class="text-xs text-amber-300 mt-0.5 truncate">{}</div>\n                </div>\n            </div>\n        </div>\n        ',
             obj.id,
             s1_title,
             obj.whatsapp_sender_phone or "Прямой вебхук",
+            s2_title,
             s2_sub,
             s3_sub,
             "Независимый статус для каждого факта",
@@ -1679,6 +1742,416 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
         return mark_safe(html)
 
     stage_1_whatsapp_card.short_description = "1. Входные данные WhatsApp"
+
+    def dialogue_thread_hierarchy_card(self, obj):
+        """Рендеринг иерархической карточки треда диалога (Этап 2)"""
+        if not obj.raw_message_id:
+            return mark_safe(
+                '<div class="p-4 rounded-xl border border-gray-200 dark:border-gray-800 '
+                'bg-gray-50/50 dark:bg-gray-900/40 text-xs text-gray-500 dark:text-gray-400 '
+                'flex items-center gap-3">'
+                '<span class="text-base">💬</span>'
+                '<div>'
+                '<div class="font-semibold text-gray-700 dark:text-gray-300">Сообщение вне треда диалога</div>'
+                '<div class="text-[11px] mt-0.5 text-gray-500 dark:text-gray-400">'
+                'Данное сообщение не связано с исходным сообщением WhatsApp или обрабатывается автономно.'
+                '</div>'
+                '</div>'
+                '</div>'
+            )
+
+        tm = (
+            ThreadMessage.objects.filter(raw_message=obj.raw_message)
+            .select_related("thread__project__company", "thread__parent")
+            .first()
+        )
+        if not tm or not tm.thread:
+            return mark_safe(
+                '<div class="p-4 rounded-xl border border-gray-200 dark:border-gray-800 '
+                'bg-gray-50/50 dark:bg-gray-900/40 text-xs text-gray-500 dark:text-gray-400 '
+                'flex items-center gap-3">'
+                '<span class="text-base">💬</span>'
+                '<div>'
+                '<div class="font-semibold text-gray-700 dark:text-gray-300">Сообщение ещё не включено в тред диалога</div>'
+                '<div class="text-[11px] mt-0.5 text-gray-500 dark:text-gray-400">'
+                'Данное сообщение пока не сгруппировано в тематический тред или является автономным инфо-сообщением.'
+                '</div>'
+                '</div>'
+                '</div>'
+            )
+
+        thread = tm.thread
+
+        # 1. Компания Bitrix24
+        company = None
+        if thread.project and thread.project.company:
+            company = thread.project.company
+        elif obj.project and obj.project.company:
+            company = obj.project.company
+
+        if company:
+            try:
+                comp_url = reverse("admin:api_company_change", args=[company.id])
+                company_link = format_html(
+                    '<a href="{}" class="text-[11px] text-indigo-400 hover:underline">#{} ↗</a>',
+                    comp_url,
+                    company.bitrix_company_id or company.id,
+                )
+            except Exception:
+                company_link = format_html(
+                    '<span class="text-[11px] text-indigo-400 font-mono">#{}</span>',
+                    company.bitrix_company_id or company.id,
+                )
+            company_name_html = format_html(
+                '<span class="text-sm font-bold text-indigo-200">{}</span> {}',
+                company.name,
+                company_link,
+            )
+        else:
+            company_name_html = mark_safe(
+                '<span class="text-xs text-gray-400 italic">Компания не указана</span>'
+            )
+
+        # 2. Сделка / Объект
+        project = thread.project or obj.project
+        if project:
+            try:
+                proj_url = reverse("admin:api_project_change", args=[project.id])
+                deal_label = (
+                    f"Bitrix #{project.bitrix_id}"
+                    if project.bitrix_id
+                    else f"#{project.id}"
+                )
+                proj_link = format_html(
+                    '<a href="{}" class="text-[11px] text-sky-400 hover:underline">{} ↗</a>',
+                    proj_url,
+                    deal_label,
+                )
+            except Exception:
+                proj_link = format_html(
+                    '<span class="text-[11px] text-sky-400 font-mono">#{}</span>',
+                    project.bitrix_id or project.id,
+                )
+            project_name_html = format_html(
+                '<span class="text-sm font-bold text-sky-200">{}</span> {}',
+                project.name,
+                proj_link,
+            )
+            amt_str = (
+                f"{project.contract_amount:,.2f} ₸"
+                if project.contract_amount
+                else "—"
+            )
+            project_meta_html = format_html(
+                '<span class="text-gray-400 text-[11px]">Сумма: <b class="text-emerald-400">{}</b> · Стадия: <b class="text-gray-300">{}</b></span>',
+                amt_str,
+                project.get_status_display(),
+            )
+        else:
+            project_name_html = mark_safe(
+                '<span class="text-xs text-gray-400 italic">Сделка / объект не привязаны</span>'
+            )
+            project_meta_html = mark_safe(
+                '<span class="text-gray-500 text-[11px]">—</span>'
+            )
+
+        # 3. Тред и Поддиалог (если применимо)
+        state_badge_map = {
+            "open": ("badge-warn", "open (мысль в процессе)"),
+            "ready": ("badge-good", "ready (мысль завершена)"),
+            "superseded": ("badge-neutral", "superseded (заменена)"),
+            "unknown": ("badge-neutral", "unknown"),
+        }
+        thread_badge_cls, thread_badge_label = state_badge_map.get(
+            thread.state, ("badge-neutral", thread.state or "unknown")
+        )
+
+        msg_count = thread.message_links.count()
+        count_label = f"{msg_count} сообщ. WA"
+
+        if thread.parent:
+            parent = thread.parent
+            p_cls, p_label = state_badge_map.get(
+                parent.state, ("badge-neutral", parent.state or "unknown")
+            )
+            thread_hierarchy_html = format_html(
+                '<div class="space-y-2">'
+                '<div class="flex items-center justify-between text-gray-300">'
+                '<div class="flex items-center gap-2">'
+                '<span>📂</span>'
+                '<span class="font-medium text-white">Родительский тред #{}: {}</span>'
+                '<span class="{} px-2 py-0.5 rounded text-[10px]">{}</span>'
+                '</div>'
+                '</div>'
+                '<div class="ml-4 pl-3 border-l-2 border-indigo-400/40 space-y-1">'
+                '<div class="flex items-center justify-between text-gray-300">'
+                '<div class="flex items-center gap-2">'
+                '<span>↳ 📂</span>'
+                '<span class="font-bold text-indigo-200">Поддиалог #{}: {}</span>'
+                '<span class="{} px-2 py-0.5 rounded text-[10px]">{}</span>'
+                '</div>'
+                '<span class="text-gray-400 font-mono text-[11px]">{}</span>'
+                '</div>'
+                '</div>'
+                '</div>',
+                parent.id,
+                parent.topic or f"Тред #{parent.id}",
+                p_cls,
+                p_label,
+                thread.id,
+                thread.topic or f"Поддиалог #{thread.id}",
+                thread_badge_cls,
+                thread_badge_label,
+                count_label,
+            )
+        else:
+            child = thread.children.first()
+            subdialogue_part = ""
+            if child:
+                c_cls, c_label = state_badge_map.get(
+                    child.state, ("badge-neutral", child.state or "unknown")
+                )
+                subdialogue_part = format_html(
+                    '<div class="ml-4 pl-3 border-l-2 border-indigo-400/20 text-gray-400 flex items-center justify-between pt-1 text-[11px]">'
+                    '<span>↳ 📂 Поддиалог #{}: {}</span>'
+                    '<span class="{} px-1.5 py-0.5 rounded text-[10px]">{}</span>'
+                    '</div>',
+                    child.id,
+                    child.topic or f"Поддиалог #{child.id}",
+                    c_cls,
+                    c_label,
+                )
+
+            thread_hierarchy_html = format_html(
+                '<div class="space-y-1">'
+                '<div class="flex items-center justify-between text-gray-300">'
+                '<div class="flex items-center gap-2">'
+                '<span>📂</span>'
+                '<span class="font-bold text-white">Тред #{}: {}</span>'
+                '<span class="{} px-2 py-0.5 rounded text-[10px]">{}</span>'
+                '</div>'
+                '<span class="text-gray-400 font-mono text-[11px]">{}</span>'
+                '</div>'
+                '{}'
+                '</div>',
+                thread.id,
+                thread.topic or f"Тред #{thread.id}",
+                thread_badge_cls,
+                thread_badge_label,
+                count_label,
+                mark_safe(subdialogue_part),
+            )
+
+        # 4. Message role, thought state & rationale
+        role_map = {
+            "discusses": "Обсуждает (discusses)",
+            "answers": "Отвечает (answers)",
+            "clarifies": "Уточняет (clarifies)",
+            "cancels": "Отменяет / пересматривает (cancels)",
+            "fulfills": "Выполняет обязательство (fulfills)",
+        }
+        thought_map = {
+            "intermediate": "Промежуточная мысль (intermediate)",
+            "final": "Финальная мысль (final)",
+            "unknown": "Не определено (unknown)",
+        }
+        role_label = role_map.get(tm.relation, tm.relation or "discusses")
+        thought_label = thought_map.get(tm.thought_state, tm.thought_state or "intermediate")
+        rationale_text = tm.rationale or thread.summary or "Обоснование отсутствует."
+
+        role_html = format_html(
+            '<div class="p-3 rounded-lg bg-gray-900/90 border border-gray-800 space-y-1.5 text-xs">'
+            '<div class="flex flex-wrap items-center gap-3">'
+            '<div>'
+            '<span class="text-gray-400 font-medium">Роль реплики в треде:</span>'
+            '<span class="ml-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">{}</span>'
+            '</div>'
+            '<div>'
+            '<span class="text-gray-400 font-medium">Статус мысли:</span>'
+            '<span class="ml-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-purple-500/20 text-purple-300 border border-purple-500/30">{}</span>'
+            '</div>'
+            '</div>'
+            '<div class="text-[11px] text-gray-300 pt-1">'
+            '<span class="text-gray-400 font-semibold">Обоснование классификатора:</span>'
+            '<span class="text-gray-200 ml-1">{}</span>'
+            '</div>'
+            '</div>',
+            role_label,
+            thought_label,
+            rationale_text,
+        )
+
+        # 5. Extracted facts / commitments
+        fact_cards = []
+        for candidate in _trace_candidates(obj):
+            changes = candidate.proposed_changes or {}
+            cand_status = candidate.get_status_display()
+            if candidate.fact_type == "project":
+                name = changes.get("name") or (candidate.project.name if candidate.project else "Объект")
+                amt = changes.get("contract_amount")
+                if amt is None and candidate.project:
+                    amt = candidate.project.contract_amount
+                amt_fmt = f"{float(amt):,.2f} ₸" if amt is not None else "0.00 ₸"
+                stage = changes.get("stage") or (candidate.project.get_status_display() if candidate.project else "")
+                fact_cards.append({
+                    "title": f"Сделка: {name}",
+                    "desc": f"Сумма: {amt_fmt}" + (f" · Стадия: {stage}" if stage else ""),
+                    "badge": f"Сопоставлено Bitrix ({cand_status})",
+                    "border": "border-emerald-500/30",
+                    "text_color": "text-emerald-400",
+                    "badge_cls": "badge-good",
+                })
+            elif candidate.fact_type == "commitment":
+                text = changes.get("commitment_text") or "Обязательство"
+                dl = changes.get("deadline") or ""
+                amt = changes.get("amount")
+                amt_str = f" · Сумма: {float(amt):,.2f} ₸" if amt else ""
+                fact_cards.append({
+                    "title": f"Обязательство: {text[:60]}",
+                    "desc": (f"Дедлайн: {dl}" if dl else "Без дедлайна") + amt_str,
+                    "badge": f"SLA ({cand_status})",
+                    "border": "border-amber-500/30",
+                    "text_color": "text-amber-300",
+                    "badge_cls": "badge-warn",
+                })
+            elif candidate.fact_type == "payment":
+                amt = changes.get("amount") or 0
+                pt = changes.get("payment_type") or "Оплата"
+                dt = changes.get("payment_date") or ""
+                fact_cards.append({
+                    "title": f"Платеж: {float(amt):,.2f} ₸",
+                    "desc": f"{pt}" + (f" от {dt}" if dt else ""),
+                    "badge": f"Финансы ({cand_status})",
+                    "border": "border-teal-500/30",
+                    "text_color": "text-teal-400",
+                    "badge_cls": "badge-good",
+                })
+
+        if not fact_cards:
+            if obj.commitment:
+                c = obj.commitment
+                fact_cards.append({
+                    "title": f"Обязательство: {c.commitment_text[:60]}",
+                    "desc": f"Дедлайн: {c.deadline or '—'} · Срочность: {c.get_severity_display()}",
+                    "badge": f"Создано SLA #{c.id}",
+                    "border": "border-amber-500/30",
+                    "text_color": "text-amber-300",
+                    "badge_cls": "badge-warn",
+                })
+            if obj.financial_record:
+                f = obj.financial_record
+                fact_cards.append({
+                    "title": f"Платеж: {float(f.amount):,.2f} ₸",
+                    "desc": f"{f.get_payment_type_display()} · {f.payment_date}",
+                    "badge": f"Оплата #{f.id}",
+                    "border": "border-teal-500/30",
+                    "text_color": "text-teal-400",
+                    "badge_cls": "badge-good",
+                })
+            if obj.ai_extracted_facts:
+                facts = obj.ai_extracted_facts
+                ca = facts.get("contract_amount")
+                if ca and float(ca) > 0:
+                    fact_cards.append({
+                        "title": f"Сделка: {facts.get('object_name') or 'Объект'}",
+                        "desc": f"Сумма: {float(ca):,.2f} ₸ · Стадия: {facts.get('stage') or '—'}",
+                        "badge": f"AI-факт ({int(obj.ai_confidence * 100)}%)",
+                        "border": "border-emerald-500/30",
+                        "text_color": "text-emerald-400",
+                        "badge_cls": "badge-good",
+                    })
+
+        if fact_cards:
+            rendered_cards = "".join(
+                format_html(
+                    '<div class="p-2.5 rounded-lg bg-gray-900 {} border flex items-center justify-between gap-2">'
+                    '<div class="min-w-0">'
+                    '<div class="font-bold {} text-xs truncate">{}</div>'
+                    '<div class="text-[11px] text-gray-400 mt-0.5 truncate">{}</div>'
+                    '</div>'
+                    '<span class="{} text-[10px] px-2 py-0.5 rounded shrink-0">{}</span>'
+                    '</div>',
+                    c["border"],
+                    c["text_color"],
+                    c["title"],
+                    c["desc"],
+                    c["badge_cls"],
+                    c["badge"],
+                )
+                for c in fact_cards
+            )
+            facts_html = format_html(
+                '<div class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">{}</div>',
+                mark_safe(rendered_cards),
+            )
+        else:
+            facts_html = mark_safe(
+                '<div class="text-[11px] text-gray-400 italic py-1">Факты и обязательства в данной реплике не зафиксированы.</div>'
+            )
+
+        card_html = format_html(
+            '<div class="unfold-card p-5 space-y-4 border border-indigo-900/40 bg-gradient-to-b from-gray-900 to-[#0c1222] text-white">'
+            '<div class="flex items-center justify-between pb-3 border-b border-gray-800">'
+            '<div>'
+            '<h3 class="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">'
+            '<span>🌳 Иерархия диалога и контекст треда</span>'
+            '</h3>'
+            '<p class="text-xs text-gray-400 mt-0.5">'
+            'Положение сообщения в директории проектов и связных тематических ветках'
+            '</p>'
+            '</div>'
+            '<div class="flex items-center gap-2">'
+            '<span class="{} px-2.5 py-0.5 rounded-full text-xs font-semibold">{}</span>'
+            '</div>'
+            '</div>'
+            '<div class="space-y-3 font-sans text-xs">'
+            '<div class="p-3.5 rounded-lg bg-gray-950/70 border border-gray-800 space-y-3">'
+            '<!-- 1. Компания Bitrix -->'
+            '<div class="flex items-center justify-between font-semibold text-white">'
+            '<div class="flex items-center gap-2">'
+            '<span class="text-indigo-400 font-bold">📁 Проект (Компания Bitrix):</span>'
+            '{}'
+            '</div>'
+            '</div>'
+            '<!-- 2. Сделка / Объект -->'
+            '<div class="ml-4 pl-3 border-l-2 border-indigo-500/40 space-y-2">'
+            '<div class="flex items-center justify-between text-gray-300">'
+            '<div class="flex items-center gap-2">'
+            '<span class="text-sky-400 font-bold">🏢 Объект / Сделка:</span>'
+            '{}'
+            '</div>'
+            '{}'
+            '</div>'
+            '<!-- 3. Тред и Поддиалог -->'
+            '<div class="ml-4 pl-3 border-l-2 border-indigo-500/40 space-y-2.5">'
+            '{}'
+            '{}'
+            '<!-- 4. Извлеченные факты -->'
+            '<div class="pt-1">'
+            '<div class="text-[11px] font-semibold text-gray-400 uppercase tracking-wider mb-1.5">'
+            'Извлеченные сущности и факты из этого контекста:'
+            '</div>'
+            '{}'
+            '</div>'
+            '</div>'
+            '</div>'
+            '</div>'
+            '</div>'
+            '</div>',
+            thread_badge_cls,
+            thread_badge_label,
+            company_name_html,
+            project_name_html,
+            project_meta_html,
+            thread_hierarchy_html,
+            role_html,
+            facts_html,
+        )
+        return mark_safe(card_html)
+
+    dialogue_thread_hierarchy_card.short_description = (
+        "2. Иерархия треда диалога"
+    )
 
     def stage_2_earlier_messages_card(self, obj):
         return mark_safe(render_context(obj))
