@@ -36,7 +36,7 @@ def reserve_attempt(raw, operation_key):
         whatsapp_sender_name=raw.sender_name,
         whatsapp_timestamp=raw.timestamp if raw.sent_at_known else None,
         whatsapp_content=raw.content,
-        prompt_version="facts-v4-contextual-obligations",
+        prompt_version="facts-v5-dialogue-threads",
         status="warning",
         result_summary="Ожидает обработки с полной историей.",
         context_metadata={

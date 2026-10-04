@@ -15,7 +15,13 @@ export interface ConversationMessage {
   partial?: boolean;
   is_source_revision?: boolean;
 }
+export interface DialogueThread {
+  id: number; topic: string; summary: string; state: 'open' | 'ready' | 'unknown' | 'superseded';
+  version: number; parent_id: number | null; project_id: number | null;
+  messages: (ConversationMessage & { thought_state: 'intermediate' | 'final' | 'unknown'; relation: string; rationale: string })[];
+}
 export interface CandidateContext {
+  thread?: DialogueThread | null;
   source: ConversationMessage | null;
   messages: ConversationMessage[];
   before: number | null;

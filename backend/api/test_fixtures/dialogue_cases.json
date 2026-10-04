@@ -1,0 +1,7 @@
+[
+  {"name":"request_without_answer","messages":["БЦ Север: подготовь смету", "Сделаешь завтра?"],"assignments":["north","north"],"ready":[],"expected_facts":0},
+  {"name":"unrelated_short_reply","messages":["Тогда завтра"],"assignments":["unknown"],"ready":[],"expected_facts":0},
+  {"name":"interleaved_topics","messages":["БЦ Север: подготовь смету", "БЦ Южный: проверь доставку", "Сделаешь завтра?", "БЦ Север: да, подготовлю смету завтра"],"assignments":["north","south","north","north"],"ready":["north"],"expected_facts":1},
+  {"name":"both_topics_ready","messages":["БЦ Север: подготовь смету", "БЦ Южный: проверь доставку", "БЦ Север: да, подготовлю смету завтра", "БЦ Южный: проверю доставку в пятницу"],"assignments":["north","south","north","south"],"ready":["north","south"],"expected_facts":2},
+  {"name":"general_team_task","messages":["Подготовь список объектов команды", "Да, подготовлю список объектов завтра"],"assignments":["general","general"],"ready":["general"],"expected_facts":1}
+]

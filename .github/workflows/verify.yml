@@ -42,7 +42,12 @@ jobs:
       - name: Fetch pinned tokenizer data
         run: uv run --project backend python backend/fetch_tokenizer.py
       - name: Backend analytics contracts and access tests
-        run: uv run --project backend python backend/manage.py test api.tests_analytics api.tests_provider_urls api.tests_qwen_context api.tests_history_reprocessing api.tests_user_access api.tests_fact_review api.tests_contextual_commitments api.tests_delivery_receipts api.tests_embedding_chunks
+        run: uv run --project backend python backend/manage.py test api.tests_analytics api.tests_provider_urls api.tests_qwen_context api.tests_history_reprocessing api.tests_user_access api.tests_fact_review api.tests_contextual_commitments api.tests_delivery_receipts api.tests_embedding_chunks api.tests_dialogue_threads
+      - name: Install local e2e browser
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Local browser, API and Q2 end-to-end tests
+        run: uv run --project backend python backend/e2e/run.py
       - name: Production security settings
         run: uv run --project backend python ops/check_deployment.py
       - name: Dependency audit

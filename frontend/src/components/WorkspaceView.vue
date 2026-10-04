@@ -10,18 +10,29 @@
     <p class="text-sm text-slate-400">AI предлагает изменения. Утверждённые суммы остаются прежними до подтверждения. Платежи проверяет финансист.</p>
     <label>Статус <select class="field" v-model="candidateStatus" @change="candidatePage = 1; load()"><option value="pending">На проверке</option><option value="approved">Принято</option><option value="rejected">Отклонено</option><option value="superseded">Заменено</option></select></label>
     <label class="ml-3">Тип <select class="field" v-model="candidateFactType" @change="candidatePage = 1; load()"><option value="">Все факты</option><option value="project">Проекты — проверить и создать</option><option value="commitment">Обязательства</option><option value="payment">Платежи</option></select></label>
-    <p v-if="!directory.projects.length" class="panel text-amber-200">Подтверждённых доступных проектов пока нет. Проекты из переписки сначала появляются как предложения и добавляются в справочник после проверки. <button class="underline" @click="candidateFactType = 'project'; candidateStatus = 'pending'; candidatePage = 1; load()">Показать предложения по проектам</button>. Общие задачи команды можно подтверждать без проекта.</p>
+    <section class="panel space-y-2" aria-label="Справочник проектов CRM">
+      <p v-for="state in directory.crm_catalog || []" :key="state.team_id" :class="state.state === 'error' ? 'text-rose-300' : 'text-slate-300'">
+        {{ catalogLabel(state.state) }} · Загружено: {{ state.imported_count }}
+        <span v-if="state.last_success_at"> · Последняя загрузка: {{ new Date(state.last_success_at).toLocaleString('ru-RU') }}</span>
+        <span v-if="state.error_code"> · {{ catalogError(state.error_code) }}</span>
+        <button v-if="lead" class="btn ml-2" :disabled="busy || ['queued', 'running'].includes(state.state)" @click="syncCatalog(state.team_id)">Загрузить из CRM</button>
+      </p>
+      <p v-if="!directory.projects.length">Доступных проектов пока нет. Справочник загружается из Bitrix CRM; общие обязательства команды можно подтверждать без проекта.</p>
+      <p v-else>Проекты из CRM доступны для привязки. Финансовые данные подтверждаются отдельно.</p>
+      <button class="btn" :disabled="busy || loading" @click="refreshDirectory">Обновить справочник</button>
+    </section>
     <p class="text-sm text-slate-400">Предложений: {{ candidateCount }}. Связанные факты на этой странице собраны по проекту или чату.</p>
     <template v-for="group in candidateGroups" :key="group.key">
     <h2 class="text-lg font-semibold pt-3">{{ group.label }} <span class="text-sm text-slate-400">· {{ group.items.length }} на этой странице</span></h2>
     <article v-for="item in group.items" :key="item.id" class="panel space-y-4" :data-testid="`candidate-${item.id}`">
+      <p v-if="item.thread" class="text-sm text-indigo-300">Тема #{{ item.thread.id }}: {{ item.thread.topic }} · Версия {{ item.thread.version }}</p>
       <FactSummary :item="item" />
       <section class="space-y-2"><h3 class="text-sm font-semibold">Чем подтверждается факт</h3>
       <blockquote v-for="evidence in item.evidence" :key="evidence.id" class="border-l-2 border-indigo-400 pl-3 text-sm whitespace-pre-wrap"><strong v-if="evidence.role" class="block text-xs text-indigo-200">{{ ({request: 'Просьба / предмет задачи', promise: 'Обещание / назначение', deadline: 'Срок', fulfillment: 'Доказательство выполнения'} as Record<string, string>)[evidence.role] || 'Первоисточник' }}</strong>{{ evidence.quote }}</blockquote>
       <p v-if="!item.evidence.length" class="text-amber-300 text-sm">Первоисточник недоступен. Подтверждение невозможно без доступа к нему.</p></section>
       <FactConversation :candidate-id="item.id" />
       <label v-if="item.status === 'pending' && (canReview(item) || canApprove(item) || canSelectCrm(item))" class="block text-sm">Основание / причина<input class="field w-full mt-1" v-model="reasons[item.id]" /></label>
-      <section v-if="item.fact_type === 'project'" class="rounded-xl border border-sky-700/60 bg-sky-950/20 p-3 space-y-3" :data-crm-state="item.crm_resolution.state">
+      <section v-if="item.fact_type === 'project' || item.crm_resolution.state !== 'not_requested'" class="rounded-xl border border-sky-700/60 bg-sky-950/20 p-3 space-y-3" :data-crm-state="item.crm_resolution.state">
         <div class="flex flex-wrap items-start justify-between gap-2">
           <div>
             <h3 class="font-semibold text-sky-200">Сопоставление с CRM</h3>
@@ -60,6 +71,7 @@
     </article></template>
     <nav class="flex gap-3 items-center" aria-label="Страницы предложений"><button class="btn" :disabled="loading || busy || candidatePage === 1" @click="changeCandidatePage(-1)">Предыдущая</button><span class="text-sm">Страница {{ candidatePage }}</span><button class="btn" :disabled="loading || busy || !candidateNext" @click="changeCandidatePage(1)">Следующая</button></nav><p v-if="!candidates.length && !loading" class="panel">Предложений с этим статусом нет.</p>
   </template>
+  <ThreadBrowser v-if="tab === 'threads'" />
   <template v-if="tab === 'tasks'">
     <p class="text-sm text-slate-400">Сроки указаны в UTC+6. Чтение уведомления не закрывает обязательство. Перенос сохраняет исходный срок.</p>
     <article v-for="item in commitments?.commitments" :key="item.id" class="panel space-y-3"><h2 class="font-semibold">{{ item.project_name }} · {{ item.manager_name }}</h2><p>{{ item.text }}</p><p :class="item.status_color === 'red' ? 'text-rose-300' : 'text-slate-400'">{{ item.deadline_formatted }} · {{ item.status }}</p><p v-if="item.postponed_reason">Причина переноса: {{ item.postponed_reason }}</p><div v-if="['pending','overdue'].includes(item.status_code)" class="flex flex-wrap gap-2"><button class="btn-primary" :disabled="busy" @click="taskAction(item, 'fulfill')">Выполнено</button><button class="btn" :disabled="busy" @click="taskAction(item, 'help')">Нужна помощь</button><button v-if="lead" class="btn" :disabled="busy" @click="taskAction(item, 'postpone')">Перенести</button><input type="datetime-local" class="field" v-if="lead" v-model="deadlines[item.id]" aria-label="Новый срок" /><input class="field flex-1" v-model="reasons[item.id]" placeholder="Причина переноса или запрос помощи" /></div></article>
@@ -88,6 +100,7 @@
 </section>
 </template>
 <script setup lang="ts">
+import ThreadBrowser from './review/ThreadBrowser.vue'
 import { ref, computed, onMounted } from 'vue'
 import FactSummary from './review/FactSummary.vue'
 import FactConversation from './review/FactConversation.vue'
@@ -101,7 +114,7 @@ import type { ManagerProjectSummary, CommitmentData, CommitmentItem } from '../t
 const roles = computed(() => currentUser.value?.roles || [])
 const client = computed(() => roles.value.includes('client')), lead = computed(() => roles.value.includes('team_lead')), financeRole = computed(() => roles.value.includes('finance'))
 const tab = ref('projects'), loading = ref(false), busy = ref(false), error = ref(''), notice = ref('')
-const tabs = computed(() => [{ id: 'projects', label: 'Проекты' }, ...(!client.value ? [{ id: 'review', label: 'Проверка фактов' }, { id: 'tasks', label: 'Обязательства' }, { id: 'finance', label: 'Финансы' }] : []), { id: 'documents', label: 'Документы' }, { id: 'notifications', label: 'Уведомления' }, ...(roles.value.includes('admin') ? [{ id: 'operations', label: 'Состояние системы' }, { id: 'legacy', label: 'Исторические данные' }] : [])])
+const tabs = computed(() => [{ id: 'projects', label: 'Проекты' }, ...(!client.value ? [{ id: 'review', label: 'Проверка фактов' }, { id: 'threads', label: 'Темы переписки' }, { id: 'tasks', label: 'Обязательства' }, { id: 'finance', label: 'Финансы' }] : []), { id: 'documents', label: 'Документы' }, { id: 'notifications', label: 'Уведомления' }, ...(roles.value.includes('admin') ? [{ id: 'operations', label: 'Состояние системы' }, { id: 'legacy', label: 'Исторические данные' }] : [])])
 const confirmedUndelivered = ref<Record<number, boolean>>({})
 const assignments = ref<Record<number, number>>({}), transferTasks = ref<Record<number, boolean>>({})
 const legacy = ref<LegacyProject[]>([]), legacyTeams = ref<Record<number, number>>({})
@@ -131,7 +144,7 @@ function canReview(item: Candidate) {
   const financialProject = item.fact_type === 'project' && ('contract_amount' in item.proposed_changes || 'cost_amount' in item.proposed_changes)
   return item.fact_type === 'payment' || financialProject ? financeRole.value : lead.value
 }
-function canSelectCrm(item: Candidate) { return item.fact_type === 'project' && lead.value }
+function canSelectCrm(_item: Candidate) { return lead.value }
 function requiresFinanceForCrmMaterialization(item: Candidate) {
   const selected = item.crm_resolution.options.find(option => option.selection_state === 'selected')
   if (!selected) return false
@@ -144,6 +157,7 @@ function canApprove(item: Candidate) { return requiresFinanceForCrmMaterializati
 function approvalHint(item: Candidate) {
   if (!item.evidence.length || item.source_available === false) return 'Для подтверждения нужен доступ к первоисточнику.'
   if (!canApprove(item)) return 'Для подтверждения финансовых данных требуется роль финансиста.'
+  if (item.thread && item.fact_type === 'project' && !item.project_id && !['matched', 'not_found'].includes(item.crm_resolution.state)) return 'Сначала завершите поиск CRM и выберите существующий проект либо подтвердите отсутствие совпадений.'
   if (item.fact_type === 'payment' && !item.project_id) return 'Сначала выберите существующий подтверждённый проект.'
   if (item.project_id && item.base_version !== item.current_version) return 'Данные проекта изменились. Выберите проект и обновите данные перед проверкой.'
   if (item.fact_type === 'payment' && !['increment', 'reversal'].includes(String(item.proposed_changes.payment_kind || 'increment'))) return 'Обещание и накопленный итог нельзя принять как новый платёж. Исправляйте вид только при подтверждении в переписке, иначе отклоните предложение.'
@@ -170,6 +184,7 @@ async function load() {
     if (tab.value === 'legacy') legacy.value = (await api<Page<LegacyProject>>('/legacy/projects/')).results
     if (tab.value === 'projects') projects.value = (await api<Page<ManagerProjectSummary>>('/projects/')).results
     if (tab.value === 'review') {
+      await refreshDirectory()
       const page = await api<Page<Candidate>>(`/candidates/?status=${candidateStatus.value}&page=${candidatePage.value}${candidateFactType.value ? `&fact_type=${candidateFactType.value}` : ''}`)
       candidates.value = page.results; candidateCount.value = page.count; candidateNext.value = Boolean(page.next)
       crmSelections.value = {}
@@ -185,8 +200,22 @@ async function load() {
     if (tab.value === 'operations') health.value = await api<Health>('/operations-health/')
   } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка загрузки' } finally { loading.value = false }
 }
+function catalogLabel(state: string) { return ({ idle: 'Справочник ещё не загружен', queued: 'Загрузка CRM в очереди', running: 'Загрузка CRM выполняется', succeeded: 'Справочник CRM загружен', error: 'Ошибка загрузки CRM' } as Record<string, string>)[state] || 'Состояние загрузки неизвестно' }
+function catalogError(code: string) { return ({ crm_team_mapping_required: 'Не настроена команда CRM', crm_import_disabled: 'Импорт CRM отключён', crm_not_configured: 'Не настроено подключение к CRM', crm_project_scope_conflict: 'Сделка уже принадлежит другой команде' } as Record<string, string>)[code] || 'Не удалось загрузить данные; повторите загрузку' }
+async function refreshDirectory() {
+  const first = await api<Directory>('/directory/')
+  const entries = [...first.projects]
+  let next = first.projects_next_page
+  while (next) {
+    const batch = await api<Directory>(`/directory/?project_page=${next}`)
+    entries.push(...batch.projects)
+    next = batch.projects_next_page
+  }
+  directory.value = { ...first, projects: entries }
+}
+async function syncCatalog(teamId: number) { await perform(() => post('/directory/crm-sync/', { team_id: teamId }), 'Загрузка CRM поставлена в очередь. Обновите справочник после обработки.') }
 async function selectTab(value: string) { tab.value = value; notice.value = ''; await load() }
-async function perform(work: () => Promise<unknown>, message = 'Сохранено') { busy.value = true; error.value = ''; notice.value = ''; try { await work(); notice.value = message; directory.value = await api<Directory>('/directory/'); await load() } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка операции' } finally { busy.value = false } }
+async function perform(work: () => Promise<unknown>, message = 'Сохранено') { busy.value = true; error.value = ''; notice.value = ''; try { await work(); notice.value = message; await refreshDirectory(); await load() } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка операции' } finally { busy.value = false } }
 async function reviewItem(item: Candidate, action: string) {
   await perform(async () => {
     await post(`/candidates/${item.id}/review/`, { action, base_version: item.base_version, reason: reasons.value[item.id] || '', changes: {} })
@@ -227,5 +256,5 @@ async function downloadAttachment(id: number) { await perform(() => download(`/a
 async function publish(item: Attachment) { await perform(() => post(`/attachments/${item.id}/`, { published_to_client: !item.published_to_client })) }
 async function sendNotice() { await perform(() => dispatchNotification(noticeForm.value), 'Уведомление сохранено; доставка отслеживается отдельно') }
 async function exportPayments() { await perform(async () => { const receipt = await post<OperationReceipt>('/exports/', { idempotency_key: crypto.randomUUID() }); const result = await pollOperation<ExportResult>(receipt.operation_id); const url = URL.createObjectURL(new Blob(['\uFEFF', result.content], { type: 'text/csv;charset=utf-8' })); const a = document.createElement('a'); a.href = url; a.download = result.filename; a.click(); URL.revokeObjectURL(url) }, 'Выгрузка готова') }
-onMounted(async () => { try { directory.value = await api<Directory>('/directory/'); uploadProject.value = directory.value.projects[0]?.id || 0 } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка' }; await load() })
+onMounted(async () => { try { await refreshDirectory(); uploadProject.value = directory.value.projects[0]?.id || 0 } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка' }; await load() })
 </script>

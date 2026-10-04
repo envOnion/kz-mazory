@@ -335,7 +335,7 @@ def extraction_input(value):
 
 def extraction_payload(
     cfg, endpoint, content, sender, context, known_projects, sent_at, source_timezone,
-    source_metadata=None, current_time=None, target_message_id=None,
+    source_metadata=None, current_time=None, target_message_id=None, known_threads=None,
 ):
     from .ai_service import WORKER_PROMPT
 
@@ -350,6 +350,7 @@ def extraction_payload(
             **({"target_message_id": target_message_id} if target_message_id is not None else {}),
             "context": context,
             "known_projects": known_projects,
+            **({"known_threads": known_threads} if known_threads is not None else {}),
         }
     )
     if getattr(cfg, "chat_api_format", "openai_compatible") == "anthropic_messages":

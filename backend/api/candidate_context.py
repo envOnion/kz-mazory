@@ -193,8 +193,15 @@ class CandidateContextView(APIView):
             Q(order_time__gt=last.order_time)
             | Q(order_time=last.order_time, id__gt=last.id)
         ).exists()
+        thread = None
+        if candidate.thread_revision_id:
+            from .thread_views import thread_data, visible_threads
+            revision = candidate.thread_revision
+            if visible_threads(request.user).filter(pk=revision.thread_id).exists():
+                thread = thread_data(revision.thread, request.user, revision)
         return Response(
             {
+                "thread": thread,
                 "source": message_data(source, source.id, ai_ids, source.message_id),
                 "messages": [
                     message_data(m, source.id, ai_ids, source.message_id)

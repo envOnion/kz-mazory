@@ -4,9 +4,11 @@ import copy
 import json
 import re
 import uuid
+import hashlib
 
 from django.contrib.auth.models import User
 from django.db import transaction
+from django.db.models import Q
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from .ai_service import AIService, usage_event_id
@@ -43,7 +45,7 @@ def _source_quote(quote, content):
     return match.group()
 
 
-def _facts(result, raw, diagnostics=None, snapshot_id=None):
+def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False):
     # A missing optional value and an explicit null both mean unknown. Required
     # values, enums and evidence still go through the full serializer validation.
     fields = FactSchema().fields
@@ -82,13 +84,19 @@ def _facts(result, raw, diagnostics=None, snapshot_id=None):
                 fact["uncertainties"].append(
                     "Накопительный итог не является новым платежом."
                 )
-        quote = _source_quote(fact["evidence"], raw.content)
+        evidence_raw = raw
+        if threaded:
+            evidence_raw = source_scope(raw).get(pk=fact["evidence_message_id"], id__lte=snapshot_id)
+        quote = _source_quote(fact["evidence"], evidence_raw.content)
         if quote != fact["evidence"] and diagnostics is not None:
             diagnostics.setdefault("source_whitespace_restored", []).append(index)
         fact["evidence"] = quote
         if fact["fact_type"] == "commitment":
             from .commitment_evidence import validate_commitment
-            if not validate_commitment(fact, raw, snapshot_id or raw.id, _source_quote):
+            promise_raw = source_scope(raw).filter(pk=fact.get("promise_message_id"), id__lte=snapshot_id).first() if threaded else raw
+            if not promise_raw:
+                raise ProviderUnavailable("commitment_promise_evidence_unavailable")
+            if not validate_commitment(fact, promise_raw, snapshot_id or raw.id, _source_quote, threaded=threaded):
                 continue
         accepted_facts.append(fact)
     return accepted_facts
@@ -189,7 +197,9 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             team = raw.config.team if raw.config_id else raw.team
             known = json_value(
                 list(
-                    Project.objects.filter(team=team, is_verified=True, archived=False)
+                    Project.objects.filter(team=team, archived=False).filter(
+                        Q(is_verified=True) | Q(identity_confirmed=True)
+                    )
                     .order_by("id")
                     .values("id", "name", "company__name")[:100]
                 )
@@ -234,11 +244,14 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         trace.context_metadata["input_tokens_actual"] = (
             value if type(value) is int and value >= 0 else None
         )
-        facts = _facts(result, raw, diagnostics, trace.context_metadata["snapshot_max_id"])
+        from .dialogue_threads import prepare_themes, ready_facts, persist_themes, lock_source
+        themes = prepare_themes(result, raw, trace)
+        facts = _facts(ready_facts(result, themes), raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True)
         from .commitment_resolution import resolve_remaining
         resolved = resolve_remaining(facts, raw, cfg, trace)
-        facts = _facts({"facts": json_value(resolved)}, raw, diagnostics, trace.context_metadata["snapshot_max_id"])
+        facts = _facts({"facts": json_value(resolved)}, raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True)
         with transaction.atomic():
+            lock_source(raw)
             locked = (
                 RawMessage.objects.select_for_update(of=("self",))
                 .select_related("config__team", "team", "project")
@@ -269,16 +282,16 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 trace.save()
                 return
             team = locked.config.team if locked.config_id else locked.team
+            revisions = persist_themes(themes, locked, trace, json_value(facts))
             origin = RawMessage.objects.filter(
                 source=raw.source,
                 session_name=raw.session_name,
                 message_id=raw.message_id,
             )
             previous = FactCandidate.objects.filter(
-                trace__raw_message__in=origin
+                Q(trace__raw_message__in=origin) | Q(thread_revision__thread_id__in=[revision.thread_id for revision in revisions.values()])
             ).exclude(trace=trace)
             accepted = list(previous.filter(status="approved"))
-            accepted_ids = {fact_identity(item.proposed_changes) for item in accepted}
             sender = (
                 UserProfile.objects.filter(
                     phone=raw.sender_phone,
@@ -290,14 +303,16 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 if raw.sender_phone
                 else None
             )
-            proposed, duplicates = 0, []
+            proposed, duplicates, retained = 0, [], []
             for index, fact in enumerate(facts):
-                approved_obligation = next((item for item in accepted if item.fact_type == "commitment" and same_commitment_origin(item.proposed_changes, fact) and hasattr(item, "accepted_commitment")), None) if fact["fact_type"] == "commitment" else None
+                revision = revisions[fact["thread_key"]]
+                related_approved = [item for item in accepted if not item.thread_revision_id or item.thread_revision.thread_id == revision.thread_id]
+                approved_obligation = next((item for item in related_approved if item.fact_type == "commitment" and same_commitment_origin(item.proposed_changes, fact) and hasattr(item, "accepted_commitment")), None) if fact["fact_type"] == "commitment" else None
                 fulfillment_update = bool(approved_obligation and fact.get("commitment_status") == "fulfilled" and approved_obligation.accepted_commitment.status not in ("fulfilled", "cancelled"))
                 if approved_obligation and fulfillment_update:
                     fact["commitment_id"] = approved_obligation.accepted_commitment.id
                     fact["base_commitment_version"] = approved_obligation.accepted_commitment.version
-                if fact_identity(fact) in accepted_ids and not fulfillment_update:
+                if any(fact_identity(item.proposed_changes) == fact_identity(fact) for item in related_approved) and not fulfillment_update:
                     duplicates.append(index)
                     continue
                 if approved_obligation and not fulfillment_update:
@@ -306,8 +321,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 matches = Project.objects.filter(
                     team=team,
                     archived=False,
-                    normalized_name=normalize_deal_name(fact["object_name"]),
-                )
+                ).filter(Q(normalized_name=normalize_deal_name(fact["object_name"])) | Q(source="bitrix_crm", name__iexact=fact["object_name"]))
                 project = (
                     matches.first()
                     if fact["object_name"] and matches.count() == 1
@@ -317,13 +331,21 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                     fact["uncertainties"].append(
                         "Есть ранее подтверждённый факт из этого сообщения. Проверьте, является ли предложение корректировкой."
                     )
-                if fact["fact_type"] == "commitment" and raw.config_id and source_time(raw)[2] == "export_header":
-                    # Transport sender is the person who imported the chat, not the author.
-                    authors = UserProfile.objects.filter(full_name=fact.get("responsible_name", ""), user__memberships__team=team, user__memberships__status="active").distinct()
+                if fact["fact_type"] == "commitment":
+                    promise_raw = RawMessage.objects.select_related("config").get(pk=fact["promise_message_id"])
+                    profiles = UserProfile.objects.filter(user__memberships__team=team, user__memberships__status="active", user__is_active=True)
+                    # A closing reply may come from the requester. Resolve the actor
+                    # from the promise or the explicit assignment, never the target.
+                    if fact["assignment_kind"] == "promise" and source_time(promise_raw)[2] != "export_header" and promise_raw.sender_phone:
+                        authors = profiles.filter(phone=promise_raw.sender_phone).distinct()
+                    else:
+                        authors = profiles.filter(full_name=fact.get("responsible_name", "")).distinct()
                     sender = authors.first() if authors.count() == 1 else None
+                identity = hashlib.sha256(f"{fact['evidence_message_id']}:{fact_identity(fact)}".encode()).hexdigest()
                 candidate, created = FactCandidate.objects.get_or_create(
-                    source_key=f"message:{raw.id}:attempt:{trace.attempt_no}:fact:{index}",
+                    source_key=f"thread:{revision.thread_id}:revision:{revision.version}:fact:{identity}",
                     defaults={
+                        "thread_revision": revisions[fact["thread_key"]],
                         "trace": trace,
                         "project": project,
                         "team": team,
@@ -335,7 +357,11 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                         "uncertainties": fact["uncertainties"],
                     },
                 )
-                references = fact.get("evidence_messages") or [{"raw_message_id": raw.id, "quote": fact["evidence"], "role": "source"}]
+                revision = revisions[fact["thread_key"]]
+                if project and revision.thread.project_id != project.id:
+                    revision.thread.project = project
+                    revision.thread.save(update_fields=["project"])
+                references = fact.get("evidence_messages") or [{"raw_message_id": fact["evidence_message_id"], "quote": fact["evidence"], "role": "source"}]
                 for reference in references:
                     FactEvidence.objects.get_or_create(
                         candidate=candidate,
@@ -343,12 +369,13 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                         quote=reference["quote"],
                         field_name=reference["role"],
                     )
-                if created and candidate.fact_type == "project":
+                if created and (candidate.fact_type == "project" or fact["object_name"]):
                     from .tasks import enqueue_crm_match
 
                     enqueue_crm_match(candidate.id)
                 proposed += 1
-            previous.filter(status="pending").update(status="superseded")
+                retained.append(candidate.pk)
+            previous.filter(status="pending").exclude(pk__in=retained).update(status="superseded")
             locked.processed, locked.processing_state = (
                 True,
                 "needs_review" if proposed else "no_facts",
@@ -375,6 +402,22 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         PermissionDenied,
         User.DoesNotExist,
     ) as exc:
+        if isinstance(exc, ProviderUnavailable) and str(exc) == "thread_revision_conflict":
+            # Never reuse an immutable request containing obsolete thread versions.
+            # Reserve a fresh snapshot and let the durable queue retry the analysis.
+            with transaction.atomic():
+                source = RawMessage.objects.select_for_update().get(pk=raw.id)
+                key = f"thread-conflict:{trace.id}"
+                replacement = reserve_attempt(source, key)
+                OutboxEvent.objects.get_or_create(deduplication_key=key, defaults={
+                    "event_type": "extract_message", "payload": {"raw_id": raw.id,
+                    "trace_id": replacement.id, "requested_by_id": requested_by_id,
+                    "commitment_refresh": True}})
+                trace.status = "warning"
+                trace.context_metadata["request_state"] = "superseded"
+                trace.result_summary = "Тема изменилась во время анализа; запрошена новая версия."
+                trace.save()
+            return
         trace.status, trace.pipeline_action = "error", "error"
         trace.error_code = (
             str(exc)[:64]
