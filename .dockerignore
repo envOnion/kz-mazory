@@ -13,6 +13,8 @@ frontend/*
 !frontend/public/**
 !frontend/src
 !frontend/src/**
+!frontend/scripts/
+!frontend/scripts/**
 
 !nginx
 nginx/*

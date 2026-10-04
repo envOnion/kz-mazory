@@ -5,7 +5,29 @@ import secrets
 import base64
 import subprocess
 import sys
+import argparse
+import json
 from pathlib import Path
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("backend", nargs="?", default=str(Path(__file__).resolve().parents[1] / "backend"))
+parser.add_argument("--runtime-context", help="Check running server containers using this Docker context")
+args = parser.parse_args()
+if args.runtime_context:
+    names = ["mazory-backend", "mazory-qcluster", "mazory-qcluster-history",
+             "mazory-qcluster-delivery", "mazory-qcluster-crm", "mazory-outbox"]
+    result = subprocess.run(
+        ["docker", "--context", args.runtime_context, "inspect", "--type", "container", *names],
+        capture_output=True, text=True, check=True,
+    )
+    containers = json.loads(result.stdout)
+    images = {container["Image"] for container in containers}
+    if len(images) != 1 or not all(container["State"]["Running"] for container in containers):
+        for container in containers:
+            print(container["Name"], container["Config"]["Image"], container["State"]["Status"])
+        raise SystemExit("Deployment mismatch: backend and all workers must run the same image.")
+    print("Backend and all workers are running the same image.")
+    raise SystemExit(0)
 
 environment = {
     **os.environ,
@@ -20,9 +42,7 @@ environment = {
 }
 subprocess.run(
     [sys.executable, "manage.py", "check", "--deploy", "--fail-level", "ERROR"],
-    cwd=Path(sys.argv[1])
-    if len(sys.argv) > 1
-    else Path(__file__).resolve().parents[1] / "backend",
+    cwd=Path(args.backend),
     env=environment,
     check=True,
 )
