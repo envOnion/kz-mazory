@@ -62,6 +62,15 @@ def _money_matches(value, text):
     return False
 
 
+def _project_label_quoted(label, text):
+    if not label:
+        return False
+    if label.isdecimal():
+        # A payment amount equal to a numeric project label is not identity evidence.
+        return bool(re.search(r"\b(?:объект\w*|проект\w*|жк|бц|мжд|мкр)\s*(?:№\s*)?" + re.escape(label) + r"(?![\w.,])", text, re.I))
+    return bool(re.search(r"(?<!\w)" + re.escape(label) + r"(?!\w)", normalize_deal_name(text)))
+
+
 def _evidence(candidate):
     from .pipeline import _source_quote
     raw = candidate.trace.raw_message
@@ -108,12 +117,14 @@ def _resolve_project(candidate, data):
             candidate.project = thread_project
     if not candidate.project_id and data.get("object_name"):
         normalized = normalize_deal_name(data["object_name"])
-        matches = list(Project.objects.filter(team_id=candidate.team_id, archived=False).filter(
+        matches = list(Project.objects.filter(team_id=candidate.team_id).filter(
             Q(normalized_name=normalized) | Q(name__iexact=data["object_name"]) | Q(aliases__normalized_name=normalized)
         ).distinct()[:2])
         if len(matches) > 1:
             raise Deferred("ambiguous_project", "Несколько объектов с одинаковым обозначением.")
         if matches:
+            if matches[0].archived:
+                raise Deferred("ambiguous_project", "Единственный объект с этим обозначением архивен; новая активная сделка не доказана.")
             candidate.project = matches[0]
     if not candidate.project_id:
         # CRM scores alone never authorize a binding. Only an exact object label
@@ -161,20 +172,22 @@ def _validate(candidate, data, primary, text):
     if role != "unknown" and not re.search(role_patterns[role], text, re.I):
         data["party_role"] = "unknown"
         candidate._discarded_fields = {**getattr(candidate, "_discarded_fields", {}), "party_role": "Роль стороны не доказана цитатой; упоминание сохранено без подмены юридического заказчика."}
-    if candidate.project_id and data.get("object_name"):
-        normalized = normalize_deal_name(text)
+    if candidate.project_id:
         labels = {normalize_deal_name(candidate.project.name), normalize_deal_name(candidate.project.normalized_name)} | set(candidate.project.aliases.values_list("normalized_name", flat=True))
         labels |= {normalize_deal_name(option.object_label or option.deal_title) for option in candidate.crm_matches.filter(project_id=candidate.project_id, crm_match_revision=candidate.crm_match_revision)}
-        if normalize_deal_name(data["object_name"]) not in labels:
+        if data.get("object_name") and normalize_deal_name(data["object_name"]) not in labels:
             raise Deferred("ambiguous_project", "Название в источнике не соответствует выбранному проекту или его доказанным обозначениям.")
-        named = any(label and re.search(r"(?<!\w)" + re.escape(label) + r"(?!\w)", normalized) for label in labels)
-        established = bool(candidate.thread_revision_id and FactCandidate.objects.filter(thread_revision__thread_id=candidate.thread_revision.thread_id, project_id=candidate.project_id, status="approved").exists())
-        if not named and not established and primary.project_id != candidate.project_id:
+        named = any(_project_label_quoted(label, text) for label in labels)
+        label = normalize_deal_name(data.get("object_name", ""))
+        collisions = list(Project.objects.filter(team_id=candidate.team_id).filter(Q(normalized_name=label) | Q(name__iexact=data["object_name"]) | Q(aliases__normalized_name=label)).values_list("pk", flat=True).distinct()[:2]) if label else []
+        if len(collisions) > 1 and primary.project_id != candidate.project_id:
+            raise Deferred("ambiguous_project", "Одно обозначение соответствует активному и/или архивному объекту; статус активности не доказывает выбор.")
+        if not named and primary.project_id != candidate.project_id:
             raise Deferred("ambiguous_project", "Цитаты не подтверждают связь события с выбранным объектом.")
     if candidate.fact_type == "project":
         if not data.get("object_name") and not candidate.project_id:
             raise Deferred("ambiguous_project", "Объект не определен.")
-        if data.get("object_name") and not candidate.project_id and normalize_deal_name(data["object_name"]) not in normalize_deal_name(text):
+        if data.get("object_name") and not candidate.project_id and not _project_label_quoted(normalize_deal_name(data["object_name"]), text):
             raise Deferred("ambiguous_project", "Название нового объекта не доказано цитатой.")
         for field in ("contract_amount", "cost_amount"):
             if field in data and (not _money_matches(data[field], text) or APPROXIMATE.search(text)):
@@ -271,13 +284,13 @@ def _validate(candidate, data, primary, text):
                 if not re.search(r"прошу|поруч|нужно|необходимо|должен|требуется|сделай|найди|уточни|подготовь|please|must", promise_text, re.I):
                     raise Deferred("not_an_assignment", "Нет явного назначения действия; обсуждение не создает обязанность.")
                 name_parts = [word for word in re.findall(r"\w+", data["responsible_name"].casefold()) if len(word) >= 3]
-                if not name_parts or not any(word in promise_text.casefold() for word in name_parts):
+                if not name_parts or not all(re.search(r"(?<!\w)" + re.escape(word) + r"(?!\w)", promise_text.casefold()) for word in name_parts):
                     raise Deferred("unknown_participant", "Назначенный исполнитель не подтвержден в цитате поручения.")
             elif data["assignment_kind"] == "reported_promise":
                 if not re.search(r"обещал|обещали|обязал(?:ся|ись)|подтвердил", promise_text, re.I):
                     raise Deferred("promise_unproven", "Сообщенное обещание другой стороны не подтверждено цитатой.")
                 words = [word for word in re.findall(r"\w+", data["responsible_name"].casefold()) if len(word) >= 3]
-                if not words or not any(word in text.casefold() for word in words):
+                if not words or not all(re.search(r"(?<!\w)" + re.escape(word) + r"(?!\w)", text.casefold()) for word in words):
                     raise Deferred("unknown_participant", "Сторона сообщенного обещания не установлена по источнику.")
             elif not re.search(r"обещаю|сделаю|отправлю|предоставлю|проверю|позвоню|подготовлю|найду|уточню|узнаю|проведу|займусь|скину|вышлю|передам|согласую|беру|буду|жіберемін|тексеремін|I(?:'ll| will)", promise_text, re.I):
                 raise Deferred("promise_unproven", "Нет явного обещания автора; необходим связанный контекст принятия поручения.")
@@ -325,7 +338,7 @@ def _participant(candidate, data, raw):
     if "," in name or " и " in name.casefold():
         return None  # Preserve a group label; never invent one combined person.
     technical = raw.sender_phone if data.get("assignment_kind") == "promise" else ""
-    namespace = f"team:{candidate.team_id}:phone" if technical else f"team:{candidate.team_id}:source:{raw.config_id}:{raw.chat_id}:name"
+    namespace = f"team:{candidate.team_id}:phone" if technical else f"team:{candidate.team_id}:source:{raw.config_id}:{raw.chat_id}:project:{candidate.project_id or 'general'}:name"
     value = technical or name.casefold()
     identity = ParticipantIdentity.objects.filter(namespace=namespace, value=value).select_related("participant").first()
     if identity:

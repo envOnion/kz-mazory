@@ -173,6 +173,26 @@ class AutonomousAccountingTests(TestCase):
         self.assertEqual(decide(edited.id).reason_code, 'source_revision_requires_correction')
         self.assertEqual(FinancialRecord.objects.count(), 1)
 
+    def test_active_and_archived_same_name_cannot_be_resolved_by_activity(self):
+        active = Project.objects.create(team=self.team, name='Norex', normalized_name='norex', identity_confirmed=True)
+        Project.objects.create(team=self.team, name='Norex', normalized_name='norex', archived=True, identity_confirmed=True)
+        for suggested in (None, active):
+            candidate = self.candidate('По Norex поступило 117 млн тенге', object_name='Norex')
+            candidate.project = suggested
+            candidate.save()
+            self.assertEqual(decide(candidate.id).reason_code, 'ambiguous_project')
+        self.assertFalse(FinancialRecord.objects.exists())
+
+    def test_blank_object_name_does_not_authorize_weak_project_suggestion(self):
+        candidate = self.candidate('Поступило 117 млн тенге', object_name='')
+        self.assertEqual(decide(candidate.id).reason_code, 'ambiguous_project')
+        self.assertFalse(FinancialRecord.objects.exists())
+
+    def test_payment_amount_is_not_a_numeric_project_identity(self):
+        candidate = self.candidate('Поступило 343 млн тенге', amount='343000000')
+        self.assertEqual(decide(candidate.id).reason_code, 'ambiguous_project')
+        self.assertFalse(FinancialRecord.objects.exists())
+
     def test_missing_quote_and_foreign_team_cannot_be_applied(self):
         candidate = self.candidate()
         candidate.evidence.update(quote="Несуществующая цитата")
@@ -619,6 +639,14 @@ class AutonomousAccountingTests(TestCase):
         self.assertEqual(decide(candidate.id).outcome, 'accepted')
         self.assertEqual(Commitment.objects.get().responsible_name, 'Дмитрий')
         self.assertIsNone(Commitment.objects.get().manager_id)
+
+    def test_reported_promise_cannot_invent_unquoted_surname(self):
+        candidate = self.candidate('По объекту 343 Дмитрий обещал предоставить цену', kind='commitment', commitment_text='Предоставить цену', responsible_name='Дмитрий Иванов', assignment_kind='reported_promise', commitment_status='pending')
+        raw = candidate.trace.raw_message
+        candidate.proposed_changes.update(promise_message_id=raw.id, evidence_messages=[{'raw_message_id': raw.id, 'quote': raw.content, 'role': 'promise'}])
+        candidate.save()
+        self.assertEqual(decide(candidate.id).reason_code, 'unknown_participant')
+        self.assertFalse(Commitment.objects.exists())
 
     def test_plan_to_complete_project_does_not_change_stage_to_completed(self):
         candidate = self.candidate('По объекту 343 планируем завершить проект завтра', kind='project', stage='completed')

@@ -342,6 +342,7 @@ def extraction_payload(
     system_prompt = WORKER_PROMPT
     if getattr(cfg, "autonomous_enabled", False):
         system_prompt += "\nАвтономный режим: точное время дедлайна не выдумывай. Только день/утро означает deadline_precision=date; искусственные 09:00/18:00 не являются сообщенным временем. Сервер задает техническую границу дня отдельно от точности источника."
+        system_prompt += "\nСвязь с объектом доказывается цитатами, а не наличием ID в known_projects/known_threads. Если название находится в более раннем сообщении, добавь буквальную цитату этого сообщения в evidence_messages с role=identity. Пустое object_name не подтверждает предложенный project. Не выбирай между активным и архивным одноименным объектом только по статусу активности."
     user_content = extraction_input(
         {
             "content": content,
