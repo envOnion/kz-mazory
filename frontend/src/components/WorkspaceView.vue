@@ -77,25 +77,10 @@
     <article v-for="item in commitments?.commitments" :key="item.id" class="panel space-y-3"><h2 class="font-semibold">{{ item.project_name }} · {{ item.manager_name }}</h2><p>{{ item.text }}</p><p :class="item.status_color === 'red' ? 'text-rose-300' : 'text-slate-400'">{{ item.deadline_formatted }} · {{ item.status }}</p><p v-if="item.postponed_reason">Причина переноса: {{ item.postponed_reason }}</p><div v-if="['pending','overdue'].includes(item.status_code)" class="flex flex-wrap gap-2"><button class="btn-primary" :disabled="busy" @click="taskAction(item, 'fulfill')">Выполнено</button><button class="btn" :disabled="busy" @click="taskAction(item, 'help')">Нужна помощь</button><button v-if="lead" class="btn" :disabled="busy" @click="taskAction(item, 'postpone')">Перенести</button><input type="datetime-local" class="field" v-if="lead" v-model="deadlines[item.id]" aria-label="Новый срок" /><input class="field flex-1" v-model="reasons[item.id]" placeholder="Причина переноса или запрос помощи" /></div></article>
     <p v-if="commitments && !commitments.total_count" class="panel">Подтверждённых обязательств пока нет.</p>
   </template>
-  <template v-if="tab === 'finance' && financeData">
-    <div class="flex justify-between flex-wrap gap-2"><p>Просрочено по графику: {{ financeData.receivables.overdue }} {{ financeData.receivables.currency }}</p><button class="btn" :disabled="busy" @click="exportPayments">Выгрузить платежи CSV</button></div>
-    <p class="text-amber-300 text-sm">Проектов без подтверждённого графика: {{ financeData.receivables.unknown_schedule_projects }}</p>
-    <div class="panel overflow-auto"><h2 class="font-semibold mb-3">Реестр платежей</h2><table class="data-table"><thead><tr><th>ID</th><th>Дата</th><th>Проект</th><th>Сумма</th><th>Корректировка</th></tr></thead><tbody><tr v-for="payment in financeData.payments" :key="payment.id"><td>{{ payment.id }}</td><td>{{ payment.payment_date }}</td><td>{{ projectName(payment.project_id) }}</td><td>{{ payment.amount }} {{ payment.currency }}</td><td>{{ payment.reverses_id ? `К платежу #${payment.reverses_id}` : '—' }}</td></tr></tbody></table></div>
-    <form v-if="financeRole" class="panel flex flex-wrap gap-3 items-end" @submit.prevent="addSchedule"><h2 class="w-full font-semibold">Добавить согласованный срок платежа</h2><label class="block w-full sm:w-auto sm:max-w-xs">Проект<select class="field block w-full truncate" v-model="schedule.project_id" required><option v-for="p in directory.projects" :key="p.id" :value="p.id">{{ p.name }}</option></select></label><label class="block w-full sm:w-auto">Срок<input class="field block w-full" type="date" v-model="schedule.due_date" required /></label><label class="block w-full sm:w-auto">Сумма<input class="field block w-full" type="text" inputmode="decimal" pattern="[0-9]+([.][0-9]{1,2})?" v-model="schedule.amount" required /></label><button class="btn-primary" :disabled="busy">Сохранить график</button></form>
-    <div class="panel overflow-auto"><h2 class="font-semibold">График платежей</h2><table class="data-table"><thead><tr><th>ID</th><th>Проект</th><th>Срок</th><th>Сумма</th><th>Остаток</th></tr></thead><tbody><tr v-for="row in financeData.receivables.rows" :key="row.id"><td>{{ row.id }}</td><td>{{ projectName(row.project_id) }}</td><td>{{ row.due_date }}</td><td>{{ row.amount }}</td><td>{{ row.remaining }}</td></tr></tbody></table></div>
-    <form v-if="financeRole" class="panel flex flex-wrap gap-3 items-end" @submit.prevent="allocate"><h2 class="w-full font-semibold">Распределить платёж</h2><label class="block w-full sm:w-auto sm:max-w-xs">Платёж<select class="field block w-full truncate" v-model="allocation.payment_id" required><option v-for="p in financeData.payments" :key="p.id" :value="p.id">#{{ p.id }} · {{ p.amount }}</option></select></label><label class="block w-full sm:w-auto sm:max-w-xs">Строка графика<select class="field block w-full truncate" v-model="allocation.schedule_id" required><option v-for="s in financeData.receivables.rows" :key="s.id" :value="s.id">#{{ s.id }} · {{ s.due_date }}</option></select></label><label class="block w-full sm:w-auto">Сумма<input class="field block w-full" type="text" inputmode="decimal" pattern="[0-9]+([.][0-9]{1,2})?" v-model="allocation.amount" required /></label><button class="btn-primary" :disabled="busy">Распределить</button></form>
-    <form v-if="lead || financeRole" class="panel flex flex-wrap gap-3 items-end" @submit.prevent="saveTarget"><h2 class="w-full font-semibold">Утвердить месячный план</h2><label class="block w-full sm:w-auto sm:max-w-xs">Команда<select class="field block w-full truncate" v-model="target.team_id" required><option v-for="t in directory.teams" :key="t.id" :value="t.id">{{ t.name }}</option></select></label><label class="block w-full sm:w-auto sm:max-w-xs">Менеджер<select class="field block w-full truncate" v-model="target.profile_id" required><option v-for="p in directory.profiles" :key="p.id" :value="p.id">{{ p.full_name }}</option></select></label><label class="block w-full sm:w-auto">Месяц<input class="field block w-full" type="month" v-model="targetMonth" required /></label><label class="block w-full sm:w-auto">Валюта<select class="field block w-full" v-model="target.currency"><option>KZT</option><option>USD</option><option>EUR</option><option>RUB</option></select></label><label class="block w-full sm:w-auto">План<input class="field block w-full" type="text" inputmode="decimal" pattern="[0-9]+([.][0-9]{1,2})?" v-model="target.amount" required /></label><button class="btn-primary" :disabled="busy">Утвердить план</button></form>
-  </template>
-  <template v-if="tab === 'documents'">
-    <form v-if="!client" class="panel space-y-3" @submit.prevent="upload"><h2 class="font-semibold">Документ или голосовое сообщение</h2><label class="block max-w-sm">Проект<select class="field block w-full truncate mt-1" v-model="uploadProject" required><option v-for="p in directory.projects" :key="p.id" :value="p.id">{{ p.name }}</option></select></label><input type="file" accept="image/png,image/jpeg,application/pdf,audio/ogg,audio/wav,audio/mpeg" @change="chooseFile" required /><p class="text-xs text-slate-400">До 10 МБ. Распознанный текст требует проверки. Документы клиента публикует руководитель.</p><button class="btn-primary" :disabled="busy || !file">Загрузить</button></form>
-    <article v-for="item in attachments" :key="item.id" class="panel space-y-2"><h2>Документ #{{ item.id }} · {{ projectName(item.project_id) }}</h2><p class="text-sm">{{ item.content_type }} · {{ item.state === 'unavailable' ? 'Распознавание не настроено' : item.state }}</p><div class="flex gap-2 flex-wrap"><button class="btn" @click="showAttachment(item.id)">Открыть распознанный текст</button><button class="btn" @click="downloadAttachment(item.id)">Скачать файл</button><button v-if="lead" class="btn" @click="publish(item)">{{ item.published_to_client ? 'Скрыть от клиента' : 'Опубликовать клиенту' }}</button></div></article>
-  </template>
   <template v-if="tab === 'notifications'">
     <button class="btn" @click="markAllAsRead">Прочитать все</button><article v-for="item in notifications" :key="item.id" class="panel space-y-2"><h2 class="font-semibold">{{ item.title }}</h2><p>{{ item.message }}</p><p class="text-xs text-slate-400">{{ new Date(item.created_at).toLocaleString() }} · {{ item.is_read ? 'Прочитано' : 'Новое' }}</p><p v-for="(delivery, index) in item.deliveries" :key="index" class="text-xs">WhatsApp: {{ deliveryLabel(delivery.state) }}</p><button v-if="!item.acknowledged" class="btn" @click="acknowledge(item.id)">Подтвердить получение</button></article>
     <form v-if="lead || financeRole" @submit.prevent="sendNotice" class="panel space-y-3"><h2 class="font-semibold">Адресное уведомление</h2><label class="block max-w-sm">Получатель<select class="field block w-full truncate mt-1" v-model="noticeForm.recipient_id" required><option v-for="p in directory.profiles" :key="p.id" :value="p.user_id">{{ p.full_name }}</option></select></label><input class="field w-full" v-model="noticeForm.title" placeholder="Заголовок" required maxlength="255" /><textarea class="field w-full" v-model="noticeForm.message" placeholder="Сообщение" required maxlength="4000" /><label class="block"><input type="checkbox" v-model="noticeForm.send_whatsapp" /> Продублировать в WhatsApp</label><button class="btn-primary" :disabled="busy">Отправить уведомление</button></form>
   </template>
-  <template v-if="tab === 'operations' && health"><div class="panel"><h2>Очереди и интеграции</h2><p>AI за сутки: {{ health.ai_last_24h.requests }} запросов, ошибок {{ health.ai_last_24h.failed_requests }}. Средняя задержка: {{ Math.round(health.ai_last_24h.mean_duration_ms || 0) }} мс.</p><p>Известные расходы: {{ health.ai_last_24h.cost_usd ?? "Нет данных" }} USD. Запросов без цены поставщика: {{ health.ai_last_24h.unknown_cost_requests }}.</p><p>Возраст старейшего события: {{ Math.round(health.oldest_pending_seconds) }} сек.</p><table class="data-table"><thead><tr><th>Очередь</th><th>Состояние</th><th>Количество</th></tr></thead><tbody><tr v-for="(item, i) in health.outbox" :key="i"><td>{{ item.event_type }}</td><td>{{ item.state }}</td><td>{{ item.count }}</td></tr></tbody></table><div v-for="item in health.errors" :key="item.id" class="text-amber-300 space-y-2 mt-3"><p>#{{ item.id }} {{ item.event_type }}: {{ item.error_code }}</p><template v-if="!['otp','waha_control'].includes(item.event_type)"><input class="field" v-model="reasons[item.id]" placeholder="Причина повторной обработки" /><label v-if="item.state === 'unknown' && item.event_type === 'notification'" class="block"><input type="checkbox" v-model="confirmedUndelivered[item.id]" /> Проверено у поставщика: сообщение не было доставлено</label><button class="btn" :disabled="busy || !reasons[item.id]" @click="retryEvent(item.id)">Повторить после сверки</button></template></div></div><a class="btn inline-block" href="/admin/">Администрирование доступов и интеграций</a></template>
-  <template v-if="tab === 'legacy'"><p class="panel text-amber-300">Исторические записи исключены из KPI до проверки. Старый накопленный итог не создаёт платёж; каждую оплату подтвердите отдельно по дате и документу.</p><article v-for="project in legacy" :key="project.id" class="panel space-y-3"><h2>{{ project.name }}</h2><p>Договор из истории: {{ project.contract_amount }} {{ project.currency }}. Прежний накопленный итог: {{ project.legacy_paid_amount }}.</p><select class="field max-w-xs truncate" v-model="legacyTeams[project.id]"><option v-for="team in directory.teams" :key="team.id" :value="team.id">{{ team.name }}</option></select><input class="field w-full" v-model="reasons[project.id]" placeholder="Основание проверки договора" /><button class="btn" :disabled="busy || !reasons[project.id] || !(project.team_id || legacyTeams[project.id])" @click="proposeLegacy(project)">Передать договор на проверку</button></article><p v-if="!legacy.length">Исторических проектов для сверки нет.</p></template>
   <dialog ref="dialog" class="w-[min(90vw,800px)] rounded-2xl bg-slate-900 text-slate-100 border border-slate-600 p-6 backdrop:bg-black/70"><div class="flex justify-between gap-3 mb-4"><h2 class="font-semibold">{{ modalTitle }}</h2><button class="btn" @click="dialog?.close()">Закрыть</button></div><pre class="whitespace-pre-wrap break-words text-sm max-h-[65vh] overflow-auto">{{ modalText }}</pre></dialog>
 </section>
 </template>
@@ -106,20 +91,26 @@ import FactSummary from './review/FactSummary.vue'
 import FactConversation from './review/FactConversation.vue'
 import FactCorrectionForm from './review/FactCorrectionForm.vue'
 import { roles as roleLabels, statusLabels, crmErrors, crmReasons } from './review/presentation'
-import { api, post, pollOperation, download } from '../composables/api'
+import { api, post } from '../composables/api'
 import { currentUser } from '../composables/session'
 import { useNotifications } from '../composables/useNotifications'
-import type { Page, Candidate, CrmMatchState, Directory, Finance, Attachment, OperationReceipt, ExportResult, Health, LegacyProject } from '../types/platform'
+import type { Page, Candidate, CrmMatchState, Directory } from '../types/platform'
 import type { ManagerProjectSummary, CommitmentData, CommitmentItem } from '../types/chat'
 const roles = computed(() => currentUser.value?.roles || [])
 const client = computed(() => roles.value.includes('client')), lead = computed(() => roles.value.includes('team_lead')), financeRole = computed(() => roles.value.includes('finance'))
 const tab = ref('projects'), loading = ref(false), busy = ref(false), error = ref(''), notice = ref('')
-const tabs = computed(() => [{ id: 'projects', label: 'Проекты' }, ...(!client.value ? [{ id: 'review', label: 'Проверка фактов' }, { id: 'threads', label: 'Темы переписки' }, { id: 'tasks', label: 'Обязательства' }, { id: 'finance', label: 'Финансы' }] : []), { id: 'documents', label: 'Документы' }, { id: 'notifications', label: 'Уведомления' }, ...(roles.value.includes('admin') ? [{ id: 'operations', label: 'Состояние системы' }, { id: 'legacy', label: 'Исторические данные' }] : [])])
-const confirmedUndelivered = ref<Record<number, boolean>>({})
+const tabs = computed(() => [
+  { id: 'projects', label: 'Проекты' },
+  ...(!client.value ? [
+    { id: 'review', label: 'Проверка фактов' },
+    { id: 'threads', label: 'Темы переписки' },
+    { id: 'tasks', label: 'Обязательства' }
+  ] : []),
+  { id: 'notifications', label: 'Уведомления' }
+])
 const assignments = ref<Record<number, number>>({}), transferTasks = ref<Record<number, boolean>>({})
-const legacy = ref<LegacyProject[]>([]), legacyTeams = ref<Record<number, number>>({})
-const projects = ref<ManagerProjectSummary[]>([]), candidates = ref<Candidate[]>([]), commitments = ref<CommitmentData | null>(null), financeData = ref<Finance | null>(null)
-const attachments = ref<Attachment[]>([]), health = ref<Health | null>(null), directory = ref<Directory>({ teams: [], profiles: [], projects: [] })
+const projects = ref<ManagerProjectSummary[]>([]), candidates = ref<Candidate[]>([]), commitments = ref<CommitmentData | null>(null)
+const directory = ref<Directory>({ teams: [], profiles: [], projects: [] })
 const candidateFactType = ref(''), candidateStatus = ref('pending'), editing = ref<number | null>(null), reasons = ref<Record<number, string>>({}), deadlines = ref<Record<number, string>>({}), matches = ref<Record<number, number>>({})
 const candidatePage = ref(1), candidateCount = ref(0), candidateNext = ref(false)
 const candidateGroups = computed(() => {
@@ -133,13 +124,9 @@ const candidateGroups = computed(() => {
 })
 async function changeCandidatePage(delta: number) { candidatePage.value += delta; editing.value = null; await load() }
 const crmSelections = ref<Record<number, number>>({})
-const schedule = ref({ project_id: 0, due_date: '', amount: '' }), allocation = ref({ payment_id: 0, schedule_id: 0, amount: '' })
-const target = ref({ team_id: 0, profile_id: 0, amount: '', currency: 'KZT' }), targetMonth = ref(new Date().toISOString().slice(0, 7))
-const uploadProject = ref(0), file = ref<File | null>(null)
 const noticeForm = ref({ recipient_id: 0, title: '', message: '', send_whatsapp: false })
 const dialog = ref<HTMLDialogElement>(), modalTitle = ref(''), modalText = ref('')
 const { notifications, fetchNotifications, markAllAsRead, acknowledge, dispatchNotification } = useNotifications()
-function projectName(id: number) { return directory.value.projects.find(p => p.id === id)?.name || projects.value.find(p => p.id === id)?.name || `#${id}` }
 function canReview(item: Candidate) {
   const financialProject = item.fact_type === 'project' && ('contract_amount' in item.proposed_changes || 'cost_amount' in item.proposed_changes)
   return item.fact_type === 'payment' || financialProject ? financeRole.value : lead.value
@@ -181,7 +168,6 @@ function crmStateLabel(item: Candidate) {
 async function load() {
   loading.value = true; error.value = ''
   try {
-    if (tab.value === 'legacy') legacy.value = (await api<Page<LegacyProject>>('/legacy/projects/')).results
     if (tab.value === 'projects') projects.value = (await api<Page<ManagerProjectSummary>>('/projects/')).results
     if (tab.value === 'review') {
       await refreshDirectory()
@@ -194,10 +180,7 @@ async function load() {
       }
     }
     if (tab.value === 'tasks') commitments.value = await api<CommitmentData>('/commitments/')
-    if (tab.value === 'finance') financeData.value = await api<Finance>('/finance/')
-    if (tab.value === 'documents') attachments.value = await api<Attachment[]>('/attachments/')
     if (tab.value === 'notifications') await fetchNotifications()
-    if (tab.value === 'operations') health.value = await api<Health>('/operations-health/')
   } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка загрузки' } finally { loading.value = false }
 }
 function catalogLabel(state: string) { return ({ idle: 'Справочник ещё не загружен', queued: 'Загрузка CRM в очереди', running: 'Загрузка CRM выполняется', succeeded: 'Справочник CRM загружен', error: 'Ошибка загрузки CRM' } as Record<string, string>)[state] || 'Состояние загрузки неизвестно' }
@@ -241,20 +224,9 @@ async function matchCrm(item: Candidate) {
 }
 async function taskAction(item: CommitmentItem, action: string) { await perform(() => post(`/commitments/${item.id}/action/`, { action, version: item.version, reason: reasons.value[item.id] || '', ...(action === 'postpone' && deadlines.value[item.id] ? { deadline_at: new Date(`${deadlines.value[item.id]}:00+06:00`).toISOString() } : {}) })) }
 async function assignProject(project: ManagerProjectSummary) { await perform(() => post(`/projects/${project.id}/assign/`, { manager_id: assignments.value[project.id], base_version: project.version, reason: reasons.value[project.id], transfer_open_commitments: transferTasks.value[project.id] || false })) }
-async function proposeLegacy(project: LegacyProject) { await perform(() => post('/candidates/manual/', { project_id: project.id, team_id: project.team_id || legacyTeams.value[project.id], reason: reasons.value[project.id], changes: { fact_type: 'project', contract_amount: project.contract_amount } }), 'Предложение создано. Подтвердите проверенные значения в разделе проверки фактов.') }
-async function retryEvent(id: number) { await perform(() => post(`/outbox/${id}/retry/`, { reason: reasons.value[id], provider_confirmed_not_delivered: confirmedUndelivered.value[id] || false }), 'Повтор поставлен в очередь') }
-async function addSchedule() { await perform(() => post('/finance/schedules/', schedule.value)) }
-async function allocate() { await perform(() => post('/finance/allocations/', allocation.value)) }
-async function saveTarget() { const month = `${targetMonth.value}-01`; const old = financeData.value?.targets.find(t => t.team_id === target.value.team_id && t.currency === target.value.currency && t.profile_id === target.value.profile_id && t.month === month); await perform(() => post('/finance/targets/', { ...target.value, month, base_version: old?.version || 0 })) }
 async function openText(title: string, work: () => Promise<unknown>) { error.value = ''; try { const result = await work(); modalTitle.value = title; modalText.value = typeof result === 'string' ? result : JSON.stringify(result, null, 2); dialog.value?.showModal() } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка загрузки' } }
 
 async function showHistory(id: number) { await openText('История подтверждений', () => api(`/projects/${id}/history/`)) }
-function chooseFile(event: Event) { file.value = (event.target as HTMLInputElement).files?.[0] || null }
-async function upload() { if (!file.value) return; const form = new FormData(); form.append('project_id', String(uploadProject.value)); form.append('file', file.value); await perform(() => api('/attachments/', { method: 'POST', body: form }), 'Файл принят в обработку') }
-async function showAttachment(id: number) { await openText('Распознанный текст', async () => (await api<{ transcript: string }>(`/attachments/${id}/`)).transcript || 'Распознанного текста пока нет.') }
-async function downloadAttachment(id: number) { await perform(() => download(`/attachments/${id}/?download=1`, `document-${id}`), 'Файл скачан') }
-async function publish(item: Attachment) { await perform(() => post(`/attachments/${item.id}/`, { published_to_client: !item.published_to_client })) }
 async function sendNotice() { await perform(() => dispatchNotification(noticeForm.value), 'Уведомление сохранено; доставка отслеживается отдельно') }
-async function exportPayments() { await perform(async () => { const receipt = await post<OperationReceipt>('/exports/', { idempotency_key: crypto.randomUUID() }); const result = await pollOperation<ExportResult>(receipt.operation_id); const url = URL.createObjectURL(new Blob(['\uFEFF', result.content], { type: 'text/csv;charset=utf-8' })); const a = document.createElement('a'); a.href = url; a.download = result.filename; a.click(); URL.revokeObjectURL(url) }, 'Выгрузка готова') }
-onMounted(async () => { try { await refreshDirectory(); uploadProject.value = directory.value.projects[0]?.id || 0 } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка' }; await load() })
+onMounted(async () => { try { await refreshDirectory() } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка' }; await load() })
 </script>
