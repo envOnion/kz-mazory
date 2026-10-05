@@ -5,6 +5,24 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
 from .models import Company, Project, Team, TeamMembership, FinancialRecord, RawMessage, MessageProcessingTrace, FactCandidate
+from .crm_catalog import upsert_company
+
+
+class CompanyCatalogNameTests(TestCase):
+    def test_deal_without_company_title_preserves_imported_name(self):
+        company = upsert_company('114', 'Top Build')
+        result = upsert_company('114', '', '+77000000000')
+        self.assertEqual(result.id, company.id)
+        company.refresh_from_db()
+        self.assertEqual(company.name, 'Top Build')
+        self.assertEqual(company.phone, '+77000000000')
+
+    def test_placeholder_is_used_only_when_name_is_unknown(self):
+        company = upsert_company('114')
+        self.assertEqual(company.name, 'Компания #114')
+        upsert_company('114', 'Top Build')
+        company.refresh_from_db()
+        self.assertEqual(company.name, 'Top Build')
 
 
 @patch('api.views.PageNumberPagination.page_size', 2)
