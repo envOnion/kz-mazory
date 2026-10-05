@@ -46,7 +46,23 @@ def source_time(raw):
                     return sent, match[3].strip(), "export_header"
             except ValueError:
                 pass
-        # In an explicitly imported chat, the transport timestamp is an import date.
+        # A configured export chat can also contain native messages fetched from
+        # WAHA history. Their provider timestamp remains a send date, not the
+        # export ingestion date. Require matching immutable transport evidence.
+        payload = raw.raw_payload.get("payload", {})
+        stamp = payload.get("timestamp") if isinstance(payload, dict) else None
+        native = (
+            not re.match(r"\A\[\d{2}\.\d{2}\.\d{4}", raw.content)
+            and raw.source == "waha" and raw.sent_at_known
+            and raw.raw_payload.get("event") in ("message", "message.any", "history.import")
+            and raw.raw_payload.get("session") == raw.session_name
+            and isinstance(stamp, (int, float)) and not isinstance(stamp, bool)
+            and payload.get("id") == raw.message_id and payload.get("body") == raw.content
+            and abs(stamp - raw.timestamp.timestamp()) < 1
+        )
+        if native:
+            return raw.timestamp.astimezone(zone), raw.sender_name, "message_metadata"
+        # An export without its source header has no proven send date.
         return None, raw.sender_name, "unknown_export_date"
     sent = raw.timestamp.astimezone(zone) if raw.sent_at_known else None
     return sent, raw.sender_name, "message_metadata" if sent else "unknown"
