@@ -63,3 +63,38 @@ def source_metadata(raw):
         "received_at": raw.received_at.isoformat(),
         "timezone": "UTC" + offset[:3] + ":" + offset[3:],
     }
+
+
+def grounded_dates(text, raw, *, default_to_source=False):
+    """Only explicit calendar dates and source-relative days are evidence."""
+    from datetime import date
+    text = EXPORT_HEADER.sub("", text)
+    sent = source_time(raw)[0]
+    dates = set()
+    for year, month, day in re.findall(r"\b(\d{4})-(\d{2})-(\d{2})\b", text):
+        try:
+            dates.add(date(int(year), int(month), int(day)))
+        except ValueError:
+            pass
+    for day, month, year in re.findall(r"(?<!\d)(\d{1,2})[./](\d{1,2})(?:[./](\d{4}|\d{2}))?(?!\d)", text):
+        if not year and not sent:
+            continue
+        try:
+            numeric_year = (2000 + int(year) if len(year) == 2 else int(year)) if year else sent.year
+            dates.add(date(numeric_year, int(month), int(day)))
+        except ValueError:
+            pass
+    months = 'января февраля марта апреля мая июня июля августа сентября октября ноября декабря'.split()
+    for day, month, year in re.findall(r"\b(\d{1,2})\s+(" + '|'.join(months) + r")(?:\s+(\d{4}))?\b", text.casefold()):
+        if year or sent:
+            try:
+                dates.add(date(int(year) if year else sent.year, months.index(month) + 1, int(day)))
+            except ValueError:
+                pass
+    if sent:
+        relative = {'сегодня': 0, 'вчера': -1, 'позавчера': -2, 'завтра': 1, 'послезавтра': 2}
+        words = set(re.findall(r'\w+', text.casefold()))
+        dates.update(sent.date() + timedelta(days=offset) for word, offset in relative.items() if word in words)
+        if default_to_source and not dates:
+            dates.add(sent.date())
+    return dates

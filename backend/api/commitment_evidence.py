@@ -3,7 +3,7 @@
 import re
 from datetime import datetime, time, timedelta
 from .message_context import source_scope
-from .message_time import EXPORT_HEADER, source_time, source_zone
+from .message_time import EXPORT_HEADER, grounded_dates, source_time, source_zone
 from .providers import ProviderUnavailable
 
 
@@ -56,6 +56,7 @@ def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, aut
     deadline_text = " ".join(
         item["quote"] for item in refs if item["raw_message_id"] == deadline_id
     )
+    deadline_text = EXPORT_HEADER.sub("", deadline_text)
     relative = re.search(r"\b(завтра|сегодня|послезавтра)\b", deadline_text, re.I)
     morning = bool(re.search(r"\b(утром|с\s+утра)\b", deadline_text, re.I))
     explicit_clock = re.search(r"\b(?:[01]?\d|2[0-3])[:.][0-5]\d\b|\b(?:к|в|до)\s+(?:[01]?\d|2[0-3])\s*(?:час|ч\b)", deadline_text, re.I)
@@ -103,6 +104,11 @@ def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, aut
         note = "Время 09:00 уточнено по правилу для утреннего срока (UTC+6)."
         if note not in fact["uncertainties"]:
             fact["uncertainties"].append(note)
+    if autonomous and fact.get("deadline_at"):
+        supported = grounded_dates(deadline_text, date_message, default_to_source=bool(explicit_clock))
+        if fact["deadline_at"].astimezone(source_zone(date_message)).date() not in supported:
+            fact["deadline_at"], fact["deadline_precision"] = None, "unknown"
+            fact["uncertainties"].append("Срок не подтвержден календарной датой или относительным днем в цитате WhatsApp.")
     fact["fulfilled_at"] = None
     if fact.get("commitment_status") == "fulfilled":
         fulfilled_id = fact.get("fulfillment_message_id")

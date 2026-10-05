@@ -727,7 +727,8 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                     raise serializers.ValidationError(
                         "Укажите подтвержденную дату платежа."
                     )
-                if data["payment_date"] > timezone.localdate():
+                today = timezone.now().astimezone(source_zone(candidate.trace.raw_message)).date() if system else timezone.localdate()
+                if data["payment_date"] > today:
                     raise serializers.ValidationError(
                         "Полученный платёж не может иметь будущую дату."
                     )

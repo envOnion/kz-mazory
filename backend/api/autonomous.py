@@ -15,7 +15,7 @@ from rest_framework.exceptions import ValidationError
 from .deduplication import normalize_deal_name
 from .facts import FactSchema, _apply_candidate, fact_identity, json_value
 from .message_context import source_scope
-from .message_time import source_time, source_zone
+from .message_time import grounded_dates, source_time, source_zone
 from .models import (
     AISettings, AuditEvent, CandidateCrmMatch, Commitment, Company, CompanyAlias,
     FactCandidate, FactDecision, FactEvent, FieldAssertion, FinancialRecord,
@@ -243,6 +243,8 @@ def _validate(candidate, data, primary, text):
             raise Deferred("ambiguous_project", "Движение сохранено в переписке; объект учета не определен.")
         if not data.get("payment_date"):
             raise Deferred("unknown_source_time", "Дата платежа не установлена.")
+        if data["payment_date"] not in grounded_dates(data["evidence"], primary, default_to_source=True):
+            raise Deferred("unsupported_payment_date", "Дата движения не подтверждена цитатой или датой отправки WhatsApp.")
         if data["payment_date"] > timezone.now().astimezone(source_zone(primary)).date():
             raise Deferred("plan_not_actual", "Будущая дата не подтверждает поступивший платеж.", True)
         prior = FinancialRecord.objects.filter(project=candidate.project, is_verified=True, amount=data["amount"], currency=data.get("currency", candidate.project.currency), payment_date=data["payment_date"], direction=data["direction"]).select_related("candidate__trace__raw_message").first()

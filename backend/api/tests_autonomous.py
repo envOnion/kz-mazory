@@ -71,6 +71,11 @@ class AutonomousAccountingTests(TestCase):
         wrong = decide(self.candidate("По объекту 343 поступило 8.500.000 тенге", amount="500000").id)
         self.assertEqual(wrong.reason_code, "unknown_amount")
 
+    def test_payment_date_cannot_be_invented_by_model(self):
+        result = decide(self.candidate(payment_date='2010-01-01').id)
+        self.assertEqual(result.reason_code, 'unsupported_payment_date')
+        self.assertFalse(FinancialRecord.objects.exists())
+
     def test_invented_exact_clock_for_tomorrow_is_downgraded_to_date(self):
         candidate = self.candidate('По объекту 343 завтра предоставлю цену', kind='commitment', commitment_text='Предоставить цену', responsible_name='Менеджер', assignment_kind='promise', commitment_status='pending', deadline_at=(timezone.now() + timedelta(days=1)).replace(hour=18).isoformat(), deadline_precision='datetime')
         raw = candidate.trace.raw_message
