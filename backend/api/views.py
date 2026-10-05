@@ -26,6 +26,7 @@ from .models import (
 )
 from .datamart import datamart, project_row, scoped_projects
 from .security import Conflict, Unavailable
+from .project_workspace import ProjectFilters, workspace_projects, workspace_rows
 
 
 class Filters(serializers.Serializer):
@@ -161,12 +162,16 @@ class ProjectListView(APIView):
                     )
                 }
             )
-        qs, _ = scoped_projects(request.user, filters_for(request))
+        schema = ProjectFilters(data=request.query_params)
+        schema.is_valid(raise_exception=True)
+        qs, counts = workspace_projects(request.user, schema.validated_data)
         paginator = PageNumberPagination()
         page = paginator.paginate_queryset(
-            qs.select_related("company", "manager").order_by("id"), request
+            qs.select_related("company", "manager"), request
         )
-        return paginator.get_paginated_response([project_row(p) for p in page])
+        response = paginator.get_paginated_response(workspace_rows(request.user, page))
+        response.data['group_counts'] = counts
+        return response
 
 
 class ProjectVerifyView(APIView):

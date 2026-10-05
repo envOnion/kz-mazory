@@ -81,13 +81,13 @@ def scoped_projects(user, filters=None):
     return qs.filter(currency=currency), currency
 
 
-def project_row(p):
+def project_row(p, *, paid_total=None):
     margin = (
         (p.contract_amount - p.cost_amount) / p.contract_amount * 100
         if p.cost_confirmed and p.contract_amount
         else None
     )
-    paid = (
+    paid = paid_total if paid_total is not None else (
         p.financial_records.filter(is_verified=True, status="received").aggregate(
             s=Sum("amount")
         )["s"]

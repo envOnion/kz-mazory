@@ -7,6 +7,11 @@ export interface ManagerProjectSummary {
   status: string; status_code: string; margin_percent: number | null; equipment: string; is_verified: boolean;
   margin_alert: boolean; priority: string; version: number; currency: string; current_action: string; next_action: string
 }
+export interface ProjectWorkspaceSummary extends ManagerProjectSummary {
+  contract_known: boolean; payments_known: boolean; balance_known: boolean;
+  data_completeness: 'complete' | 'partial' | 'missing';
+  missing_data_reasons: { code: string; message: string }[]; review_available: boolean
+}
 export interface ManagerKpi { id: number; name: string; role: string; avatar: string; isTopPerformer?: boolean;
   statusColor: 'green' | 'yellow' | 'red'; kpiPercent: number | null; kpiBarColor: 'green' | 'yellow' | 'red';
   salesAmount: string; fact: Money; targetAmount: Money | null; targetFormatted: string; dealsCount: number;
