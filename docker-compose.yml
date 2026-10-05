@@ -131,7 +131,7 @@ services:
       WHATSAPP_SWAGGER_ENABLED: 'false'
       WHATSAPP_HOOK_URL: http://backend:8000/api/whatsapp/webhook/
       WHATSAPP_HOOK_HMAC_KEY: ${WAHA_WEBHOOK_SECRET:?Set the signing secret}
-      WHATSAPP_HOOK_EVENTS: message,message.ack
+      WHATSAPP_HOOK_EVENTS: message.any,message.ack
       WAHA_LOG_LEVEL: warn
     volumes: [waha_sessions:/app/.sessions]
     networks: [internal]

@@ -1,5 +1,8 @@
 from datetime import timedelta
 from decimal import Decimal
+import hashlib
+import hmac
+import json
 from unittest.mock import patch
 
 from django.contrib.auth.models import User
@@ -14,7 +17,7 @@ from .facts import review
 from .security import Conflict
 from .models import (
     AISettings, BitrixSettings, Commitment, Company, CrmDelivery, FactCandidate,
-    FactDecision, FactEvent, FactEvidence, FinancialRecord, MessageProcessingTrace,
+    FactDecision, FactEvent, FactEvidence, FinancialRecord, MessageArtifact, MessageProcessingTrace,
     OutboxEvent, Project, RawMessage, SourceCheckpoint, Team, TeamMembership,
     WhatsAppConfig,
 )
@@ -40,6 +43,41 @@ class AutonomousAccountingTests(TestCase):
         candidate = FactCandidate.objects.create(trace=trace, team=self.team, project=self.project, base_project_version=self.project.version, fact_type=kind, source_key=f"candidate:{self.counter}", proposed_changes=data)
         FactEvidence.objects.create(candidate=candidate, raw_message=raw, quote=text, field_name="source")
         return candidate
+
+    def webhook(self, payload):
+        encoded = json.dumps({'event': 'message.any', 'session': 'default', 'payload': {'timestamp': int(timezone.now().timestamp()), **payload}})
+        signature = hmac.new(b'fixture-secret', encoded.encode(), hashlib.sha512).hexdigest()
+        with override_settings(WAHA_WEBHOOK_SECRET='fixture-secret'):
+            return APIClient().post('/api/whatsapp/webhook/', encoded, content_type='application/json', HTTP_X_WEBHOOK_HMAC=signature)
+
+    def test_captionless_media_is_saved_with_explicit_gap(self):
+        response = self.webhook({'id': 'media', 'from': self.config.group_jid, 'body': '', 'hasMedia': True, 'media': None})
+        self.assertEqual(response.status_code, 202)
+        raw = RawMessage.objects.get(message_id='media')
+        self.assertEqual(MessageArtifact.objects.get(raw_message=raw).error_code, 'waha_media_not_downloaded')
+        refresh_checkpoint(raw)
+        self.assertEqual(SourceCheckpoint.objects.get().counts['missing_media'], 1)
+
+    def test_human_outgoing_message_uses_target_group_and_real_sender(self):
+        response = self.webhook({'id': 'own', 'from': '79990000001@c.us', 'to': self.config.group_jid, 'fromMe': True, 'body': 'Завтра предоставлю цену'})
+        self.assertEqual(response.status_code, 202)
+        raw = RawMessage.objects.get(message_id='own')
+        self.assertEqual(raw.chat_id, self.config.group_jid)
+        self.assertEqual(raw.sender_phone, '79990000001')
+        self.assertEqual(self.webhook({'id': 'foreign', 'from': '79990000001@c.us', 'to': 'other@g.us', 'fromMe': True, 'body': 'Поступило 10 млн'}).status_code, 403)
+
+    def test_system_notification_is_not_accepted_as_business_truth(self):
+        from .models import Notification, NotificationDelivery
+        user = User.objects.create_user('recipient')
+        notification = Notification.objects.create(recipient=user, deduplication_key='synthetic', title='Уведомление', message='Сообщение')
+        NotificationDelivery.objects.create(notification=notification, provider_message_id='system')
+        response = self.webhook({'id': 'system', 'from': '79990000001@c.us', 'to': self.config.group_jid, 'fromMe': True, 'body': 'Поступило 117 млн'})
+        self.assertEqual(response.data['status'], 'ignored')
+        self.assertFalse(RawMessage.objects.exists())
+        candidate = self.candidate()
+        NotificationDelivery.objects.update(provider_message_id=candidate.trace.raw_message.message_id)
+        self.assertEqual(decide(candidate.id).reason_code, 'system_generated_message')
+        self.assertFalse(FinancialRecord.objects.exists())
 
     def test_payment_is_accepted_without_human_and_unknown_contract_stays_unknown(self):
         candidate = self.candidate()
@@ -121,6 +159,19 @@ class AutonomousAccountingTests(TestCase):
         self.assertEqual(result.reason_code, "possible_duplicate")
         self.assertEqual(FinancialRecord.objects.count(), 1)
         self.assertEqual(decide(duplicate.id).id, result.id)
+
+    def test_edited_message_with_another_amount_is_not_a_second_payment(self):
+        original = self.candidate()
+        original.trace.raw_message.source_revision = 'old'
+        original.trace.raw_message.save()
+        decide(original.id)
+        edited = self.candidate('По объекту 343 поступило 118 млн тенге', amount='118000000')
+        raw = edited.trace.raw_message
+        raw.message_id = original.trace.raw_message.message_id
+        raw.source_revision = 'new'
+        raw.save()
+        self.assertEqual(decide(edited.id).reason_code, 'source_revision_requires_correction')
+        self.assertEqual(FinancialRecord.objects.count(), 1)
 
     def test_missing_quote_and_foreign_team_cannot_be_applied(self):
         candidate = self.candidate()

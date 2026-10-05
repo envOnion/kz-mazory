@@ -69,6 +69,9 @@ def _evidence(candidate):
         raise Deferred("unsupported_source", "Для автоматического учета нужен источник WhatsApp.")
     if candidate.team_id != (raw.config.team_id if raw.config_id else raw.team_id):
         raise Deferred("source_team_conflict", "Команда кандидата не совпадает с командой источника.")
+    from .models import NotificationDelivery
+    if NotificationDelivery.objects.filter(provider_message_id=raw.message_id).exclude(provider_message_id="").exists():
+        raise Deferred("system_generated_message", "Уведомление Mazory не является самостоятельным фактом бизнеса.", True)
     scope = source_scope(raw)
     refs = list(candidate.evidence.select_related("raw_message"))
     if not refs:
@@ -250,6 +253,9 @@ def _validate(candidate, data, primary, text):
             raise Deferred("unsupported_payment_date", "Дата движения не подтверждена цитатой или датой отправки WhatsApp.")
         if data["payment_date"] > timezone.now().astimezone(source_zone(primary)).date():
             raise Deferred("plan_not_actual", "Будущая дата не подтверждает поступивший платеж.", True)
+        edited = FinancialRecord.objects.filter(is_verified=True, candidate__trace__raw_message__source=primary.source, candidate__trace__raw_message__session_name=primary.session_name, candidate__trace__raw_message__message_id=primary.message_id).exclude(candidate__trace__raw_message__source_revision=primary.source_revision).first()
+        if edited:
+            raise Deferred("source_revision_requires_correction", f"Предыдущая версия сообщения уже дала движение №{edited.id}; изменение сообщения не является вторым платежом.")
         prior = FinancialRecord.objects.filter(project=candidate.project, is_verified=True, amount=data["amount"], currency=data.get("currency", candidate.project.currency), payment_date=data["payment_date"], direction=data["direction"]).select_related("candidate__trace__raw_message").first()
         if prior:
             origin = prior.candidate.trace.raw_message if prior.candidate_id else None
@@ -257,6 +263,8 @@ def _validate(candidate, data, primary, text):
                 raise Deferred("duplicate_event", f"Это движение уже учтено в записи №{prior.id}.", True)
             raise Deferred("possible_duplicate", f"Есть совпадающая запись №{prior.id}; переписка не доказывает вторую операцию.")
     else:
+        if not data.get("commitment_id") and data["assignment_kind"] == "promise":
+            data["responsible_name"] = source_time(primary)[1] or primary.sender_phone
         if not data.get("commitment_id") and data["commitment_status"] == "pending":
             promise_text = " ".join(ref["quote"] for ref in data.get("evidence_messages", []) if ref["role"] == "promise") or data["evidence"]
             if data["assignment_kind"] == "assignment":
