@@ -317,6 +317,8 @@ class AIService:
                     usage = {"prompt_tokens": data.get("input_tokens")}
             else:
                 usage = data.get("usage", {}) if isinstance(data, dict) else {}
+                if url.endswith("/api/chat") and isinstance(data, dict):
+                    usage = {"prompt_tokens": data.get("prompt_eval_count"), "completion_tokens": data.get("eval_count")}
             if not isinstance(usage, dict):
                 usage = {}
 
@@ -493,6 +495,19 @@ class AIService:
                 response_validator=normalize_anthropic_message,
             )
             data = normalize_anthropic_message(raw_data)
+        elif "_ollama_num_ctx" in payload:
+            from .ollama_chat import native_request, normalize_response
+
+            if not provider_url.endswith("/v1"):
+                raise ProviderUnavailable("context_provider_unsupported")
+            raw_data = AIService._post(
+                provider_url[:-3] + "/api/chat",
+                native_request(payload, cfg),
+                (10, settings.AI_REQUEST_TIMEOUT),
+                api_format=api_format, operation="chat", api_key=api_key,
+                response_validator=normalize_response,
+            )
+            data = normalize_response(raw_data)
         else:
             data = AIService._post(
                 f"{provider_url.rstrip('/')}/chat/completions",
@@ -572,6 +587,19 @@ class AIService:
                 response_validator=normalize_anthropic_message,
             )
             data = normalize_anthropic_message(raw_data)
+        elif cfg.chat_model_name == "gemma4:e4b":
+            from .context_tokens import context_runtime
+            from .ollama_chat import native_request, normalize_response
+
+            context_runtime(cfg)
+            payload.update(max_tokens=cfg.max_completion_tokens, reasoning_effort="none", _ollama_num_ctx=cfg.context_window_tokens)
+            base = AIService.effective_chat_provider_url(cfg)
+            raw_data = AIService._post(
+                base[:-3] + "/api/chat", native_request(payload, cfg, structured=False), 45,
+                api_format=api_format, operation="chat", api_key=api_key,
+                response_validator=normalize_response,
+            )
+            data = normalize_response(raw_data)
         else:
             data = AIService._post(
                 f"{AIService.effective_chat_provider_url(cfg)}/chat/completions",
@@ -615,9 +643,17 @@ class AIService:
             raise ProviderUnavailable("analytics_timeout")
         key = AIService._credential(cfg, api_format=api_format)
         native = api_format == ANTHROPIC_MESSAGES
+        gemma = not native and cfg.chat_model_name == "gemma4:e4b"
+        if gemma:
+            from .ollama_chat import analytics_request, normalize_response
+
+            payload = analytics_request(payload, cfg)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ProviderUnavailable("analytics_timeout")
         try:
             result = AIService._post(
-                f"{AIService.effective_chat_provider_url(cfg)}"
+                (AIService.effective_chat_provider_url(cfg)[:-3] + "/api/chat") if gemma else f"{AIService.effective_chat_provider_url(cfg)}"
                 + ("/v1/messages" if native else "/chat/completions"),
                 payload,
                 min(45, remaining),
@@ -625,10 +661,10 @@ class AIService:
                 operation="analytics",
                 headers=anthropic_headers(key) if native else None,
                 api_key=None if native else key,
-                response_validator=lambda data: analytics_turn(data, api_format),
+                response_validator=lambda data: analytics_turn(normalize_response(data, allow_tools=True) if gemma else data, api_format),
             )
         except ProviderUnavailable as exc:
             if str(exc) in ["provider_invalid_request", "provider_request_rejected"]:
                 raise ProviderUnavailable("provider_tools_unsupported") from None
             raise
-        return analytics_turn(result, api_format)
+        return analytics_turn(normalize_response(result, allow_tools=True) if gemma else result, api_format)

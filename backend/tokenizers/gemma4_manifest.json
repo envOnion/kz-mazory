@@ -1,0 +1,35 @@
+{
+  "repo": "google/gemma-4-E4B",
+  "revision": "411aa17b749aa952df1359d2dcea73917a544d9a",
+  "models": [
+    "gemma4:e4b"
+  ],
+  "files": {
+    "tokenizer.json": "12bac982b793c44b03d52a250a9f0d0b666813da566b910c24a6da0695fd11e6",
+    "tokenizer_config.json": "6a9383197f000d2723684efd2210f5bf217bc29fa2cf360ae1574201b47af060"
+  },
+  "ollama": {
+    "architecture": "gemma4",
+    "renderer": "gemma4",
+    "version": "0.34.0",
+    "vocabulary_sha256": "bf35d81ce63e65e5b907203ba84cee6d275aece9c6cec83cd2b0315a25e8787b",
+    "identity_fields": [
+      "tokenizer.ggml.add_bos_token",
+      "tokenizer.ggml.add_space_prefix",
+      "tokenizer.ggml.bos_token_id",
+      "tokenizer.ggml.eos_token_id",
+      "tokenizer.ggml.mask_token_id",
+      "tokenizer.ggml.merges",
+      "tokenizer.ggml.model",
+      "tokenizer.ggml.padding_token_id",
+      "tokenizer.ggml.scores",
+      "tokenizer.ggml.token_type",
+      "tokenizer.ggml.tokens",
+      "tokenizer.ggml.unknown_token_id"
+    ],
+    "renderer_source": "https://github.com/ollama/ollama/blob/v0.34.0/model/renderers/gemma4.go",
+    "max_context_tokens": 131072,
+    "native_context_options": true,
+    "renderer_source_sha256": "f95c2233639c4d01a628b7f878bed65068593925b4c310e29d954ddd8dce04b3"
+  }
+}

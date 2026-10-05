@@ -18,6 +18,7 @@ from .providers import ProviderUnavailable, checked_ai_url
 ROOT = Path(__file__).resolve().parents[1] / "tokenizers"
 MANIFEST = json.loads((ROOT / "manifest.json").read_text())
 QWEN_MANIFEST = json.loads((ROOT / "qwen38_manifest.json").read_text())
+GEMMA_MANIFEST = json.loads((ROOT / "gemma4_manifest.json").read_text())
 MAX_REMOTE_COUNT_REQUESTS = 32
 
 
@@ -102,6 +103,38 @@ class QwenCounter(NativeCounter):
         return self.count_text(rendered)
 
 
+class GemmaCounter(NativeCounter):
+    """Text-only Gemma4 renderer from the pinned Ollama release."""
+
+    strategy = "gemma4_ollama_local_manifest"
+
+    def __init__(self):
+        root = ROOT / GEMMA_MANIFEST["revision"]
+        for name, checksum in GEMMA_MANIFEST["files"].items():
+            if hashlib.sha256((root / name).read_bytes()).hexdigest() != checksum:
+                raise ValueError("Invalid tokenizer assets")
+        self.tokenizer = Tokenizer.from_file(str(root / "tokenizer.json"))
+        self.tokenizer.no_truncation()
+        self.tokenizer.no_padding()
+
+    def count_payload(self, payload):
+        messages = payload.get("messages", [])
+        if (
+            payload.get("reasoning_effort") != "none" or payload.get("tools")
+            or [message.get("role") for message in messages] != ["system", "user"]
+            or any(set(message) != {"role", "content"} or not isinstance(message.get("content"), str) for message in messages)
+        ):
+            raise ProviderUnavailable("context_token_count_unavailable")
+        # Go strings.TrimSpace uses Unicode White_Space, excluding Python's
+        # additional U+001C..U+001F separators.
+        whitespace = "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+        rendered = "<bos>" + "".join(
+            f"<|turn>{message['role']}\n{message['content'].strip(whitespace)}<turn|>\n"
+            for message in messages
+        ) + "<|turn>model\n"
+        return self.count_text(rendered)
+
+
 class AnthropicCounter:
     """Exact provider counts cached for one extraction job.
 
@@ -170,14 +203,24 @@ def qwen_counter():
         raise ProviderUnavailable("context_tokenizer_unavailable") from exc
 
 
+@lru_cache(maxsize=1)
+def gemma_counter():
+    try:
+        return GemmaCounter()
+    except (OSError, ValueError, KeyError) as exc:
+        raise ProviderUnavailable("context_tokenizer_unavailable") from exc
+
+
 def ollama_context_runtime(cfg):
     """Verify the installed model in the worker before trusting local counts."""
     from .ai_service import AIService
 
+    gemma = cfg.chat_model_name in GEMMA_MANIFEST["models"] or cfg.tokenizer_id == GEMMA_MANIFEST["repo"]
+    manifest = GEMMA_MANIFEST if gemma else QWEN_MANIFEST
     if (
-        cfg.chat_model_name not in QWEN_MANIFEST["models"]
-        or cfg.tokenizer_id != QWEN_MANIFEST["repo"]
-        or cfg.tokenizer_revision != QWEN_MANIFEST["revision"]
+        cfg.chat_model_name not in manifest["models"]
+        or cfg.tokenizer_id != manifest["repo"]
+        or cfg.tokenizer_revision != manifest["revision"]
     ):
         raise ProviderUnavailable("context_tokenizer_unavailable")
     base = AIService.effective_chat_provider_url(cfg)
@@ -187,7 +230,7 @@ def ollama_context_runtime(cfg):
     key = "ollama-context:" + payload_hash({
         "url": base, "model": cfg.chat_model_name,
         "credential": cfg.chat_api_key_encrypted,
-        "profile": payload_hash(QWEN_MANIFEST),
+        "profile": payload_hash(manifest),
     })
     endpoint = cache.get(key)
     if endpoint is None:
@@ -195,7 +238,7 @@ def ollama_context_runtime(cfg):
             base[:-3] + "/api/version", {"model": cfg.chat_model_name},
             (5, 15), api_key=api_key, operation="model_metadata", http_method="GET",
         )
-        if not isinstance(version, dict) or version.get("version") != QWEN_MANIFEST["ollama"]["version"]:
+        if not isinstance(version, dict) or version.get("version") != manifest["ollama"]["version"]:
             raise ProviderUnavailable("context_tokenizer_unavailable")
         data = AIService._post(
             base[:-3] + "/api/show", {"model": cfg.chat_model_name, "verbose": True},
@@ -204,34 +247,34 @@ def ollama_context_runtime(cfg):
         try:
             identity = {
                 field: data["model_info"][field]
-                for field in QWEN_MANIFEST["ollama"]["identity_fields"]
+                for field in manifest["ollama"]["identity_fields"]
             }
             metadata = data["model_info"]
             if (
-                payload_hash(identity) != QWEN_MANIFEST["ollama"]["vocabulary_sha256"]
-                or metadata["general.architecture"] != QWEN_MANIFEST["ollama"]["architecture"]
-                or not re.search(r"^RENDERER qwen3\.8$", data["modelfile"], re.MULTILINE)
+                payload_hash(identity) != manifest["ollama"]["vocabulary_sha256"]
+                or metadata["general.architecture"] != manifest["ollama"]["architecture"]
+                or not re.search(r"^RENDERER " + re.escape(manifest["ollama"]["renderer"]) + r"$", data["modelfile"], re.MULTILINE)
                 or data["template"] != "{{ .Prompt }}"
             ):
                 raise ProviderUnavailable("context_tokenizer_unavailable")
-            window = metadata["qwen35.context_length"]
+            window = metadata[manifest["ollama"]["architecture"] + ".context_length"]
             configured_window = re.search(
                 r"^num_ctx\s+(\d+)\s*$", data["parameters"], re.MULTILINE,
             )
-            if type(window) is not int or not configured_window:
+            if type(window) is not int or window <= 0 or (not gemma and not configured_window):
                 raise ProviderUnavailable("context_model_window_unavailable")
-            window = min(window, int(configured_window.group(1)))
+            window = min(window, manifest["ollama"]["max_context_tokens"]) if gemma else min(window, int(configured_window.group(1)))
         except (TypeError, KeyError, ValueError, AttributeError) as exc:
             raise ProviderUnavailable("context_model_metadata_unavailable") from exc
         endpoint = {
-            "tag": "ollama", "transport": "ollama", "context_length": window,
+            "tag": "ollama", "transport": "ollama_native" if gemma else "ollama", "context_length": window,
             "supported_parameters": ["max_tokens", "response_format", "reasoning_effort"],
             "api_format": "openai_compatible", "effective_provider_url": base,
         }
         cache.set(key, endpoint, timeout=300)
     if endpoint["context_length"] < cfg.context_window_tokens:
         raise ProviderUnavailable("context_model_window_unavailable")
-    return qwen_counter(), endpoint
+    return (gemma_counter() if gemma else qwen_counter()), endpoint
 
 
 def context_runtime(cfg):
@@ -255,7 +298,7 @@ def context_runtime(cfg):
         }
     if api_format != "openai_compatible":
         raise ProviderUnavailable("context_provider_unsupported")
-    if cfg.chat_model_name in QWEN_MANIFEST["models"] or cfg.tokenizer_id == QWEN_MANIFEST["repo"]:
+    if cfg.chat_model_name in QWEN_MANIFEST["models"] + GEMMA_MANIFEST["models"] or cfg.tokenizer_id in (QWEN_MANIFEST["repo"], GEMMA_MANIFEST["repo"]):
         return ollama_context_runtime(cfg)
     if (
         cfg.chat_model_name not in MANIFEST["models"]
@@ -381,11 +424,13 @@ def extraction_payload(
             {"role": "user", "content": user_content},
         ],
     }
-    if endpoint.get("transport") == "ollama":
+    if endpoint.get("transport") in ("ollama", "ollama_native"):
         payload.pop("provider")
         payload.pop("plugins")
         payload.pop("reasoning")
         payload["reasoning_effort"] = "none"
+        if endpoint["transport"] == "ollama_native":
+            payload["_ollama_num_ctx"] = cfg.context_window_tokens
     if "response_format" in endpoint.get("supported_parameters", []):
         payload["response_format"] = {"type": "json_object"}
     return payload
