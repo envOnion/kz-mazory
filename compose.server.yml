@@ -1,18 +1,25 @@
 services:
   nginx:
     container_name: mazory-nginx
+    image: mazory-nginx:${APP_TAG:-local}
   backend:
     container_name: mazory-backend
+    image: mazory-backend:${APP_TAG:-local}
   qcluster:
     container_name: mazory-qcluster
+    image: mazory-backend:${APP_TAG:-local}
   qcluster_delivery:
     container_name: mazory-qcluster-delivery
+    image: mazory-backend:${APP_TAG:-local}
   qcluster_history:
     container_name: mazory-qcluster-history
+    image: mazory-backend:${APP_TAG:-local}
   qcluster_crm:
     container_name: mazory-qcluster-crm
+    image: mazory-backend:${APP_TAG:-local}
   outbox:
     container_name: mazory-outbox
+    image: mazory-backend:${APP_TAG:-local}
   postgres:
     container_name: mazory-postgres
   redis:
