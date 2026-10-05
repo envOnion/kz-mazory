@@ -162,6 +162,18 @@ class ContextualCommitmentTests(TestCase):
         self.assertEqual(basis, "message_metadata")
         self.assertEqual(sent, live.timestamp.astimezone(ZONE))
 
+    def test_native_history_before_export_cutoff_keeps_proven_transport_date(self):
+        self.promise.content = 'Поступило 42 млн тенге'
+        self.promise.source = 'waha'
+        self.promise.raw_payload = {'event': 'history.import', 'session': self.promise.session_name, 'payload': {'id': self.promise.message_id, 'body': self.promise.content, 'timestamp': int(self.promise.timestamp.timestamp())}}
+        self.promise.save()
+        sent, sender, basis = source_time(self.promise)
+        self.assertEqual(basis, 'message_metadata')
+        self.assertEqual(sent, self.promise.timestamp.astimezone(ZONE))
+        self.promise.raw_payload['payload']['timestamp'] -= 86400
+        self.promise.save()
+        self.assertEqual(source_time(self.promise)[2], 'unknown_export_date')
+
     def test_normal_message_metadata_is_used_without_parsing_arbitrary_body(self):
         self.config.snapshot = {"timezone": "UTC+06:00"}
         self.config.save()

@@ -79,7 +79,8 @@ def enqueue_step(run, delay=0):
     OutboxEvent.objects.create(
         event_type="history_import",
         deduplication_key=f"history:{run.id}:{run.step}",
-        payload={"history_run_id": run.id, "step": run.step},
+        payload={"history_run_id": run.id,
+                        "priority": "history", "step": run.step},
         next_attempt_at=timezone.now() + timedelta(seconds=delay),
     )
 
@@ -425,6 +426,8 @@ def persist_items(run, config, batch):
             or raw.team_id not in (None, config.team_id)
         ):
             raise ProviderUnavailable("history_wrong_chat")
+        from .message_artifacts import register
+        register(raw)
         linked.append(raw)
         if raw.pk not in counted:
             run.existing_count += int(key in before)

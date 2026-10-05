@@ -49,6 +49,7 @@ export interface CrmResolution {
   options: CrmMatchOption[]
 }
 export interface Candidate {
+  automatic_decision?: import("./autonomous").AutomaticDecision | null
   thread?: { id: number; topic: string; version: number } | null
   id: number
   project_id: number | null
@@ -95,6 +96,7 @@ export interface DirectoryProject {
 }
 
 export interface Directory {
+  autonomous_enabled?: boolean
   chats?: { id: number; name: string; team_id: number }[]
   crm_catalog?: CrmCatalogStatus[]
   projects_count?: number

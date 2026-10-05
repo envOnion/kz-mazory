@@ -256,6 +256,9 @@ class WebhookPayload(serializers.Serializer):
     notifyName = serializers.CharField(
         max_length=255, required=False, allow_blank=True, default=""
     )
+    hasMedia = serializers.BooleanField(default=False)
+    media = serializers.DictField(required=False, allow_null=True)
+    replyTo = serializers.DictField(required=False, allow_null=True)
     ack = serializers.IntegerField(min_value=-1, max_value=4, required=False)
 
 
@@ -272,10 +275,13 @@ class WebhookInput(serializers.Serializer):
             if "ack" not in data["payload"]:
                 raise ValidationError("Не указан статус доставки.")
             return data
-        chat = original.get("from", "")
+        chat = original.get("to", "") if data["payload"]["fromMe"] else original.get("from", "")
         if not isinstance(chat, str) or not chat or len(chat) > 128:
             raise ValidationError("Не указан чат.")
         data["chat_id"] = chat
+        own_sender = original.get("from", "") if data["payload"]["fromMe"] else ""
+        if isinstance(own_sender, str) and own_sender.endswith(("@c.us", "@s.whatsapp.net")):
+            data["payload"]["participant"] = data["payload"]["participant"] or own_sender
         return data
 
 
@@ -320,7 +326,9 @@ class MessageIngestView(APIView):
         if not cfg:
             raise PermissionDenied("Источник не разрешён.")
         payload = data["payload"]
-        if payload["fromMe"] or not payload["body"].strip():
+        if NotificationDelivery.objects.filter(provider_message_id=payload["id"]).exclude(provider_message_id="").exists():
+            return Response({"status": "ignored"})
+        if not payload["body"].strip() and not payload["hasMedia"]:
             return Response({"status": "ignored"})
         stamp = payload.get("timestamp")
         try:
@@ -377,6 +385,8 @@ class MessageIngestView(APIView):
                     },
                 },
             )
+            from .message_artifacts import register
+            register(raw)
             if raw.config_id != cfg.id:
                 raise Conflict("Идентификатор источника уже связан с другим чатом.")
             analyze = not job or not job.only_new or job.analyze_after_import

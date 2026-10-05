@@ -54,7 +54,10 @@ from .platform_views import (
 from .attachments import AttachmentView, AttachmentDetailView
 from .mcp_views import FactReviewMcpView, McpTokenView
 
+from .autonomous_reports import AutonomousOverviewView
+
 urlpatterns = [
+    path("autonomous/overview/", AutonomousOverviewView.as_view()),
     path("legacy/projects/", LegacyProjectsView.as_view()),
     path("health/<str:mode>/", health),
     path("auth/send-code/", SendVerificationCodeView.as_view()),

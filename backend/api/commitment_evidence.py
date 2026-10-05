@@ -3,11 +3,14 @@
 import re
 from datetime import datetime, time, timedelta
 from .message_context import source_scope
-from .message_time import EXPORT_HEADER, source_time, source_zone
+from .message_time import EXPORT_HEADER, grounded_dates, source_time, source_zone
 from .providers import ProviderUnavailable
 
 
-def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False):
+def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, autonomous=None):
+    from .models import AISettings
+    if autonomous is None:
+        autonomous = AISettings.get_active().autonomous_enabled
     scope = source_scope(raw).filter(id__lte=snapshot_id)
     refs = fact.get("evidence_messages") or [
         {"raw_message_id": raw.id, "quote": fact["evidence"], "role": "promise"}
@@ -53,8 +56,13 @@ def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False):
     deadline_text = " ".join(
         item["quote"] for item in refs if item["raw_message_id"] == deadline_id
     )
+    deadline_text = EXPORT_HEADER.sub("", deadline_text)
     relative = re.search(r"\b(завтра|сегодня|послезавтра)\b", deadline_text, re.I)
     morning = bool(re.search(r"\b(утром|с\s+утра)\b", deadline_text, re.I))
+    explicit_clock = re.search(r"\b(?:[01]?\d|2[0-3])[:.][0-5]\d\b|\b(?:к|в|до)\s+(?:[01]?\d|2[0-3])\s*(?:час|ч\b)", deadline_text, re.I)
+    if autonomous and fact.get("deadline_at") and not explicit_clock:
+        fact["deadline_precision"] = "date"
+        fact["deadline_at"] = fact["deadline_at"].astimezone(source_zone(date_message)).replace(hour=23, minute=59, second=59, microsecond=0)
     if sent is None and (relative or morning):
         fact["deadline_at"], fact["deadline_precision"] = None, "unknown"
         fact["uncertainties"].append(
@@ -65,7 +73,9 @@ def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False):
         day = sent.date() + timedelta(days=days)
         predicted = fact.get("deadline_at")
         clock = (
-            time(9)
+            time(23, 59, 59)
+            if autonomous and (morning or fact["deadline_precision"] == "date" or not predicted)
+            else time(9)
             if morning
             else time(18)
             if fact["deadline_precision"] == "date" or not predicted
@@ -75,23 +85,30 @@ def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False):
             day, clock, tzinfo=source_zone(date_message)
         )
         fact["deadline_precision"] = (
-            "datetime"
+            "date"
+            if autonomous and (morning or not predicted or fact["deadline_precision"] == "date")
+            else "datetime"
             if morning
             else fact["deadline_precision"]
             if predicted
             else "date"
         )
-    elif sent and morning and fact.get("deadline_at"):
+    elif sent and morning and fact.get("deadline_at") and not autonomous:
         fact["deadline_at"] = (
             fact["deadline_at"]
             .astimezone(source_zone(date_message))
             .replace(hour=9, minute=0, second=0, microsecond=0)
         )
-    if morning and fact.get("deadline_at"):
+    if morning and fact.get("deadline_at") and not autonomous:
         fact["deadline_basis"] = "morning_default"
         note = "Время 09:00 уточнено по правилу для утреннего срока (UTC+6)."
         if note not in fact["uncertainties"]:
             fact["uncertainties"].append(note)
+    if autonomous and fact.get("deadline_at"):
+        supported = grounded_dates(deadline_text, date_message, default_to_source=bool(explicit_clock))
+        if fact["deadline_at"].astimezone(source_zone(date_message)).date() not in supported:
+            fact["deadline_at"], fact["deadline_precision"] = None, "unknown"
+            fact["uncertainties"].append("Срок не подтвержден календарной датой или относительным днем в цитате WhatsApp.")
     fact["fulfilled_at"] = None
     if fact.get("commitment_status") == "fulfilled":
         fulfilled_id = fact.get("fulfillment_message_id")

@@ -30,6 +30,11 @@ class Command(BaseCommand):
                 history_planned = time.monotonic()
             dispatch_outbox()
             if time.monotonic() - planned >= 60:
+                from api.models import AISettings, OutboxEvent
+                if AISettings.get_active().autonomous_enabled:
+                    from django.utils import timezone
+                    minute = timezone.now().strftime("%Y%m%d%H%M")
+                    OutboxEvent.objects.get_or_create(deduplication_key=f"autonomous-reconcile:{minute}", defaults={"event_type": "autonomous_reconcile", "payload": {}})
                 monitor_kpi_risks_and_anomalies_task()
                 planned = time.monotonic()
             if options["once"]:

@@ -27,7 +27,7 @@ raw_message_id и точной непрерывной цитатой соотв�
 
 def resolve_remaining(facts, raw, cfg, trace):
     drafts = [fact for fact in facts if fact["fact_type"] == "commitment"]
-    if not drafts or trace.context_metadata.get("history_complete_in_request"):
+    if not drafts or getattr(cfg, "autonomous_enabled", False) or trace.context_metadata.get("history_complete_in_request"):
         return facts
     counter, endpoint = context_runtime(cfg)
     max_input = (

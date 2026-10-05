@@ -64,6 +64,8 @@ def scoped_projects(user, filters=None):
             | Q(
                 financial_records__is_verified=True,
                 financial_records__status="received",
+                financial_records__direction="income",
+                financial_records__amount_precision="exact",
             )
         )
         .exclude(archived=True)
@@ -88,7 +90,7 @@ def project_row(p, *, paid_total=None):
         else None
     )
     paid = paid_total if paid_total is not None else (
-        p.financial_records.filter(is_verified=True, status="received").aggregate(
+        p.financial_records.filter(is_verified=True, status="received", direction="income", amount_precision="exact").aggregate(
             s=Sum("amount")
         )["s"]
         or ZERO
@@ -132,7 +134,7 @@ class DataMartService:
         payments = FinancialRecord.objects.filter(
             project__in=qs,
             is_verified=True,
-            status="received",
+            status="received", direction="income", amount_precision="exact",
             currency=currency,
             payment_date__gte=start,
             payment_date__lt=min(end, today + timedelta(days=1)),
@@ -260,7 +262,7 @@ class DataMartService:
             FinancialRecord.objects.filter(
                 project__in=qs,
                 is_verified=True,
-                status="received",
+                status="received", direction="income", amount_precision="exact",
                 currency=currency,
                 payment_date__gte=previous_start,
                 payment_date__lt=compare_end,
@@ -417,7 +419,7 @@ class DataMartService:
             FinancialRecord.objects.filter(
                 project__in=projects,
                 is_verified=True,
-                status="received",
+                status="received", direction="income", amount_precision="exact",
                 currency=currency,
                 payment_date__gte=history,
                 payment_date__lt=current,
@@ -428,7 +430,7 @@ class DataMartService:
             FinancialRecord.objects.filter(
                 project__in=projects,
                 is_verified=True,
-                status="received",
+                status="received", direction="income", amount_precision="exact",
                 currency=currency,
                 payment_date__gte=current,
                 payment_date__lte=today,
@@ -480,7 +482,7 @@ class DataMartService:
         rows = []
         for item in (
             PaymentScheduleItem.objects.filter(
-                project__in=qs, is_verified=True, currency=currency
+                project__in=qs, is_verified=True, currency=currency, direction="income", amount_precision="exact"
             )
             .annotate(paid=Sum("allocations__amount"))
             .order_by("due_date", "id")

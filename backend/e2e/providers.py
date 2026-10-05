@@ -17,6 +17,7 @@ ASSIGNMENTS = {
     "Сделаешь завтра?": ("north", "request"),
     "БЦ Север: да, подготовлю смету завтра": ("north", "promise"),
     "БЦ Север: оплата 50 000 000 ₸ поступила сегодня": ("north", "payment"),
+    "БЦ Южный: оплата 20 000 000 ₸ поступила сегодня": ("south", "payment"),
     "БЦ Южный: проверь доставку": ("south", "request"),
     "БЦ Южный: проверю доставку в пятницу": ("south", "promise"),
     "БЦ Южный: согласуем график платежей": ("south", "request"),
@@ -83,8 +84,8 @@ def classify(value):
                         "thread_key": key,
                         "evidence_message_id": row["raw_message_id"],
                         "fact_type": "payment",
-                        "object_name": "БЦ Север",
-                        "amount": "50000000.00",
+                        "object_name": "БЦ Север" if key == "north" else "БЦ Южный",
+                        "amount": "50000000.00" if key == "north" else "20000000.00",
                         "currency": "KZT",
                         "payment_date": str(timezone.localdate()),
                         "payment_kind": "increment",
@@ -214,6 +215,19 @@ class ProviderHandler(BaseHTTPRequestHandler):
             state = json.loads(self.control.read_text())
             if state.get("crm_error"):
                 return self.respond({"error": "CRM temporarily unavailable"}, 503)
+            if self.path.endswith("crm.deal.get.json"):
+                return self.respond({"result": {"ID": body["id"], "TITLE": "БЦ Север" if str(body["id"]) == "101" else "БЦ Южный"}})
+            if self.path.endswith("crm.timeline.comment.list.json"):
+                return self.respond({"result": [row for row in state.get("comments", []) if str(row["ENTITY_ID"]) == str(body["filter"]["ENTITY_ID"])]})
+            if self.path.endswith("crm.timeline.comment.add.json"):
+                comment = {**body["fields"], "ID": str(1000 + len(state.get("comments", [])))}
+                state.setdefault("comments", []).append(comment)
+                self.control.write_text(json.dumps(state))
+                return self.respond({"result": comment["ID"]})
+            if self.path.endswith("tasks.task.list.json"):
+                return self.respond({"result": {"tasks": []}})
+            if self.path.endswith("tasks.task.add.json"):
+                return self.respond({"result": {"task": {"id": "2000"}}})
             if self.path.endswith("crm.company.list.json"):
                 rows = [
                     {"ID": "201", "TITLE": "ТОО Север Холдинг"},

@@ -13,6 +13,7 @@ from .models import (
     RawMessage,
     Team,
     WhatsAppConfig,
+    Commitment,
 )
 from .providers import ProviderUnavailable
 
@@ -78,6 +79,7 @@ def context_threads(raw):
             "parent_id": item.parent_id,
             "project_id": item.project_id,
             "summary": item.summary[:600],
+            "commitments": [{**task, "deadline_at": task["deadline_at"].isoformat() if task["deadline_at"] else None} for task in Commitment.objects.filter(candidate__thread_revision__thread_id=item.id, status__in=["pending", "overdue"], is_verified=True).values("id", "version", "commitment_text", "responsible_name", "source_message_id", "deadline_at")[:10]],
             "message_ids": list(
                 item.message_links.order_by("-raw_message_id").values_list(
                     "raw_message_id", flat=True
@@ -165,6 +167,8 @@ def prepare_themes(result, raw, trace):
     )
     if not ids.issubset(allowed) or ids != valid_ids or raw.id not in ids:
         raise ProviderUnavailable("thread_sources_unavailable")
+    if not set(trace.context_metadata.get("batch_message_ids", [])).issubset(ids):
+        raise ProviderUnavailable("batch_classification_missing")
     offered = {item["id"] for item in trace.context_metadata.get("known_threads", [])}
     for theme in themes:
         if theme["thread_id"] is not None and theme["thread_id"] not in offered:
@@ -184,6 +188,12 @@ def prepare_themes(result, raw, trace):
             chain.add(parent)
             parent = keyed[parent]["parent_key"]
     for fact in result["facts"]:
+        if isinstance(fact, dict) and not fact.get("thread_key"):
+            anchor = fact.get("evidence_message_id") or fact.get("promise_message_id")
+            compatible = [key for key, theme in keyed.items() if type(anchor) is int and any(link["raw_message_id"] == anchor for link in theme["messages"])]
+            if len(compatible) == 1:
+                fact["thread_key"] = compatible[0]
+                trace.context_metadata.setdefault("schema_repairs", []).append("unique_evidence_thread")
         if not isinstance(fact, dict) or fact.get("thread_key") not in keyed:
             raise ProviderUnavailable("fact_thread_missing")
     return keyed

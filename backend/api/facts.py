@@ -1,4 +1,4 @@
-"""Validated proposals and transactional human review. AI cannot write approved facts."""
+"""Validated proposals and transactional domain application with audited actors."""
 
 from decimal import Decimal
 from datetime import datetime
@@ -40,7 +40,7 @@ SUPPORTED_CURRENCIES = ("KZT", "USD", "EUR", "RUB")
 class EvidenceSchema(serializers.Serializer):
     raw_message_id = serializers.IntegerField(min_value=1)
     quote = serializers.CharField(max_length=32000)
-    role = serializers.ChoiceField(choices=["request", "promise", "deadline", "fulfillment"])
+    role = serializers.ChoiceField(choices=["request", "promise", "deadline", "fulfillment", "cancellation", "source", "identity", "amount", "date", "contract", "party"])
 
 
 class FactSchema(serializers.Serializer):
@@ -49,6 +49,9 @@ class FactSchema(serializers.Serializer):
     fact_type = serializers.ChoiceField(choices=["project", "payment", "commitment"])
     object_name = serializers.CharField(max_length=255, allow_blank=True, default="")
     company_name = serializers.CharField(max_length=255, allow_blank=True, default="")
+    party_role = serializers.ChoiceField(choices=["unknown", "customer", "contractor", "supplier", "payer", "designer"], default="unknown")
+    direction = serializers.ChoiceField(choices=["income", "expense"], default="income")
+    amount_precision = serializers.ChoiceField(choices=["exact", "approximate", "range", "unknown"], default="exact")
     contract_amount = serializers.DecimalField(
         max_digits=14, decimal_places=2, min_value=0, required=False
     )
@@ -59,7 +62,7 @@ class FactSchema(serializers.Serializer):
     currency = serializers.ChoiceField(choices=SUPPORTED_CURRENCIES, required=False)
     payment_date = serializers.DateField(required=False, allow_null=True)
     payment_kind = serializers.ChoiceField(
-        choices=["increment", "cumulative", "promise", "reversal"], default="increment"
+        choices=["increment", "cumulative", "promise", "reversal", "balance", "debt", "invoice", "transfer"], default="increment"
     )
     reverses_id = serializers.IntegerField(min_value=1, required=False)
     stage = serializers.ChoiceField(
@@ -76,9 +79,9 @@ class FactSchema(serializers.Serializer):
     deadline_precision = serializers.ChoiceField(
         choices=["unknown", "date", "datetime"], default="unknown"
     )
-    assignment_kind = serializers.ChoiceField(choices=["promise", "assignment"], default="promise")
+    assignment_kind = serializers.ChoiceField(choices=["promise", "assignment", "reported_promise"], default="promise")
     responsible_name = serializers.CharField(max_length=255, allow_blank=True, default="")
-    commitment_status = serializers.ChoiceField(choices=["pending", "fulfilled"], default="pending")
+    commitment_status = serializers.ChoiceField(choices=["pending", "fulfilled", "cancelled"], default="pending")
     deadline_basis = serializers.ChoiceField(choices=["explicit", "morning_default", "unknown"], default="unknown")
     deadline_message_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
     fulfillment_message_id = serializers.IntegerField(min_value=1, required=False, allow_null=True)
@@ -103,7 +106,7 @@ class FactSchema(serializers.Serializer):
         return value
 
     def validate(self, data):
-        if data["fact_type"] == "payment" and "amount" not in data:
+        if data["fact_type"] == "payment" and "amount" not in data and data["amount_precision"] != "unknown":
             raise serializers.ValidationError("Для платежа требуется сумма.")
         if data["fact_type"] == "commitment" and not data.get("commitment_text"):
             raise serializers.ValidationError("Требуется текст обязательства.")
@@ -142,6 +145,8 @@ def fact_identity(data):
         "payment": (
             "amount",
             "currency",
+            "direction",
+            "amount_precision",
             "payment_date",
             "payment_kind",
             "reverses_id",
@@ -160,7 +165,7 @@ def fact_identity(data):
     kind = data.get("fact_type")
     value = {
         key: json_value(
-            "KZT" if key == "currency" and key not in data else data.get(key)
+            "KZT" if key == "currency" and key not in data else "income" if key == "direction" and key not in data else "exact" if key == "amount_precision" and key not in data else data.get(key)
         )
         for key in fields.get(kind, ())
     }
@@ -180,6 +185,8 @@ def snapshot(project):
         "contract_amount",
         "cost_amount",
         "cost_confirmed",
+        "contract_known",
+        "whatsapp_fields",
         "paid_amount",
         "due_amount",
         "currency",
@@ -295,10 +302,10 @@ def select_crm_match(
         raise serializers.ValidationError("Укажите причину выбора сделки CRM.")
 
     with transaction.atomic():
-        lock_candidate_source(access.candidates_for(user).get(pk=candidate_id))
+        candidates = access.candidates_for(user)
+        lock_candidate_source(candidates.get(pk=candidate_id))
         candidate = (
-            access.candidates_for(user)
-            .select_for_update(of=("self",))
+            candidates.select_for_update(of=("self",))
             .get(pk=candidate_id)
         )
         access.require_team_role(user, candidate.team_id, ["team_lead"])
@@ -474,8 +481,10 @@ def _company_from_crm_match(crm_match, data):
             return None
         try:
             with transaction.atomic():
-                company, _ = Company.objects.get_or_create(name=company_name)
-                return company
+                matches = list(Company.objects.filter(name=company_name)[:2])
+                if len(matches) > 1:
+                    raise Conflict("Название компании неоднозначно без внешнего ID.")
+                return matches[0] if matches else Company.objects.create(name=company_name)
         except IntegrityError as exc:
             raise Conflict("Компания конфликтует с существующей записью.") from exc
 
@@ -489,10 +498,6 @@ def _company_from_crm_match(crm_match, data):
     if not company_name:
         raise serializers.ValidationError(
             "В снимке CRM отсутствует название выбранной компании."
-        )
-    if Company.objects.select_for_update().filter(name=company_name).exists():
-        raise Conflict(
-            "Компания с таким названием уже существует без выбранного CRM ID."
         )
     try:
         with transaction.atomic():
@@ -546,11 +551,17 @@ def _materialize_crm_project(candidate, crm_match, data):
 
 
 def review(candidate_id, user, action, reason="", changes=None, base_version=None):
+    if user is None or not user.is_authenticated:
+        raise serializers.ValidationError("Требуется авторизованный пользователь.")
+    return _apply_candidate(candidate_id, user, action, reason, changes, base_version)
+
+
+def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_version=None, *, system=False):
     with transaction.atomic():
-        lock_candidate_source(access.candidates_for(user).get(pk=candidate_id))
+        candidates = FactCandidate.objects.filter(team__is_active=True) if system else access.candidates_for(user)
+        lock_candidate_source(candidates.get(pk=candidate_id))
         candidate = (
-            access.candidates_for(user)
-            .select_for_update(of=("self",))
+            candidates.select_for_update(of=("self",))
             .get(pk=candidate_id)
         )
         if action not in ("approve", "reject"):
@@ -558,7 +569,7 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
         if candidate.status in ("approved", "rejected"):
             if candidate.status != ("approved" if action == "approve" else "rejected"):
                 raise Conflict("Предложение уже рассмотрено с другим решением.")
-            if candidate.reviewed_by_id != user.id and not user.is_superuser:
+            if not system and candidate.reviewed_by_id != user.id and not user.is_superuser:
                 access.require_review(user, candidate)
             return candidate
         if candidate.status != "pending":
@@ -569,9 +580,9 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
         if action == "approve" and candidate.fact_type == "project":
             crm_match = _selected_crm_match(candidate)
             project = _crm_project_for_match(candidate, crm_match) if crm_match else None
-        if _crm_approval_requires_finance(candidate, crm_match, project):
+        if not system and _crm_approval_requires_finance(candidate, crm_match, project):
             access.require_team_role(user, candidate.team_id, ["finance"])
-        else:
+        elif not system:
             access.require_review(user, candidate)
 
         if action == "reject" and not reason.strip():
@@ -638,13 +649,13 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
             old_stage = project.status if project else ""
             if candidate.fact_type == "project":
                 if project is None:
-                    if candidate.thread_revision_id and not crm_match and candidate.crm_match_state != "not_found":
+                    if not system and candidate.thread_revision_id and not crm_match and candidate.crm_match_state != "not_found":
                         raise serializers.ValidationError("Перед созданием проекта нужен успешный поиск CRM без совпадений.")
                     if crm_match:
                         if base_version != 0:
                             raise Conflict()
                         project = _materialize_crm_project(candidate, crm_match, data)
-                    elif not data["object_name"] or ("contract_amount" in data and data["contract_amount"] <= 0):
+                    elif not data["object_name"] or (not system and "contract_amount" in data and data["contract_amount"] <= 0):
                         raise serializers.ValidationError(
                             "Нужны название и положительная сумма договора."
                         )
@@ -661,10 +672,13 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                                 "Объект уже существует. Сопоставьте предложение с ним."
                             )
                         company = None
-                        if data.get("company_name"):
-                            company, _ = Company.objects.get_or_create(
-                                name=data["company_name"]
-                            )
+                        if data.get("company_name") and (not system or data["party_role"] == "customer"):
+                            companies = list(Company.objects.filter(name=data["company_name"]).filter(Q(team=candidate.team) | Q(team__isnull=True))[:2])
+                            if len(companies) > 1:
+                                raise Conflict("Название заказчика неоднозначно: требуется доказанная идентичность компании.")
+                            company = companies[0] if companies else None
+                            if company is None:
+                                company = Company.objects.create(name=data["company_name"], team=candidate.team)
                         project = Project(
                             team=candidate.team,
                             manager=candidate.manager,
@@ -682,7 +696,7 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                             "Проект уже связан с другой сделкой CRM."
                         )
                 _validate_project_currency(project, data["currency"])
-                if any(key in data for key in ("cost_amount", "contract_amount")):
+                if not system and any(key in data for key in ("cost_amount", "contract_amount")):
                     access.require_team_role(user, candidate.team_id, ["finance"])
                 project.currency = data["currency"]
                 for field in (
@@ -693,6 +707,9 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                 ):
                     if field in data and data[field] != "":
                         setattr(project, field, data[field])
+                if "contract_amount" in data:
+                    project.contract_known = True
+                project.whatsapp_fields = sorted(set(project.whatsapp_fields) | {field for field in ("contract_amount", "cost_amount", "current_action", "next_action", "stage") if field in data and data[field] != ""})
                 if "cost_amount" in data:
                     project.cost_confirmed = True
                 if "stage" in data:
@@ -710,7 +727,8 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                     raise serializers.ValidationError(
                         "Укажите подтвержденную дату платежа."
                     )
-                if data["payment_date"] > timezone.localdate():
+                today = timezone.now().astimezone(source_zone(candidate.trace.raw_message)).date() if system else timezone.localdate()
+                if data["payment_date"] > today:
                     raise serializers.ValidationError(
                         "Полученный платёж не может иметь будущую дату."
                     )
@@ -719,6 +737,7 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                     and FinancialRecord.objects.filter(
                         project=project,
                         is_verified=True,
+                        direction=data["direction"],
                         amount=data["amount"],
                         payment_date=data["payment_date"],
                         currency=data["currency"],
@@ -762,9 +781,11 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                     if reversal
                     else project.manager,
                     status="received",
+                    direction=data["direction"],
+                    amount_precision=data["amount_precision"],
                     is_verified=True,
                     reverses=reversal,
-                    notes="Подтверждено по источнику; подробности в истории проверки.",
+                    notes=reason or "Подтверждено по источнику; подробности в истории проверки.",
                 )
                 if reversal:
                     # Reversal first consumes unallocated money, then reverses allocation entries,
@@ -798,24 +819,26 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                             )
                             remaining -= take
                 project.paid_amount = project.financial_records.filter(
-                    is_verified=True, status="received"
+                    is_verified=True, status="received", direction="income", amount_precision="exact"
                 ).aggregate(s=Sum("amount"))["s"] or Decimal(0)
             elif candidate.fact_type == "commitment":
                 from .commitment_evidence import validate_commitment
                 from .pipeline import _source_quote
                 reviewed_deadline = data.get("deadline_at")
                 reviewed_precision = data["deadline_precision"]
-                if candidate.thread_revision_id:
-                    raw = access.messages_for(user).filter(pk=data.get("promise_message_id"), pk__in=candidate.evidence.values_list("raw_message_id", flat=True)).select_related("config").first()
-                if not raw or not validate_commitment(data, raw, candidate.trace.context_metadata.get("snapshot_max_id", raw.id), _source_quote, threaded=bool(candidate.thread_revision_id)):
+                from .message_context import source_scope
+                if candidate.thread_revision_id or system:
+                    evidence_scope = source_scope(raw) if system else access.messages_for(user)
+                    raw = evidence_scope.filter(pk=data.get("promise_message_id"), pk__in=candidate.evidence.values_list("raw_message_id", flat=True)).select_related("config").first()
+                if not raw or not validate_commitment(data, raw, candidate.trace.context_metadata.get("snapshot_max_id", raw.id), _source_quote, threaded=bool(candidate.thread_revision_id), autonomous=True if system else None):
                     raise serializers.ValidationError("Нужны конкретное действие и доказательства обязательства.")
                 evidence_ids = set(candidate.evidence.values_list("raw_message_id", flat=True))
-                if set(access.messages_for(user).filter(pk__in=evidence_ids).values_list("pk", flat=True)) != evidence_ids:
+                if set((source_scope(raw) if system else access.messages_for(user)).filter(pk__in=evidence_ids).values_list("pk", flat=True)) != evidence_ids:
                     raise serializers.ValidationError("Для подтверждения необходим доступ ко всем доказательствам.")
                 saved = set(candidate.evidence.values_list("raw_message_id", "quote"))
                 if any((ref["raw_message_id"], ref["quote"]) not in saved for ref in data["evidence_messages"]):
                     raise serializers.ValidationError("Доказательства должны соответствовать сохранённой переписке.")
-                if changes and "deadline_at" in changes and reason.strip():
+                if not system and changes and "deadline_at" in changes and reason.strip():
                     data["deadline_at"], data["deadline_precision"] = reviewed_deadline, reviewed_precision
                     data["deadline_basis"] = "explicit" if reviewed_deadline else "unknown"
                     data["uncertainties"] = [note for note in data["uncertainties"] if not note.startswith("Время 09:00 уточнено")]
@@ -842,19 +865,29 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                     existing = Commitment.objects.select_for_update().get(pk=data["commitment_id"], team=candidate.team)
                     if existing.version != candidate.proposed_changes.get("base_commitment_version"):
                         raise Conflict("Обязательство изменилось. Повторите проверку.")
-                    if existing.source_message_id != raw.id or data["commitment_status"] != "fulfilled":
-                        raise serializers.ValidationError("Это предложение может только подтвердить выполнение исходного обязательства.")
+                    if existing.source_message_id != raw.id:
+                        raise serializers.ValidationError("Доказательство постановки не соответствует обязательству.")
+                    if not system and data["commitment_status"] != "fulfilled":
+                        raise serializers.ValidationError("Ручное предложение может только подтвердить выполнение.")
                     before_commitment = {"status": existing.status, "version": existing.version}
-                    existing.status, existing.fulfilled_at = "fulfilled", data["fulfilled_at"]
+                    existing.status = data["commitment_status"]
+                    existing.fulfilled_at = data.get("fulfilled_at") if existing.status == "fulfilled" else None
+                    updated = ["status", "fulfilled_at", "version"]
+                    if system and existing.status == "pending" and deadline:
+                        existing.deadline_at = deadline
+                        existing.deadline = deadline.astimezone(source_zone(raw)).date()
+                        existing.deadline_precision = data["deadline_precision"]
+                        existing.postponed_reason = reason
+                        updated += ["deadline_at", "deadline", "deadline_precision", "postponed_reason"]
                     existing.version += 1
-                    existing.save(update_fields=["status", "fulfilled_at", "version"])
-                    AuditEvent.objects.create(actor=user, target_type="Commitment", target_id=existing.id, action="approve_fulfillment", before_after={"before": before_commitment, "candidate_id": candidate.id, "status": "fulfilled"})
+                    existing.save(update_fields=updated)
+                    AuditEvent.objects.create(actor=user, target_type="Commitment", target_id=existing.id, action="approve_fulfillment", before_after={"before": before_commitment, "candidate_id": candidate.id, "status": existing.status})
                 else:
                     Commitment.objects.create(**commitment_values)
             if project is not None:
                 if project.pk:
                     project.paid_amount = project.financial_records.filter(
-                        is_verified=True, status="received"
+                        is_verified=True, status="received", direction="income", amount_precision="exact"
                     ).aggregate(s=Sum("amount"))["s"] or Decimal(0)
                 if candidate.fact_type in ("project", "payment"):
                     project.identity_confirmed = True
@@ -884,7 +917,7 @@ def review(candidate_id, user, action, reason="", changes=None, base_version=Non
                         "candidate_id": candidate.id,
                     },
                 )
-                if project.needs_bitrix_sync and BitrixSettings.objects.filter(is_active=True).exists():
+                if not system and project.needs_bitrix_sync and BitrixSettings.objects.filter(is_active=True).exists():
                     OutboxEvent.objects.get_or_create(
                         deduplication_key=f"crm:{project.id}:{project.version}",
                         defaults={

@@ -17,6 +17,7 @@ from . import access
 from .dialogue_threads import lock_candidate_source
 from .models import (
     FactCandidate,
+    AISettings,
     Project,
     Commitment,
     FinancialRecord,
@@ -124,6 +125,7 @@ def candidate_data(candidate, user, source_map=None, project_ids=None):
         "source_metadata": source_metadata(source) if source else None,
         "evidence": evidence,
         "review_reason": candidate.review_reason,
+        "automatic_decision": (lambda d: {"outcome": d.outcome, "reason_code": d.reason_code, "explanation": d.explanation, "policy_version": d.policy_version} if d else None)(candidate.decisions.order_by("-id").first()),
         "created_at": candidate.created_at,
         "crm_resolution": {
             "state": candidate.crm_match_state,
@@ -665,6 +667,7 @@ class DirectoryView(APIView):
             "projects_count": count,
             "projects_next_page": values["project_page"] + 1 if start + 100 < count else None,
             "crm_catalog": catalog_status(request.user),
+            "autonomous_enabled": AISettings.get_active().autonomous_enabled,
             "chats": list(access.configs_for(request.user).values("id", "name", "team_id")),
         })
 

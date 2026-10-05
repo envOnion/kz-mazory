@@ -853,11 +853,18 @@ class BitrixService:
         project = Project.objects.filter(Q(is_verified=True) | Q(identity_confirmed=True)).get(pk=project_id)
         if not project.team_id or project.version != version:
             return
+        # Once autonomous accounting owns delivery, old scheduled jobs may
+        # only enqueue its field-limited command, never restore a full snapshot.
+        from .models import AISettings, FactEvent
+        if AISettings.get_active().autonomous_enabled:
+            from .autonomous_crm import enqueue_project
+            event = FactEvent.objects.filter(project=project).exclude(event_type="daily_report").order_by("-id").first()
+            if event:
+                enqueue_project(project, event)
+            return
         revision = ProjectRevision.objects.get(project=project, version=version)
         snapshot = revision.snapshot
         stage = settings.BITRIX_STAGE_MAP.get(snapshot["status"])
-        if not stage and project.is_verified:
-            raise ProviderUnavailable("crm_stage_mapping_required")
         fields = {
             "STAGE_ID": stage,
             "TITLE": snapshot["name"],
@@ -869,6 +876,10 @@ class BitrixService:
             + "\n"
             + escape(snapshot.get("next_action", "")),
         }
+        if not stage:
+            fields.pop("STAGE_ID", None)
+        if not snapshot.get("contract_known") and Decimal(str(snapshot.get("contract_amount") or 0)) <= 0:
+            fields.pop("OPPORTUNITY", None)
         if not project.is_verified:
             fields = {"TITLE": snapshot["name"], "ORIGINATOR_ID": "MAZORY", "ORIGIN_ID": str(project.id)}
         # Stable external key permits reconciliation after an unknown create outcome.

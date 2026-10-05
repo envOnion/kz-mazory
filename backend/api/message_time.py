@@ -46,7 +46,23 @@ def source_time(raw):
                     return sent, match[3].strip(), "export_header"
             except ValueError:
                 pass
-        # In an explicitly imported chat, the transport timestamp is an import date.
+        # A configured export chat can also contain native messages fetched from
+        # WAHA history. Their provider timestamp remains a send date, not the
+        # export ingestion date. Require matching immutable transport evidence.
+        payload = raw.raw_payload.get("payload", {})
+        stamp = payload.get("timestamp") if isinstance(payload, dict) else None
+        native = (
+            not re.match(r"\A\[\d{2}\.\d{2}\.\d{4}", raw.content)
+            and raw.source == "waha" and raw.sent_at_known
+            and raw.raw_payload.get("event") in ("message", "message.any", "history.import")
+            and raw.raw_payload.get("session") == raw.session_name
+            and isinstance(stamp, (int, float)) and not isinstance(stamp, bool)
+            and payload.get("id") == raw.message_id and payload.get("body") == raw.content
+            and abs(stamp - raw.timestamp.timestamp()) < 1
+        )
+        if native:
+            return raw.timestamp.astimezone(zone), raw.sender_name, "message_metadata"
+        # An export without its source header has no proven send date.
         return None, raw.sender_name, "unknown_export_date"
     sent = raw.timestamp.astimezone(zone) if raw.sent_at_known else None
     return sent, raw.sender_name, "message_metadata" if sent else "unknown"
@@ -63,3 +79,38 @@ def source_metadata(raw):
         "received_at": raw.received_at.isoformat(),
         "timezone": "UTC" + offset[:3] + ":" + offset[3:],
     }
+
+
+def grounded_dates(text, raw, *, default_to_source=False):
+    """Only explicit calendar dates and source-relative days are evidence."""
+    from datetime import date
+    text = EXPORT_HEADER.sub("", text)
+    sent = source_time(raw)[0]
+    dates = set()
+    for year, month, day in re.findall(r"\b(\d{4})-(\d{2})-(\d{2})\b", text):
+        try:
+            dates.add(date(int(year), int(month), int(day)))
+        except ValueError:
+            pass
+    for day, month, year in re.findall(r"(?<!\d)(\d{1,2})[./](\d{1,2})(?:[./](\d{4}|\d{2}))?(?!\d)", text):
+        if not year and not sent:
+            continue
+        try:
+            numeric_year = (2000 + int(year) if len(year) == 2 else int(year)) if year else sent.year
+            dates.add(date(numeric_year, int(month), int(day)))
+        except ValueError:
+            pass
+    months = 'января февраля марта апреля мая июня июля августа сентября октября ноября декабря'.split()
+    for day, month, year in re.findall(r"\b(\d{1,2})\s+(" + '|'.join(months) + r")(?:\s+(\d{4}))?\b", text.casefold()):
+        if year or sent:
+            try:
+                dates.add(date(int(year) if year else sent.year, months.index(month) + 1, int(day)))
+            except ValueError:
+                pass
+    if sent:
+        relative = {'сегодня': 0, 'вчера': -1, 'позавчера': -2, 'завтра': 1, 'послезавтра': 2}
+        words = set(re.findall(r'\w+', text.casefold()))
+        dates.update(sent.date() + timedelta(days=offset) for word, offset in relative.items() if word in words)
+        if default_to_source and not dates:
+            dates.add(sent.date())
+    return dates

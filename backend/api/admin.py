@@ -890,6 +890,7 @@ class AISettingsAdmin(IntegrationAdmin):
     )
     fieldsets = (
         ("Конфигурация", {"fields": ("name", "is_active")}),
+        ("Автономный учет WhatsApp", {"fields": ("autonomous_enabled", "autonomous_crm_enabled", "autonomous_policy_version", "autonomous_context_messages", "autonomous_input_tokens", "autonomous_daily_token_limit", "autonomous_max_in_flight")}),
         (
             "Chat / Reasoning",
             {
@@ -2320,3 +2321,14 @@ class McpTokenAdmin(ModelAdmin):
 
 from . import job_admin  # noqa: F401, E402 — register job views after source admins.
 
+
+# Provenance and worker ledgers are read-only, including for superusers.
+from .models import (FactDecision, FactEvent, FieldAssertion, SourceCheckpoint,
+                     SourceWorkItem, MessageArtifact, CrmDelivery,
+                     ExternalObjectLink, ProviderReservation, Participant,
+                     ParticipantIdentity, ProjectParty, ProjectAlias, CompanyAlias)
+for model in (FactDecision, FactEvent, FieldAssertion, SourceCheckpoint,
+              SourceWorkItem, MessageArtifact, CrmDelivery, ExternalObjectLink,
+              ProviderReservation, Participant, ParticipantIdentity,
+              ProjectParty, ProjectAlias, CompanyAlias):
+    admin.site.register(model, ScopedReadOnlyAdmin)
