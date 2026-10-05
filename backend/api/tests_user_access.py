@@ -84,3 +84,23 @@ class UserProvisioningTests(TestCase):
             response = api.post("/api/auth/send-code/", {"phone": phone})
             self.assertEqual(response.status_code, expected)
             self.assertEqual(OutboxEvent.objects.filter(payload__user_id=user.pk).exists(), state == "active")
+
+
+class AdminSidebarNavigationTests(TestCase):
+    def test_personal_settings_is_below_administration(self):
+        from django.conf import settings
+
+        navigation = settings.UNFOLD.get("SIDEBAR", {}).get("navigation", [])
+        titles = [
+            section.get("title")
+            for section in navigation
+            if isinstance(section, dict) and "title" in section
+        ]
+        self.assertIn("Администрирование", titles)
+        self.assertIn("Личные настройки", titles)
+        self.assertGreater(
+            titles.index("Личные настройки"),
+            titles.index("Администрирование"),
+            "Раздел 'Личные настройки' должен находиться ниже раздела 'Администрирование'",
+        )
+
