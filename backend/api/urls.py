@@ -52,6 +52,7 @@ from .platform_views import (
     LegacyProjectsView,
 )
 from .attachments import AttachmentView, AttachmentDetailView
+from .mcp_views import FactReviewMcpView, McpTokenView
 
 urlpatterns = [
     path("legacy/projects/", LegacyProjectsView.as_view()),
@@ -108,4 +109,6 @@ urlpatterns = [
     path("operations-health/", OperationsHealthView.as_view()),
     path("attachments/", AttachmentView.as_view()),
     path("attachments/<int:pk>/", AttachmentDetailView.as_view()),
+    path("mcp/fact-review/", FactReviewMcpView.as_view()),
+    path("mcp/tokens/", McpTokenView.as_view()),
 ]
