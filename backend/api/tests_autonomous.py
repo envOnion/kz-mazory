@@ -76,6 +76,15 @@ class AutonomousAccountingTests(TestCase):
         self.assertEqual(result.reason_code, 'unsupported_payment_date')
         self.assertFalse(FinancialRecord.objects.exists())
 
+    def test_payment_plan_without_quoted_date_does_not_create_calendar_entry(self):
+        from .models import PaymentScheduleItem
+        result = decide(self.candidate('По объекту 343 ожидаем оплату 117 млн тенге', payment_kind='promise', payment_date='2027-01-01').id)
+        self.assertEqual(result.outcome, 'accepted')
+        self.assertFalse(PaymentScheduleItem.objects.exists())
+        event = FactEvent.objects.get()
+        self.assertIsNone(event.payload['payment_date'])
+        self.assertTrue(event.payload['uncertainties'])
+
     def test_invented_exact_clock_for_tomorrow_is_downgraded_to_date(self):
         candidate = self.candidate('По объекту 343 завтра предоставлю цену', kind='commitment', commitment_text='Предоставить цену', responsible_name='Менеджер', assignment_kind='promise', commitment_status='pending', deadline_at=(timezone.now() + timedelta(days=1)).replace(hour=18).isoformat(), deadline_precision='datetime')
         raw = candidate.trace.raw_message

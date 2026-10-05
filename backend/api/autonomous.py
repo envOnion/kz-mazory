@@ -204,6 +204,9 @@ def _validate(candidate, data, primary, text):
         if data["payment_kind"] == "promise":
             if not candidate.project_id:
                 raise Deferred("ambiguous_project", "Ожидание оплаты сохранено; объект графика еще не определен.")
+            if data.get("payment_date") and data["payment_date"] not in grounded_dates(data["evidence"], primary):
+                data["payment_date"] = None
+                data["uncertainties"].append("Дата ожидаемой оплаты не подтверждена цитатой WhatsApp; календарный пункт не создан.")
             if data.get("payment_date") and data.get("amount"):
                 prior_schedule = PaymentScheduleItem.objects.filter(project=candidate.project, due_date=data["payment_date"], amount=data["amount"], currency=data.get("currency", candidate.project.currency), direction=data["direction"], state="active").first()
                 if prior_schedule:
