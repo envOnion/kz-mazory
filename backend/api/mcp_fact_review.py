@@ -107,8 +107,8 @@ def create_fact_review_mcp(user):
             {
                 "id": m.id,
                 "bitrix_deal_id": m.bitrix_deal_id,
-                "title": m.title,
-                "company_title": m.company_title,
+                "title": m.deal_title,
+                "company_title": m.company_name,
                 "opportunity": str(m.opportunity) if m.opportunity is not None else None,
                 "stage_id": m.stage_id,
                 "selection_state": m.selection_state,
