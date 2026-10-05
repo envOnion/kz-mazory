@@ -1032,4 +1032,24 @@ class CatalogTests(TestCase):
         self.assertEqual(len(search_resp.data["projects"]), 1)
         self.assertEqual(search_resp.data["projects"][0]["id"], p1.id)
 
+    def test_scoped_projects_includes_identity_confirmed_crm_deals(self):
+        from .datamart import scoped_projects
+        p = Project.objects.create(
+            team=self.team,
+            bitrix_id="999",
+            name="CRM Объект",
+            source="bitrix_crm",
+            identity_confirmed=True,
+            is_verified=False,
+            version=0,
+            currency="KZT",
+        )
+        qs, currency = scoped_projects(self.lead)
+        self.assertIn(p, qs)
+
+        resp = self.api.get("/api/projects/")
+        self.assertEqual(resp.status_code, 200)
+        results = resp.data.get("results", [])
+        self.assertTrue(any(row["id"] == p.id for row in results))
+
 

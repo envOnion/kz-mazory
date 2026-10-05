@@ -1,5 +1,6 @@
 """Paginated CRM identities. Imported catalog entries do not approve finances."""
 
+from decimal import Decimal
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
@@ -148,7 +149,7 @@ def _sync_deals_page(sync, config, cfg, payload):
             "start": sync.cursor,
             "order": {"ID": "ASC"},
             "filter": {"CATEGORY_ID": cfg.deal_category_id},
-            "select": ["ID", "TITLE", "COMPANY_ID", "ASSIGNED_BY_ID", "CURRENCY_ID"],
+            "select": ["ID", "TITLE", "COMPANY_ID", "ASSIGNED_BY_ID", "CURRENCY_ID", "OPPORTUNITY"],
         },
         config=config,
         budget=CrmReadBudget(),
