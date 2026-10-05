@@ -30,9 +30,10 @@ def upsert_company(company_id, title="", phone=""):
         return None
 
     company = Company.objects.filter(bitrix_company_id=cid).first()
-    clean_title = (title or "").strip()[:255] or f"Компания #{cid}"
+    provided_title = (title or "").strip()[:255]
+    clean_title = provided_title or f"Компания #{cid}"
     if company:
-        if company.name != clean_title:
+        if provided_title and company.name != clean_title:
             if not Company.objects.filter(name=clean_title).exclude(pk=company.pk).exists():
                 company.name = clean_title
         if phone and not company.phone:
