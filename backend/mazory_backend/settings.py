@@ -315,17 +315,6 @@ UNFOLD = {
         "show_all_applications": True,
         "navigation": [
             {
-                "title": "Личные настройки",
-                "separator": True,
-                "items": [
-                    {
-                        "title": "Безопасность",
-                        "icon": "security",
-                        "link": "/admin/security/",
-                    }
-                ],
-            },
-            {
                 "title": "Управление продажами",
                 "separator": True,
                 "items": [
@@ -443,6 +432,17 @@ UNFOLD = {
                         "icon": "badge",
                         "link": "/admin/api/userprofile/",
                     },
+                ],
+            },
+            {
+                "title": "Личные настройки",
+                "separator": True,
+                "items": [
+                    {
+                        "title": "Безопасность",
+                        "icon": "security",
+                        "link": "/admin/security/",
+                    }
                 ],
             },
         ],
