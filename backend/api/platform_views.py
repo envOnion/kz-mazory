@@ -150,6 +150,11 @@ class CandidateListView(APIView):
             .order_by("id")
         )
         fact_type = request.query_params.get("fact_type", "")
+        if 'project_id' in request.query_params:
+            field = serializers.IntegerField(min_value=1)
+            project_id = field.run_validation(request.query_params['project_id'])
+            get_object_or_404(access.projects_for(request.user), pk=project_id)
+            qs = qs.filter(project_id=project_id)
         if fact_type:
             if fact_type not in ("project", "payment", "commitment"):
                 raise ValidationError("Неизвестный тип факта.")

@@ -4,9 +4,23 @@
   <nav class="flex gap-2 flex-wrap" aria-label="Разделы кабинета"><button v-for="item in tabs" :key="item.id" class="btn" :class="tab === item.id ? 'bg-indigo-600 border-indigo-400' : ''" @click="selectTab(item.id)">{{ item.label }}</button></nav>
   <p v-if="error" role="alert" class="panel text-rose-300">{{ error }}</p><p v-if="notice" role="status" class="text-emerald-300">{{ notice }}</p><p v-if="loading" role="status">Загрузка…</p>
   <template v-if="tab === 'projects'">
-    <div class="grid md:grid-cols-2 gap-4"><article v-for="project in projects" :key="project.id" class="panel space-y-2"><h2 class="font-semibold">{{ project.name }}</h2><p>{{ project.status }} · Версия {{ project.version }}</p><template v-if="!client"><p>Договор: {{ project.contract_formatted }}</p><p>Поступило: {{ project.paid_formatted }}</p><p>Остаток: {{ project.due_formatted }}</p><button class="btn" @click="showHistory(project.id)">История подтверждений</button><details v-if="lead" class="pt-2"><summary>Сменить ответственного</summary><select class="field" v-model="assignments[project.id]"><option v-for="profile in directory.profiles" :key="profile.id" :value="profile.id">{{ profile.full_name }}</option></select><input class="field" v-model="reasons[project.id]" placeholder="Причина смены ответственного" /><label class="block"><input type="checkbox" v-model="transferTasks[project.id]" /> Передать открытые обязательства</label><button class="btn" :disabled="busy || !assignments[project.id] || !reasons[project.id]" @click="assignProject(project)">Сохранить ответственного</button></details></template></article></div><p v-if="!projects.length && !loading" class="panel">Нет доступных проектов.</p>
+    <template v-if="!client">
+      <nav class="flex gap-2 flex-wrap" aria-label="Данные проектов"><button v-for="group in projectGroups" :key="group.id" class="btn" :class="projectGroup === group.id ? 'bg-indigo-600 border-indigo-400' : ''" :disabled="loading" @click="projectGroup = group.id; filterProjects()">{{ group.label }} · {{ projectCounts[group.id] }}</button></nav>
+      <form class="panel grid sm:grid-cols-2 lg:grid-cols-3 gap-3" @submit.prevent="filterProjects">
+        <label>Проект или компания<input v-model="projectSearch" class="field w-full" placeholder="Название" /></label>
+        <label>Стадия<select v-model="projectStage" class="field w-full" @change="filterProjects"><option value="">Все стадии</option><option v-for="stage in projectStages" :key="stage.id" :value="stage.id">{{ stage.label }}</option></select></label>
+        <label>Полнота данных<select v-model="projectCompleteness" class="field w-full" @change="filterProjects"><option value="all">Все</option><option value="complete">Полные</option><option value="partial">Частичные</option><option value="missing">Нет финансовых данных</option></select></label>
+        <label>Команда<select v-model="projectTeam" class="field w-full" @change="filterProjects"><option :value="null">Все доступные</option><option v-for="team in directory.teams" :key="team.id" :value="team.id">{{ team.name }}</option></select></label>
+        <label>Ответственный<select v-model="projectManager" class="field w-full" @change="filterProjects"><option :value="null">Все доступные</option><option v-for="profile in directory.profiles" :key="profile.id" :value="profile.id">{{ profile.full_name }}</option></select></label>
+        <button class="btn-primary self-end" :disabled="loading" type="submit">Найти</button>
+      </form>
+      <p class="text-sm text-slate-400">По фильтрам: {{ projectCount }}. Данные подтверждаются по переписке WhatsApp.</p>
+    </template>
+    <div class="grid md:grid-cols-2 gap-4"><article v-for="project in projects" :key="project.id" class="panel space-y-2"><h2 class="font-semibold">{{ project.name }}</h2><p>{{ project.status }} · Версия {{ project.version }}</p><template v-if="!client"><p>Договор: {{ project.contract_known ? project.contract_formatted : 'Сумма не указана' }}</p><p>Поступило: {{ project.payments_known ? project.paid_formatted : 'Нет зарегистрированных сведений' }}</p><p>Остаток: {{ project.balance_known ? project.due_formatted : 'Не определён' }}</p><section v-if="project.missing_data_reasons?.length" class="rounded-lg bg-slate-800/60 p-3 text-sm space-y-1" aria-label="Причины неполных данных"><p v-for="(reason, index) in project.missing_data_reasons" :key="index">{{ reason.message }}</p><button v-if="project.review_available" class="btn" @click="showProjectFacts(project)">Проверить связанные факты</button></section><button class="btn" @click="showHistory(project.id)">История подтверждений</button><details v-if="lead" class="pt-2"><summary>Сменить ответственного</summary><select class="field" v-model="assignments[project.id]"><option v-for="profile in directory.profiles" :key="profile.id" :value="profile.id">{{ profile.full_name }}</option></select><input class="field" v-model="reasons[project.id]" placeholder="Причина смены ответственного" /><label class="block"><input type="checkbox" v-model="transferTasks[project.id]" /> Передать открытые обязательства</label><button class="btn" :disabled="busy || !assignments[project.id] || !reasons[project.id]" @click="assignProject(project)">Сохранить ответственного</button></details></template></article></div><p v-if="!projects.length && !loading" class="panel">Нет проектов по выбранным фильтрам. Измените список или условия поиска.</p>
+    <nav v-if="!client" class="flex gap-3 items-center" aria-label="Страницы проектов"><button class="btn" :disabled="loading || projectPage === 1" @click="changeProjectPage(-1)">Предыдущая</button><span>Страница {{ projectPage }}</span><button class="btn" :disabled="loading || !projectNext" @click="changeProjectPage(1)">Следующая</button></nav>
   </template>
   <template v-if="tab === 'review'">
+    <p v-if="candidateProject" class="text-sm">Факты проекта: {{ candidateProjectName }} <button class="btn" @click="candidateProject = null; candidatePage = 1; load()">Показать все факты</button></p>
     <p class="text-sm text-slate-400">AI предлагает изменения. Утверждённые суммы остаются прежними до подтверждения. Платежи проверяет финансист.</p>
     <label>Статус <select class="field" v-model="candidateStatus" @change="candidatePage = 1; load()"><option value="pending">На проверке</option><option value="approved">Принято</option><option value="rejected">Отклонено</option><option value="superseded">Заменено</option></select></label>
     <label class="ml-3">Тип <select class="field" v-model="candidateFactType" @change="candidatePage = 1; load()"><option value="">Все факты</option><option value="project">Проекты — проверить и создать</option><option value="commitment">Обязательства</option><option value="payment">Платежи</option></select></label>
@@ -95,7 +109,7 @@ import { api, post } from '../composables/api'
 import { currentUser } from '../composables/session'
 import { useNotifications } from '../composables/useNotifications'
 import type { Page, Candidate, CrmMatchState, Directory } from '../types/platform'
-import type { ManagerProjectSummary, CommitmentData, CommitmentItem } from '../types/chat'
+import type { ManagerProjectSummary, ProjectWorkspaceSummary, CommitmentData, CommitmentItem } from '../types/chat'
 const roles = computed(() => currentUser.value?.roles || [])
 const client = computed(() => roles.value.includes('client')), lead = computed(() => roles.value.includes('team_lead')), financeRole = computed(() => roles.value.includes('finance'))
 const tab = ref('projects'), loading = ref(false), busy = ref(false), error = ref(''), notice = ref('')
@@ -109,9 +123,19 @@ const tabs = computed(() => [
   { id: 'notifications', label: 'Уведомления' }
 ])
 const assignments = ref<Record<number, number>>({}), transferTasks = ref<Record<number, boolean>>({})
-const projects = ref<ManagerProjectSummary[]>([]), candidates = ref<Candidate[]>([]), commitments = ref<CommitmentData | null>(null)
+const projects = ref<ProjectWorkspaceSummary[]>([]), candidates = ref<Candidate[]>([]), commitments = ref<CommitmentData | null>(null)
 const directory = ref<Directory>({ teams: [], profiles: [], projects: [] })
+const candidateProject = ref<number | null>(null), candidateProjectName = ref('')
+async function showProjectFacts(project: ProjectWorkspaceSummary) { candidateProject.value = project.id; candidateProjectName.value = project.name; candidatePage.value = 1; candidateStatus.value = 'pending'; await selectTab('review') }
 const candidateFactType = ref(''), candidateStatus = ref('pending'), editing = ref<number | null>(null), reasons = ref<Record<number, string>>({}), deadlines = ref<Record<number, string>>({}), matches = ref<Record<number, number>>({})
+const projectPage = ref(1), projectCount = ref(0), projectNext = ref(false)
+const projectGroup = ref('with_data'), projectSearch = ref(''), projectStage = ref(''), projectCompleteness = ref('all')
+const projectTeam = ref<number | null>(null), projectManager = ref<number | null>(null)
+const projectCounts = ref<Record<string, number>>({ with_data: 0, without_data: 0, all: 0 })
+const projectGroups = [{ id: 'with_data', label: 'С финансовыми данными' }, { id: 'without_data', label: 'Без финансовых данных' }, { id: 'all', label: 'Все проекты' }]
+const projectStages = [{ id: 'lead', label: 'Первичный контакт' }, { id: 'qualification', label: 'Квалификация' }, { id: 'design', label: 'Проектирование' }, { id: 'proposal_sent', label: 'КП отправлено' }, { id: 'contract_signing', label: 'Согласование договора' }, { id: 'in_execution', label: 'В исполнении' }, { id: 'completed', label: 'Завершён' }, { id: 'stalled', label: 'Требует внимания' }, { id: 'lost', label: 'Проигран' }]
+async function filterProjects() { projectPage.value = 1; await load() }
+async function changeProjectPage(delta: number) { projectPage.value += delta; await load() }
 const candidatePage = ref(1), candidateCount = ref(0), candidateNext = ref(false)
 const candidateGroups = computed(() => {
   const groups = new Map<string, { key: string; label: string; items: Candidate[] }>()
@@ -168,10 +192,19 @@ function crmStateLabel(item: Candidate) {
 async function load() {
   loading.value = true; error.value = ''
   try {
-    if (tab.value === 'projects') projects.value = (await api<Page<ManagerProjectSummary>>('/projects/')).results
+    if (tab.value === 'projects') {
+      const query = new URLSearchParams({ page: String(projectPage.value), group: projectGroup.value, completeness: projectCompleteness.value })
+      if (projectSearch.value.trim()) query.set('search', projectSearch.value.trim())
+      if (projectStage.value) query.set('stage', projectStage.value)
+      if (projectTeam.value !== null) query.set('team_id', String(projectTeam.value))
+      if (projectManager.value !== null) query.set('manager_id', String(projectManager.value))
+      const page = await api<Page<ProjectWorkspaceSummary> & { group_counts?: { with_data: number; without_data: number } }>(client.value ? '/projects/' : `/projects/?${query}`)
+      projects.value = page.results; projectCount.value = page.count; projectNext.value = Boolean(page.next)
+      if (page.group_counts) projectCounts.value = { ...page.group_counts, all: page.group_counts.with_data + page.group_counts.without_data }
+    }
     if (tab.value === 'review') {
       await refreshDirectory()
-      const page = await api<Page<Candidate>>(`/candidates/?status=${candidateStatus.value}&page=${candidatePage.value}${candidateFactType.value ? `&fact_type=${candidateFactType.value}` : ''}`)
+      const page = await api<Page<Candidate>>(`/candidates/?status=${candidateStatus.value}&page=${candidatePage.value}${candidateFactType.value ? `&fact_type=${candidateFactType.value}` : ''}${candidateProject.value ? `&project_id=${candidateProject.value}` : ''}`)
       candidates.value = page.results; candidateCount.value = page.count; candidateNext.value = Boolean(page.next)
       crmSelections.value = {}
       for (const candidate of candidates.value) {

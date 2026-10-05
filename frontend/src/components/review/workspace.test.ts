@@ -176,3 +176,47 @@ describe("General commitments and project discovery", () => {
     wrapper.unmount();
   });
 });
+
+describe('Project workspace', () => {
+  async function projectsScreen() {
+    currentUser.value = { id: 1, name: 'Тест', phone: 'test', username: 'test', roles: ['finance'] };
+    mocks.api.mockImplementation(async (url: string) => {
+      if (url === '/directory/') return directory;
+      if (url.startsWith('/projects/?')) return {
+        count: 51, next: url.includes('page=2') ? null : '/api/projects/?page=2',
+        group_counts: { with_data: 1, without_data: 50 },
+        results: [{ id: 870, name: 'ЦТП 343', status: 'В исполнении', version: 1,
+          contract_formatted: '0.00 ₸', paid_formatted: '117 000 000.00 ₸', due_formatted: '-117 000 000.00 ₸',
+          contract_known: false, payments_known: true, balance_known: false,
+          missing_data_reasons: [{ code: 'contract_missing', message: 'Сумма договора не зарегистрирована.' }], review_available: false }],
+      };
+      return { results: [], count: 0, next: null };
+    });
+    const wrapper = mount(WorkspaceView);
+    await flushPromises();
+    return wrapper;
+  }
+  it('shows known payments and explains missing contract without a false negative balance', async () => {
+    const wrapper = await projectsScreen();
+    expect(wrapper.text()).toContain('Поступило: 117 000 000.00 ₸');
+    expect(wrapper.text()).toContain('Договор: Сумма не указана');
+    expect(wrapper.text()).toContain('Остаток: Не определён');
+    expect(wrapper.text()).not.toContain('-117 000 000');
+    expect(wrapper.text()).toContain('Сумма договора не зарегистрирована.');
+    wrapper.unmount();
+  });
+  it('requests subsequent pages and resets page on a list/filter change', async () => {
+    const wrapper = await projectsScreen();
+    await wrapper.get('nav[aria-label="Страницы проектов"]').findAll('button')[1]!.trigger('click');
+    await flushPromises();
+    expect(mocks.api).toHaveBeenCalledWith('/projects/?page=2&group=with_data&completeness=all');
+    await wrapper.get('nav[aria-label="Данные проектов"]').findAll('button')[1]!.trigger('click');
+    await flushPromises();
+    expect(mocks.api).toHaveBeenCalledWith('/projects/?page=1&group=without_data&completeness=all');
+    await wrapper.get('input[placeholder="Название"]').setValue('Top Build');
+    await wrapper.get('form').trigger('submit');
+    await flushPromises();
+    expect(mocks.api).toHaveBeenCalledWith('/projects/?page=1&group=without_data&completeness=all&search=Top+Build');
+    wrapper.unmount();
+  });
+});
