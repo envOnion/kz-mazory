@@ -15,7 +15,7 @@
     <!-- Right controls: notifications, auth/profile door & avatar (NO DROPDOWNS, NO GEAR) -->
     <div class="flex items-center gap-3">
       <!-- Notification Bell with real Redis count & Popover - ONLY for Authenticated users -->
-      <div v-if="isAuthenticated" class="relative">
+      <div v-if="isAuthenticated" class="relative" ref="popoverContainer">
         <button
           type="button"
           class="relative p-2.5 text-slate-300 hover:text-white rounded-full hover:bg-white/5 transition-colors focus:outline-none cursor-pointer"
@@ -77,7 +77,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, watch } from 'vue'
+import { onMounted, onUnmounted, watch, ref } from 'vue'
 import { Bell, DoorOpen } from 'lucide-vue-next'
 import MazoryLogo from './icons/MazoryLogo.vue'
 import NotificationsPopover from './NotificationsPopover.vue'
@@ -103,10 +103,31 @@ const {
   closePopover
 } = useNotifications()
 
+const popoverContainer = ref<HTMLElement | null>(null)
+
+function handleClickOutside(event: MouseEvent) {
+  if (isPopoverOpen.value && popoverContainer.value && !popoverContainer.value.contains(event.target as Node)) {
+    closePopover()
+  }
+}
+
+function handleKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape' && isPopoverOpen.value) {
+    closePopover()
+  }
+}
+
 onMounted(() => {
   if (isAuthenticated.value) {
     fetchNotifications()
   }
+  document.addEventListener('click', handleClickOutside)
+  document.addEventListener('keydown', handleKeydown)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', handleClickOutside)
+  document.removeEventListener('keydown', handleKeydown)
 })
 
 watch(isAuthenticated, (authed) => {
