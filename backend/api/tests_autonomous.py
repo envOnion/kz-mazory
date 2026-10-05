@@ -162,7 +162,7 @@ class AutonomousAccountingTests(TestCase):
         TeamMembership.objects.create(user=user, team=self.team, role="team_lead", status="active")
         decide(self.candidate().id)
         api.force_authenticate(user)
-        self.assertEqual(api.get("/api/autonomous/overview/").data["totals"][0]["amount"], "117000000")
+        self.assertEqual(Decimal(api.get("/api/autonomous/overview/").data["totals"][0]["amount"]), Decimal("117000000"))
         stranger = User.objects.create_user("stranger")
         api.force_authenticate(stranger)
         self.assertEqual(api.get("/api/autonomous/overview/").data["totals"], [])

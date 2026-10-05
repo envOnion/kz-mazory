@@ -46,4 +46,10 @@ def reserve(cfg, payload, operation):
             history_tokens = reservations.filter(purpose="history").aggregate(total=Sum("reserved_tokens"))["total"] or 0
             if history_tokens + tokens > locked.autonomous_daily_token_limit // 5:
                 raise ProviderUnavailable("history_budget_reserved", retry_after=60)
-        return ProviderReservation.objects.create(config=locked, operation=operation, purpose=purpose, reserved_tokens=tokens, lease_until=now + timedelta(minutes=10))
+        return ProviderReservation.objects.create(
+            config=locked,
+            operation=operation,
+            purpose=purpose,
+            reserved_tokens=tokens,
+            lease_until=now + timedelta(minutes=10),
+        )
