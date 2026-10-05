@@ -76,14 +76,18 @@ def history_queryset(raw, snapshot_id, include_following=False):
     return qs.order_by(f"-{time_field}", "-id"), time_field
 
 
-def build_context(raw, cfg, known_projects, snapshot_id, include_following=False):
+def build_context(raw, cfg, known_projects, snapshot_id, include_following=False, batch_ids=None):
     from .dialogue_threads import context_threads
     themes = context_threads(raw)
     counter, endpoint = context_runtime(cfg)
     qs, time_field = history_queryset(raw, snapshot_id, include_following)
     if themes and include_following:
         relevant_ids = [message_id for theme in themes for message_id in theme["message_ids"]]
-        qs = qs.annotate(theme_priority=Case(When(pk__in=relevant_ids, then=Value(0)), default=Value(1), output_field=IntegerField())).order_by("theme_priority", "distance", "id")
+        promise_ids = [task["source_message_id"] for theme in themes for task in theme.get("commitments", [])]
+        qs = qs.annotate(theme_priority=Case(When(pk__in=(batch_ids or []), then=Value(0)), When(pk__in=promise_ids, then=Value(1)), When(pk__in=relevant_ids, then=Value(2)), default=Value(3), output_field=IntegerField())).order_by("theme_priority", "distance", "id")
+    if batch_ids and include_following and not themes:
+        qs = qs.annotate(batch_priority=Case(When(pk__in=batch_ids, then=Value(0)), default=Value(1), output_field=IntegerField())).order_by("batch_priority", "distance", "id")
+    requested_batch = list(batch_ids or [])
     source = source_metadata(raw)
     source_timezone = source["timezone"]
     analysis_time = timezone.now().astimezone(source_zone(raw)).isoformat()
@@ -104,14 +108,19 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
             source["sent_at"],
             source_timezone,
             source_metadata=source, current_time=analysis_time, target_message_id=raw.id,
-            known_threads=themes,
+            known_threads=themes, batch_message_ids=requested_batch,
         )
 
+    incremental = getattr(cfg, "autonomous_enabled", False)
+    if incremental:
+        qs = qs[:max(1, cfg.autonomous_context_messages)]
     max_input = (
         cfg.context_window_tokens
         - cfg.max_completion_tokens
         - cfg.context_safety_tokens
     )
+    if incremental:
+        max_input = min(max_input, max(1, cfg.autonomous_input_tokens))
     fixed = counter.count_payload(payload([]))
     if fixed > max_input:
         raise ProviderUnavailable("context_fixed_input_too_large")
@@ -232,6 +241,9 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
                     estimated = actual
     if counter.count_payload(payload(nearest)) > max_input:
         nearest = fit_boundary(nearest)
+    if requested_batch:
+        included_ids = {raw.id} | {item["raw_message_id"] for item in nearest if not item["partial"]}
+        requested_batch = [pk for pk in requested_batch if pk in included_ids]
     request = payload(nearest)
     input_tokens = counter.count_payload(request)
     if input_tokens > max_input:
@@ -241,6 +253,7 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
     included = len(context)
     metadata = {
         "schema_version": 1,
+        "batch_message_ids": requested_batch,
         "known_threads": themes,
         "input_serialization": "target-last-v1",
         "policy_version": POLICY,
@@ -274,7 +287,8 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
         "partial_messages_count": partial_count,
         "omitted_messages_count": available - included,
         "empty_messages_count": empty,
-        "history_complete_in_request": included == available and partial_count == 0,
+        "history_complete_in_request": not incremental and included == available and partial_count == 0,
+        "incremental_context": incremental,
         "omission_reason": "token_budget"
         if included < available or partial_count
         else "",

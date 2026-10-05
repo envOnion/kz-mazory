@@ -20,10 +20,15 @@ RETRYABLE = {
     "provider_request_failed",
     "provider_response_error",
     "provider_invalid_response",
+    "provider_output_truncated",
     "provider_in_flight_budget",
+    "provider_circuit_open",
     "context_model_metadata_unavailable",
     "invalid_extraction_schema",
     "invalid_schema",
+    "fact_thread_missing",
+    "batch_classification_missing",
+    "thread_classification_invalid",
     "invalid_embedding",
 }
 
@@ -80,7 +85,19 @@ def handle_failure(event, exc):
     delay = 60 * 2 ** max(0, min(event.attempt_count - 1, 3)) + random.randint(0, 15)
     delay = max(delay, exc.retry_after or 0)
     next_at = timezone.now() + timedelta(seconds=delay) if pending else None
+    payload = dict(event.payload)
+    batch = payload.get("batch_ids", [])
+    if code in {"invalid_extraction_schema", "invalid_schema", "batch_classification_missing", "thread_classification_invalid", "provider_output_truncated"} and len(batch) > 1:
+        payload["batch_ids"] = batch[:max(1, len(batch) // 2)]
+        from .processing_attempts import reserve_attempt
+        # Preserve the old immutable envelope; a smaller request is a distinct
+        # trace, not an in-place rewrite of the previous model input.
+        with transaction.atomic():
+            raw = RawMessage.objects.select_for_update().get(pk=payload["raw_id"])
+            replacement = reserve_attempt(raw, f"packet-repair:{event.id}:{len(payload['batch_ids'])}")
+            payload["trace_id"] = replacement.id
     OutboxEvent.objects.filter(pk=event.id).update(
+        payload=payload,
         state="pending" if pending else "failed",
         error_code=code,
         lease_until=None,

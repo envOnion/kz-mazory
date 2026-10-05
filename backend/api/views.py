@@ -256,6 +256,9 @@ class WebhookPayload(serializers.Serializer):
     notifyName = serializers.CharField(
         max_length=255, required=False, allow_blank=True, default=""
     )
+    hasMedia = serializers.BooleanField(default=False)
+    media = serializers.DictField(required=False, allow_null=True)
+    replyTo = serializers.DictField(required=False, allow_null=True)
     ack = serializers.IntegerField(min_value=-1, max_value=4, required=False)
 
 
@@ -377,6 +380,8 @@ class MessageIngestView(APIView):
                     },
                 },
             )
+            from .message_artifacts import register
+            register(raw)
             if raw.config_id != cfg.id:
                 raise Conflict("Идентификатор источника уже связан с другим чатом.")
             analyze = not job or not job.only_new or job.analyze_after_import

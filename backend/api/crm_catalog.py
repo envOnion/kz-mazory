@@ -34,22 +34,11 @@ def upsert_company(company_id, title="", phone=""):
     clean_title = provided_title or f"Компания #{cid}"
     if company:
         if provided_title and company.name != clean_title:
-            if not Company.objects.filter(name=clean_title).exclude(pk=company.pk).exists():
-                company.name = clean_title
+            company.name = clean_title
         if phone and not company.phone:
             company.phone = str(phone).strip()[:64]
         company.save()
         return company
-
-    existing = Company.objects.filter(name=clean_title).first()
-    if existing and not existing.bitrix_company_id:
-        existing.bitrix_company_id = cid
-        if phone and not existing.phone:
-            existing.phone = str(phone).strip()[:64]
-        existing.save()
-        return existing
-    elif existing:
-        clean_title = f"{clean_title} (#{cid})"[:255]
 
     return Company.objects.create(
         bitrix_company_id=cid,

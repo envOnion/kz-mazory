@@ -78,7 +78,8 @@ class Company(models.Model):
         ("designer", "Проектная организация"),
         ("other", "Прочее"),
     ]
-    name = models.CharField(max_length=255, unique=True)
+    name = models.CharField(max_length=255)
+    team = models.ForeignKey("Team", null=True, blank=True, on_delete=models.PROTECT)
     bitrix_company_id = models.CharField(
         max_length=64, blank=True, null=True, db_index=True
     )
@@ -188,6 +189,8 @@ class Project(models.Model):
 
     team = models.ForeignKey("Team", on_delete=models.PROTECT, null=True, blank=True)
     version = models.PositiveIntegerField(default=0)
+    contract_known = models.BooleanField(default=False)
+    whatsapp_fields = models.JSONField(default=list, blank=True)
     cost_confirmed = models.BooleanField(default=False)
     currency = models.CharField(max_length=3, default="KZT")
     archived = models.BooleanField(default=False)
@@ -393,6 +396,7 @@ class Commitment(models.Model):
         on_delete=models.PROTECT,
         related_name="accepted_commitment",
     )
+    participant = models.ForeignKey("Participant", null=True, blank=True, on_delete=models.PROTECT)
     version = models.PositiveIntegerField(default=1)
     deadline_at = models.DateTimeField(null=True, blank=True)
     deadline_precision = models.CharField(max_length=16, default="unknown")
@@ -467,6 +471,9 @@ class FinancialRecord(models.Model):
     reverses = models.ForeignKey(
         "self", null=True, blank=True, on_delete=models.PROTECT
     )
+    direction = models.CharField(max_length=16, default="income")
+    amount_precision = models.CharField(max_length=16, default="exact")
+    event_kind = models.CharField(max_length=32, default="payment")
     credited_profile = models.ForeignKey(
         UserProfile,
         null=True,
@@ -622,6 +629,15 @@ class WhatsAppConfig(models.Model):
 
 
 class AISettings(models.Model):
+    autonomous_daily_token_limit = models.PositiveBigIntegerField(default=1000000)
+    autonomous_max_in_flight = models.PositiveIntegerField(default=2)
+    autonomous_reconcile_cursor = models.PositiveBigIntegerField(default=0)
+    autonomous_enabled = models.BooleanField(default=False)
+    autonomous_crm_enabled = models.BooleanField(default=False)
+    autonomous_policy_version = models.CharField(max_length=64, default="whatsapp-autonomous-v1")
+    autonomous_context_messages = models.PositiveIntegerField(default=30)
+    autonomous_input_tokens = models.PositiveIntegerField(default=12000)
+
     """
     Конфигурация нейросетевых моделей для embeddings и Chat/Reasoning.
     """
@@ -1492,6 +1508,11 @@ class ProjectRevision(models.Model):
 
 
 class PaymentScheduleItem(models.Model):
+    fact_event = models.ForeignKey("FactEvent", null=True, blank=True, on_delete=models.PROTECT)
+    version = models.PositiveIntegerField(default=1)
+    state = models.CharField(max_length=16, default="active")
+    direction = models.CharField(max_length=16, default="income")
+    amount_precision = models.CharField(max_length=16, default="exact")
     project = models.ForeignKey(
         Project, on_delete=models.PROTECT, related_name="payment_schedule"
     )
@@ -1952,3 +1973,157 @@ class McpToken(models.Model):
     class Meta:
         ordering = ["-created_at"]
 
+
+
+class Participant(models.Model):
+    team = models.ForeignKey(Team, on_delete=models.PROTECT)
+    user_profile = models.ForeignKey(UserProfile, null=True, blank=True, on_delete=models.PROTECT)
+    display_name = models.CharField(max_length=255)
+
+
+class ParticipantIdentity(models.Model):
+    participant = models.ForeignKey(Participant, on_delete=models.PROTECT, related_name="identities")
+    namespace = models.CharField(max_length=255)
+    value = models.CharField(max_length=255)
+    resolution_state = models.CharField(max_length=16, default="resolved")
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["namespace", "value"], name="participant_identity_unique")]
+
+
+class CompanyAlias(models.Model):
+    company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name="aliases")
+    normalized_name = models.CharField(max_length=255, db_index=True)
+    decision = models.ForeignKey("FactDecision", null=True, on_delete=models.PROTECT)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["company", "normalized_name"], name="company_alias_unique")]
+
+
+class ProjectAlias(models.Model):
+    project = models.ForeignKey(Project, on_delete=models.PROTECT, related_name="aliases")
+    normalized_name = models.CharField(max_length=255, db_index=True)
+    decision = models.ForeignKey("FactDecision", null=True, on_delete=models.PROTECT)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "normalized_name"], name="project_alias_unique")]
+
+
+class ProjectParty(models.Model):
+    project = models.ForeignKey(Project, on_delete=models.PROTECT, related_name="parties")
+    company = models.ForeignKey(Company, on_delete=models.PROTECT)
+    role = models.CharField(max_length=32)
+    decision = models.ForeignKey("FactDecision", on_delete=models.PROTECT)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["project", "company", "role"], name="project_party_unique")]
+
+
+class FactDecision(models.Model):
+    candidate = models.ForeignKey(FactCandidate, on_delete=models.PROTECT, related_name="decisions")
+    supersedes = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT)
+    outcome = models.CharField(max_length=16, choices=[(x, x) for x in ("accepted", "deferred", "rejected", "superseded")])
+    actor_kind = models.CharField(max_length=16, default="system")
+    policy_version = models.CharField(max_length=64)
+    input_fingerprint = models.CharField(max_length=64)
+    reason_code = models.CharField(max_length=64)
+    explanation = models.TextField()
+    validation = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["candidate", "policy_version", "input_fingerprint"], name="fact_decision_input_unique")]
+
+
+class FactEvent(models.Model):
+    decision = models.ForeignKey(FactDecision, null=True, blank=True, on_delete=models.PROTECT, related_name="events")
+    team = models.ForeignKey(Team, on_delete=models.PROTECT)
+    project = models.ForeignKey(Project, null=True, blank=True, on_delete=models.PROTECT, related_name="fact_events")
+    event_key = models.CharField(max_length=255, unique=True)
+    event_type = models.CharField(max_length=64)
+    occurred_at = models.DateTimeField(null=True, blank=True)
+    payload = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        default_permissions = ("view",)
+
+
+class FieldAssertion(models.Model):
+    fact_event = models.ForeignKey(FactEvent, on_delete=models.PROTECT)
+    project = models.ForeignKey(Project, null=True, blank=True, on_delete=models.PROTECT, related_name="assertions")
+    commitment = models.ForeignKey(Commitment, null=True, blank=True, on_delete=models.PROTECT)
+    financial_record = models.ForeignKey(FinancialRecord, null=True, blank=True, on_delete=models.PROTECT)
+    field_name = models.CharField(max_length=64)
+    value_state = models.CharField(max_length=16, default="known")
+    value = models.JSONField(null=True)
+
+    class Meta:
+        constraints = [models.CheckConstraint(condition=(models.Q(project__isnull=False, commitment__isnull=True, financial_record__isnull=True) | models.Q(project__isnull=True, commitment__isnull=False, financial_record__isnull=True) | models.Q(project__isnull=True, commitment__isnull=True, financial_record__isnull=False)), name="assertion_one_target")]
+
+
+class SourceWorkItem(models.Model):
+    raw_message = models.ForeignKey(RawMessage, on_delete=models.PROTECT, related_name="work_items")
+    processing_version = models.CharField(max_length=64)
+    state = models.CharField(max_length=32, default="pending", db_index=True)
+    lease_until = models.DateTimeField(null=True, blank=True)
+    error_code = models.CharField(max_length=64, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["raw_message", "processing_version"], name="source_work_version_unique")]
+
+
+class SourceCheckpoint(models.Model):
+    team = models.ForeignKey(Team, on_delete=models.PROTECT)
+    source_scope = models.CharField(max_length=64)
+    complete_through = models.DateTimeField(null=True, blank=True)
+    gaps = models.JSONField(default=list)
+    counts = models.JSONField(default=dict)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["team", "source_scope"], name="source_checkpoint_unique")]
+
+
+class MessageArtifact(models.Model):
+    raw_message = models.OneToOneField(RawMessage, on_delete=models.PROTECT, related_name="artifacts")
+    checksum = models.CharField(max_length=64, blank=True)
+    state = models.CharField(max_length=32, default="unavailable")
+    extracted_text = models.TextField(blank=True)
+    error_code = models.CharField(max_length=64, blank=True)
+
+
+class ExternalObjectLink(models.Model):
+    team = models.ForeignKey(Team, on_delete=models.PROTECT)
+    integration_key = models.CharField(max_length=64)
+    object_type = models.CharField(max_length=32)
+    local_type = models.CharField(max_length=32)
+    local_id = models.PositiveBigIntegerField()
+    external_id = models.CharField(max_length=64, blank=True, null=True)
+    origin_key = models.CharField(max_length=255, unique=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["team", "integration_key", "object_type", "external_id"], condition=models.Q(external_id__isnull=False), name="external_object_namespace_unique")]
+
+
+class CrmDelivery(models.Model):
+    outbox_event = models.OneToOneField(OutboxEvent, on_delete=models.PROTECT)
+    external_object_link = models.ForeignKey(ExternalObjectLink, on_delete=models.PROTECT)
+    fact_event = models.ForeignKey(FactEvent, null=True, blank=True, on_delete=models.PROTECT)
+    target_version = models.PositiveIntegerField()
+    state = models.CharField(max_length=32, default="pending")
+    patch = models.JSONField(default=dict)
+    error_code = models.CharField(max_length=64, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+class ProviderReservation(models.Model):
+    purpose = models.CharField(max_length=16, default="live")
+    config = models.ForeignKey(AISettings, on_delete=models.PROTECT)
+    usage = models.OneToOneField(ProviderUsage, null=True, blank=True, on_delete=models.PROTECT)
+    operation = models.CharField(max_length=32)
+    reserved_tokens = models.PositiveBigIntegerField()
+    state = models.CharField(max_length=16, default="reserved")
+    lease_until = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)

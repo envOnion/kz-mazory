@@ -102,3 +102,26 @@ class ProjectWorkspaceTests(TestCase):
         response = self.api.get('/api/candidates/', {'status': 'rejected', 'project_id': p.id})
         self.assertEqual(response.data['count'], 2)
         self.assertEqual(self.api.get('/api/candidates/', {'project_id': 'bad'}).status_code, 400)
+
+    def test_approximate_receipt_is_shown_with_data_without_exact_balance(self):
+        project = self.project('Approximate')
+        record = self.payment(project, 42000000)
+        record.amount_precision = 'approximate'
+        record.save()
+        response = self.api.get('/api/projects/', {'group': 'with_data'})
+        self.assertEqual(response.data['count'], 1)
+        row = response.data['results'][0]
+        self.assertFalse(row['payments_known'])
+        self.assertFalse(row['balance_known'])
+        self.assertEqual(row['data_completeness'], 'partial')
+        self.assertIsNotNone(row['approximate_paid_formatted'])
+
+    def test_search_multiple_aliases_does_not_multiply_payment_total(self):
+        from .models import ProjectAlias
+        project = self.project('School')
+        self.payment(project, 100)
+        ProjectAlias.objects.create(project=project, normalized_name='school one')
+        ProjectAlias.objects.create(project=project, normalized_name='school two')
+        response = self.api.get('/api/projects/', {'search': 'school'})
+        self.assertEqual(response.data['results'][0]['paid_amount'], '100.00')
+        self.assertEqual(response.data['count'], 1)

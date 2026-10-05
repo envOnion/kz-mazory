@@ -142,8 +142,8 @@ def _extraction_user_message(payload):
     return matches[0]
 
 
-def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refresh=False):
-    explicit = trace_id is not None
+def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refresh=False, batch_ids=None, reanalyze=False):
+    explicit = trace_id is not None or reanalyze
     with transaction.atomic():
         raw = (
             RawMessage.objects.select_for_update(of=("self",))
@@ -152,7 +152,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         )
         if raw.processed and not explicit:
             return
-        if explicit:
+        if trace_id is not None:
             trace = raw.traces.get(pk=trace_id)
         else:
             operation = (
@@ -204,8 +204,10 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                     .values("id", "name", "company__name")[:100]
                 )
             )
+            if cfg.autonomous_enabled and not batch_ids and not requested_by_id:
+                batch_ids = list(source_scope(raw).filter(processed=False, id__gte=raw.id, id__lte=trace.context_metadata["snapshot_max_id"]).exclude(content="").order_by("id").values_list("id", flat=True)[:cfg.autonomous_context_messages])
             context, metadata, payload = build_context(
-                raw, cfg, known, trace.context_metadata["snapshot_max_id"], include_following=True
+                raw, cfg, known, trace.context_metadata["snapshot_max_id"], include_following=True, **({"batch_ids": batch_ids} if batch_ids else {})
             )
             envelope = copy.deepcopy(payload)
             user_message = _extraction_user_message(envelope)
@@ -308,7 +310,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 revision = revisions[fact["thread_key"]]
                 related_approved = [item for item in accepted if not item.thread_revision_id or item.thread_revision.thread_id == revision.thread_id]
                 approved_obligation = next((item for item in related_approved if item.fact_type == "commitment" and same_commitment_origin(item.proposed_changes, fact) and hasattr(item, "accepted_commitment")), None) if fact["fact_type"] == "commitment" else None
-                fulfillment_update = bool(approved_obligation and fact.get("commitment_status") == "fulfilled" and approved_obligation.accepted_commitment.status not in ("fulfilled", "cancelled"))
+                fulfillment_update = bool(approved_obligation and (fact.get("commitment_status") in ("fulfilled", "cancelled") or fact.get("commitment_id")) and approved_obligation.accepted_commitment.status not in ("fulfilled", "cancelled"))
                 if approved_obligation and fulfillment_update:
                     fact["commitment_id"] = approved_obligation.accepted_commitment.id
                     fact["base_commitment_version"] = approved_obligation.accepted_commitment.version
@@ -373,7 +375,9 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                     from .tasks import enqueue_crm_match
 
                     enqueue_crm_match(candidate.id)
-                if created:
+                from .autonomous import enqueue_decision
+                enqueue_decision(candidate.id)
+                if created and not cfg.autonomous_enabled:
                     from .notifications import notify_on_new_candidate
 
                     notify_on_new_candidate(candidate)
@@ -382,9 +386,16 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             previous.filter(status="pending").exclude(pk__in=retained).update(status="superseded")
             locked.processed, locked.processing_state = (
                 True,
-                "needs_review" if proposed else "no_facts",
+                ("analyzed" if cfg.autonomous_enabled else "needs_review") if proposed else "no_facts",
             )
             locked.save(update_fields=["processed", "processing_state"])
+            classified = {link["raw_message_id"] for theme in themes.values() for link in theme["messages"]}
+            batch_covered = set(trace.context_metadata.get("batch_message_ids", [])) & classified
+            if cfg.autonomous_enabled and batch_covered:
+                source_scope(locked).filter(pk__in=batch_covered).update(processed=True, processing_state="analyzed")
+                from .models import SourceWorkItem
+                SourceWorkItem.objects.bulk_create([SourceWorkItem(raw_message_id=pk, processing_version=cfg.autonomous_policy_version, state="done") for pk in batch_covered], ignore_conflicts=True)
+                SourceWorkItem.objects.filter(raw_message_id__in=batch_covered, processing_version=cfg.autonomous_policy_version).update(state="done", error_code="", lease_until=None)
             trace.ai_extracted_facts = json_value({"facts": facts})
             trace.context_metadata["already_approved_fact_indices"] = duplicates
             trace.pipeline_action = "proposed_facts" if proposed else "non_commercial"
@@ -393,11 +404,9 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 f"Предложено фактов: {proposed}. Уже подтверждено ранее: {len(duplicates)}.",
             )
             trace.save()
-            OutboxEvent.objects.get_or_create(
-                deduplication_key=f"index:{raw.id}",
-                defaults={"event_type": "index_message", "payload": {"raw_id": raw.id}},
-            )
-        if not explicit:
+            for indexed_id in {raw.id, *batch_covered}:
+                OutboxEvent.objects.get_or_create(deduplication_key=f"index:{indexed_id}", defaults={"event_type": "index_message", "payload": {"raw_id": indexed_id}})
+        if not explicit and not cfg.autonomous_enabled:
             from .commitment_refresh import schedule_commitment_refresh
             schedule_commitment_refresh(raw)
     except (

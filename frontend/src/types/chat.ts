@@ -9,6 +9,7 @@ export interface ManagerProjectSummary {
 }
 export interface ProjectWorkspaceSummary extends ManagerProjectSummary {
   contract_known: boolean; payments_known: boolean; balance_known: boolean;
+  approximate_paid_formatted?: string | null;
   data_completeness: 'complete' | 'partial' | 'missing';
   missing_data_reasons: { code: string; message: string }[]; review_available: boolean
 }

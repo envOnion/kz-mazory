@@ -335,10 +335,13 @@ def extraction_input(value):
 
 def extraction_payload(
     cfg, endpoint, content, sender, context, known_projects, sent_at, source_timezone,
-    source_metadata=None, current_time=None, target_message_id=None, known_threads=None,
+    source_metadata=None, current_time=None, target_message_id=None, known_threads=None, batch_message_ids=None,
 ):
     from .ai_service import WORKER_PROMPT
 
+    system_prompt = WORKER_PROMPT
+    if getattr(cfg, "autonomous_enabled", False):
+        system_prompt += "\nАвтономный режим: точное время дедлайна не выдумывай. Только день/утро означает deadline_precision=date; искусственные 09:00/18:00 не являются сообщенным временем. Сервер задает техническую границу дня отдельно от точности источника."
     user_content = extraction_input(
         {
             "content": content,
@@ -348,6 +351,7 @@ def extraction_payload(
             **({"source_metadata": source_metadata} if source_metadata is not None else {}),
             **({"current_time": current_time} if current_time is not None else {}),
             **({"target_message_id": target_message_id} if target_message_id is not None else {}),
+            **({"batch_message_ids": batch_message_ids} if batch_message_ids else {}),
             "context": context,
             "known_projects": known_projects,
             **({"known_threads": known_threads} if known_threads is not None else {}),
@@ -357,7 +361,7 @@ def extraction_payload(
         return {
             "model": cfg.chat_model_name,
             "max_tokens": cfg.max_completion_tokens,
-            "system": WORKER_PROMPT,
+            "system": system_prompt,
             "messages": [{"role": "user", "content": user_content}],
         }
     payload = {
@@ -372,7 +376,7 @@ def extraction_payload(
         },
         "plugins": [{"id": "context-compression", "enabled": False}],
         "messages": [
-            {"role": "system", "content": WORKER_PROMPT},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
     }

@@ -8,7 +8,7 @@ import requests
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Q, Case, When, Value, IntegerField
 from django.utils import timezone
 from django_q.tasks import async_task
 from . import access
@@ -35,11 +35,13 @@ CLUSTERS = {
     "notification": "delivery",
     "delivery_ack": "delivery",
     "crm_sync": "crm",
+    "autonomous_crm": "crm",
     "crm_import": "crm",
     "crm_catalog": "crm",
     "crm_match": "crm",
     "waha_control": "delivery",
     "history_import": "history",
+    "whatsapp_artifact": "history",
     "thread_backfill": "history",
 }
 NON_IDEMPOTENT = {"otp", "notification", "waha_control"}
@@ -92,24 +94,37 @@ def dispatch_outbox(limit=100):
     )
     pending = OutboxEvent.objects.filter(state="pending", next_attempt_at__lte=now)
     if AISettings.get_active().message_processing_paused:
-        pending = pending.exclude(event_type__in=["extract_message", "index_message"])
-    ids = list(pending.order_by("id").values_list("id", flat=True)[:limit])
+        pending = pending.exclude(event_type__in=["extract_message", "index_message", "whatsapp_artifact"])
+    if AISettings.get_active().autonomous_enabled:
+        pending = pending.annotate(work_priority=Case(When(event_type="operation", then=Value(0)), When(payload__priority="live", then=Value(1)), When(event_type="decide_fact", then=Value(2)), default=Value(3), output_field=IntegerField())).order_by("work_priority", "id")
+    else:
+        pending = pending.order_by("id")
+    cfg = AISettings.get_active()
+    expensive = {"extract_message", "index_message", "operation", "whatsapp_artifact"}
+    in_flight = OutboxEvent.objects.filter(event_type__in=expensive, state__in=("enqueued", "processing")).count()
+    ids = list(pending.values_list("id", flat=True)[:limit])
+    dispatched = 0
     for pk in ids:
         with transaction.atomic():
             event = OutboxEvent.objects.select_for_update().get(pk=pk)
             if event.state != "pending":
                 continue
+            if cfg.autonomous_enabled and event.event_type in expensive:
+                if in_flight >= max(1, cfg.autonomous_max_in_flight):
+                    continue
+                in_flight += 1
             event.state, event.lease_until = "enqueued", now + timedelta(minutes=5)
             event.save(update_fields=["state", "lease_until"])
         try:
             async_task(
                 "api.tasks.run_outbox", pk, cluster=CLUSTERS.get(event.event_type, "ai")
             )
+            dispatched += 1
         except Exception:
             OutboxEvent.objects.filter(pk=pk, state="enqueued").update(
                 state="pending", error_code="broker_unavailable"
             )
-    return len(ids)
+    return dispatched
 
 
 def enqueue_crm_match(candidate_id, allowed_states=("not_requested",)):
@@ -209,7 +224,7 @@ def run_outbox(pk):
             ).exclude(pk=event.pk).filter(
                 Q(state="processing") | Q(pk__lt=event.pk, state__in=["pending", "enqueued"])
             ).exists()
-            if earlier:
+            if earlier and not AISettings.get_active().autonomous_enabled:
                 event.state, event.lease_until = "pending", None
                 event.next_attempt_at = timezone.now() + timedelta(seconds=10)
                 event.save(update_fields=["state", "lease_until", "next_attempt_at"])
@@ -228,10 +243,18 @@ def run_outbox(pk):
     ai_retries.record_attempt(event, "processing")
     from .ai_service import usage_event_id
 
+    if event.event_type == "extract_message":
+        from .models import SourceWorkItem
+        item, _ = SourceWorkItem.objects.get_or_create(raw_message_id=event.payload["raw_id"], processing_version=AISettings.get_active().autonomous_policy_version)
+        SourceWorkItem.objects.filter(pk=item.pk).update(state="processing", lease_until=event.lease_until, error_code="")
     context_token = usage_event_id.set(event.id)
     try:
         handlers = {
             "extract_message": extract_message,
+            "decide_fact": decide_fact,
+            "autonomous_reconcile": autonomous_reconcile,
+            "whatsapp_artifact": process_message_artifact,
+            "autonomous_crm": autonomous_crm,
             "index_message": index_message,
             "otp": deliver_otp,
             "notification": deliver_notification,
@@ -286,11 +309,11 @@ def run_outbox(pk):
             if isinstance(exc, ProviderUnavailable)
             else type(exc).__name__
         )
-        if event.event_type == "thread_backfill" and code == "thread_history_busy":
+        if (event.event_type == "thread_backfill" and code == "thread_history_busy") or code in ("history_budget_reserved", "autonomous_crm_paused", "crm_deal_delivery_pending"):
             # Waiting for earlier pages is normal progress, not a failed attempt.
             OutboxEvent.objects.filter(pk=pk).update(
                 state="pending", error_code="", lease_until=None,
-                next_attempt_at=timezone.now() + timedelta(seconds=10),
+                next_attempt_at=timezone.now() + timedelta(seconds=max(10, getattr(exc, "retry_after", None) or 0)),
                 attempt_count=max(0, event.attempt_count - 1),
             )
             return
@@ -361,6 +384,14 @@ def run_outbox(pk):
         )
 
     finally:
+        if event.event_type == "autonomous_crm":
+            from .models import CrmDelivery
+            current = OutboxEvent.objects.get(pk=event.pk)
+            CrmDelivery.objects.filter(outbox_event=event).exclude(state__in=("delivered", "superseded")).update(state=current.state, error_code=current.error_code)
+        if event.event_type == "extract_message":
+            from .models import SourceWorkItem
+            current = OutboxEvent.objects.get(pk=event.pk)
+            SourceWorkItem.objects.filter(raw_message_id=event.payload["raw_id"], processing_version=AISettings.get_active().autonomous_policy_version).update(state=current.state, error_code=current.error_code, lease_until=current.lease_until)
         usage_event_id.reset(context_token)
 
 
@@ -504,11 +535,15 @@ def apply_delivery_ack(payload):
 def extract_message(payload):
     from .pipeline import extract_message as extract
 
+    if payload.get("history_run_id") and AISettings.get_active().autonomous_enabled and RawMessage.objects.filter(pk=payload["raw_id"], processed=True).exists():
+        return
     extract(
         payload["raw_id"],
         trace_id=payload.get("trace_id"),
         requested_by_id=payload.get("requested_by_id"),
         commitment_refresh=payload.get("commitment_refresh", False),
+        batch_ids=payload.get("batch_ids"),
+        reanalyze=payload.get("reanalyze", False),
     )
 
 
@@ -649,6 +684,8 @@ def match_crm(payload):
         ):
             return
         raise
+    from .autonomous import enqueue_decision
+    enqueue_decision(candidate_id, f"crm:{revision}:{state}")
     logger.info(
         "crm_match_done candidate_id=%s revision=%s state=%s",
         candidate_id,
@@ -842,3 +879,42 @@ def process_incoming_message_task(message_data):
     if not isinstance(message_data, int):
         raise ValueError("Persist source through authenticated inbox first")
     return extract_message({"raw_id": message_data})
+
+
+def decide_fact(payload):
+    from .autonomous import decide
+    decide(payload["candidate_id"])
+
+
+def autonomous_crm(payload):
+    from .autonomous_crm import deliver
+    deliver(payload)
+
+
+def autonomous_reconcile(payload):
+    from .autonomous import reconcile
+    from .autonomous_reports import refresh_reports
+    reconcile()
+    refresh_reports()
+
+
+def process_message_artifact(payload):
+    from .message_artifacts import process
+    process(payload["artifact_id"])
+
+
+def waha_download_media(url):
+    from urllib.parse import urlsplit, unquote
+    parsed, configured = urlsplit(url or ""), urlsplit(settings.WAHA_API_URL)
+    if parsed.hostname not in (configured.hostname, "localhost", "127.0.0.1") or not parsed.path.startswith("/api/files/") or ".." in unquote(parsed.path) or "\\" in unquote(parsed.path) or parsed.query or parsed.fragment:
+        raise ProviderUnavailable("waha_media_url_invalid")
+    if not settings.WAHA_API_KEY:
+        raise ProviderUnavailable("waha_not_configured")
+    result = bytearray()
+    with requests.get(settings.WAHA_API_URL.rstrip("/") + parsed.path, headers={"X-Api-Key": settings.WAHA_API_KEY}, timeout=25, allow_redirects=False, stream=True) as response:
+        response.raise_for_status()
+        for chunk in response.iter_content(65536):
+            result.extend(chunk)
+            if len(result) > settings.MAX_ATTACHMENT_SIZE:
+                raise ProviderUnavailable("media_too_large")
+    return bytes(result)

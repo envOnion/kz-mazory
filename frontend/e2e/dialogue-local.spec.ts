@@ -271,3 +271,25 @@ test('full flow from WhatsApp messages to KPI plan/fact, timeline and forecasts'
   await expect(page.getByTestId('chart-kpi').first()).toBeVisible({ timeout: 20000 })
   await expect(page.locator('canvas').first()).toBeVisible()
 })
+
+
+test('autonomous WhatsApp receipt reaches CRM and reports without a review click', async ({ page, context, request }) => {
+  const stateFile = join(directory, 'provider-state.json')
+  writeFileSync(stateFile, JSON.stringify({ ...JSON.parse(readFileSync(stateFile, 'utf8')), autonomous: true }))
+  await expect.poll(async () => (await (await request.get('/api/directory/', { headers })).json()).autonomous_enabled).toBe(true)
+  await message(request, 'south-auto-payment', 'БЦ Южный: оплата 20 000 000 ₸ поступила сегодня')
+  await expect.poll(async () => {
+    const response = await request.get('/api/autonomous/overview/', { headers })
+    const value = await response.json()
+    return value.totals.find((row: { currency: string; direction: string; amount_precision: string }) => row.currency === 'KZT' && row.direction === 'income' && row.amount_precision === 'exact')?.amount
+  }).toBe('70000000')
+  await message(request, 'south-auto-payment', 'БЦ Южный: оплата 20 000 000 ₸ поступила сегодня', true)
+  await expect.poll(() => JSON.parse(readFileSync(stateFile, 'utf8')).comments?.some((row: { COMMENT: string }) => row.COMMENT.includes('20 000 000'))).toBe(true)
+  await authenticate(context)
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Рабочий кабинет', exact: true }).click()
+  await page.getByRole('button', { name: 'Отчеты по WhatsApp', exact: true }).click()
+  await expect(page.getByText('Автоматическая обработка включена', { exact: false })).toBeVisible()
+  await expect(page.getByText('70 000 000', { exact: true }).first()).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Подтвердить факт', exact: true })).toHaveCount(0)
+})

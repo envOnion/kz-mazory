@@ -16,12 +16,12 @@
       </form>
       <p class="text-sm text-slate-400">По фильтрам: {{ projectCount }}. Данные подтверждаются по переписке WhatsApp.</p>
     </template>
-    <div class="grid md:grid-cols-2 gap-4"><article v-for="project in projects" :key="project.id" class="panel space-y-2"><h2 class="font-semibold">{{ project.name }}</h2><p>{{ project.status }} · Версия {{ project.version }}</p><template v-if="!client"><p>Договор: {{ project.contract_known ? project.contract_formatted : 'Сумма не указана' }}</p><p>Поступило: {{ project.payments_known ? project.paid_formatted : 'Нет зарегистрированных сведений' }}</p><p>Остаток: {{ project.balance_known ? project.due_formatted : 'Не определён' }}</p><section v-if="project.missing_data_reasons?.length" class="rounded-lg bg-slate-800/60 p-3 text-sm space-y-1" aria-label="Причины неполных данных"><p v-for="(reason, index) in project.missing_data_reasons" :key="index">{{ reason.message }}</p><button v-if="project.review_available" class="btn" @click="showProjectFacts(project)">Проверить связанные факты</button></section><button class="btn" @click="showHistory(project.id)">История подтверждений</button><details v-if="lead" class="pt-2"><summary>Сменить ответственного</summary><select class="field" v-model="assignments[project.id]"><option v-for="profile in directory.profiles" :key="profile.id" :value="profile.id">{{ profile.full_name }}</option></select><input class="field" v-model="reasons[project.id]" placeholder="Причина смены ответственного" /><label class="block"><input type="checkbox" v-model="transferTasks[project.id]" /> Передать открытые обязательства</label><button class="btn" :disabled="busy || !assignments[project.id] || !reasons[project.id]" @click="assignProject(project)">Сохранить ответственного</button></details></template></article></div><p v-if="!projects.length && !loading" class="panel">Нет проектов по выбранным фильтрам. Измените список или условия поиска.</p>
+    <div class="grid md:grid-cols-2 gap-4"><article v-for="project in projects" :key="project.id" class="panel space-y-2"><h2 class="font-semibold">{{ project.name }}</h2><p>{{ project.status }} · Версия {{ project.version }}</p><template v-if="!client"><p>Договор: {{ project.contract_known ? project.contract_formatted : 'Сумма не указана' }}</p><p>Поступило: {{ project.payments_known ? project.paid_formatted : 'Точная сумма не установлена' }}</p><p v-if="project.approximate_paid_formatted">Приблизительное поступление: {{ project.approximate_paid_formatted }}</p><p>Остаток: {{ project.balance_known ? project.due_formatted : 'Не определён' }}</p><section v-if="project.missing_data_reasons?.length" class="rounded-lg bg-slate-800/60 p-3 text-sm space-y-1" aria-label="Причины неполных данных"><p v-for="(reason, index) in project.missing_data_reasons" :key="index">{{ reason.message }}</p><button v-if="project.review_available" class="btn" @click="showProjectFacts(project)">Проверить связанные факты</button></section><button class="btn" @click="showHistory(project.id)">История подтверждений</button><details v-if="lead && !automatic" class="pt-2"><summary>Сменить ответственного</summary><select class="field" v-model="assignments[project.id]"><option v-for="profile in directory.profiles" :key="profile.id" :value="profile.id">{{ profile.full_name }}</option></select><input class="field" v-model="reasons[project.id]" placeholder="Причина смены ответственного" /><label class="block"><input type="checkbox" v-model="transferTasks[project.id]" /> Передать открытые обязательства</label><button class="btn" :disabled="busy || !assignments[project.id] || !reasons[project.id]" @click="assignProject(project)">Сохранить ответственного</button></details></template></article></div><p v-if="!projects.length && !loading" class="panel">Нет проектов по выбранным фильтрам. Измените список или условия поиска.</p>
     <nav v-if="!client" class="flex gap-3 items-center" aria-label="Страницы проектов"><button class="btn" :disabled="loading || projectPage === 1" @click="changeProjectPage(-1)">Предыдущая</button><span>Страница {{ projectPage }}</span><button class="btn" :disabled="loading || !projectNext" @click="changeProjectPage(1)">Следующая</button></nav>
   </template>
   <template v-if="tab === 'review'">
     <p v-if="candidateProject" class="text-sm">Факты проекта: {{ candidateProjectName }} <button class="btn" @click="candidateProject = null; candidatePage = 1; load()">Показать все факты</button></p>
-    <p class="text-sm text-slate-400">AI предлагает изменения. Утверждённые суммы остаются прежними до подтверждения. Платежи проверяет финансист.</p>
+    <p class="text-sm text-slate-400">{{ automatic ? 'Система принимает решения по переписке WhatsApp автоматически. Здесь показаны основания и причины ожидания данных.' : 'AI предлагает изменения. Утверждённые суммы остаются прежними до подтверждения. Платежи проверяет финансист.' }}</p>
     <label>Статус <select class="field" v-model="candidateStatus" @change="candidatePage = 1; load()"><option value="pending">На проверке</option><option value="approved">Принято</option><option value="rejected">Отклонено</option><option value="superseded">Заменено</option></select></label>
     <label class="ml-3">Тип <select class="field" v-model="candidateFactType" @change="candidatePage = 1; load()"><option value="">Все факты</option><option value="project">Проекты — проверить и создать</option><option value="commitment">Обязательства</option><option value="payment">Платежи</option></select></label>
     <section class="panel space-y-2" aria-label="Справочник проектов CRM">
@@ -41,6 +41,7 @@
     <article v-for="item in group.items" :key="item.id" class="panel space-y-4" :data-testid="`candidate-${item.id}`">
       <p v-if="item.thread" class="text-sm text-indigo-300">Тема #{{ item.thread.id }}: {{ item.thread.topic }} · Версия {{ item.thread.version }}</p>
       <FactSummary :item="item" />
+      <p v-if="item.automatic_decision" class="rounded bg-slate-800 p-3 text-sm">Автоматическое решение: {{ item.automatic_decision.explanation }}</p>
       <section class="space-y-2"><h3 class="text-sm font-semibold">Чем подтверждается факт</h3>
       <blockquote v-for="evidence in item.evidence" :key="evidence.id" class="border-l-2 border-indigo-400 pl-3 text-sm whitespace-pre-wrap"><strong v-if="evidence.role" class="block text-xs text-indigo-200">{{ ({request: 'Просьба / предмет задачи', promise: 'Обещание / назначение', deadline: 'Срок', fulfillment: 'Доказательство выполнения'} as Record<string, string>)[evidence.role] || 'Первоисточник' }}</strong>{{ evidence.quote }}</blockquote>
       <p v-if="!item.evidence.length" class="text-amber-300 text-sm">Первоисточник недоступен. Подтверждение невозможно без доступа к нему.</p></section>
@@ -85,10 +86,11 @@
     </article></template>
     <nav class="flex gap-3 items-center" aria-label="Страницы предложений"><button class="btn" :disabled="loading || busy || candidatePage === 1" @click="changeCandidatePage(-1)">Предыдущая</button><span class="text-sm">Страница {{ candidatePage }}</span><button class="btn" :disabled="loading || busy || !candidateNext" @click="changeCandidatePage(1)">Следующая</button></nav><p v-if="!candidates.length && !loading" class="panel">Предложений с этим статусом нет.</p>
   </template>
+  <AutonomousReports v-if="tab === 'reports'" />
   <ThreadBrowser v-if="tab === 'threads'" />
   <template v-if="tab === 'tasks'">
     <p class="text-sm text-slate-400">Сроки указаны в UTC+6. Чтение уведомления не закрывает обязательство. Перенос сохраняет исходный срок.</p>
-    <article v-for="item in commitments?.commitments" :key="item.id" class="panel space-y-3"><h2 class="font-semibold">{{ item.project_name }} · {{ item.manager_name }}</h2><p>{{ item.text }}</p><p :class="item.status_color === 'red' ? 'text-rose-300' : 'text-slate-400'">{{ item.deadline_formatted }} · {{ item.status }}</p><p v-if="item.postponed_reason">Причина переноса: {{ item.postponed_reason }}</p><div v-if="['pending','overdue'].includes(item.status_code)" class="flex flex-wrap gap-2"><button class="btn-primary" :disabled="busy" @click="taskAction(item, 'fulfill')">Выполнено</button><button class="btn" :disabled="busy" @click="taskAction(item, 'help')">Нужна помощь</button><button v-if="lead" class="btn" :disabled="busy" @click="taskAction(item, 'postpone')">Перенести</button><input type="datetime-local" class="field" v-if="lead" v-model="deadlines[item.id]" aria-label="Новый срок" /><input class="field flex-1" v-model="reasons[item.id]" placeholder="Причина переноса или запрос помощи" /></div></article>
+    <article v-for="item in commitments?.commitments" :key="item.id" class="panel space-y-3"><h2 class="font-semibold">{{ item.project_name }} · {{ item.manager_name }}</h2><p>{{ item.text }}</p><p :class="item.status_color === 'red' ? 'text-rose-300' : 'text-slate-400'">{{ item.deadline_formatted }} · {{ item.status }}</p><p v-if="item.postponed_reason">Причина переноса: {{ item.postponed_reason }}</p><div v-if="!automatic && ['pending','overdue'].includes(item.status_code)" class="flex flex-wrap gap-2"><button class="btn-primary" :disabled="busy" @click="taskAction(item, 'fulfill')">Выполнено</button><button class="btn" :disabled="busy" @click="taskAction(item, 'help')">Нужна помощь</button><button v-if="lead" class="btn" :disabled="busy" @click="taskAction(item, 'postpone')">Перенести</button><input type="datetime-local" class="field" v-if="lead" v-model="deadlines[item.id]" aria-label="Новый срок" /><input class="field flex-1" v-model="reasons[item.id]" placeholder="Причина переноса или запрос помощи" /></div></article>
     <p v-if="commitments && !commitments.total_count" class="panel">Подтверждённых обязательств пока нет.</p>
   </template>
   <template v-if="tab === 'notifications'">
@@ -99,6 +101,7 @@
 </section>
 </template>
 <script setup lang="ts">
+import AutonomousReports from './AutonomousReports.vue'
 import ThreadBrowser from './review/ThreadBrowser.vue'
 import { ref, computed, onMounted } from 'vue'
 import FactSummary from './review/FactSummary.vue'
@@ -115,8 +118,9 @@ const client = computed(() => roles.value.includes('client')), lead = computed((
 const tab = ref('projects'), loading = ref(false), busy = ref(false), error = ref(''), notice = ref('')
 const tabs = computed(() => [
   { id: 'projects', label: 'Проекты' },
+  ...(!client.value ? [{ id: 'reports', label: 'Отчеты по WhatsApp' }] : []),
   ...(!client.value ? [
-    { id: 'review', label: 'Проверка фактов' },
+    { id: 'review', label: automatic.value ? 'Решения системы' : 'Проверка фактов' },
     { id: 'threads', label: 'Темы переписки' },
     { id: 'tasks', label: 'Обязательства' }
   ] : []),
@@ -125,6 +129,7 @@ const tabs = computed(() => [
 const assignments = ref<Record<number, number>>({}), transferTasks = ref<Record<number, boolean>>({})
 const projects = ref<ProjectWorkspaceSummary[]>([]), candidates = ref<Candidate[]>([]), commitments = ref<CommitmentData | null>(null)
 const directory = ref<Directory>({ teams: [], profiles: [], projects: [] })
+const automatic = computed(() => directory.value.autonomous_enabled === true)
 const candidateProject = ref<number | null>(null), candidateProjectName = ref('')
 async function showProjectFacts(project: ProjectWorkspaceSummary) { candidateProject.value = project.id; candidateProjectName.value = project.name; candidatePage.value = 1; candidateStatus.value = 'pending'; await selectTab('review') }
 const candidateFactType = ref(''), candidateStatus = ref('pending'), editing = ref<number | null>(null), reasons = ref<Record<number, string>>({}), deadlines = ref<Record<number, string>>({}), matches = ref<Record<number, number>>({})
@@ -152,10 +157,11 @@ const noticeForm = ref({ recipient_id: 0, title: '', message: '', send_whatsapp:
 const dialog = ref<HTMLDialogElement>(), modalTitle = ref(''), modalText = ref('')
 const { notifications, fetchNotifications, markAllAsRead, acknowledge, dispatchNotification } = useNotifications()
 function canReview(item: Candidate) {
+  if (automatic.value) return false
   const financialProject = item.fact_type === 'project' && ('contract_amount' in item.proposed_changes || 'cost_amount' in item.proposed_changes)
   return item.fact_type === 'payment' || financialProject ? financeRole.value : lead.value
 }
-function canSelectCrm(_item: Candidate) { return lead.value }
+function canSelectCrm(_item: Candidate) { return !automatic.value && lead.value }
 function requiresFinanceForCrmMaterialization(item: Candidate) {
   const selected = item.crm_resolution.options.find(option => option.selection_state === 'selected')
   if (!selected) return false
@@ -164,8 +170,9 @@ function requiresFinanceForCrmMaterialization(item: Candidate) {
     && selected.project_id === null
     && selected.opportunity !== null
 }
-function canApprove(item: Candidate) { return requiresFinanceForCrmMaterialization(item) ? financeRole.value : canReview(item) }
+function canApprove(item: Candidate) { return !automatic.value && (requiresFinanceForCrmMaterialization(item) ? financeRole.value : canReview(item)) }
 function approvalHint(item: Candidate) {
+  if (automatic.value) return ''
   if (!item.evidence.length || item.source_available === false) return 'Для подтверждения нужен доступ к первоисточнику.'
   if (!canApprove(item)) return 'Для подтверждения финансовых данных требуется роль финансиста.'
   if (item.thread && item.fact_type === 'project' && !item.project_id && !['matched', 'not_found'].includes(item.crm_resolution.state)) return 'Сначала завершите поиск CRM и выберите существующий проект либо подтвердите отсутствие совпадений.'
