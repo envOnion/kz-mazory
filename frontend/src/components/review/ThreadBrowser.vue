@@ -56,21 +56,21 @@
           :class="statusFilter === 'all' ? 'bg-indigo-600 border-indigo-400 text-white font-medium' : 'text-slate-300'"
           @click="setStatusFilter('all')"
         >
-          Все ({{ items.length }})
+          Все ({{ serverStats.total }})
         </button>
         <button
           class="btn py-1 px-2.5 text-xs transition-colors"
           :class="statusFilter === 'open' ? 'bg-amber-600 border-amber-400 text-white font-medium' : 'text-slate-300'"
           @click="setStatusFilter('open')"
         >
-          ⏳ В процессе ({{ stats.open }})
+          ⏳ В процессе ({{ serverStats.open }})
         </button>
         <button
           class="btn py-1 px-2.5 text-xs transition-colors"
           :class="statusFilter === 'ready' ? 'bg-emerald-600 border-emerald-400 text-white font-medium' : 'text-slate-300'"
           @click="setStatusFilter('ready')"
         >
-          ✅ Завершенные ({{ stats.ready }})
+          ✅ Завершенные ({{ serverStats.ready }})
         </button>
       </div>
 
@@ -177,6 +177,7 @@
                       <strong class="font-medium text-slate-100 truncate" :title="thread.topic">
                         #{{ thread.id }}: {{ thread.topic }}
                       </strong>
+                      <span v-if="thread.is_subscribed" class="text-xs shrink-0" title="Вы подписаны на эту тему">🔔</span>
                     </div>
                     <span
                       class="px-1.5 py-0.5 rounded text-[10px] whitespace-nowrap font-medium"
@@ -223,10 +224,16 @@
         </article>
 
         <!-- Навигация страниц пагинации -->
-        <nav class="flex gap-2 justify-between items-center text-xs pt-2">
-          <button class="btn py-1" :disabled="loading || page === 1" @click="load(page - 1)">Ранее</button>
-          <span class="text-slate-400">Стр. {{ page }}</span>
-          <button class="btn py-1" :disabled="loading || !next" @click="load(page + 1)">Далее</button>
+        <nav v-if="totalPages > 1" class="flex gap-2 justify-between items-center text-xs pt-2 px-1">
+          <button class="btn py-1 px-3 text-xs" :disabled="loading || page <= 1" @click="load(page - 1)">
+            ← Ранее
+          </button>
+          <span class="text-slate-400 font-medium">
+            Стр. {{ page }} из {{ totalPages }}
+          </span>
+          <button class="btn py-1 px-3 text-xs" :disabled="loading || !next" @click="load(page + 1)">
+            Далее →
+          </button>
         </nav>
       </aside>
 
@@ -256,8 +263,22 @@
                   <span v-if="detail.project_name" class="px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
                     💼 {{ detail.project_name }}
                   </span>
+                  <span v-if="detail.chat_name" class="px-2 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700">
+                    📱 {{ detail.chat_name }}
+                  </span>
                 </div>
               </div>
+              <button
+                type="button"
+                class="btn py-1.5 px-3 text-xs shrink-0 flex items-center gap-1.5 transition-all"
+                :class="detail.is_subscribed ? 'bg-emerald-600/20 border-emerald-500 text-emerald-300 hover:bg-emerald-600/30' : 'bg-slate-800/80 border-slate-600 text-slate-200 hover:bg-slate-700'"
+                :disabled="subscribing"
+                @click="toggleSubscription"
+                :title="detail.is_subscribed ? 'Отписаться от уведомлений по этой теме' : 'Подписаться на уведомления при изменении статуса этой темы'"
+              >
+                <span>{{ detail.is_subscribed ? '🔕' : '🔔' }}</span>
+                <span>{{ detail.is_subscribed ? 'Вы подписаны' : 'Подписаться на тему' }}</span>
+              </button>
             </div>
 
             <!-- Краткая суть диалога -->
@@ -414,9 +435,20 @@ const lead = computed(() => currentUser.value?.roles.includes('team_lead'))
 const search = ref('')
 const statusFilter = ref<'all' | 'open' | 'ready'>('all')
 const page = ref(1)
+const totalCount = ref(0)
+const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / 10)))
 const next = ref(false)
+const prev = ref(false)
 const loading = ref(false)
 const error = ref('')
+
+const serverStats = ref<{ total: number; open: number; ready: number; commitments?: number }>({
+  total: 0,
+  open: 0,
+  ready: 0,
+  commitments: 0,
+})
+const subscribing = ref(false)
 
 const items = ref<ThreadSummary[]>([])
 const detail = ref<DialogueThread | null>(null)
@@ -458,18 +490,7 @@ function formatMoney(amount: number | string | null | undefined): string {
 
 // Статистика по загруженным тредам
 const stats = computed(() => {
-  let open = 0, ready = 0, commitments = 0
-  for (const it of items.value) {
-    if (it.state === 'open') open++
-    if (it.state === 'ready') ready++
-    commitments += it.commitments_count || 0
-  }
-  return {
-    total: items.value.length,
-    open,
-    ready,
-    commitments,
-  }
+  return serverStats.value
 })
 
 // Поддиалоги по ID родителя
@@ -501,10 +522,20 @@ interface TreeCompany {
 const treeCompanies = computed(() => {
   const companyMap = new Map<string, { name: string; projectsMap: Map<string, ThreadSummary[]>; count: number }>()
 
-  // Итерируем по корневым тредам
+  // Итерируем по тредам
   for (const thread of items.value) {
-    const compName = thread.company_name?.trim() || 'Без контрагента'
-    const projName = thread.project_name?.trim() || 'Общие вопросы'
+    let compName = thread.company_name?.trim() || thread.counterparty?.trim()
+    if (!compName && thread.chat_name) {
+      compName = `Чат: ${thread.chat_name}`
+    }
+    if (!compName) {
+      compName = 'Общие диалоги'
+    }
+
+    let projName = thread.project_name?.trim()
+    if (!projName) {
+      projName = 'Диалоги'
+    }
 
     if (!companyMap.has(compName)) {
       companyMap.set(compName, { name: compName, projectsMap: new Map(), count: 0 })
@@ -597,8 +628,13 @@ async function load(number: number) {
 
     const result = await api<Page<ThreadSummary>>(`/threads/?${params.toString()}`)
     items.value = result.results
+    totalCount.value = result.count
     next.value = Boolean(result.next)
+    prev.value = Boolean(result.previous)
     page.value = number
+    if (result.stats) {
+      serverStats.value = result.stats
+    }
 
     // Если был выбран тред, проверяем остался ли он в списке
     if (detail.value && !items.value.some(it => it.id === detail.value!.id)) {
@@ -619,6 +655,23 @@ async function open(id: number) {
     detail.value = await api<DialogueThread>(`/threads/${id}/`)
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Тема недоступна'
+  }
+}
+
+async function toggleSubscription() {
+  if (!detail.value) return
+  subscribing.value = true
+  try {
+    const res = await post<{ subscribed: boolean; thread_id: number }>(`/threads/${detail.value.id}/subscribe/`, {})
+    detail.value.is_subscribed = res.subscribed
+    const item = items.value.find(it => it.id === detail.value!.id)
+    if (item) {
+      item.is_subscribed = res.subscribed
+    }
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'Не удалось изменить подписку'
+  } finally {
+    subscribing.value = false
   }
 }
 

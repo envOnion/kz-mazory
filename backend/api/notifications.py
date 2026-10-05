@@ -725,3 +725,46 @@ def notify_on_candidate_approved(candidate):
         notifications.append(notif)
     return notifications
 
+
+def notify_thread_subscribers(thread, old_state, new_state):
+    """
+    Уведомляет подписчиков темы переписки об изменении её статуса.
+    """
+    from .models import ThreadSubscription
+
+    subs = list(ThreadSubscription.objects.filter(thread=thread).select_related("user"))
+    if not subs:
+        return []
+
+    state_names = {
+        "open": "В процессе",
+        "ready": "Завершена",
+        "unknown": "Требует уточнения",
+        "superseded": "Заменена",
+    }
+    old_str = state_names.get(old_state, old_state)
+    new_str = state_names.get(new_state, new_state)
+
+    title = f"Изменен статус темы: {thread.topic[:60]}"
+    lines = [
+        f"Тема #{thread.id}: «{thread.topic}»",
+        f"Статус: {old_str} ➔ {new_str}",
+    ]
+    if thread.summary:
+        lines.append(f"Резюме: {thread.summary[:300]}")
+
+    message = "\n".join(lines)
+    notifications = []
+    for sub in subs:
+        notif = create_notification(
+            user=sub.user,
+            title=title,
+            message=message,
+            category="thread_status",
+            key=f"thread_status:{thread.id}:{new_state}:{thread.version}",
+            project=thread.project,
+            whatsapp=True,
+        )
+        notifications.append(notif)
+    return notifications
+

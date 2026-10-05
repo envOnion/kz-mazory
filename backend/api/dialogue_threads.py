@@ -290,6 +290,7 @@ def persist_themes(themes, raw, trace, facts):
                 persisted[theme_key] = latest
                 del pending[theme_key]
                 continue
+            old_state = thread.state
             thread.parent, thread.topic, thread.summary, thread.state = (
                 parent,
                 theme["topic"],
@@ -299,6 +300,10 @@ def persist_themes(themes, raw, trace, facts):
             thread.version += 1
             thread.snapshot_max_id = trace.context_metadata["snapshot_max_id"]
             thread.save()
+            if old_state != thread.state:
+                from .notifications import notify_thread_subscribers
+
+                notify_thread_subscribers(thread, old_state, thread.state)
             for link in theme["messages"]:
                 ThreadMessage.objects.update_or_create(
                     thread=thread,
