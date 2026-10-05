@@ -527,7 +527,7 @@ class AutonomousAccountingTests(TestCase):
                     waha_download_media(url)
         get.assert_not_called()
 
-    @override_settings(OCR_URL="https://recognizer.test/ocr", PROVIDER_ALLOWED_HOSTS=["recognizer.test"])
+    @override_settings(OCR_URL="https://recognizer.test/ocr")
     def test_recognized_media_preserves_original_and_has_derived_provenance(self):
         from .message_artifacts import register, process
         from .models import MessageArtifact, ProviderUsage
