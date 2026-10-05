@@ -1938,3 +1938,17 @@ class WhatsAppHistoryItem(models.Model):
                 fields=["run", "timestamp", "id"], name="history_item_time_idx"
             )
         ]
+
+
+class McpToken(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="mcp_tokens")
+    name = models.CharField(max_length=128, default="default")
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_used_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+

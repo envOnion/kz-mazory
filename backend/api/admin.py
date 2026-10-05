@@ -2307,4 +2307,16 @@ for model in (
 ):
     admin.site.register(model, ScopedReadOnlyAdmin)
 
+from .models import McpToken
+
+
+@admin.register(McpToken)
+class McpTokenAdmin(ModelAdmin):
+    list_display = ("name", "user", "is_active", "created_at", "last_used_at", "expires_at")
+    list_filter = ("is_active", "created_at")
+    search_fields = ("name", "user__username", "user__first_name", "user__last_name")
+    readonly_fields = ("token_hash", "created_at", "last_used_at")
+
+
 from . import job_admin  # noqa: F401, E402 — register job views after source admins.
+

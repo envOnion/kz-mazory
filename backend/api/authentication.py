@@ -51,6 +51,67 @@ class SessionJWTAuthentication(JWTAuthentication):
         return user
 
 
+class McpTokenAuthentication(JWTAuthentication):
+    """Authenticates agents via dedicated McpToken (Bearer mcp_... or X-API-Key)."""
+
+    def authenticate(self, request):
+        from rest_framework.authentication import get_authorization_header
+        from .models import McpToken
+
+        auth_header = get_authorization_header(request).split()
+        token_str = None
+        if auth_header and auth_header[0].lower() in (b"bearer", b"token"):
+            if len(auth_header) == 2:
+                try:
+                    token_str = auth_header[1].decode()
+                except UnicodeDecodeError:
+                    return None
+        if not token_str:
+            token_str = request.META.get("HTTP_X_API_KEY")
+
+        if not token_str:
+            return None
+
+        thash = token_hash(token_str)
+        token_obj = (
+            McpToken.objects.filter(token_hash=thash, is_active=True)
+            .select_related("user")
+            .first()
+        )
+        if token_obj is None:
+            # Let SessionJWTAuthentication try if it's a JWT
+            return None
+
+        if token_obj.expires_at and token_obj.expires_at <= timezone.now():
+            raise AuthenticationFailed("Срок действия токена MCP истёк.")
+
+        if not has_access(token_obj.user):
+            raise AuthenticationFailed("Доступ пользователя отозван.")
+
+        token_obj.last_used_at = timezone.now()
+        token_obj.save(update_fields=["last_used_at"])
+        return (token_obj.user, token_obj)
+
+    def authenticate_header(self, request):
+        return 'Bearer realm="mcp"'
+
+
+def generate_mcp_token(user, name="default", expires_at=None):
+    import secrets
+    from .models import McpToken
+
+    raw_token = f"mcp_{secrets.token_urlsafe(32)}"
+    token_obj = McpToken.objects.create(
+        user=user,
+        name=name,
+        token_hash=token_hash(raw_token),
+        expires_at=expires_at,
+        is_active=True,
+    )
+    return token_obj, raw_token
+
+
+
 def rotate_refresh(encoded):
     try:
         token = RefreshToken(encoded)
