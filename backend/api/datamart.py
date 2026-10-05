@@ -60,12 +60,13 @@ def scoped_projects(user, filters=None):
         access.projects_for(user)
         .filter(
             Q(is_verified=True)
+            | Q(identity_confirmed=True)
             | Q(
                 financial_records__is_verified=True,
                 financial_records__status="received",
             )
         )
-        .filter(version__gt=0)
+        .exclude(archived=True)
         .distinct()
     )
     for field in ("team_id", "manager_id", "project_id"):
