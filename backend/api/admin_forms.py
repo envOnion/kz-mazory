@@ -45,9 +45,7 @@ class BitrixSettingsForm(forms.ModelForm):
                 )
             else:
                 message = (
-                    "Используйте HTTPS и разрешённый портал Bitrix24. "
-                    "Для нового портала добавьте его хост в "
-                    "PROVIDER_ALLOWED_HOSTS на сервере."
+                    "Используйте HTTPS, порт 443 и адрес без логина и пароля."
                 )
             raise forms.ValidationError(message) from None
         if len(normalized) > 255:

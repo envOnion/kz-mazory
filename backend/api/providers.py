@@ -2,7 +2,6 @@ import math
 from email.utils import parsedate_to_datetime
 from urllib.parse import urlparse
 
-from django.conf import settings
 from django.utils import timezone
 
 
@@ -101,11 +100,8 @@ def checked_ai_url(url):
 
 
 def checked_url(url):
-    """Validate CRM and attachment destinations against their configured hosts."""
-    checked_ai_url(url)
-    if urlparse(url).hostname not in settings.PROVIDER_ALLOWED_HOSTS:
-        raise ProviderUnavailable("provider_not_allowed")
-    return url
+    """Validate outgoing URL syntax without restricting destination hosts."""
+    return checked_ai_url(url)
 
 
 def checked_base_url(url):

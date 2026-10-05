@@ -926,7 +926,6 @@ class DialogueTests(TestCase):
 
 @override_settings(
     ALLOWED_HOSTS=["testserver"],
-    PROVIDER_ALLOWED_HOSTS=["crm.test"],
     CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}},
 )
 class CatalogTests(TestCase):

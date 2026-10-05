@@ -9,7 +9,6 @@ from .models import AISettings
 from .providers import ProviderUnavailable, checked_ai_url, checked_base_url, checked_url
 
 
-@override_settings(PROVIDER_ALLOWED_HOSTS=["crm.example"])
 class ProviderURLTests(SimpleTestCase):
     def test_custom_ai_host_is_accepted_in_form_and_runtime(self):
         url = "https://ai.kk-minsk.by/v1"
@@ -42,13 +41,18 @@ class ProviderURLTests(SimpleTestCase):
             with self.subTest(url=url), self.assertRaises(ProviderUnavailable):
                 checked_base_url(url)
 
-    def test_crm_host_restriction_is_preserved(self):
-        self.assertEqual(checked_url("https://crm.example/rest/1/key/"), "https://crm.example/rest/1/key/")
-        with self.assertRaises(ProviderUnavailable):
-            checked_url("https://ai.kk-minsk.by/v1")
+    @override_settings(PROVIDER_ALLOWED_HOSTS=[])
+    def test_outgoing_hosts_are_accepted_despite_legacy_allowlist(self):
+        for url in ("https://crm.example/rest/1/key/", "https://ai.kk-minsk.by/v1", "https://recognizer.test/ocr"):
+            with self.subTest(url=url):
+                self.assertEqual(checked_url(url), url)
+
+    def test_outgoing_url_syntax_is_still_validated(self):
+        for url in ("http://crm.example/", "https:///rest/", "https://user:pass@crm.example/", "https://crm.example:8443/", "https://crm.example:invalid/"):
+            with self.subTest(url=url), self.assertRaises(ProviderUnavailable):
+                checked_url(url)
 
 
-@override_settings(PROVIDER_ALLOWED_HOSTS=["crm.example"])
 class ProviderTransportTests(TestCase):
     def test_custom_host_reaches_transport_for_all_ai_operations(self):
         AISettings.objects.create(name="Custom", is_active=True)
@@ -177,6 +181,35 @@ class DailyAILimitTests(TestCase):
 
     def test_unlimited_config_still_alerts_on_repeated_failures(self):
         self.alert(failed=10).assert_called_once()
+
+
+@override_settings(BITRIX_WEBHOOK_URL="https://legacy.example/rest/1/fixture/")
+class BitrixWebhookSourceTests(TestCase):
+    def test_saved_webhook_is_the_only_source(self):
+        from .bitrix_config import effective_webhook_url
+        from .bitrix_service import BitrixService, CrmReadConfig
+        from .models import BitrixSettings
+
+        cfg = BitrixSettings.objects.create(webhook_url="https://custom.example/rest/1/fixture/")
+        self.assertEqual(effective_webhook_url(cfg), cfg.webhook_url)
+        self.assertEqual(CrmReadConfig.from_model(cfg).webhook_base, cfg.webhook_url)
+        with patch.object(BitrixService, "_request", return_value={"result": []}) as request:
+            BitrixService.call("crm.company.list")
+        self.assertEqual(request.call_args.args[0], cfg.webhook_url)
+
+    def test_empty_database_webhook_never_uses_environment_or_sends_request(self):
+        from .bitrix_config import effective_webhook_url
+        from .bitrix_service import BitrixService, CrmReadConfig
+        from .models import BitrixSettings
+
+        cfg = BitrixSettings.objects.create(webhook_url="")
+        self.assertEqual(effective_webhook_url(cfg), "")
+        with self.assertRaisesMessage(ProviderUnavailable, "crm_not_configured"):
+            CrmReadConfig.from_model(cfg)
+        with patch("api.bitrix_service.requests.post") as post:
+            with self.assertRaisesMessage(ProviderUnavailable, "crm_disabled"):
+                BitrixService.call("crm.company.list")
+        post.assert_not_called()
 
 
 class CRMReadRequestTests(SimpleTestCase):

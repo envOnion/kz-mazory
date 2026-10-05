@@ -1073,12 +1073,11 @@ class BitrixSettingsAdmin(IntegrationAdmin):
     )
 
     def webhook_url_masked(self, obj):
-        source = "Сохранён в настройках" if obj.webhook_url else "Из окружения сервера"
         return format_html(
             '<div class="mazory-list-stack"><span class="mazory-webhook-address">{}</span>'
             '<span class="mazory-list-meta">{}</span></div>',
             masked_webhook_url(obj),
-            source if effective_webhook_url(obj) else "Укажите адрес ниже",
+            "Сохранён в настройках" if effective_webhook_url(obj) else "Укажите адрес ниже",
         )
 
     webhook_url_masked.short_description = "Webhook"

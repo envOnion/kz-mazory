@@ -35,7 +35,6 @@ Q_CLUSTER = {
     "max_attempts": 1,
 }
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver"]
-PROVIDER_ALLOWED_HOSTS = ["localhost"]
 BITRIX_TEAM_ID = 1
 WAHA_WEBHOOK_SECRET = "isolated-local-webhook-secret"
 SECURE_SSL_REDIRECT = AUTH_COOKIE_SECURE = SESSION_COOKIE_SECURE = (
@@ -46,7 +45,7 @@ AI_DAILY_REQUEST_LIMIT = 10000
 MEDIA_ROOT = E2E_DIR / "media"
 QDRANT_URL = "https://localhost"
 
-# Retain the production URL validation (HTTPS, allowlist, port 443). Only the
+# Retain the production URL validation (HTTPS, port 443). Only the
 # local test transport maps the validated loopback URL to an unprivileged port.
 # All non-loopback provider calls fail closed; no external account is reachable.
 import requests

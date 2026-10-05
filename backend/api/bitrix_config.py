@@ -3,7 +3,6 @@
 import re
 from urllib.parse import urlsplit
 
-from django.conf import settings
 
 from .providers import ProviderUnavailable, checked_url
 
@@ -14,7 +13,7 @@ BITRIX_WEBHOOK_PATH = re.compile(
 
 
 def effective_webhook_url(config):
-    return config.webhook_url.strip() or settings.BITRIX_WEBHOOK_URL.strip()
+    return config.webhook_url.strip()
 
 
 def checked_bitrix_webhook_base(value):
@@ -26,7 +25,7 @@ def checked_bitrix_webhook_base(value):
         parsed = urlsplit(value)
     except ValueError:
         raise ProviderUnavailable("bitrix_webhook_invalid") from None
-    # checked_url enforces HTTPS, the host allowlist, port 443, and no userinfo.
+    # checked_url enforces HTTPS, port 443, and no userinfo.
     checked_url(value)
     # urlsplit keeps path parameters in path, so the exact regex rejects them too.
     if (
