@@ -5,6 +5,8 @@ description = "Generated dependencies, repository internals and exact Django mig
 paths = ['''(^|/)(node_modules|\.venv|\.git|dist)/''']
 regexTarget = "line"
 regexes = [
+    '''^\s*"tokenizer\.json": "12bac982b793c44b03d52a250a9f0d0b666813da566b910c24a6da0695fd11e6",?\s*$''',
+    '''^\s*"tokenizer_config\.json": "6a9383197f000d2723684efd2210f5bf217bc29fa2cf360ae1574201b47af060",?\s*$''',
     '''^\s*"tokenizer\.json": "623c34567aebb18582765289fbe23d901c62704d6518d71866e0e58db892b5b7",?\s*$''',
     '''^\s*"tokenizer_config\.json": "10f93eabcb9b1602fbb991d6308e787ce1df28ee9cd7a1c6d1e8c3f338b957bc",?\s*$''',
     '''^\s*"tokenizer\.json": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",?\s*$''',
