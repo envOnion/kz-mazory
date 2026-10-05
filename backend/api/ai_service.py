@@ -307,6 +307,8 @@ class AIService:
             error = "provider_request_failed"
             raise ProviderUnavailable(error) from None
         finally:
+            if not succeeded and not error:
+                error = "provider_interrupted"
             if api_format == ANTHROPIC_MESSAGES:
                 usage = normalize_anthropic_usage(
                     data.get("usage", {}) if isinstance(data, dict) else {}

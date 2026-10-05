@@ -540,6 +540,17 @@ class AutonomousAccountingTests(TestCase):
             reserve(self.cfg, {'model': 'test'}, 'chat')
         self.assertEqual(str(caught.exception), 'ai_daily_budget_exhausted')
 
+    def test_interrupted_worker_records_provider_reason_and_keeps_quota(self):
+        from .ai_service import AIService
+        from .models import ProviderUsage, ProviderReservation
+        with patch('api.ai_service.requests.post', side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                AIService._post('https://provider.example/v1/chat/completions', {'model': 'synthetic'}, 1, api_key='test')
+        usage = ProviderUsage.objects.get()
+        self.assertFalse(usage.succeeded)
+        self.assertEqual(usage.error_code, 'provider_interrupted')
+        self.assertEqual(ProviderReservation.objects.get().usage_id, usage.id)
+
     def test_reported_vendor_promise_is_not_assigned_to_message_author(self):
         candidate = self.candidate('По объекту 343 Дмитрий обещал завтра предоставить цену', kind='commitment', commitment_text='Предоставить цену', responsible_name='Дмитрий', assignment_kind='reported_promise', commitment_status='pending')
         raw = candidate.trace.raw_message
