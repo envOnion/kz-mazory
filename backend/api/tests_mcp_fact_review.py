@@ -20,6 +20,7 @@ from .models import (
     DialogueThread,
     ThreadMessage,
     FactEvidence,
+    CandidateCrmMatch,
     Notification,
     McpToken,
     WhatsAppConfig,
@@ -233,6 +234,44 @@ class FactReviewMcpServerTests(TestCase):
         self.assertEqual(content["id"], self.candidate.id)
         self.assertEqual(content["fact_type"], "commitment")
         self.assertEqual(len(content["evidence"]), 1)
+
+    def test_tool_get_candidate_details_with_crm_match(self):
+        match = CandidateCrmMatch.objects.create(
+            candidate=self.candidate,
+            project=self.project,
+            crm_match_revision=2,
+            bitrix_deal_id="718",
+            deal_title="ЦТП 343 квартал",
+            company_name="Top Build",
+            opportunity=Decimal("117000000.00"),
+            stage_id="EXECUTING",
+            selection_state="selected",
+        )
+        self.candidate.crm_match_state = "matched"
+        self.candidate.crm_match_revision = 2
+        self.candidate.save(update_fields=["crm_match_state", "crm_match_revision"])
+        _, raw_token = generate_mcp_token(self.user)
+        resp = self._call_mcp(
+            "tools/call",
+            params={"name": "get_candidate_details", "arguments": {"candidate_id": self.candidate.id}},
+            headers={"HTTP_AUTHORIZATION": f"Bearer {raw_token}"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        result = resp.json()["result"]
+        self.assertFalse(result.get("isError", False), result)
+        content = json.loads(result["content"][0]["text"])
+        self.assertEqual(content["crm_match_revision"], 2)
+        self.assertEqual(content["crm_match_state"], "matched")
+        self.assertEqual(content["base_version"], 1)
+        self.assertEqual(content["crm_matches"], [{
+            "id": match.id,
+            "bitrix_deal_id": "718",
+            "title": "ЦТП 343 квартал",
+            "company_title": "Top Build",
+            "opportunity": "117000000.00",
+            "stage_id": "EXECUTING",
+            "selection_state": "selected",
+        }])
 
     def test_tool_get_candidate_context(self):
         token_obj, raw_token = generate_mcp_token(self.user)

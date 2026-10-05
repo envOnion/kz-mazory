@@ -2,7 +2,7 @@ import { test, expect, type APIRequestContext, type BrowserContext } from '@play
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHmac } from 'node:crypto'
-import type { Candidate, Directory, Page } from '../src/types/platform'
+import type { Candidate, Directory, Health, Page } from '../src/types/platform'
 import type { DialogueThread } from '../src/types/factReview'
 
 const directory = process.env.MAZORY_E2E_DIR
@@ -40,6 +40,17 @@ async function message(request: APIRequestContext, id: string, body: string, dup
 }
 async function themes(request: APIRequestContext): Promise<Page<DialogueThread>> {
   const response = await request.get('/api/threads/', { headers }); expect(response.ok()).toBe(true); return response.json()
+}
+async function waitForFactProcessing(request: APIRequestContext) {
+  await expect.poll(async () => {
+    const response = await request.get('/api/operations-health/', { headers })
+    expect(response.ok()).toBe(true)
+    const value: Health = await response.json()
+    return value.outbox.filter(row =>
+      ['thread_backfill', 'extract_message', 'crm_match'].includes(row.event_type)
+      && ['pending', 'enqueued', 'processing'].includes(row.state)
+    ).reduce((sum, row) => sum + row.count, 0)
+  }, { timeout: 45000 }).toBe(0)
 }
 
 // One browser session shares the real refresh rotation across serial scenarios.
@@ -86,9 +97,7 @@ test('CRM catalog, incomplete thought, interleaved themes and review through rea
   // Reprocessing history preserves the approved obligation, retaining the open south theme.
   const rebuild = await request.post('/api/threads/backfill/', { headers, data: { config_id: session.config_id, request_key: 'local-rebuild' } })
   expect(rebuild.status()).toBe(202)
-  await expect.poll(async () => {
-    const health = await request.get('/api/operations-health/', { headers }); const value = await health.json(); return value.outbox.filter((row: { event_type: string; state: string; count: number }) => ['thread_backfill', 'extract_message'].includes(row.event_type) && ['pending', 'enqueued', 'processing'].includes(row.state)).reduce((sum: number, row: { count: number }) => sum + row.count, 0)
-  }, { timeout: 45000 }).toBe(0)
+  await waitForFactProcessing(request)
   expect((await candidates(request)).count).toBe(0)
   expect((await candidates(request, 'approved')).count).toBe(1)
   const endC = (await context.cookies()).find(x => x.name === session.cookie_name); if (endC) currentRefresh = endC.value
@@ -164,6 +173,7 @@ test('full flow from WhatsApp messages to KPI plan/fact, timeline and forecasts'
     return list.results.find(c => c.fact_type === 'payment' && c.project_name === 'БЦ Север' && c.proposed_changes.amount === '50000000.00')
   }, { timeout: 20000 }).toBeTruthy()
 
+  await waitForFactProcessing(request)
   const payFact = (await candidates(request)).results.find(
     c => c.fact_type === 'payment' && c.project_name === 'БЦ Север' && c.proposed_changes.amount === '50000000.00'
   )!
@@ -204,6 +214,8 @@ test('full flow from WhatsApp messages to KPI plan/fact, timeline and forecasts'
     return list.results.find(c => c.fact_type === 'commitment' && c.project_name === 'БЦ Южный' && c.proposed_changes.amount === '30000000.00')
   }, { timeout: 20000 }).toBeTruthy()
 
+  // Both messages can produce revisions; review the candidate after Q2 settles.
+  await waitForFactProcessing(request)
   const commitFact = (await candidates(request)).results.find(
     c => c.fact_type === 'commitment' && c.project_name === 'БЦ Южный' && c.proposed_changes.amount === '30000000.00'
   )!
@@ -259,4 +271,3 @@ test('full flow from WhatsApp messages to KPI plan/fact, timeline and forecasts'
   await expect(page.getByTestId('chart-kpi').first()).toBeVisible({ timeout: 20000 })
   await expect(page.locator('canvas').first()).toBeVisible()
 })
-
