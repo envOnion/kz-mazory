@@ -1319,6 +1319,17 @@ class ThreadRevision(models.Model):
         constraints = [models.UniqueConstraint(fields=["thread", "version"], name="thread_revision_unique")]
 
 
+class ThreadSubscription(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="thread_subscriptions")
+    thread = models.ForeignKey(DialogueThread, on_delete=models.CASCADE, related_name="subscriptions")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "thread"], name="unique_user_thread_subscription")
+        ]
+
+
 class CrmCatalogSync(models.Model):
     team = models.OneToOneField(Team, on_delete=models.PROTECT)
     generation = models.PositiveIntegerField(default=0)

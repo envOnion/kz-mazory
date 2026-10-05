@@ -21,6 +21,8 @@ from .models import (
     WhatsAppConfig,
     OutboxEvent,
     Company,
+    ThreadSubscription,
+    Notification,
 )
 from .pipeline import extract_message
 from .crm_catalog import enqueue_catalog, sync_page
@@ -819,7 +821,107 @@ class DialogueTests(TestCase):
         self.assertEqual(len(filtered["facts"]), 1)
         self.assertTrue(filtered["facts"][0].get("in_progress"))
 
+    def test_thread_subscription_and_toggle(self):
+        case = CASES[0]
+        rows = self.messages(case["messages"])
+        self.run_result(rows[-1], fixture_result(case, rows))
+        thread = DialogueThread.objects.first()
 
+        # Initially not subscribed
+        resp = self.api.get(f"/api/threads/{thread.id}/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.data.get("is_subscribed"))
+
+        # Subscribe
+        sub_resp = self.api.post(f"/api/threads/{thread.id}/subscribe/")
+        self.assertEqual(sub_resp.status_code, 200)
+        self.assertTrue(sub_resp.data.get("subscribed"))
+        self.assertEqual(sub_resp.data.get("thread_id"), thread.id)
+        self.assertTrue(ThreadSubscription.objects.filter(user=self.user, thread=thread).exists())
+
+        # Check detail reflects subscription
+        resp = self.api.get(f"/api/threads/{thread.id}/")
+        self.assertTrue(resp.data.get("is_subscribed"))
+
+        # Check list reflects subscription
+        list_resp = self.api.get("/api/threads/")
+        item = next(it for it in list_resp.data["results"] if it["id"] == thread.id)
+        self.assertTrue(item.get("is_subscribed"))
+
+        # Unsubscribe
+        unsub_resp = self.api.post(f"/api/threads/{thread.id}/subscribe/")
+        self.assertEqual(unsub_resp.status_code, 200)
+        self.assertFalse(unsub_resp.data.get("subscribed"))
+        self.assertFalse(ThreadSubscription.objects.filter(user=self.user, thread=thread).exists())
+
+        # Check detail reflects unsubscription
+        resp = self.api.get(f"/api/threads/{thread.id}/")
+        self.assertFalse(resp.data.get("is_subscribed"))
+
+    def test_thread_list_stats_and_priority_ordering(self):
+        case = CASES[2]
+        rows = self.messages(case["messages"])
+        self.run_result(rows[-1], fixture_result(case, rows))
+
+        # Check /api/threads/ pagination and stats
+        resp = self.api.get("/api/threads/")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("stats", resp.data)
+        stats = resp.data["stats"]
+        self.assertIn("total", stats)
+        self.assertIn("open", stats)
+        self.assertIn("ready", stats)
+        self.assertIn("commitments", stats)
+        self.assertEqual(stats["total"], 2)
+        self.assertEqual(stats["open"], 1)
+        self.assertEqual(stats["ready"], 1)
+        self.assertEqual(stats["commitments"], 1)
+
+        # Check that when filtering by state="open", stats still retains global numbers
+        resp_open = self.api.get("/api/threads/", {"state": "open"})
+        self.assertEqual(resp_open.status_code, 200)
+        self.assertEqual(len(resp_open.data["results"]), 1)
+        self.assertEqual(resp_open.data["results"][0]["state"], "open")
+        self.assertEqual(resp_open.data["stats"]["total"], 2)
+        self.assertEqual(resp_open.data["stats"]["open"], 1)
+        self.assertEqual(resp_open.data["stats"]["ready"], 1)
+        self.assertEqual(resp_open.data["stats"]["commitments"], 1)
+
+        # Priority ordering: ready thread comes before open thread
+        results = resp.data["results"]
+        self.assertEqual(results[0]["state"], "ready")
+
+    def test_thread_status_change_notifies_subscribers(self):
+        from .processing_attempts import reserve_attempt
+        from .dialogue_threads import context_threads
+
+        case = CASES[0]
+        rows = self.messages(case["messages"])
+        res1 = fixture_result(case, rows)
+        self.run_result(rows[-1], res1)
+        thread = DialogueThread.objects.get()
+        self.assertEqual(thread.state, "open")
+
+        # Subscribe user to thread
+        ThreadSubscription.objects.create(user=self.user, thread=thread)
+
+        # Second run completes the theme (state: open -> ready)
+        trace = reserve_attempt(rows[-1], "thread-status-test")
+        res2 = fixture_result(case, rows, context_threads(rows[-1]))
+        res2["threads"][0]["state"] = "ready"
+        res2["threads"][0]["completion_reason"] = "договоренность достигнута"
+        res2["threads"][0]["messages"][-1]["thought_state"] = "final"
+        res2["threads"][0]["expected_version"] = thread.version
+        self.run_result(rows[-1], res2, trace.id)
+
+        thread.refresh_from_db()
+        self.assertEqual(thread.state, "ready")
+
+        # Verify notification was sent
+        notif = Notification.objects.filter(recipient=self.user, category="thread_status").first()
+        self.assertIsNotNone(notif)
+        self.assertIn("Изменен статус темы", notif.title)
+        self.assertIn("В процессе ➔ Завершена", notif.message)
 
 
 @override_settings(
@@ -1051,5 +1153,3 @@ class CatalogTests(TestCase):
         self.assertEqual(resp.status_code, 200)
         results = resp.data.get("results", [])
         self.assertTrue(any(row["id"] == p.id for row in results))
-
-

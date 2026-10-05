@@ -42,6 +42,9 @@ export interface DialogueThread {
   project_name?: string | null;
   company_id?: number | null;
   company_name?: string | null;
+  chat_name?: string | null;
+  counterparty?: string | null;
+  is_subscribed?: boolean;
   children_count?: number;
   messages_count?: number;
   commitments_count?: number;

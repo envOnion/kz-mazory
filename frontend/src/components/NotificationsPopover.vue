@@ -51,11 +51,12 @@
               'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30': item.type === 'deal',
               'bg-amber-500/15 text-amber-400 border border-amber-500/30': item.type === 'warning',
               'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30': item.type === 'kpi' || item.type === 'success' || item.type === 'fact_approved',
-              'bg-indigo-500/15 text-indigo-400 border border-indigo-500/30': item.type === 'info'
+              'bg-indigo-500/15 text-indigo-400 border border-indigo-500/30': item.type === 'info' || item.type === 'thread_status'
             }"
           >
             <AlertOctagon v-if="item.type === 'urgent'" class="w-3.5 h-3.5" />
             <Briefcase v-else-if="item.type === 'deal' || item.type === 'commitment_detected'" class="w-3.5 h-3.5" />
+            <MessageSquare v-else-if="item.type === 'thread_status'" class="w-3.5 h-3.5" />
             <AlertTriangle v-else-if="item.type === 'warning'" class="w-3.5 h-3.5" />
             <Trophy v-else-if="item.type === 'kpi' || item.type === 'success' || item.type === 'fact_approved'" class="w-3.5 h-3.5" />
             <Sparkles v-else class="w-3.5 h-3.5" />
@@ -111,7 +112,7 @@
 </template>
 
 <script setup lang="ts">
-import { Bell, AlertTriangle, Trophy, Sparkles, AlertOctagon, Briefcase } from 'lucide-vue-next'
+import { Bell, AlertTriangle, Trophy, Sparkles, AlertOctagon, Briefcase, MessageSquare } from 'lucide-vue-next'
 import type { NotificationItem } from '../composables/useNotifications'
 
 defineProps<{

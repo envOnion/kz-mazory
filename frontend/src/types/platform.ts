@@ -4,7 +4,7 @@ export type Money = string
 export interface AuthUser { id: number; phone: string; name: string; username: string; roles: Role[] }
 export interface AuthResponse { access: string; user: AuthUser; session_id: number; csrf_token: string }
 export interface ApiError { error?: string; code?: string; fields?: Record<string, unknown> }
-export interface Page<T> { count: number; next: string | null; results: T[] }
+export interface Page<T> { count: number; next: string | null; previous?: string | null; results: T[]; stats?: { total: number; open: number; ready: number; commitments?: number } }
 export interface Coverage { status: 'complete' | 'partial'; message: string }
 export interface Profile {
   id: number; full_name: string; role: string; department: string; email: string; phone: string; avatar_url: string;
