@@ -13,7 +13,7 @@ from .models import (
     OutboxEvent, Project, RawMessage, Team, ThreadMessage, ThreadRevision,
     WhatsAppConfig, WhatsAppHistoryItem, WhatsAppHistoryJob, WhatsAppHistoryRun,
 )
-from .tasks import run_outbox
+from .tasks import dispatch_outbox, run_outbox
 
 
 class HistoryReprocessingTests(TestCase):
@@ -89,13 +89,42 @@ class HistoryReprocessingTests(TestCase):
         run = start_job(self.job.id)
         self.assertEqual(run.settings_snapshot["analysis_mode"], "reprocess_all")
 
+    def test_dispatches_all_message_work_without_processing_toggle(self):
+        events = [
+            OutboxEvent.objects.create(event_type=kind, deduplication_key=kind)
+            for kind in ("extract_message", "index_message", "whatsapp_artifact")
+        ]
+        with patch("api.tasks.AISettings.get_active", return_value=AISettings()), patch(
+            "api.tasks.async_task"
+        ) as enqueue:
+            self.assertEqual(dispatch_outbox(), 3)
+        self.assertEqual(enqueue.call_count, 3)
+        self.assertEqual({call.args[1] for call in enqueue.call_args_list}, {e.pk for e in events})
+        for event in events:
+            event.refresh_from_db()
+            self.assertEqual(event.state, "enqueued")
+
+    def test_pending_history_message_reaches_analysis_without_processing_toggle(self):
+        run = self.run_record()
+        self.persist(run, [self.item(run)])
+        event = OutboxEvent.objects.get(payload__history_run_id=run.pk)
+        with patch("api.tasks.AISettings.get_active", return_value=AISettings()), patch(
+            "api.tasks.extract_message"
+        ) as extract:
+            run_outbox(event.pk)
+        extract.assert_called_once_with(event.payload)
+        event.refresh_from_db()
+        self.assertEqual(event.state, "done")
+        self.assertEqual(event.attempt_count, 1)
+        self.assertEqual(event.error_code, "")
+
     def test_worker_waits_for_older_attempt_without_consuming_retry(self):
         first = self.run_record()
         self.persist(first, [self.item(first)])
         second = self.run_record()
         self.persist(second, [self.item(second)])
         event = OutboxEvent.objects.get(payload__history_run_id=second.id)
-        with patch("api.tasks.AISettings.get_active", return_value=AISettings(message_processing_paused=False)), patch("api.tasks.extract_message") as extract:
+        with patch("api.tasks.AISettings.get_active", return_value=AISettings()), patch("api.tasks.extract_message") as extract:
             run_outbox(event.id)
         extract.assert_not_called()
         event.refresh_from_db()
@@ -186,7 +215,7 @@ class HistoryReprocessingTests(TestCase):
         older = OutboxEvent.objects.get(payload__history_run_id=first.id)
         newer = OutboxEvent.objects.get(payload__history_run_id=second.id)
         OutboxEvent.objects.filter(pk=newer.id).update(state="processing")
-        with patch("api.tasks.AISettings.get_active", return_value=AISettings(message_processing_paused=False)), patch("api.tasks.extract_message") as extract:
+        with patch("api.tasks.AISettings.get_active", return_value=AISettings()), patch("api.tasks.extract_message") as extract:
             run_outbox(older.id)
         extract.assert_not_called()
         MessageProcessingTrace.objects.filter(pk=older.payload["trace_id"]).update(status="error")
@@ -420,4 +449,3 @@ class HistoryReprocessingTests(TestCase):
         self.assertIn("Вне треда", empty_badge)
         empty_card = trace_admin.dialogue_thread_hierarchy_card(empty_trace)
         self.assertIn("Сообщение ещё не включено в тред диалога", empty_card)
-

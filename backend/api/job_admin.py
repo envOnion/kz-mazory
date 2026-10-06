@@ -12,7 +12,6 @@ from django.views.decorators.http import require_POST
 from .admin_access import IntegrationAdmin, ScopedReadOnlyAdmin
 from .history_jobs import ERROR_LABELS, IMPORT_STATES, control_run, progress, start_job
 from .models import (
-    AISettings,
     DialogueThread,
     FactCandidate,
     MessageProcessingTrace,
@@ -553,9 +552,7 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
         )
         return format_html(
             '<div data-testid="history-analysis-errors"><p>{}</p><ul>{}</ul></div>',
-            "Новые запросы AI приостановлены в настройках AI."
-            if AISettings.get_active().message_processing_paused
-            else "Ошибок анализа нет."
+            "Ошибок анализа нет."
             if not counts
             else "Ошибки последних попыток:",
             rows,

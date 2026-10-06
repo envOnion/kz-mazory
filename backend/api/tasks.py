@@ -93,8 +93,6 @@ def dispatch_outbox(limit=100):
         state="pending"
     )
     pending = OutboxEvent.objects.filter(state="pending", next_attempt_at__lte=now)
-    if AISettings.get_active().message_processing_paused:
-        pending = pending.exclude(event_type__in=["extract_message", "index_message", "whatsapp_artifact"])
     if AISettings.get_active().autonomous_enabled:
         pending = pending.annotate(work_priority=Case(When(event_type="operation", then=Value(0)), When(payload__priority="live", then=Value(1)), When(event_type="decide_fact", then=Value(2)), default=Value(3), output_field=IntegerField())).order_by("work_priority", "id")
     else:
@@ -194,14 +192,6 @@ def run_outbox(pk):
         if event.next_attempt_at > timezone.now():
             event.state, event.lease_until = "pending", None
             event.save(update_fields=["state", "lease_until"])
-            return
-        if (
-            event.event_type in ("extract_message", "index_message")
-            and AISettings.get_active().message_processing_paused
-        ):
-            event.state, event.lease_until = "pending", None
-            event.next_attempt_at = timezone.now() + timedelta(seconds=10)
-            event.save(update_fields=["state", "lease_until", "next_attempt_at"])
             return
         if event.event_type == "extract_message":
             # Lock the message while claiming work so two workers cannot claim

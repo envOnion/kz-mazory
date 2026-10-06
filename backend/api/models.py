@@ -713,11 +713,6 @@ class AISettings(models.Model):
     context_safety_tokens = models.PositiveIntegerField(
         "Технический запас, токены", default=2048
     )
-    message_processing_paused = models.BooleanField(
-        "Приостановить анализ и индексацию сообщений",
-        default=False,
-        help_text="Новые задания ждут в очереди. Уже отправленные запросы завершаются.",
-    )
     daily_request_limit = models.PositiveIntegerField(
         "Лимит запросов AI в сутки",
         default=0,
