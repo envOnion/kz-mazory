@@ -363,7 +363,7 @@ UNFOLD = {
                 "separator": True,
                 "items": [
                     {
-                        "title": "Модели AI (Чат и Embeddings)",
+                        "title": "Настройки AI",
                         "icon": "smart_toy",
                         "link": "/admin/api/aisettings/",
                     },
@@ -402,11 +402,6 @@ UNFOLD = {
                         "title": "Очередь и ошибки",
                         "icon": "pending_actions",
                         "link": "/admin/api/outboxevent/",
-                    },
-                    {
-                        "title": "Настройки анализа AI",
-                        "icon": "smart_toy",
-                        "link": "/admin/api/aisettings/",
                     },
                 ],
             },
