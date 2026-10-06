@@ -50,7 +50,7 @@ def record_attempt(event, state, code="", next_at=None):
         state=state,
         attempts=event.attempt_count,
         max_attempts=MAX_ATTEMPTS,
-        next_attempt=event.attempt_count + 1,
+        next_attempt=None if state == "cancelled" else event.attempt_count + 1,
         next_attempt_at=next_at.isoformat() if next_at else None,
     )
     if state in ("pending", "failed", "done"):
@@ -63,7 +63,10 @@ def record_attempt(event, state, code="", next_at=None):
                 "finished_at": timezone.now().isoformat(),
             }
         )
-    if state in ("pending", "processing", "budget_wait"):
+    if state == "cancelled":
+        trace.status = "warning"
+        trace.result_summary = "Запуск отменён администратором. Повторы этой попытки не назначаются."
+    elif state in ("pending", "processing", "budget_wait"):
         trace.status = "warning"
         trace.result_summary = (
             "Ожидает возобновления суточного бюджета AI."
@@ -77,9 +80,16 @@ def record_attempt(event, state, code="", next_at=None):
     trace.save(update_fields=["context_metadata", "status", "result_summary"])
 
 
+@transaction.atomic
 def handle_failure(event, exc):
     if event.event_type not in EVENT_TYPES or not isinstance(exc, ProviderUnavailable):
         return False
+    current = OutboxEvent.objects.select_for_update().get(pk=event.pk)
+    if current.state == "cancelled" or current.payload.get("history_cancelled"):
+        current.state, current.lease_until = "cancelled", None
+        current.save(update_fields=["state", "lease_until"])
+        record_attempt(current, "cancelled", "history_run_cancelled")
+        return True
     code = str(exc)
     pending = code in RETRYABLE and event.attempt_count < MAX_ATTEMPTS
     delay = 60 * 2 ** max(0, min(event.attempt_count - 1, 3)) + random.randint(0, 15)

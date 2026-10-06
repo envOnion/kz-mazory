@@ -1,6 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.models import User
 from django.test import RequestFactory, TestCase
+from django.urls import reverse
 from django.utils import timezone
 
 from .job_admin import WhatsAppHistoryRunAdmin
@@ -43,6 +44,20 @@ class HistoryRunAdminTests(TestCase):
         self.assertIn("thematic_summary", self.admin.list_display)
         self.assertIn("thematic_tree_card", self.admin.fields)
         self.assertIn("thematic_tree_card", self.admin.readonly_fields)
+
+    def test_cancel_button_is_available_while_analyzing(self):
+        self.client.force_login(self.user)
+        self.run.state = "analyzing"
+        self.run.save()
+        url = reverse("admin:api_whatsapphistoryrun_change", args=[self.run.pk])
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["can_cancel_import"])
+        self.assertContains(response, "Отменить запуск")
+        self.run.state = "cancelled"
+        self.run.save()
+        response = self.client.get(url)
+        self.assertFalse(response.context["can_cancel_import"])
 
     def test_thematic_summary_and_tree_card_empty(self):
         self.assertEqual(self.admin.thematic_summary(self.run), "0 тредов")

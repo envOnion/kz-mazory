@@ -174,22 +174,37 @@ def control_run(run_id, action, user):
         run.state = run.resume_state or "waiting_connection"
         run.resume_state = ""
         run.status_message = "Импорт продолжен с сохранённого шага."
-    elif action == "cancel" and run.state in IMPORT_STATES | {"paused"}:
+    elif action == "cancel" and run.state in IMPORT_STATES | {"paused", "analyzing"}:
         if run.settings_snapshot.get("only_new"):
             job.enabled, job.next_run_at = False, None
             job.save(update_fields=["enabled", "next_run_at"])
         run.state, run.finished_at = "cancelled", timezone.now()
-        run.status_message = "Импорт отменён. Существующие сообщения не удалены."
+        run.status_message = "Запуск отменён. Сообщения и готовые результаты сохранены. Уже начатый запрос AI может завершиться; новые повторы этого запуска отменены."
         run.items.all().delete()
+        from . import ai_retries
+        for event in OutboxEvent.objects.select_for_update().filter(
+            event_type="extract_message", payload__history_run_id=run.id,
+            state__in=["pending", "enqueued", "processing"],
+        ).order_by("id"):
+            if event.state == "processing":
+                # Keep the claim until the running request returns, so a new
+                # run cannot analyze the same source concurrently.
+                event.payload = {**event.payload, "history_cancelled": True}
+                event.save(update_fields=["payload"])
+            else:
+                event.state, event.lease_until = "cancelled", None
+                event.error_code = event.error_code or "history_run_cancelled"
+                event.save(update_fields=["state", "lease_until", "error_code"])
+                ai_retries.record_attempt(event, "cancelled", "history_run_cancelled")
     else:
         raise ValidationError(
-            "Действие недоступно на этом этапе. Анализ сообщений приостанавливается в настройках AI."
+            "Действие недоступно на этом этапе. Незавершённый запуск можно отменить; завершённый запуск нельзя продолжить."
         )
     # Invalidate an in-flight page result and queued copies before scheduling a resume.
     OutboxEvent.objects.filter(
         event_type="history_import",
         payload__history_run_id=run.id,
-        state__in=["pending", "enqueued"],
+        state__in=["pending", "enqueued", "processing"] if action == "cancel" else ["pending", "enqueued"],
     ).update(state="cancelled")
     run.step += 1
     run.save()

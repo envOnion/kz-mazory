@@ -27,7 +27,7 @@
       panel.querySelector('[data-history-group-title]').textContent = value.fields.source_snapshot.group_title || 'Название не получено';
       document.querySelectorAll('[data-history-action]').forEach(form => {
         const action = form.dataset.historyAction;
-        form.hidden = !(action === 'resume' ? value.state === 'paused' : action === 'pause' ? importing.has(value.state) : importing.has(value.state) || value.state === 'paused');
+        form.hidden = !(action === 'resume' ? value.state === 'paused' : action === 'pause' ? importing.has(value.state) : importing.has(value.state) || value.state === 'paused' || value.state === 'analyzing');
       });
       Object.entries(value.fields).forEach(([name, content]) => {
         const field = fields[name];

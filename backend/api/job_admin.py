@@ -978,7 +978,7 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
                 "can_pause_import": can_control and obj.state in IMPORT_STATES,
                 "can_resume_import": can_control and obj.state == "paused",
                 "can_cancel_import": can_control
-                and obj.state in IMPORT_STATES | {"paused"},
+                and obj.state in IMPORT_STATES | {"paused", "analyzing"},
             },
         )
 

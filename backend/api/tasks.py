@@ -79,6 +79,9 @@ def dispatch_outbox(limit=100):
     now = timezone.now()
     # A crash after a non-idempotent HTTP request has an unknown external outcome.
     expired = OutboxEvent.objects.filter(state="processing", lease_until__lte=now)
+    expired.filter(event_type="extract_message", payload__history_cancelled=True).update(
+        state="cancelled", lease_until=None
+    )
     for item in expired.filter(event_type__in=NON_IDEMPOTENT):
         with transaction.atomic():
             if OutboxEvent.objects.filter(
@@ -184,6 +187,14 @@ def enqueue_crm_match(candidate_id, allowed_states=("not_requested",)):
         return event
 
 
+def uncancelled_attempt(pk):
+    # A missing JSON key is SQL NULL: a plain exclude(key=True) would also
+    # exclude ordinary tasks without this cancellation marker on PostgreSQL.
+    return OutboxEvent.objects.filter(pk=pk, state="processing").filter(
+        Q(payload__history_cancelled__isnull=True) | Q(payload__history_cancelled=False)
+    )
+
+
 def run_outbox(pk):
     with transaction.atomic():
         event = OutboxEvent.objects.select_for_update().get(pk=pk)
@@ -280,7 +291,7 @@ def run_outbox(pk):
             if event.event_type in NON_IDEMPOTENT or event.event_type == "crm_sync"
             else ("failed" if event.attempt_count >= 3 else "pending")
         )
-        OutboxEvent.objects.filter(pk=pk).update(
+        uncancelled_attempt(pk).update(
             state=state,
             error_code="provider_timeout",
             next_attempt_at=timezone.now() + timedelta(minutes=2),
@@ -301,7 +312,7 @@ def run_outbox(pk):
         )
         if (event.event_type == "thread_backfill" and code == "thread_history_busy") or code in ("history_budget_reserved", "autonomous_crm_paused", "crm_deal_delivery_pending"):
             # Waiting for earlier pages is normal progress, not a failed attempt.
-            OutboxEvent.objects.filter(pk=pk).update(
+            uncancelled_attempt(pk).update(
                 state="pending", error_code="", lease_until=None,
                 next_attempt_at=timezone.now() + timedelta(seconds=max(10, getattr(exc, "retry_after", None) or 0)),
                 attempt_count=max(0, event.attempt_count - 1),
@@ -311,7 +322,7 @@ def run_outbox(pk):
             tomorrow = (timezone.now() + timedelta(days=1)).replace(
                 hour=0, minute=0, second=1, microsecond=0
             )
-            OutboxEvent.objects.filter(pk=pk).update(
+            uncancelled_attempt(pk).update(
                 state="pending",
                 error_code=code,
                 next_attempt_at=tomorrow,
@@ -355,7 +366,7 @@ def run_outbox(pk):
             or event.event_type in NON_IDEMPOTENT
             else "pending"
         )
-        OutboxEvent.objects.filter(pk=pk).update(
+        uncancelled_attempt(pk).update(
             state=state,
             error_code=code,
             next_attempt_at=timezone.now()
@@ -380,7 +391,12 @@ def run_outbox(pk):
             CrmDelivery.objects.filter(outbox_event=event).exclude(state__in=("delivered", "superseded")).update(state=current.state, error_code=current.error_code)
         if event.event_type == "extract_message":
             from .models import SourceWorkItem
+            OutboxEvent.objects.filter(
+                pk=event.pk, state="processing", payload__history_cancelled=True,
+            ).update(state="cancelled", lease_until=None)
             current = OutboxEvent.objects.get(pk=event.pk)
+            if current.state == "cancelled":
+                ai_retries.record_attempt(current, "cancelled", "history_run_cancelled")
             SourceWorkItem.objects.filter(raw_message_id=event.payload["raw_id"], processing_version=AISettings.get_active().autonomous_policy_version).update(state=current.state, error_code=current.error_code, lease_until=current.lease_until)
         usage_event_id.reset(context_token)
 

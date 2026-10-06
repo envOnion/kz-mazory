@@ -1,13 +1,13 @@
 {% extends "admin/change_form.html" %}
 {% load static %}
-{% block extrahead %}{{ block.super }}{{ history_field_names|json_script:"history-field-names" }}<script src="{% static 'mazory/js/history_run.js' %}" defer></script>{% endblock %}
+{% block extrahead %}{{ block.super }}{{ history_field_names|json_script:"history-field-names" }}<script src="{% static 'mazory/js/history_run.js' %}?v=20261006-cancel-analysis" defer></script>{% endblock %}
 {% block form_before %}
 {{ block.super }}
 <div class="flex flex-wrap gap-2 mb-4">
 {% if original %}
 {% if can_control_import %}<form data-history-action="pause" {% if not can_pause_import %}hidden{% endif %} method="post" action="{% url 'admin:api_whatsapphistoryrun_control' original.pk 'pause' %}">{% csrf_token %}<button class="font-medium inline-flex items-center justify-center rounded-default px-3 py-2 border border-transparent bg-primary-600 text-white cursor-pointer" type="submit">Приостановить импорт</button></form>{% endif %}
 {% if can_control_import %}<form data-history-action="resume" {% if not can_resume_import %}hidden{% endif %} method="post" action="{% url 'admin:api_whatsapphistoryrun_control' original.pk 'resume' %}">{% csrf_token %}<button class="font-medium inline-flex items-center justify-center rounded-default px-3 py-2 border border-transparent bg-primary-600 text-white cursor-pointer" type="submit">Продолжить импорт</button></form>{% endif %}
-{% if can_control_import %}<form data-history-action="cancel" {% if not can_cancel_import %}hidden{% endif %} method="post" action="{% url 'admin:api_whatsapphistoryrun_control' original.pk 'cancel' %}">{% csrf_token %}<button class="font-medium inline-flex items-center justify-center rounded-default px-3 py-2 border border-transparent bg-primary-600 text-white cursor-pointer" type="submit">Отменить импорт</button></form>{% endif %}
+{% if can_control_import %}<form data-history-action="cancel" {% if not can_cancel_import %}hidden{% endif %} method="post" action="{% url 'admin:api_whatsapphistoryrun_control' original.pk 'cancel' %}">{% csrf_token %}<button class="font-medium inline-flex items-center justify-center rounded-default px-3 py-2 border border-transparent bg-primary-600 text-white cursor-pointer" type="submit">Отменить запуск</button></form>{% endif %}
 <a class="font-medium inline-flex items-center justify-center rounded-default px-3 py-2 border border-base-200 bg-white text-important dark:border-base-700 dark:bg-transparent cursor-pointer" href="{% url 'admin:api_whatsapphistoryjob_change' original.job_id %}">Настройки / новый запуск</a>
 <a class="font-medium inline-flex items-center justify-center rounded-default px-3 py-2 border border-base-200 bg-white text-important dark:border-base-700 dark:bg-transparent cursor-pointer" href="{% url 'admin:api_aisettings_changelist' %}">Настройки анализа AI</a>
 {% endif %}
