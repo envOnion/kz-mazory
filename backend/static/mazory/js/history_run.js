@@ -21,8 +21,8 @@
       panel.querySelector('[data-history-label]').textContent = value.label;
       panel.querySelector('[data-history-message]').textContent = value.message;
       panel.querySelector('[data-history-counts]').textContent = `Получено: ${value.fetched} · Новых: ${value.imported} · Уже были: ${value.existing}`;
-      panel.querySelector('[data-history-analysis]').textContent = `Обработано: ${value.analysis.processed} / ${value.analysis.total} · Ошибок: ${value.analysis.errors}`;
-      panel.querySelector('[data-history-error]').textContent = value.error;
+      panel.querySelector('[data-history-analysis]').textContent = value.fields.analysis_progress;
+      panel.querySelector('[data-history-error]').textContent = [value.error, value.analysis.last_error, value.analysis.next_attempt_at ? `Повтор: ${value.analysis.next_attempt_at}` : '', value.analysis.last_model_response_at ? `Последний ответ AI: ${value.analysis.last_model_response_at}` : ''].filter(Boolean).join(' · ');
       panel.querySelector('[data-history-empty-help]').hidden = value.state !== 'empty';
       panel.querySelector('[data-history-group-title]').textContent = value.fields.source_snapshot.group_title || 'Название не получено';
       document.querySelectorAll('[data-history-action]').forEach(form => {

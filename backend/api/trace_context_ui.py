@@ -9,6 +9,14 @@ from . import access
 from .plain_text import clean_context
 
 ERRORS = {
+    "extraction_json_parse": "Ответ модели не является целым корректным JSON.",
+    "extraction_top_level_type": "Модель вернула неверный тип результата вместо объекта JSON.",
+    "extraction_facts_missing": "В ответе модели отсутствует обязательный массив facts.",
+    "extraction_facts_type": "Поле facts в ответе модели не является массивом.",
+    "context_batch_too_large": "Все цели пакета не помещаются в лимит входа; пакет требуется разделить.",
+    "batch_classification_missing": "Модель пропустила одну или несколько целевых реплик пакета.",
+    "analysis_claim_expired": "Попытка потеряла право публикации; устаревший ответ не применён.",
+    "analysis_request_limit": "Исчерпан предел запросов пакета, включая разделения и исправления.",
     "context_tokenizer_unavailable": "Для выбранной модели не настроен проверенный подсчёт токенов.",
     "context_token_count_unavailable": "Anthropic-провайдер не вернул проверяемый размер контекста; запрос к модели не отправлен.",
     "context_invalid_budget": "Окно должно превышать резерв ответа и технический запас.",

@@ -206,7 +206,8 @@ class DialogueTests(TestCase):
             later.next_attempt_at = timezone.now()
             later.save(update_fields=["next_attempt_at"])
             run_outbox(later.id)
-            handler.assert_called_once_with({"raw_id": second.id})
+            later.refresh_from_db()
+            handler.assert_called_once_with(later.payload)
             later.refresh_from_db()
             self.assertEqual(later.state, "done")
 

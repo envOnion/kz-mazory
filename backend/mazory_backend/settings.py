@@ -363,7 +363,7 @@ UNFOLD = {
                 "separator": True,
                 "items": [
                     {
-                        "title": "Модели AI (Чат и Embeddings)",
+                        "title": "Настройки AI",
                         "icon": "smart_toy",
                         "link": "/admin/api/aisettings/",
                     },
@@ -402,11 +402,6 @@ UNFOLD = {
                         "title": "Очередь и ошибки",
                         "icon": "pending_actions",
                         "link": "/admin/api/outboxevent/",
-                    },
-                    {
-                        "title": "Настройки анализа AI",
-                        "icon": "smart_toy",
-                        "link": "/admin/api/aisettings/",
                     },
                 ],
             },
@@ -456,8 +451,8 @@ CACHES = {
     }
 }
 
-AI_REQUEST_TIMEOUT = int(os.getenv("AI_REQUEST_TIMEOUT", "300"))
-AI_WORKER_TIMEOUT = AI_REQUEST_TIMEOUT + 180
+AI_REQUEST_TIMEOUT = int(os.getenv("AI_REQUEST_TIMEOUT", "180"))
+AI_WORKER_TIMEOUT = AI_REQUEST_TIMEOUT + 120
 AI_TASK_LEASE = AI_WORKER_TIMEOUT + 60
 
 Q_CLUSTER = {

@@ -5,13 +5,15 @@ import json
 import re
 import uuid
 import hashlib
+import time
 
 from django.contrib.auth.models import User
 from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
-from .ai_service import AIService, usage_event_id
+from .ai_service import AIService, usage_event_id, outbox_claim
 from .context_tokens import canonical_json, extraction_input, payload_hash
 from .deduplication import normalize_deal_name
 from .facts import FactSchema, fact_identity, json_value, same_commitment_origin
@@ -142,7 +144,8 @@ def _extraction_user_message(payload):
     return matches[0]
 
 
-def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refresh=False, batch_ids=None, reanalyze=False):
+def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refresh=False, batch_ids=None, reanalyze=False, trace_ids=None, segment_range=None, defer_result=False, result_override=None):
+    preparation_started = time.monotonic()
     explicit = trace_id is not None or reanalyze
     with transaction.atomic():
         raw = (
@@ -174,6 +177,17 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             except (User.DoesNotExist, PermissionDenied) as exc:
                 raise ProviderUnavailable("reanalysis_access_revoked") from exc
         cfg = AIService._config()
+        packet = trace.context_metadata.get("analysis_policy") == "history-packets-v1"
+        target_traces = {raw.id: trace}
+        if packet:
+            from .models import MessageProcessingTrace
+            target_traces.update({entry["raw_id"]: MessageProcessingTrace.objects.get(pk=entry["trace_id"], raw_message_id=entry["raw_id"]) for entry in (trace_ids or [])})
+            cfg = copy.copy(cfg)
+            limits = trace.context_metadata.get("analysis_limits", {})
+            cfg.analysis_policy = "history-packets-v1"
+            cfg.analysis_repair_reason = trace.context_metadata.get("repair_reason")
+            cfg.analysis_input_token_limit = limits.get("analysis_input_token_limit", cfg.analysis_input_token_limit)
+            cfg.max_completion_tokens = min(cfg.max_completion_tokens, limits.get("analysis_output_token_limit", cfg.analysis_output_token_limit))
         api_format = getattr(cfg, "chat_api_format", "openai_compatible")
         effective_provider_url = AIService.effective_chat_provider_url(cfg)
         if trace.context_metadata.get("request_state") == "sent":
@@ -207,7 +221,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             if cfg.autonomous_enabled and not batch_ids and not requested_by_id:
                 batch_ids = list(source_scope(raw).filter(processed=False, id__gte=raw.id, id__lte=trace.context_metadata["snapshot_max_id"]).exclude(content="").order_by("id").values_list("id", flat=True)[:cfg.autonomous_context_messages])
             context, metadata, payload = build_context(
-                raw, cfg, known, trace.context_metadata["snapshot_max_id"], include_following=True, **({"batch_ids": batch_ids} if batch_ids else {})
+                raw, cfg, known, trace.context_metadata["snapshot_max_id"], include_following=True, **({"batch_ids": batch_ids} if batch_ids else {}), **({"target_content":raw.content[segment_range[0]:segment_range[1]]} if segment_range else {})
             )
             envelope = copy.deepcopy(payload)
             user_message = _extraction_user_message(envelope)
@@ -220,6 +234,9 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 effective_provider_url=effective_provider_url,
                 api_format=api_format,
             )
+            if packet:
+                metadata.update(analysis_policy="history-packets-v1", analysis_limits=limits,
+                                retry=trace.context_metadata.get("retry", {}), repair_reason=cfg.analysis_repair_reason)
             metadata.setdefault("snapshot_max_id", trace.context_metadata["snapshot_max_id"])
             trace.earlier_messages_context, trace.earlier_messages_count = (
                 context,
@@ -227,16 +244,27 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             )
             trace.context_metadata, trace.model_version = metadata, cfg.chat_model_name
         trace.context_metadata["request_state"] = "sent"
+        trace.context_metadata.setdefault("timings_ms", {})["prepare"] = round((time.monotonic()-preparation_started)*1000)
         trace.error_code = ""
         trace.result_summary = "Запрос с сохранённой историей отправлен в AI."
         trace.save()
-        result, usage, diagnostics = AIService.analyze_payload(
+        if packet:
+            for member in target_traces.values():
+                if member.pk != trace.pk:
+                    member.context_metadata = {**copy.deepcopy(trace.context_metadata), "packet_anchor_id": raw.id}
+                    member.earlier_messages_context, member.earlier_messages_count = context if "context" in locals() else trace.earlier_messages_context, trace.earlier_messages_count
+                    member.model_version = trace.model_version
+                    member.save()
+        provider_started = time.monotonic()
+        result, usage, diagnostics = result_override or AIService.analyze_payload(
             payload,
             trace.context_metadata.get("effective_provider_url")
             or trace.context_metadata.get("provider_url"),
             expected_api_format=api_format,
         )
         trace.context_metadata["request_state"] = "responded"
+        trace.context_metadata["timings_ms"]["provider"] = round((time.monotonic()-provider_started)*1000)
+        validation_started = time.monotonic()
         trace.context_metadata["response_diagnostics"] = diagnostics
         value = (
             usage.get("prompt_tokens", usage.get("input_tokens"))
@@ -249,10 +277,21 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         from .dialogue_threads import prepare_themes, ready_facts, persist_themes, lock_source
         themes = prepare_themes(result, raw, trace)
         facts = _facts(ready_facts(result, themes), raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True)
+        if defer_result:
+            trace.context_metadata.update(request_state="segment_validated", segment_result=result, segment_range=segment_range)
+            trace.ai_extracted_facts = json_value({"facts":facts})
+            trace.save()
+            return (result, usage, diagnostics)
         from .commitment_resolution import resolve_remaining
         resolved = resolve_remaining(facts, raw, cfg, trace)
         facts = _facts({"facts": json_value(resolved)}, raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True)
+        trace.context_metadata["timings_ms"]["validate"] = round((time.monotonic()-validation_started)*1000)
+        persistence_started = time.monotonic()
         with transaction.atomic():
+            if usage_event_id.get() and outbox_claim.get():
+                owner = OutboxEvent.objects.select_for_update().get(pk=usage_event_id.get())
+                if owner.state != "processing" or owner.payload.get("claim_generation") != outbox_claim.get():
+                    raise ProviderUnavailable("analysis_claim_expired")
             lock_source(raw)
             locked = (
                 RawMessage.objects.select_for_update(of=("self",))
@@ -348,7 +387,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                     source_key=f"thread:{revision.thread_id}:revision:{revision.version}:fact:{identity}",
                     defaults={
                         "thread_revision": revisions[fact["thread_key"]],
-                        "trace": trace,
+                        "trace": target_traces.get(fact["evidence_message_id"], trace),
                         "project": project,
                         "team": team,
                         "manager": sender if fact["fact_type"] == "commitment" else sender or (project.manager if project else None),
@@ -391,7 +430,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             locked.save(update_fields=["processed", "processing_state"])
             classified = {link["raw_message_id"] for theme in themes.values() for link in theme["messages"]}
             batch_covered = set(trace.context_metadata.get("batch_message_ids", [])) & classified
-            if cfg.autonomous_enabled and batch_covered:
+            if (cfg.autonomous_enabled or packet) and batch_covered:
                 source_scope(locked).filter(pk__in=batch_covered).update(processed=True, processing_state="analyzed")
                 from .models import SourceWorkItem
                 SourceWorkItem.objects.bulk_create([SourceWorkItem(raw_message_id=pk, processing_version=cfg.autonomous_policy_version, state="done") for pk in batch_covered], ignore_conflicts=True)
@@ -403,7 +442,21 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 "success",
                 f"Предложено фактов: {proposed}. Уже подтверждено ранее: {len(duplicates)}.",
             )
+            trace.context_metadata["timings_ms"]["persist"] = round((time.monotonic()-persistence_started)*1000)
             trace.save()
+            if packet:
+                from .models import HistoryAnalysisItem
+                for message_id, member in target_traces.items():
+                    local_facts = [fact for fact in facts if fact["evidence_message_id"] == message_id]
+                    complete = any(theme["state"] == "ready" and any(link["raw_message_id"] == message_id for link in theme["messages"]) for theme in themes.values())
+                    disposition = "facts" if local_facts else "no_facts" if complete else "insufficient_data"
+                    reason = "Извлечены проверяемые кандидаты фактов." if local_facts else "Сообщение классифицировано; новых бизнес-фактов нет." if complete else "Мысль не определена; подтверждённых оснований для бизнес-факта недостаточно."
+                    member.context_metadata = {**copy.deepcopy(trace.context_metadata), "packet_anchor_id": raw.id}
+                    member.status, member.error_code = "success", ""
+                    member.ai_extracted_facts = json_value({"facts": local_facts})
+                    member.result_summary = reason
+                    member.save()
+                    HistoryAnalysisItem.objects.filter(trace=member, outbox_event_id=usage_event_id.get()).update(state="succeeded", disposition=disposition, reason_code=disposition, reason_description=reason, updated_at=timezone.now())
             for indexed_id in {raw.id, *batch_covered}:
                 OutboxEvent.objects.get_or_create(deduplication_key=f"index:{indexed_id}", defaults={"event_type": "index_message", "payload": {"raw_id": indexed_id}})
         if not explicit and not cfg.autonomous_enabled:

@@ -383,6 +383,10 @@ def extraction_payload(
     from .ai_service import WORKER_PROMPT
 
     system_prompt = WORKER_PROMPT
+    if getattr(cfg, "analysis_policy", None) == "history-packets-v1":
+        system_prompt += "\nКлассифицируй только целевые batch_message_ids; контекст помогает связать доказательства. Для информационных сообщений верни тему ready с final, completion_reason и facts=[]; не пересказывай весь чат. Все ID — числа."
+        if getattr(cfg, "analysis_repair_reason", None):
+            system_prompt += f"\nПредыдущий ответ отклонён: {cfg.analysis_repair_reason}. Исправь форму ответа по схеме и классифицируй все цели. Не угадывай факты."
     if getattr(cfg, "autonomous_enabled", False):
         system_prompt += "\nАвтономный режим: точное время дедлайна не выдумывай. Только день/утро означает deadline_precision=date; искусственные 09:00/18:00 не являются сообщенным временем. Сервер задает техническую границу дня отдельно от точности источника."
         system_prompt += "\nСвязь с объектом доказывается цитатами, а не наличием ID в known_projects/known_threads. Если название находится в более раннем сообщении, добавь буквальную цитату этого сообщения в evidence_messages с role=identity. Пустое object_name не подтверждает предложенный project. Не выбирай между активным и архивным одноименным объектом только по статусу активности."

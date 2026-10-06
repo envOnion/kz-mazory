@@ -20,6 +20,7 @@ from .models import (
     ThreadRevision,
     WhatsAppHistoryJob,
     WhatsAppHistoryRun,
+    HistoryAnalysisItem,
 )
 from .providers import ProviderUnavailable
 from .trace_context_ui import ERRORS
@@ -78,7 +79,7 @@ class WhatsAppHistoryJobAdmin(IntegrationAdmin):
             "Анализ",
             {
                 "fields": ("analyze_after_import",),
-                "description": "Модель, окно контекста, пауза и бюджет задаются в настройках AI. Размер страницы не ограничивает общий объём истории.",
+                "description": "Модель, лимиты анализа и бюджет задаются в настройках AI. Размер страницы не ограничивает общий объём истории.",
             },
         ),
         ("Последний запуск", {"fields": ("latest_run", "updated_at")}),
@@ -472,6 +473,7 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
         "scheduled_count",
         "analysis_progress",
         "analysis_errors",
+        "analysis_coverage_links",
         "results_links",
         "source_snapshot",
         "settings_snapshot",
@@ -515,11 +517,19 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
         if not obj.pk:
             return "—"
         value = progress(obj)
-        return f"Обработано {value['processed']} / {value['total']}; ошибок: {value['errors']}"
+        from .history_analysis import summary
+        return summary(value)
+
+    @admin.display(description="Покрытие и причины отсутствия данных")
+    def analysis_coverage_links(self, obj):
+        return format_html('<a href="{}?run__id__exact={}&state__exact=succeeded">Результаты сообщений</a> · <a href="{}?run__id__exact={}&needs_attention=1">Нет данных / ошибки и причины</a>', reverse("admin:api_historyanalysisitem_changelist"), obj.id, reverse("admin:api_historyanalysisitem_changelist"), obj.id)
 
     @admin.display(description="Причины ошибок анализа")
     def analysis_errors(self, obj):
         from collections import Counter
+
+        if obj.settings_snapshot.get("analysis_policy"):
+            return format_html_join("<br>", "{}: {}", obj.analysis_items.exclude(reason_code="").exclude(disposition__in=["facts", "no_facts", "no_text"]).values_list("reason_code", "reason_description")[:30]) or "Ошибок и недостатка данных нет."
 
         if obj.settings_snapshot.get("analysis_mode") == "reprocess_all":
             codes = OutboxEvent.objects.filter(
@@ -908,7 +918,7 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
         fields.update(
             state=run.get_state_display(),
             source_snapshot=run.source_snapshot,
-            analysis_progress=f"Обработано {counts['processed']} / {counts['total']}; ошибок: {counts['errors']}",
+            analysis_progress=self.analysis_progress(run),
         )
         for name, value in (
             ("last_check", run.job.last_checked_at),
@@ -948,6 +958,10 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
         ).has_change_permission(request, run.job):
             raise PermissionDenied()
         try:
+            if action == "reanalyze":
+                from .history_jobs import reanalyze_saved
+                new_run = reanalyze_saved(run.id, request.user)
+                return redirect("admin:api_whatsapphistoryrun_change", new_run.id)
             control_run(run.id, action, request.user)
         except (ValidationError, ProviderUnavailable) as exc:
             messages.error(
@@ -981,6 +995,43 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
                 and obj.state in IMPORT_STATES | {"paused", "analyzing"},
             },
         )
+
+
+class AnalysisAttentionFilter(admin.SimpleListFilter):
+    title = "Отсутствие данных и ошибки"
+    parameter_name = "needs_attention"
+
+    def lookups(self, request, model_admin):
+        return [("1", "Недостаточно данных / ошибки"), ("0", "Готовые результаты")]
+
+    def queryset(self, request, queryset):
+        condition = Q(disposition="insufficient_data") | Q(state__in=["failed", "cancelled"])
+        if self.value() == "1":
+            return queryset.filter(condition)
+        if self.value() == "0":
+            return queryset.filter(state="succeeded").exclude(condition)
+        return queryset
+
+
+@admin.register(HistoryAnalysisItem)
+class HistoryAnalysisItemAdmin(IntegrationAdmin):
+    list_display = ("id", "run", "raw_message", "state", "disposition", "reason_code", "reason_description", "trace", "updated_at")
+    list_filter = ("run", "state", "disposition", AnalysisAttentionFilter)
+    list_per_page = 50
+    readonly_fields = ("run", "raw_message", "outbox_event", "trace", "state", "disposition", "reason_code", "reason_description", "updated_at")
+    fields = readonly_fields
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def get_queryset(self, request):
+        from django.db.models import Case, When, Value, IntegerField
+        return super().get_queryset(request).select_related("run", "raw_message", "trace").annotate(
+            result_priority=Case(When(disposition="facts", then=Value(0)), When(disposition="no_facts", then=Value(1)), default=Value(2), output_field=IntegerField())
+        ).order_by("result_priority", "raw_message__timestamp", "id")
 
 
 class HistoryRunFilter(admin.SimpleListFilter):

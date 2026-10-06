@@ -54,6 +54,8 @@ def embedding_chunks(text, max_bytes=480):
 
 analytics_deadline = ContextVar("analytics_deadline", default=None)
 usage_event_id = ContextVar("usage_event_id", default=None)
+extraction_deadline = ContextVar("extraction_deadline", default=None)
+outbox_claim = ContextVar("outbox_claim", default=None)
 logger = logging.getLogger(__name__)
 
 MAX_USAGE_TOKEN_COUNT = 2_147_483_647
@@ -218,11 +220,14 @@ class AIService:
         response_validator=None,
         http_method="POST",
     ):
-        deadline = analytics_deadline.get()
+        extraction_limit = extraction_deadline.get()
+        deadline = extraction_limit or analytics_deadline.get()
+        if extraction_limit and isinstance(timeout, tuple):
+            timeout = (min(timeout[0], 10), min(timeout[1], 180))
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise ProviderUnavailable("analytics_timeout")
+                raise ProviderUnavailable("provider_timeout" if extraction_limit else "analytics_timeout")
             timeout = (
                 min(timeout, remaining)
                 if isinstance(timeout, (int, float))
@@ -258,7 +263,7 @@ class AIService:
                 allow_redirects=False,
             )
             if deadline is not None and time.monotonic() >= deadline:
-                raise ProviderUnavailable("analytics_timeout")
+                raise ProviderUnavailable("provider_timeout" if extraction_limit else "analytics_timeout")
             if response.status_code in (400, 413, 422):
                 detail = response.text.lower()
                 if any(
@@ -537,11 +542,16 @@ class AIService:
             fenced = re.fullmatch(
                 r"\s*```(?:json)?\s*\n(.*?)\n\s*```\s*", content, re.DOTALL
             )
-            result = json.loads(fenced.group(1) if fenced else content)
-            if not isinstance(result, dict) or not isinstance(
-                result.get("facts"), list
-            ):
-                raise TypeError()
+            try:
+                result = json.loads(fenced.group(1) if fenced else content)
+            except (ValueError, TypeError):
+                raise ProviderUnavailable("extraction_json_parse", diagnostics=diagnostics) from None
+            if not isinstance(result, dict):
+                raise ProviderUnavailable("extraction_top_level_type", diagnostics=diagnostics)
+            if "facts" not in result:
+                raise ProviderUnavailable("extraction_facts_missing", diagnostics=diagnostics)
+            if not isinstance(result["facts"], list):
+                raise ProviderUnavailable("extraction_facts_type", diagnostics=diagnostics)
             return result, usage, diagnostics
         except (ValueError, KeyError, TypeError, IndexError, AttributeError):
             raise ProviderUnavailable(

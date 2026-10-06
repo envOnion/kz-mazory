@@ -136,6 +136,13 @@ def start_job(job_id, user=None, *, scheduled=False):
     )
     if not job.only_new:
         run.settings_snapshot["analysis_mode"] = "reprocess_all"
+        from .models import AISettings
+        from .history_analysis import POLICY
+        cfg = AISettings.get_active()
+        run.settings_snapshot.update(analysis_policy=POLICY, **{
+            name: getattr(cfg, name) for name in (
+                "analysis_input_token_limit", "analysis_target_message_limit", "analysis_output_token_limit")
+        })
     enqueue_step(run)
     job.next_run_at = (
         timezone.now()
@@ -196,6 +203,8 @@ def control_run(run_id, action, user):
                 event.error_code = event.error_code or "history_run_cancelled"
                 event.save(update_fields=["state", "lease_until", "error_code"])
                 ai_retries.record_attempt(event, "cancelled", "history_run_cancelled")
+            from .history_analysis import synchronize
+            synchronize(event)
     else:
         raise ValidationError(
             "Действие недоступно на этом этапе. Незавершённый запуск можно отменить; завершённый запуск нельзя продолжить."
@@ -222,6 +231,33 @@ def control_run(run_id, action, user):
     return run
 
 
+@transaction.atomic
+def reanalyze_saved(run_id, user):
+    """A new run owns its own results; WAHA history is not fetched again."""
+    old = WhatsAppHistoryRun.objects.select_for_update().get(pk=run_id)
+    if old.settings_snapshot.get("only_new") or not old.messages.exists():
+        raise ValidationError("Для переанализа нужна сохранённая история полного запуска.")
+    if old.state in HISTORY_ACTIVE_STATES:
+        control_run(old.id, "cancel", user)
+    run = start_job(old.job_id, user)
+    if any(run.source_snapshot.get(k) != old.source_snapshot.get(k) for k in ("config_id", "team_id", "session_name", "chat_id")):
+        raise ValidationError("Источник изменён. Сохранённую историю нельзя анализировать как другой чат.")
+    OutboxEvent.objects.filter(event_type="history_import", payload__history_run_id=run.id).update(state="cancelled")
+    run.messages.set(old.messages.all())
+    run.state, run.cutoff_at = "analyzing", old.cutoff_at
+    run.fetched_count = run.existing_count = run.messages.count()
+    run.no_text_count = sum(not raw.content.strip() for raw in run.messages.all())
+    run.step += 1
+    run.status_message = "Переанализ сохранённых сообщений без повторной загрузки WAHA."
+    run.settings_snapshot["reanalyzed_from_run_id"] = old.id
+    from .history_analysis import schedule
+    schedule(run)
+    enqueue_step(run, 5)
+    run.save()
+    AuditEvent.objects.create(actor=user, target_type="WhatsAppHistoryRun", target_id=run.id, action="history_reanalyze_saved", before_after={"previous_run_id":old.id,"messages":run.fetched_count})
+    return run
+
+
 def schedule_due_jobs():
     now = timezone.now()
     ids = (
@@ -242,6 +278,9 @@ def schedule_due_jobs():
 
 
 def progress(run):
+    if run.settings_snapshot.get("analysis_policy"):
+        from .history_analysis import counts
+        return counts(run)
     total = run.messages.count()
     if run.settings_snapshot.get("analysis_mode") == "reprocess_all":
         events = OutboxEvent.objects.filter(
@@ -450,6 +489,8 @@ def persist_items(run, config, batch):
             run.no_text_count += int(not bool(raw.content.strip()))
             if run.settings_snapshot.get("only_new"):
                 run.fetched_count += 1
+        if run.settings_snapshot.get("analysis_policy"):
+            continue
         if (
             run.settings_snapshot.get("analysis_mode") == "reprocess_all"
             and raw.content.strip()
@@ -502,6 +543,9 @@ def import_messages(run, config):
     if current:
         persist_items(run, config, current)
     run.items.all().delete()
+    if run.settings_snapshot.get("analysis_policy") and run.settings_snapshot["analyze_after_import"]:
+        from .history_analysis import schedule
+        schedule(run)
     AuditEvent.objects.create(
         actor=run.requested_by,
         target_type="WhatsAppHistoryRun",
@@ -676,11 +720,12 @@ def process_step(payload, waha):
                 **scope,
             ).exists()
             if counts["pending"] or unfinished:
-                run.status_message = f"Обработано {counts['processed']} из {counts['total']}; ошибок: {counts['errors']}."
+                from .history_analysis import summary
+                run.status_message = summary(counts)
                 enqueue_step(run, settings["poll_seconds"])
             else:
                 finish(
                     run,
-                    "completed_with_errors" if counts["errors"] else "completed",
+                    "completed_with_errors" if counts["errors"] or counts.get("insufficient_data") else "completed",
                     f"Сообщений: {counts['total']}. Обработано: {counts['processed']}. Ошибок: {counts['errors']}. Извлечённые факты доступны для проверки.",
                 )

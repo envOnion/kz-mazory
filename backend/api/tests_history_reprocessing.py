@@ -99,10 +99,10 @@ class HistoryReprocessingTests(TestCase):
         with patch("api.tasks.AISettings.get_active", return_value=AISettings()), patch(
             "api.tasks.async_task"
         ) as enqueue:
-            self.assertEqual(dispatch_outbox(), 3)
-        self.assertEqual(enqueue.call_count, 3)
-        self.assertEqual({call.args[1] for call in enqueue.call_args_list}, {e.pk for e in events})
-        for event in events:
+            self.assertEqual(dispatch_outbox(), 2)
+        self.assertEqual(enqueue.call_count, 2)
+        self.assertEqual({call.args[1] for call in enqueue.call_args_list}, {e.pk for e in events[:2]})
+        for event in events[:2]:
             event.refresh_from_db()
             self.assertEqual(event.state, "enqueued")
 
@@ -114,6 +114,7 @@ class HistoryReprocessingTests(TestCase):
             "api.tasks.extract_message"
         ) as extract:
             run_outbox(event.pk)
+        event.refresh_from_db()
         extract.assert_called_once_with(event.payload)
         event.refresh_from_db()
         self.assertEqual(event.state, "done")
@@ -194,7 +195,7 @@ class HistoryReprocessingTests(TestCase):
                 event.refresh_from_db()
                 self.assertEqual(event.state, "pending")
                 self.assertGreater(event.next_attempt_at, timezone.now())
-                self.assertEqual(event.attempt_count, 0 if str(error)=="ai_daily_budget_exhausted" else 1)
+                self.assertEqual(event.attempt_count, 0 if str(error) in ("ai_daily_budget_exhausted", "invalid_extraction_schema") else 1)
                 # Allow the next iteration's source message to be claimed.
                 OutboxEvent.objects.filter(pk=event.pk).update(state="failed")
 

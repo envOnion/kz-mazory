@@ -629,6 +629,9 @@ class WhatsAppConfig(models.Model):
 
 
 class AISettings(models.Model):
+    analysis_input_token_limit = models.PositiveIntegerField("Вход анализа, токены", default=16384)
+    analysis_target_message_limit = models.PositiveIntegerField("Сообщений в пакете анализа", default=8)
+    analysis_output_token_limit = models.PositiveIntegerField("Ответ анализа, токены", default=4096)
     autonomous_daily_token_limit = models.PositiveBigIntegerField(default=1000000)
     autonomous_max_in_flight = models.PositiveIntegerField(default=2)
     autonomous_reconcile_cursor = models.PositiveBigIntegerField(default=0)
@@ -751,6 +754,14 @@ class AISettings(models.Model):
         from django.core.exceptions import ValidationError
 
         super().clean()
+        if not 1 <= self.analysis_target_message_limit <= 30:
+            raise ValidationError({"analysis_target_message_limit": "Допустимо от 1 до 30 сообщений."})
+        if not self.analysis_input_token_limit or not self.analysis_output_token_limit:
+            raise ValidationError("Лимиты анализа должны быть положительными.")
+        if self.analysis_output_token_limit > self.max_completion_tokens:
+            raise ValidationError({"analysis_output_token_limit": "Ответ анализа не должен превышать резерв ответа модели."})
+        if self.analysis_input_token_limit + self.analysis_output_token_limit + self.context_safety_tokens > self.context_window_tokens:
+            raise ValidationError("Вход, ответ анализа и технический запас должны помещаться в окно модели.")
         if self.daily_budget_usd is not None and self.daily_budget_usd < 0:
             raise ValidationError(
                 {"daily_budget_usd": "Бюджет не может быть отрицательным."}
@@ -1656,6 +1667,8 @@ class ReminderOccurrence(models.Model):
 
 
 class OutboxEvent(models.Model):
+    analysis_source_key = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    analysis_position = models.PositiveBigIntegerField(null=True, blank=True)
     business_event = models.ForeignKey(
         BusinessEvent, null=True, blank=True, on_delete=models.PROTECT
     )
@@ -1668,6 +1681,9 @@ class OutboxEvent(models.Model):
     lease_until = models.DateTimeField(null=True, blank=True)
     error_code = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["analysis_source_key", "state", "next_attempt_at", "analysis_position"], name="analysis_dispatch_idx")]
 
 
 class AsyncOperation(models.Model):
@@ -1932,6 +1948,23 @@ class WhatsAppHistoryRun(models.Model):
 
     def __str__(self):
         return f"Импорт #{self.pk}: {self.get_state_display()}"
+
+
+class HistoryAnalysisItem(models.Model):
+    run = models.ForeignKey(WhatsAppHistoryRun, on_delete=models.PROTECT, related_name="analysis_items")
+    raw_message = models.ForeignKey(RawMessage, on_delete=models.PROTECT)
+    outbox_event = models.ForeignKey(OutboxEvent, null=True, blank=True, on_delete=models.PROTECT)
+    trace = models.ForeignKey(MessageProcessingTrace, null=True, blank=True, on_delete=models.PROTECT)
+    state = models.CharField(max_length=16, default="queued", db_index=True)
+    disposition = models.CharField(max_length=32, blank=True)
+    reason_code = models.CharField(max_length=64, blank=True)
+    reason_description = models.TextField(blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["run", "raw_message"], name="history_analysis_coverage_unique")]
+        verbose_name = "результат анализа сообщения"
+        verbose_name_plural = "Результаты анализа сообщений"
 
 
 class WhatsAppHistoryItem(models.Model):

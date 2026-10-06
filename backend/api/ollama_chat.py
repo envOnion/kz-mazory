@@ -17,25 +17,27 @@ def native_request(payload, cfg, *, structured=True):
         or type(payload.get("_ollama_num_ctx")) is not int
         or payload["_ollama_num_ctx"] != cfg.context_window_tokens
         or cfg.context_window_tokens > GEMMA_MANIFEST["ollama"]["max_context_tokens"]
-        or payload.get("max_tokens") != cfg.max_completion_tokens
+        or type(payload.get("max_tokens")) is not int
+        or not 1 <= payload["max_tokens"] <= cfg.max_completion_tokens
     ):
         raise ProviderUnavailable("context_configuration_changed")
     if structured and payload.get("response_format") != {"type": "json_object"}:
         raise ProviderUnavailable("provider_invalid_request")
     count = gemma_counter().count_payload(payload)
-    if count + cfg.max_completion_tokens + cfg.context_safety_tokens > cfg.context_window_tokens:
+    if count + payload["max_tokens"] + cfg.context_safety_tokens > cfg.context_window_tokens:
         raise ProviderUnavailable("context_budget_exceeded")
     request = {
         "model": payload["model"], "messages": payload["messages"],
         "stream": False, "think": False,
         "options": {
             "num_ctx": cfg.context_window_tokens,
-            "num_predict": cfg.max_completion_tokens,
+            "num_predict": payload["max_tokens"],
             "temperature": payload.get("temperature", 0),
         },
     }
     if structured:
-        request["format"] = "json"
+        from .extraction_schema import extraction_schema
+        request["format"] = extraction_schema()
     return request
 
 
