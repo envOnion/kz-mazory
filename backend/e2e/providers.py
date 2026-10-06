@@ -29,7 +29,7 @@ ASSIGNMENTS = {
 
 def classify(value):
     records = list(value.get("context", [])) + [
-        {"raw_message_id": value["target_message_id"], "content": value["content"]}
+        {"raw_message_id": value["target_message_id"], "content": value["content"], "timestamp": value["sent_at"]}
     ]
     records.sort(key=lambda row: row["raw_message_id"])
     existing = {row["topic"]: row["id"] for row in value.get("known_threads", [])}
@@ -87,7 +87,7 @@ def classify(value):
                         "object_name": "БЦ Север" if key == "north" else "БЦ Южный",
                         "amount": "50000000.00" if key == "north" else "20000000.00",
                         "currency": "KZT",
-                        "payment_date": str(timezone.localdate()),
+                        "payment_date": datetime.datetime.fromisoformat(row["timestamp"]).date().isoformat(),
                         "payment_kind": "increment",
                         "evidence": row["content"],
                         "confidence": 0.98,
