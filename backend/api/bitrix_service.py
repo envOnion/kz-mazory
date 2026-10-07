@@ -36,6 +36,8 @@ READ_ONLY_METHODS = frozenset(
         "crm.company.get",
         "crm.deal.list",
         "crm.deal.get",
+        "crm.status.list",
+        "user.get",
     }
 )
 OBJECT_FIELD_PATTERN = re.compile(r"^UF_CRM_[A-Z0-9_]+$")

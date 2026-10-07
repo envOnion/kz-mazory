@@ -35,7 +35,7 @@ from .models import (
     WhatsAppConfig,
 )
 from .facts import review, select_crm_match, allocate_payment, json_value, match_candidate
-from .datamart import datamart, scoped_projects
+from .datamart import datamart, scoped_projects, confirmed_payments
 from .notifications import change_commitment
 from .security import Conflict
 from .views import Filters, filters_for, create_operation
@@ -790,14 +790,7 @@ class PaymentListView(APIView):
         start, end, today = period_bounds(
             filters["period"], profile.timezone if profile else "Asia/Almaty"
         )
-        qs = FinancialRecord.objects.filter(
-            project__in=projects,
-            is_verified=True,
-            status="received",
-            currency=currency,
-            payment_date__gte=start,
-            payment_date__lt=min(end, today + timedelta(days=1)),
-        ).order_by("payment_date", "id")
+        qs = confirmed_payments(request.user, filters).filter(payment_date__gte=start, payment_date__lt=min(end, today + timedelta(days=1))).order_by("payment_date", "id")
         pagination = PageNumberPagination()
         page = pagination.paginate_queryset(qs, request)
         return pagination.get_paginated_response(

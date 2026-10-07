@@ -293,6 +293,19 @@ class Project(models.Model):
         super().save(*args, **kwargs)
 
 
+class CrmProjectSnapshot(models.Model):
+    """Current CRM metadata, separate from accepted business facts."""
+
+    project = models.OneToOneField(Project, on_delete=models.CASCADE, related_name="crm_snapshot")
+    external_stage_id = models.CharField(max_length=128, blank=True, default="")
+    external_stage_name = models.CharField(max_length=255, blank=True, default="")
+    external_manager_id = models.CharField(max_length=64, blank=True, default="")
+    external_manager_name = models.CharField(max_length=255, blank=True, default="")
+    opportunity = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
+    currency = models.CharField(max_length=3, default="KZT")
+    synced_at = models.DateTimeField(default=timezone.now)
+
+
 class RawMessage(models.Model):
     project = models.ForeignKey(
         "Project", null=True, blank=True, on_delete=models.PROTECT

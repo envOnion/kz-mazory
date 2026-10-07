@@ -27,14 +27,14 @@ def workspace_projects(user, filters):
     if filters.get('stage'):
         qs = qs.filter(status=filters['stage'])
     records = FinancialRecord.objects.filter(project_id=OuterRef("pk"), is_verified=True, status="received")
-    received = records.filter(direction="income", amount_precision="exact")
-    approximate = records.filter(direction="income", amount_precision="approximate")
+    received = records.filter(direction="income", amount_precision="exact", currency=OuterRef("currency"))
+    approximate = records.filter(direction="income", amount_precision="approximate", currency=OuterRef("currency"))
     def total(rows, field="amount"):
         return Subquery(rows.values("project_id").annotate(value=Sum(field)).values("value"))
     def count(rows):
         return Subquery(rows.values("project_id").annotate(value=Count("id")).values("value"))
     qs = qs.annotate(workspace_paid_total=total(received), workspace_payment_count=Coalesce(count(received), Value(0)), workspace_approximate_total=total(approximate), workspace_financial_count=Coalesce(count(records), Value(0)), workspace_observations=Exists(FactEvent.objects.filter(project_id=OuterRef("pk"), event_type__in=["reported_balance", "reported_debt", "reported_cumulative", "reported_invoice", "payment_schedule"])))
-    with_data = Q(contract_known=True) | Q(contract_amount__gt=0) | Q(workspace_financial_count__gt=0) | Q(workspace_observations=True)
+    with_data = Q(contract_known=True) | Q(contract_amount__gt=0) | Q(workspace_financial_count__gt=0) | Q(workspace_observations=True) | Q(crm_snapshot__opportunity__isnull=False)
     complete = (Q(contract_known=True) | Q(contract_amount__gt=0)) & Q(workspace_payment_count__gt=0)
     state = filters['completeness']
     if state == 'complete':
@@ -47,7 +47,8 @@ def workspace_projects(user, filters):
     group = filters['group']
     if group != 'all':
         qs = qs.filter(with_data if group == 'with_data' else ~with_data)
-    return qs.annotate(workspace_has_data=Case(When(with_data, then=Value(1)), default=Value(0), output_field=IntegerField())).order_by('-workspace_has_data', 'name', 'id'), counts
+    confirmed = Q(contract_known=True) | Q(contract_amount__gt=0) | Q(workspace_payment_count__gt=0)
+    return qs.annotate(workspace_has_data=Case(When(with_data, then=Value(1)), default=Value(0), output_field=IntegerField()), workspace_confirmed_data=Case(When(confirmed, then=Value(1)), default=Value(0), output_field=IntegerField())).order_by('-workspace_confirmed_data', '-workspace_has_data', 'name', 'id'), counts
 
 
 def workspace_rows(user, projects):
@@ -65,10 +66,11 @@ def workspace_rows(user, projects):
     errors = {r.project_id for r in sources if r.project_id in ids and r.processing_state == 'failed'}
     rows = []
     for p in projects:
-        row = project_row(p, paid_total=p.workspace_paid_total or ZERO)
+        row = project_row(p, paid_total=p.workspace_paid_total or ZERO, payments_known=bool(p.workspace_payment_count))
         contract = p.contract_known or p.contract_amount > 0
         payments = (p.workspace_payment_count or 0) > 0
-        state = 'complete' if contract and payments else 'partial' if contract or p.workspace_financial_count or p.workspace_observations else 'missing'
+        crm = getattr(p, 'crm_snapshot', None)
+        state = 'complete' if contract and payments else 'partial' if contract or p.workspace_financial_count or p.workspace_observations or (crm and crm.opportunity is not None) else 'missing'
         reasons = []
         def reason(code, message):
             reasons.append({'code': code, 'message': message})

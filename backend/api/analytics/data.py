@@ -4,18 +4,18 @@ import time
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth.models import User
 from django.db import connections, transaction
-from django.db.models import Q
+from django.db.models import Q, Exists, OuterRef
 from django.utils import timezone
 from jsonschema import Draft202012Validator
 
 from .. import access
-from ..datamart import period_bounds
+from ..datamart import period_bounds, scoped_projects, confirmed_payments, project_stage
 from ..models import (
     AsyncOperation,
     FinancialRecord,
@@ -24,6 +24,8 @@ from ..models import (
     SalesTarget,
     Team,
     UserProfile,
+    RawMessage,
+    CrmProjectSnapshot,
 )
 from ..notifications import effective_deadline
 from ..providers import ProviderUnavailable
@@ -58,6 +60,17 @@ FIELDS = {
             for k in ["day", "week", "month"]
         },
     },
+    "messages": {
+        "team": ("team__name", "text"),
+        "chat": ("chat_id", "text"),
+        **{f"message_{k}": ("timestamp", "date") for k in ["day", "week", "month"]},
+    },
+    "crm_projects": {
+        "project_id": ("project_id", "id"),
+        "status": ("external_stage_name", "text"),
+        "crm_manager": ("external_manager_name", "text"),
+        "team": ("project__team__name", "text"),
+    },
     "targets": {
         "manager": ("profile__full_name", "text"),
         "team": ("team__name", "text"),
@@ -74,6 +87,8 @@ MEASURES = {
     "payments": {"payment_count": "count", "received_amount": "money"},
     "commitments": {"commitment_count": "count", "overdue_count": "count"},
     "targets": {"target_amount": "money"},
+    "messages": {"message_count": "count"},
+    "crm_projects": {"project_count": "count", "crm_amount": "money"},
 }
 QUERY_SCHEMA = {
     "type": "object",
@@ -157,9 +172,30 @@ def fail(code="invalid_tool_arguments"):
     raise ProviderUnavailable(code)
 
 
+RECORDS_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "overdue_only": {"type": "boolean"},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+    },
+}
+
+
 def validate(schema, value):
-    if list(Draft202012Validator(schema).iter_errors(value)):
-        fail()
+    errors = list(Draft202012Validator(schema).iter_errors(value))
+    if errors:
+        raise ProviderUnavailable(
+            "invalid_tool_arguments",
+            diagnostics={
+                "validation_errors": [
+                    "/".join(str(part) for part in error.path)
+                    + ": "
+                    + error.message[:1200]
+                    for error in errors[:5]
+                ]
+            },
+        )
 
 
 @dataclass
@@ -227,7 +263,11 @@ class OperationContext:
         return list(
             access.messages_for(user)
             .using(ALIAS)
-            .filter(project_id__in=project_ids)
+            .filter(
+                Q(id__in=[r.id for r in rows])
+                if dataset == "messages"
+                else Q(project_id__in=project_ids)
+            )
             .order_by("-timestamp")
             .values("id", "sender_name")[:20]
         )
@@ -246,10 +286,9 @@ class OperationContext:
                 .values("id", "name")[:200]
             ),
             "projects": list(
-                access.projects_for(user)
-                .using(ALIAS)
-                .filter(is_verified=True, version__gt=0)
-                .values("id", "name")[:200]
+                scoped_projects(user, self.defaults, using=ALIAS)[0].values(
+                    "id", "name"
+                )[:200]
             ),
             "limit": 200,
             "note": "Identity preview only; omitted names require clarification, not guessed IDs.",
@@ -258,6 +297,129 @@ class OperationContext:
     def zone(self):
         profile = UserProfile.objects.filter(user_id=self.requested_by_id).first()
         return profile.timezone if profile else "Asia/Almaty"
+
+    def records(self, arguments):
+        """Current open obligations; old overdue deadlines remain actionable."""
+        user = self.check()
+        validate(RECORDS_SCHEMA, arguments)
+        self.queries += 1
+        if self.queries > 8:
+            fail("query_limit_exceeded")
+        if ALIAS not in connections:
+            fail("analytics_not_configured")
+        conn = connections[ALIAS]
+        try:
+            with transaction.atomic(using=ALIAS):
+                if conn.vendor != "postgresql":
+                    fail("analytics_not_configured")
+                with conn.cursor() as cursor:
+                    cursor.execute("SET TRANSACTION READ ONLY")
+                    cursor.execute(
+                        "SELECT set_config('statement_timeout', %s, true)",
+                        [
+                            str(
+                                max(
+                                    1,
+                                    min(
+                                        5000,
+                                        int((self.deadline - time.monotonic()) * 1000),
+                                    ),
+                                )
+                            )
+                        ],
+                    )
+                qs = access.commitments_for(user).using(ALIAS).filter(is_verified=True)
+                for key in ["team_id", "manager_id", "project_id"]:
+                    if self.defaults.get(key):
+                        qs = qs.filter(**{key: self.defaults[key]})
+                if arguments.get("overdue_only", True):
+                    qs = qs.filter(status__in=["pending", "overdue"])
+                commitments = list(
+                    qs.select_related("project", "manager").order_by(
+                        "-promised_at", "-id"
+                    )[: MAX_SCAN + 1]
+                )
+                if len(commitments) > MAX_SCAN:
+                    fail("dataset_limit_use_filters")
+                if arguments.get("overdue_only", True):
+                    commitments = [
+                        c
+                        for c in commitments
+                        if effective_deadline(c)
+                        and effective_deadline(c) < timezone.now()
+                    ]
+                total = len(commitments)
+                chosen = commitments[: arguments.get("limit", 20)]
+                rows = [
+                    {
+                        "commitment_id": c.id,
+                        "text": c.commitment_text[:2000],
+                        "project_id": c.project_id,
+                        "project": c.project.name if c.project else "Без проекта",
+                        "responsible": c.manager.full_name
+                        if c.manager
+                        else c.responsible_name or "Не назначен",
+                        "deadline": effective_deadline(c)
+                        .astimezone(ZoneInfo(self.zone()))
+                        .isoformat()
+                        if effective_deadline(c)
+                        else None,
+                        "status": c.get_status_display(),
+                    }
+                    for c in chosen
+                ]
+                evidence = list(
+                    access.messages_for(user)
+                    .using(ALIAS)
+                    .filter(
+                        id__in=[
+                            c.source_message_id for c in chosen if c.source_message_id
+                        ]
+                    )
+                    .values("id", "sender_name")[:20]
+                )
+        except ProviderUnavailable:
+            raise
+        except Exception:
+            fail("analytics_query_failed")
+        self.check()
+        dataset = {
+            "dataset_id": str(uuid.uuid4()),
+            "columns": [
+                {"name": name, "type": kind, "unit": None}
+                for name, kind in [
+                    ("commitment_id", "id"),
+                    ("text", "text"),
+                    ("project_id", "id"),
+                    ("project", "text"),
+                    ("responsible", "text"),
+                    ("deadline", "date"),
+                    ("status", "text"),
+                ]
+            ],
+            "rows": rows,
+            "normalized_query": {
+                "dataset": "commitment_records",
+                "filters": [
+                    {"field": key, "op": "eq", "value": value}
+                    for key, value in self.defaults.items()
+                    if key in ["team_id", "manager_id", "project_id"]
+                ],
+                **arguments,
+            },
+            "timezone": self.zone(),
+            "coverage": {
+                "status": "partial",
+                "message": "Последние зарегистрированные обязательства. Просрочки включены независимо от месяца исходного срока.",
+            },
+            "returned_count": len(rows),
+            "total_groups": total,
+            "truncated": total > len(rows),
+            "definition": "Последние подтверждённые обязательства по дате регистрации; только доступные источники.",
+            "evidence": evidence,
+        }
+        self.registry[dataset["dataset_id"]] = dataset
+        return dataset
 
     def query(self, arguments):
         user = self.check()
@@ -276,7 +438,11 @@ class OperationContext:
             fail("unsupported_query")
         filters = list(arguments.get("filters", []))
         for key in ["team_id", "manager_id", "project_id"]:
-            if self.defaults.get(key) and not any(f["field"] == key for f in filters):
+            if (
+                key in filter_fields(dataset)
+                and self.defaults.get(key)
+                and not any(f["field"] == key for f in filters)
+            ):
                 filters.append({"field": key, "op": "eq", "value": self.defaults[key]})
         currency = arguments.get("currency", self.defaults.get("currency", "KZT"))
         zone = self.zone()
@@ -291,7 +457,7 @@ class OperationContext:
                 fail()
         if start >= end or (end - start).days > 3660:
             fail("unsupported_query")
-        if dataset == "projects" and arguments.get("date_range"):
+        if dataset in ["projects", "crm_projects"] and arguments.get("date_range"):
             fail("unsupported_query")
         if dataset == "targets" and (
             start.day != 1
@@ -359,6 +525,14 @@ class OperationContext:
                             except InvalidOperation:
                                 fail()
                     lookup = {"eq": "exact", "in": "in"}.get(f["op"], f["op"])
+                    # A model default is not evidence of a local project stage.
+                    if (
+                        dataset in ["projects", "payments"] and f["field"] == "status"
+                    ) or (dataset == "commitments" and f["field"] == "project_status"):
+                        prefix = "" if dataset == "projects" else "project__"
+                        qs = qs.filter(
+                            **{prefix + "whatsapp_fields__contains": ["stage"]}
+                        )
                     qs = qs.filter(**{f"{path}__{lookup}": f["value"]})
                 if dataset == "payments":
                     qs = qs.filter(
@@ -367,6 +541,20 @@ class OperationContext:
                     )
                 elif dataset == "targets":
                     qs = qs.filter(month__gte=start, month__lt=end)
+                unknown_dates = 0
+                if dataset == "messages":
+                    unknown_dates = qs.filter(sent_at_known=False).count()
+                    qs = qs.filter(
+                        sent_at_known=True,
+                        timestamp__gte=datetime.combine(
+                            start, datetime.min.time(), tzinfo=ZoneInfo(zone)
+                        ),
+                        timestamp__lt=datetime.combine(
+                            min(end, today + timedelta(days=1)),
+                            datetime.min.time(),
+                            tzinfo=ZoneInfo(zone),
+                        ),
+                    )
                 source_rows = list(qs.order_by("id")[: MAX_SCAN + 1])
                 if len(source_rows) > MAX_SCAN:
                     fail("dataset_limit_use_filters")
@@ -385,8 +573,10 @@ class OperationContext:
                     .filter(id__in=access.team_ids(user))
                     .values_list("history_complete_from", flat=True)
                 )
-                complete = bool(teams) and all(
-                    t is not None and t <= start for t in teams
+                complete = (
+                    bool(teams)
+                    and all(t is not None and t <= start for t in teams)
+                    and not unknown_dates
                 )
         except ProviderUnavailable:
             raise
@@ -443,12 +633,12 @@ class OperationContext:
             "normalized_query": {
                 **arguments,
                 "filters": filters,
-                "currency": currency,
+                "currency": None if dataset == "messages" else currency,
                 "date_range": {
                     "start": start.isoformat(),
                     "end_exclusive": end.isoformat(),
                 }
-                if dataset != "projects"
+                if dataset not in ["projects", "crm_projects"]
                 else None,
             },
             "timezone": zone,
@@ -457,7 +647,9 @@ class OperationContext:
             else None,
             "coverage": {
                 "status": "complete" if complete and not unknown_costs else "partial",
-                "message": f"Стоимость не подтверждена для {unknown_costs} проектов; маржа только по известным данным"
+                "message": f"У {unknown_dates} сообщений неизвестна исходная дата; они не включены. Полнота истории не подтверждена."
+                if unknown_dates
+                else f"Стоимость не подтверждена для {unknown_costs} проектов; маржа только по известным данным"
                 if unknown_costs
                 else "Полная история"
                 if complete
@@ -478,7 +670,9 @@ class OperationContext:
 def definition(dataset):
     return {
         "payments": "Подтверждённые received-поступления, включая отрицательные корректировки; менеджер — credited_profile, не текущий владелец проекта.",
-        "projects": "Подтверждённые неархивные проекты; договорная маржа по подтверждённой стоимости, не бухгалтерская прибыль.",
+        "messages": "Доступные оригиналы WhatsApp по исходной дате; дубли, старые версии и неизвестные даты исключены. Валюта не применяется.",
+        "crm_projects": "Текущие снимки CRM: стадия, ответственный и сумма сделки, не фактические поступления и не подтверждённый договор.",
+        "projects": "Доступные неархивные проекты с подтверждённой идентичностью или платежом; договорная маржа по подтверждённой стоимости, не бухгалтерская прибыль.",
         "commitments": "Подтверждённые обязательства; просрочка по effective deadline, неизвестный срок не считается известным.",
         "targets": "Активные утверждённые месячные планы, без пропорционального распределения.",
     }[dataset]
@@ -497,9 +691,25 @@ def enum_values(name, dataset):
 
 
 def filter_fields(dataset):
+    if dataset == "messages":
+        return {
+            "team_id": ("team_id", "id"),
+            "project_id": ("project_id", "id"),
+            "chat": ("chat_id", "text"),
+        }
+    if dataset == "crm_projects":
+        return {
+            "team_id": ("project__team_id", "id"),
+            "project_id": ("project_id", "id"),
+            "manager_id": ("project__manager_id", "id"),
+            "status": ("external_stage_id", "text"),
+        }
     prefix = "project__" if dataset in ["payments", "commitments"] else ""
     fields = {
-        "team_id": (prefix + "team_id", "id"),
+        "team_id": (
+            "team_id" if dataset == "commitments" else prefix + "team_id",
+            "id",
+        ),
         "project_id": ("id" if dataset == "projects" else "project_id", "id"),
         "manager_id": (
             {
@@ -531,24 +741,54 @@ def filter_fields(dataset):
 
 
 def queryset(dataset, user, currency):
-    projects = (
-        access.projects_for(user)
-        .using(ALIAS)
-        .filter(is_verified=True, version__gt=0, currency=currency)
-    )
-    if dataset == "projects":
-        return projects.select_related("manager", "team")
-    if dataset == "payments":
-        return (
-            FinancialRecord.objects.using(ALIAS)
-            .filter(
-                project__in=projects,
-                currency=currency,
-                status="received",
-                is_verified=True,
+    projects = scoped_projects(user, {"currency": currency}, using=ALIAS)[0]
+    if dataset == "messages":
+        messages = (
+            access.messages_for(user)
+            .using(ALIAS)
+            .filter(source__in=["waha", "whatsapp_export"])
+            .exclude(
+                processing_state__in=[
+                    "deleted",
+                    "superseded",
+                    "export_staged",
+                    "deduplication_ambiguous",
+                ]
             )
-            .select_related("project__team", "credited_profile")
         )
+        newer = RawMessage.objects.using(ALIAS).filter(
+            config_id=OuterRef("config_id"),
+            source=OuterRef("source"),
+            session_name=OuterRef("session_name"),
+            message_id=OuterRef("message_id"),
+            id__gt=OuterRef("id"),
+        )
+        return (
+            messages.annotate(newer_version=Exists(newer))
+            .filter(newer_version=False)
+            .only(
+                "id",
+                "config_id",
+                "team_id",
+                "project_id",
+                "chat_id",
+                "timestamp",
+                "sent_at_known",
+            )
+            .select_related("team")
+        )
+    if dataset == "crm_projects":
+        return (
+            CrmProjectSnapshot.objects.using(ALIAS)
+            .filter(project__in=projects, currency=currency)
+            .select_related("project__team")
+        )
+    if dataset == "projects":
+        return projects.select_related("manager", "team", "crm_snapshot")
+    if dataset == "payments":
+        return confirmed_payments(
+            user, {"currency": currency}, using=ALIAS
+        ).select_related("project__team", "credited_profile")
     if dataset == "commitments":
         return (
             access.commitments_for(user)
@@ -586,6 +826,7 @@ def aggregate(dataset, objects, dims, measures, start, end, zone, deadline):
             "margin_contract": Decimal(0),
             "margin_cost": Decimal(0),
             "known_cost": 0,
+            "known_contract": 0,
             "overdue": 0,
         }
     )
@@ -604,8 +845,12 @@ def aggregate(dataset, objects, dims, measures, start, end, zone, deadline):
             v = (
                 due.astimezone(ZoneInfo(zone)).date()
                 if path == "effective_deadline" and due
+                else project_stage(obj)[1]
+                if dataset == "projects" and d == "status"
                 else attribute(obj, path)
             )
+            if isinstance(v, datetime):
+                v = v.astimezone(ZoneInfo(zone)).date()
             if kind == "date" and v is not None:
                 if d.endswith("_week"):
                     v -= timedelta(days=v.weekday())
@@ -634,8 +879,14 @@ def aggregate(dataset, objects, dims, measures, start, end, zone, deadline):
         b["rows"] += 1
         if dataset in ["payments", "targets"]:
             b["amount"] += obj.amount
+        if dataset == "crm_projects" and obj.opportunity is not None:
+            b["amount"] += obj.opportunity
+            b["known_contract"] += 1
         if dataset == "projects":
             b["contract"] += obj.contract_amount
+            b["known_contract"] += int(
+                getattr(obj, "contract_known", False) or obj.contract_amount > 0
+            )
             if obj.cost_confirmed:
                 b["known_cost"] += 1
                 b["cost"] += obj.cost_amount
@@ -668,6 +919,11 @@ def aggregate(dataset, objects, dims, measures, start, end, zone, deadline):
                     if b["margin_contract"]
                     else None
                 )
+            elif (
+                m in ["contract_amount", "crm_amount"]
+                and b["known_contract"] != b["rows"]
+            ):
+                value = None
             elif m == "confirmed_cost":
                 value = (
                     str(b["cost"].quantize(Decimal(".01")))

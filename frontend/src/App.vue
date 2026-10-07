@@ -55,6 +55,7 @@
             :is-loading="isGenerating"
             :period="selectedPeriod"
             @open-source="openQuote"
+            @open-workspace="currentView = 'workspace'"
             @change-period="fetchKpiData"
             @change-filters="changeKpiFilters"
             @select-prompt="handlePromptSubmit"
