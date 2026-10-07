@@ -44,7 +44,9 @@ jobs:
       - name: Backend analytics contracts and access tests
         run: uv run --project backend python backend/manage.py test api.tests_analytics api.tests_provider_urls api.tests_qwen_context api.tests_gemma_context api.tests_history_reprocessing api.tests_history_admin api.tests_history_packets api.tests_whatsapp_exports api.tests_e2e_providers api.tests_user_access api.tests_fact_review api.tests_mcp_fact_review api.tests_import_review api.tests_contextual_commitments api.tests_delivery_receipts api.tests_embedding_chunks api.tests_dialogue_threads api.tests_project_workspace api.tests_autonomous api.tests_kpi_chat_data api.tests_participants
       - name: Install local e2e browser
-        run: npx playwright install --with-deps chromium
+        run: |
+          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://security.ubuntu.com/ubuntu/\tpriority:2\n' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          npx playwright install --with-deps chromium
         working-directory: frontend
       - name: Local browser, API and Q2 end-to-end tests
         run: uv run --project backend python backend/e2e/run.py
