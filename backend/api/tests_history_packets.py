@@ -61,16 +61,74 @@ class HistoryPacketsTests(TestCase):
         shape=extraction_schema({'target_message_id':42,'context':[{'raw_message_id':11},{'raw_message_id':12,'partial':True}],
                                  'target_messages':[{'raw_message_id':43}],
                                  'known_threads':[{'id':7,'message_ids':[999], 'commitments':[{'id':19}]}]})
-        theme=shape['properties']['threads']['items']['properties']
+        theme=shape['properties']['threads']['properties']['t0']['properties']
         self.assertEqual(theme['messages']['items']['properties']['raw_message_id']['enum'],[11,42,43])
+        self.assertIn('target_classification',shape['required'])
+        self.assertEqual(shape['properties']['target_classification']['properties']['raw_message_id']['enum'],[42])
         self.assertEqual(theme['thread_id']['anyOf'][0]['enum'],[7])
         commitment=next(v for v in shape['properties']['facts']['items']['oneOf'] if v['properties']['fact_type']['enum']==['commitment'])
         self.assertEqual(commitment['properties']['promise_message_id']['enum'],[11,42,43])
         self.assertEqual(commitment['properties']['commitment_id']['enum'],[19])
         empty=extraction_schema({'target_message_id':42})
-        self.assertEqual(empty['properties']['threads']['items']['properties']['thread_id'],{'type':'null'})
+        self.assertEqual(empty['properties']['threads']['properties']['t0']['properties']['thread_id'],{'type':'null'})
         commitment=empty['properties']['facts']['items']['oneOf'][-1]
         self.assertNotIn('commitment_id',commitment['properties'])
+
+    def test_fixed_theme_slots_keep_primary_target_and_context_links(self):
+        from .dialogue_threads import prepare_themes
+        event=self.packet(2); item=self.run.analysis_items.get(raw_message_id=event.payload['raw_id'])
+        other=next(pk for pk in event.payload['batch_ids'] if pk!=item.raw_message_id)
+        item.trace.earlier_messages_context=[{'raw_message_id':other}];item.trace.context_metadata['snapshot_max_id']=other
+        theme=self.model_result(event)['threads'][0];theme.pop('key')
+        result={'threads':{'t0':theme},'facts':[], 'target_classification':{'thread_key':'t0','raw_message_id':item.raw_message_id,'thought_state':'final'}}
+        themes=prepare_themes(result,item.raw_message,item.trace)
+        self.assertEqual(list(themes),['t0'])
+        self.assertEqual({row['raw_message_id'] for row in themes['t0']['messages']},set(event.payload['batch_ids']))
+        result={'threads':{'bad':theme},'facts':[]}
+        with self.assertRaisesMessage(ProviderUnavailable,'thread_classification_invalid'):
+            prepare_themes(result,item.raw_message,item.trace)
+
+    def test_each_batch_target_is_pinned_and_explicitly_classified(self):
+        from .dialogue_threads import prepare_themes
+        from .extraction_schema import extraction_schema
+        event=self.packet(2);item=self.run.analysis_items.get(raw_message_id=event.payload['raw_id'])
+        ids=event.payload['batch_ids'];other=ids[1]
+        wire=extraction_schema({'target_message_id':ids[0],'batch_message_ids':ids,'target_messages':[{'raw_message_id':other}]})
+        pinned=wire['properties']['target_classifications']
+        self.assertEqual(pinned['required'],['c0','c1'])
+        self.assertEqual([pinned['properties'][f'c{i}']['properties']['raw_message_id']['enum'] for i in range(2)],[[ids[0]],[ids[1]]])
+        item.trace.earlier_messages_context=[{'raw_message_id':other}]
+        item.trace.context_metadata.update(snapshot_max_id=other,batch_message_ids=ids)
+        theme=self.model_result(event)['threads'][0];theme.pop('key');theme['messages']=[{'raw_message_id':ids[0],'thought_state':'final'}]
+        result={'threads':{'t0':theme},'facts':[],'target_classifications':{f'c{i}':{'raw_message_id':pk,'thread_key':'t0','thought_state':'final'} for i,pk in enumerate(ids)}}
+        themes=prepare_themes(result,item.raw_message,item.trace)
+        self.assertEqual({row['raw_message_id'] for row in themes['t0']['messages']},set(ids))
+        result['target_classifications'].pop('c1')
+        with self.assertRaisesMessage(ProviderUnavailable,'target_classification_invalid'):
+            prepare_themes(result,item.raw_message,item.trace)
+
+    def test_explicit_target_classification_preserves_context_evidence_links(self):
+        from .dialogue_threads import prepare_themes
+        event=self.packet(2); item=self.run.analysis_items.get(raw_message_id=event.payload['raw_id'])
+        other=next(pk for pk in event.payload['batch_ids'] if pk!=item.raw_message_id)
+        item.trace.earlier_messages_context=[{'raw_message_id':other}];item.trace.context_metadata['snapshot_max_id']=other
+        result=self.model_result(event);result['threads'][0]['messages']=[{'raw_message_id':other,'thought_state':'final'}]
+        result['target_classification']={'thread_key':'info','raw_message_id':item.raw_message_id,'thought_state':'final','relation':'discusses','rationale':'Целевая реплика информационная.'}
+        themes=prepare_themes(result,item.raw_message,item.trace)
+        self.assertEqual({row['raw_message_id'] for row in themes['info']['messages']},{other,item.raw_message_id})
+
+    def test_explicit_classification_cannot_invent_target_or_theme(self):
+        from .dialogue_threads import prepare_themes
+        event=self.packet(1);item=self.run.analysis_items.get()
+        item.trace.context_metadata['snapshot_max_id']=item.raw_message_id
+        for classification in [
+            {'thread_key':'info','raw_message_id':item.raw_message_id+1,'thought_state':'final'},
+            {'thread_key':'absent','raw_message_id':item.raw_message_id,'thought_state':'final'},
+            {'thread_key':'info','raw_message_id':str(item.raw_message_id),'thought_state':'final'},
+            {'thread_key':'info','raw_message_id':item.raw_message_id,'thought_state':'unknown'}]:
+            result=self.model_result(event);result['target_classification']=classification
+            with self.assertRaises(ProviderUnavailable):
+                prepare_themes(result,item.raw_message,item.trace)
 
     def test_missing_anchor_has_distinct_numeric_diagnostics(self):
         from .dialogue_threads import prepare_themes
@@ -192,7 +250,7 @@ class HistoryPacketsTests(TestCase):
         body=json.loads(value['messages'][-1]['content'])
         self.assertIn('КАЖДЫЙ',body['analysis_instructions'])
         self.assertGreater(value['messages'][-1]['content'].index('"batch_message_ids"'),value['messages'][-1]['content'].index('"context"'))
-        theme=native_request(value,cfg)['format']['properties']['threads']['items']
+        theme=native_request(value,cfg)['format']['properties']['threads']['properties']['t0']
         self.assertIn('completion_reason',theme['required'])
         self.assertEqual(theme['properties']['messages']['minItems'],1)
 

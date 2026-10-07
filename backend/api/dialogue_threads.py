@@ -125,16 +125,49 @@ class ThemeSchema(serializers.Serializer):
     messages = LinkSchema(many=True, allow_empty=False)
 
 
+def normalize_themes(rows):
+    """Fixed wire slots prevent repeated keys; saved legacy arrays stay valid."""
+    if isinstance(rows, dict):
+        if "t0" not in rows or any(key not in {f"t{i}" for i in range(16)} or not isinstance(value,dict) or "key" in value for key,value in rows.items()):
+            raise ProviderUnavailable("thread_classification_invalid")
+        return [{**value,"key":key} for key,value in rows.items()]
+    return rows
+
+
 def prepare_themes(result, raw, trace):
     from .message_context import source_scope
 
-    rows = result.get("threads")
+    rows = normalize_themes(result.get("threads"))
+    result["threads"] = rows
     if rows is None:
         if result.get("facts"):
             raise ProviderUnavailable("thread_classification_missing")
         rows = []
     if not isinstance(rows, list):
         raise ProviderUnavailable("thread_classification_invalid")
+    classification = result.get("target_classification")
+    pairs = [(classification,raw.id)] if classification is not None else []
+    if "target_classifications" in result:
+        targets = trace.context_metadata.get("batch_message_ids") or [raw.id]
+        multiple = result["target_classifications"]
+        if not isinstance(multiple,dict) or set(multiple) != {f"c{i}" for i in range(len(targets))} or pairs:
+            raise ProviderUnavailable("target_classification_invalid")
+        pairs = [(multiple[f"c{i}"],pk) for i,pk in enumerate(targets)]
+    for classification, target_id in pairs:
+        # A dedicated required wire object pins the target even when the model
+        # classifies only nearby originals in threads. The model, not the server,
+        # supplies its theme and thought state; no inferred classification.
+        if not isinstance(classification, dict) or type(classification.get("raw_message_id")) is not int or classification["raw_message_id"] != target_id or not isinstance(classification.get("thread_key"), str):
+            raise ProviderUnavailable("target_classification_invalid")
+        selected = [row for row in rows if isinstance(row, dict) and row.get("key") == classification["thread_key"]]
+        schema = LinkSchema(data=classification)
+        if len(selected) != 1 or not schema.is_valid() or not isinstance(selected[0].get("messages"), list):
+            raise ProviderUnavailable("target_classification_invalid")
+        existing = [link for link in selected[0]["messages"] if isinstance(link, dict) and link.get("raw_message_id") == target_id]
+        if existing and any(link.get("thought_state") != schema.validated_data["thought_state"] for link in existing):
+            raise ProviderUnavailable("target_classification_conflict")
+        if not existing:
+            selected[0]["messages"].append(schema.validated_data)
     if not rows:
         rows = [
             {

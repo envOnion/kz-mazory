@@ -82,7 +82,7 @@ def verify_history_packets():
     import copy
     from .ai_service import AIService
     from .context_tokens import context_runtime, extraction_payload
-    from .dialogue_threads import ThemeSchema
+    from .dialogue_threads import ThemeSchema, LinkSchema, normalize_themes
 
     cfg = copy.copy(AIService._config())
     cfg.analysis_policy = "history-packets-v1"
@@ -93,6 +93,16 @@ def verify_history_packets():
     expected = counter.count_payload(payload)
     result, usage, diagnostics = AIService.analyze_payload(payload,
         provider_url=endpoint["effective_provider_url"], expected_api_format=endpoint["api_format"])
+    classification = result.get("target_classification")
+    link = LinkSchema(data=classification) if isinstance(classification,dict) else None
+    if link is None or not link.is_valid() or type(classification.get("raw_message_id")) is not int or classification["raw_message_id"] != 1:
+        raise ProviderUnavailable("analysis_probe_classification_invalid")
+    result["threads"] = normalize_themes(result.get("threads"))
+    selected = [row for row in result.get("threads",[]) if row.get("key") == classification.get("thread_key")]
+    if len(selected) != 1:
+        raise ProviderUnavailable("analysis_probe_classification_invalid")
+    if not any(row.get("raw_message_id") == 1 for row in selected[0].get("messages",[])):
+        selected[0].setdefault("messages",[]).append(link.validated_data)
     themes = ThemeSchema(data=result.get("threads"), many=True)
     if not themes.is_valid() or not themes.validated_data or result.get("facts") != []:
         raise ProviderUnavailable("analysis_probe_classification_invalid")

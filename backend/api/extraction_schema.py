@@ -3,7 +3,7 @@
 import copy
 from rest_framework import serializers
 from .facts import FactSchema
-from .dialogue_threads import ThemeSchema
+from .dialogue_threads import ThemeSchema, LinkSchema
 
 
 def resolution_schema(input_data):
@@ -98,6 +98,36 @@ def extraction_schema(input_data=None):
             "properties": {"threads": {"type": "array", "minItems": 1, "items": theme},
                            "facts": {"type": "array", "items": {"oneOf":variants}}}}
     if input_data is not None:
+        # Object properties are emitted once by native constrained decoding.
+        # A list of free-text keys allowed the same theme to be repeated.
+        slot = copy.deepcopy(theme)
+        slot["properties"].pop("key")
+        slot["required"].remove("key")
+        shape["properties"]["threads"] = {"type":"object", "additionalProperties":False,
+            "required":["t0"], "properties":{f"t{i}":copy.deepcopy(slot) for i in range(16)}}
+        for variant in variants:
+            variant["properties"]["thread_key"]["enum"] = [f"t{i}" for i in range(16)]
+        classification = serializer_schema(LinkSchema())
+        classification["properties"]["raw_message_id"] = {"type":"integer", "enum":[input_data["target_message_id"]]}
+        classification["properties"]["thread_key"] = {"type":"string", "enum":["t0"]}
+        classification["required"] = sorted(set(classification["required"]) | {"thread_key", "relation", "rationale"})
+        targets = input_data.get("batch_message_ids") or [input_data["target_message_id"]]
+        pinned = []
+        if len(targets) == 1:
+            shape["properties"]["target_classification"] = classification
+            shape["required"].append("target_classification")
+            pinned.append((classification, targets[0]))
+        else:
+            classifications = {"type":"object", "additionalProperties":False, "required":[], "properties":{}}
+            for i, pk in enumerate(targets):
+                item = copy.deepcopy(classification)
+                if i:
+                    item["properties"]["thread_key"]["enum"] = [f"t{j}" for j in range(16)]
+                classifications["required"].append(f"c{i}")
+                classifications["properties"][f"c{i}"] = item
+                pinned.append((item, pk))
+            shape["properties"]["target_classifications"] = classifications
+            shape["required"].append("target_classifications")
         # Only complete originals actually present in this immutable request
         # can be evidence. Known-thread message IDs are retrieval hints.
         message_ids = {input_data["target_message_id"]}
@@ -130,4 +160,6 @@ def extraction_schema(input_data=None):
                 for item in node.values():
                     bind(item)
         bind(shape)
+        for item, pk in pinned:
+            item["properties"]["raw_message_id"]["enum"] = [pk]
     return shape
