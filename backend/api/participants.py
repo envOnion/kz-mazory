@@ -5,17 +5,21 @@ import hashlib
 import uuid
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+from datetime import timedelta
 
 from django.contrib.auth.hashers import make_password
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.utils import timezone
 
 from .models import (
     Commitment, OutboxEvent, Participant, ParticipantIdentity, RawMessage,
     Team, TeamMembership, UserProfile, WhatsAppConfig,
 )
 from .phone_numbers import normalize_phone
+
+DIRECTORY_VERSION = 2
 
 
 def person_name(value):
@@ -103,6 +107,17 @@ def _merge(target, other):
     return target
 
 
+def sync_user_name(profile):
+    """Contact labels are display names; never infer a surname or overwrite one."""
+    label = person_name(profile.full_name)
+    if not label:
+        return
+    user = User.objects.select_for_update().get(pk=profile.user_id)
+    if not user.first_name.strip() and not user.last_name.strip():
+        user.first_name = label[:User._meta.get_field("first_name").max_length]
+        user.save(update_fields=["first_name"])
+
+
 @transaction.atomic
 def register_sender(config, sender):
     """Serialize per team; unique username also serializes accounts across teams."""
@@ -165,6 +180,8 @@ def register_sender(config, sender):
     elif sender.name and not participant.user_profile_id:
         participant.display_name = sender.name
     participant.save(update_fields=["display_name", "user_profile"])
+    if participant.user_profile_id:
+        sync_user_name(participant.user_profile)
     if sender.name and sender.jid:
         # A transport-backed name remains scoped to that person, even if another
         # group member has the same display name.
@@ -195,6 +212,26 @@ def enqueue_participants(config, actor=None, message_evidence=None):
         "requested_by_id": actor.id if actor else None,
         "message_evidence": message_evidence or [],
     })
+
+
+def schedule_participant_sync():
+    """The ordinary dispatcher owns discovery, including chats with no new text."""
+    cutoff = timezone.now() - timedelta(minutes=15)
+    scheduled = 0
+    configs = WhatsAppConfig.objects.filter(is_active=True, team__is_active=True).exclude(group_jid="")
+    for config_id in configs.values_list("id", flat=True):
+        with transaction.atomic():
+            config = WhatsAppConfig.objects.select_for_update(of=("self",)).filter(pk=config_id, is_active=True, team__is_active=True).first()
+            if not config or not config.group_jid:
+                continue
+            latest = OutboxEvent.objects.filter(event_type="whatsapp_participants", payload__config_id=config.id, payload__team_id=config.team_id, payload__session_name=config.session_name, payload__chat_id=config.group_jid).order_by("-id").first()
+            if latest and (latest.state in ("pending", "enqueued", "processing") or (
+                latest.created_at > cutoff and (latest.state != "done" or config.snapshot.get("participant_directory_version") == DIRECTORY_VERSION)
+            )):
+                continue
+            enqueue_participants(config)
+            scheduled += 1
+    return scheduled
 
 
 def scope_matches(config, payload):

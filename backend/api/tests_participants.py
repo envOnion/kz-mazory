@@ -7,14 +7,15 @@ from unittest.mock import patch
 
 import requests
 from django.contrib.auth.models import User
+from django.core.management import call_command
 from django.db import close_old_connections
 from django.test import SimpleTestCase, TestCase, TransactionTestCase, override_settings, skipUnlessDBFeature
 from django.utils import timezone
 from rest_framework.test import APIClient
 
 from .models import Participant, ParticipantIdentity, RawMessage, Team, TeamMembership, UserProfile, OutboxEvent, WhatsAppConfig
-from .participants import Sender, directory_participants, enqueue_participants, message_sender, phone_from_jid, register_sender
-from .tasks import sync_whatsapp_participants
+from .participants import Sender, directory_participants, enqueue_participants, message_sender, phone_from_jid, register_sender, schedule_participant_sync
+from .tasks import run_outbox, sync_whatsapp_participants
 from .tests_whatsapp_exports import ExportFixtures
 
 
@@ -66,11 +67,45 @@ class ParticipantsTests(TestCase):
         for user in User.objects.all():
             self.assertFalse(user.has_usable_password())
             self.assertFalse(user.is_staff or user.is_superuser)
+            self.assertEqual(user.get_full_name(), user.profile.full_name)
         raw.refresh_from_db()
         self.assertEqual(raw.sender_phone, '79990000004')
         self.assertEqual(raw.sender_name, 'Оператор')
         self.assertEqual(raw.raw_payload, original)
         self.assertEqual(RawMessage.objects.count(), 1)
+
+    def test_dispatcher_automatically_discovers_group_and_refreshes_after_interval(self):
+        # TestCase owns the transaction; daemon cleanup would close it on PostgreSQL.
+        with (
+            patch('api.management.commands.run_outbox.close_old_connections'),
+            patch('api.management.commands.run_outbox.schedule_due_jobs'),
+            patch('api.management.commands.run_outbox.monitor_kpi_risks_and_anomalies_task'),
+            patch('api.tasks.async_task') as queue,
+        ):
+            call_command('run_outbox', once=True)
+        event = OutboxEvent.objects.get(event_type='whatsapp_participants')
+        self.assertIsNone(event.payload['requested_by_id'])
+        queue.assert_called_once_with('api.tasks.run_outbox', event.id, cluster='history')
+        self.assertEqual(schedule_participant_sync(), 0)
+        with patch('api.tasks.waha_request', side_effect=self.provider):
+            run_outbox(event.id)
+        self.assertEqual(User.objects.get(username='79990000005').first_name, 'Вячеслав')
+        self.assertEqual(schedule_participant_sync(), 0)
+        OutboxEvent.objects.filter(pk=event.id).update(created_at=timezone.now() - timedelta(minutes=16))
+        self.assertEqual(schedule_participant_sync(), 1)
+        self.assertEqual(schedule_participant_sync(), 0)
+        self.assertEqual(OutboxEvent.objects.filter(event_type='whatsapp_participants').count(), 2)
+
+    def test_scheduler_respects_disabled_sources_and_recent_failure(self):
+        WhatsAppConfig.objects.create(team=self.team, group_jid='disabled@g.us', is_active=False)
+        WhatsAppConfig.objects.create(team=Team.objects.create(name='Inactive', is_active=False), group_jid='inactive@g.us')
+        WhatsAppConfig.objects.create(team=self.team, group_jid='')
+        event = enqueue_participants(self.config)
+        event.state = 'failed'; event.save(update_fields=['state'])
+        self.assertEqual(schedule_participant_sync(), 0)
+        OutboxEvent.objects.filter(pk=event.id).update(created_at=timezone.now() - timedelta(minutes=16))
+        self.assertEqual(schedule_participant_sync(), 1)
+        self.assertEqual(OutboxEvent.objects.filter(event_type='whatsapp_participants').count(), 2)
 
     def test_repeated_unique_messages_link_txt_aliases_without_rewriting_originals(self):
         start = timezone.now().replace(second=0, microsecond=0)
@@ -148,16 +183,41 @@ class ParticipantsTests(TestCase):
         self.assertTrue(ParticipantIdentity.objects.filter(value='оператор', participant__user_profile__phone='79990000004').exists())
 
     def test_existing_profile_roles_and_inactive_account_are_preserved(self):
-        user = User.objects.create_user('79990000004', password='keep-me', is_active=False)
+        user = User.objects.create_user('79990000004', password='keep-me', is_active=False, first_name='Ручное имя аккаунта', last_name='Ручная фамилия')
         profile = UserProfile.objects.create(user=user, phone=user.username, full_name='Ручное имя', email='keep@example.test')
         membership = TeamMembership.objects.create(user=user, team=self.team, role='finance', status='revoked')
         register_sender(self.config, Sender('219999999999999@lid', user.username, 'Другое имя'))
         user.refresh_from_db(); profile.refresh_from_db(); membership.refresh_from_db()
         self.assertTrue(user.check_password('keep-me'))
         self.assertFalse(user.is_active)
+        self.assertEqual(user.first_name, 'Ручное имя аккаунта')
+        self.assertEqual(user.last_name, 'Ручная фамилия')
         self.assertEqual(profile.full_name, 'Ручное имя')
         self.assertEqual(profile.email, 'keep@example.test')
         self.assertEqual(membership.status, 'revoked')
+
+    def test_name_arriving_after_phone_fills_both_records_without_duplicates(self):
+        person = register_sender(self.config, Sender('219999999999999@lid', '79990000004'))
+        user = person.user_profile.user
+        self.assertEqual(user.first_name, '')
+        register_sender(self.config, Sender('219999999999999@lid', '79990000004', 'Вячеслав Медведев'))
+        user.refresh_from_db()
+        self.assertEqual(user.first_name, 'Вячеслав Медведев')
+        self.assertEqual(user.last_name, '')
+        self.assertEqual(user.profile.full_name, 'Вячеслав Медведев')
+        self.assertEqual(User.objects.count(), 1)
+        self.assertEqual(Participant.objects.count(), 1)
+
+    def test_existing_empty_user_name_uses_profile_label_and_preserves_long_contact_name(self):
+        user = User.objects.create_user('79990000004')
+        label = 'ТОО «Название компании» ' + 'А' * 170
+        UserProfile.objects.create(user=user, phone=user.username, full_name=label)
+        register_sender(self.config, Sender('219999999999999@lid', user.username, 'Подпись WhatsApp'))
+        user.refresh_from_db()
+        self.assertEqual(user.first_name, label[:150])
+        self.assertEqual(user.last_name, '')
+        self.assertEqual(user.profile.full_name, label)
+        user.full_clean()
 
     def test_profile_conflict_does_not_silently_rebind(self):
         user = User.objects.create_user('79990000004')
@@ -211,7 +271,15 @@ class ParticipantsTests(TestCase):
         raw = RawMessage.objects.get(message_id='hook')
         self.assertEqual(raw.sender_phone, '')
         self.assertEqual(raw.raw_payload['payload']['_data']['participant'], '219999999999999@lid')
-        self.assertTrue(OutboxEvent.objects.filter(event_type='whatsapp_participants').exists())
+        event = OutboxEvent.objects.get(event_type='whatsapp_participants')
+        self.assertIsNone(event.payload['requested_by_id'])
+        with patch('api.tasks.waha_request', side_effect=self.provider):
+            run_outbox(event.id)
+        event.refresh_from_db()
+        self.assertEqual(event.state, 'done')
+        user = User.objects.get(username='79990000004')
+        self.assertEqual(user.get_full_name(), 'Оператор')
+        self.assertEqual(user.profile.full_name, 'Оператор')
 
 
 class ExportPeopleTests(ExportFixtures):
@@ -222,6 +290,29 @@ class ExportPeopleTests(ExportFixtures):
         self.assertTrue(Participant.objects.filter(display_name='Только медиа').exists())
         self.assertFalse(User.objects.exclude(pk=self.user.id).exists())
         self.assertFalse(RawMessage.objects.exists())
+
+    def test_txt_import_automatically_creates_account_and_worker_enriches_both_names(self):
+        run = self.upload('01.09.2026, 12:00 - +7 999 000 00 04: <Без медиафайлов>\n')
+        self.import_all(run)
+        user = User.objects.get(username='79990000004')
+        self.assertEqual(user.first_name, '')
+        self.assertEqual(user.profile.phone, user.username)
+        event = OutboxEvent.objects.get(event_type='whatsapp_participants')
+        self.assertIsNone(event.payload['requested_by_id'])
+        def provider(method, path, **kwargs):
+            if '/participants/' in path:
+                return [{'id': '219999999999999@lid', 'pn': '79990000004@c.us'}]
+            if '/sessions/' in path:
+                return {'me': None}
+            return {'id': '219999999999999@lid', 'pushname': 'Имя из WhatsApp'}
+        with patch('api.tasks.waha_request', side_effect=provider):
+            run_outbox(event.id)
+        user.refresh_from_db(); event.refresh_from_db()
+        self.assertEqual(event.state, 'done')
+        self.assertEqual(user.get_full_name(), 'Имя из WhatsApp')
+        self.assertEqual(user.profile.full_name, user.get_full_name())
+        self.assertEqual(User.objects.count(), 2)  # Existing fixture admin and discovered author.
+        self.assertFalse(TeamMembership.objects.filter(user=user).exists())
 
 
 @skipUnlessDBFeature('has_select_for_update')
