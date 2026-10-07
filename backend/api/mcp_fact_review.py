@@ -1,19 +1,15 @@
 """Fact Review MCP Server with Streamable HTTP transport for Agent LLM."""
 
 import json
-from decimal import Decimal
-from django.db import transaction
 from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
-from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from . import access
-from .facts import review, select_crm_match, lock_candidate_source, json_value
-from .models import FactCandidate, Project, AuditEvent, ThreadMessage
+from .facts import review, select_crm_match, json_value, match_candidate, edit_candidate
+from .models import FactCandidate
 from .notifications import notify_on_candidate_approved
-from .security import Conflict
 from .platform_views import candidate_data
 
 
@@ -219,21 +215,23 @@ def create_fact_review_mcp(user):
         crm_match_id: int | None = None,
         crm_match_revision: int | None = None,
         base_version: int | None = None,
+        remove_fields: list[str] | None = None,
     ) -> str:
         """Принять решение по предложению: подтвердить, исправить, отклонить или связать с проектом.
 
         Args:
             candidate_id: Идентификатор кандидата на факт.
-            action: Действие: 'approve' (подтвердить), 'reject' (отклонить), 'match' (связать с проектом), 'match_crm' (выбрать сделку Bitrix).
+            action: approve/reject, edit (сохранить исправления на проверке), unmatch (снять ошибочную связь и отклонить варианты CRM), match/match_crm.
             reason: Обязательное текстовое основание решения.
+            remove_fields: Необязательные значения для удаления при edit/unmatch (например cost_amount при неизвестной себестоимости).
             changes: Словарь исправлений (например: {'amount': '50000000.00', 'deadline_at': '2026-10-15'}).
             project_id: Идентификатор проекта (обязателен при action='match').
             crm_match_id: Идентификатор варианта CRM сделки (обязателен при action='match_crm').
             crm_match_revision: Версия сопоставления CRM сделки (опционально при action='match_crm').
             base_version: Ожидаемая версия записи для защиты от одновременного редактирования.
         """
-        if action not in ("approve", "reject", "match", "match_crm"):
-            return json.dumps({"error": f"Неизвестное действие '{action}'. Допустимо: approve, reject, match, match_crm."})
+        if action not in ("approve", "reject", "edit", "unmatch", "match", "match_crm"):
+            return json.dumps({"error": f"Неизвестное действие '{action}'. Допустимо: approve, reject, edit, unmatch, match, match_crm."})
 
         if not reason or not reason.strip():
             return json.dumps({"error": "Требуется указать основание (reason) для выполняемого действия."})
@@ -259,50 +257,17 @@ def create_fact_review_mcp(user):
             elif action == "match":
                 if not project_id:
                     return json.dumps({"error": "Укажите project_id для связывания факта с проектом."})
-                with transaction.atomic():
-                    lock_candidate_source(candidate)
-                    candidate = (
-                        access.candidates_for(user)
-                        .select_for_update(of=("self",))
-                        .get(pk=candidate.id)
-                    )
-                    access.require_review(user, candidate)
-                    if candidate.status != "pending":
-                        return json.dumps({"error": f"Предложение уже имеет статус '{candidate.status}', изменение невозможно."})
+                ver = base_version if base_version is not None else (candidate.base_project_version or 0)
+                res = match_candidate(candidate_id, user, project_id, ver, reason)
+                return json.dumps({"success": True, "action": "match", "candidate_id": res.id,
+                    "project_id": res.project_id, "message": "Проект сопоставлен; факт ещё не подтверждён."}, ensure_ascii=False)
 
-                    project = get_object_or_404(
-                        access.projects_for(user).select_for_update(of=("self",)),
-                        pk=project_id,
-                        team=candidate.team,
-                    )
-                    exp_version = base_version if base_version is not None else project.version
-                    if exp_version != project.version:
-                        return json.dumps({"error": f"Конфликт версий проекта: ожидалась {exp_version}, актуальная {project.version}."})
-
-                    candidate.project = project
-                    candidate.base_project_version = project.version
-                    candidate.save(update_fields=["project", "base_project_version"])
-
-                    AuditEvent.objects.create(
-                        actor=user,
-                        target_type="FactCandidate",
-                        target_id=candidate.id,
-                        action="match",
-                        before_after={
-                            "project_id": project.id,
-                            "base_version": project.version,
-                            "reason": reason,
-                        },
-                    )
-
-                    return json.dumps({
-                        "success": True,
-                        "action": "match",
-                        "candidate_id": candidate.id,
-                        "project_id": project.id,
-                        "project_name": project.name,
-                        "message": f"Факт #{candidate.id} успешно связан с проектом '{project.name}'.",
-                    }, ensure_ascii=False)
+            elif action in ("edit", "unmatch"):
+                ver = base_version if base_version is not None else (candidate.base_project_version or 0)
+                res = edit_candidate(candidate_id, user, reason, changes, remove_fields, ver, unmatch=action == "unmatch")
+                return json.dumps({"success": True, "action": action, "candidate_id": res.id,
+                    "status": res.status, "project_id": res.project_id,
+                    "message": "Исправления и основание сохранены; факт остаётся на проверке."}, ensure_ascii=False)
 
             else:
                 # approve or reject

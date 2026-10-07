@@ -1,6 +1,7 @@
 """Tests for Fact Review Streamable HTTP MCP Server and Agent LLM Tools."""
 
 import json
+from datetime import timedelta
 from decimal import Decimal
 from django.contrib.auth.models import User
 from django.test import TestCase
@@ -18,6 +19,9 @@ from .models import (
     RawMessage,
     MessageProcessingTrace,
     DialogueThread,
+    ThreadRevision,
+    AuditEvent,
+    OutboxEvent,
     ThreadMessage,
     FactEvidence,
     CandidateCrmMatch,
@@ -377,3 +381,162 @@ class FactReviewMcpServerTests(TestCase):
         )
         self.assertEqual(resp_del.status_code, 200)
         self.assertEqual(resp_del.json()["status"], "revoked")
+
+
+    def _review_tool(self, **arguments):
+        _, token = generate_mcp_token(self.user)
+        response = self._call_mcp("tools/call", {
+            "name": "review_candidate",
+            "arguments": {"candidate_id": self.candidate.id, **arguments},
+        }, headers={"HTTP_AUTHORIZATION": f"Bearer {token}"})
+        self.assertEqual(response.status_code, 200)
+        return json.loads(response.json()["result"]["content"][0]["text"])
+
+    def _project_candidate(self, **changes):
+        self.candidate.fact_type = "project"
+        self.candidate.proposed_changes = {
+            "fact_type": "project", "object_name": self.project.name,
+            "evidence": self.raw_message.content, **changes,
+        }
+        self.candidate.save()
+
+    def test_match_clears_incompatible_crm_selection_then_allows_approval(self):
+        self._project_candidate()
+        self.project.bitrix_id = "old"
+        self.project.save()
+        self.candidate.crm_match_state = "matched"
+        self.candidate.crm_match_revision = 1
+        self.candidate.save()
+        option = CandidateCrmMatch.objects.create(
+            candidate=self.candidate, project=self.project, crm_match_revision=1,
+            bitrix_deal_id="old", selection_state="selected",
+        )
+        correct = Project.objects.create(team=self.team, name="Шугла", bitrix_id="correct", version=3)
+        result = self._review_tool(action="match", project_id=correct.id, base_version=3,
+            reason="Первичный отчёт относится к Шугле, а не другому объекту компании.")
+        self.assertTrue(result["success"])
+        option.refresh_from_db()
+        self.assertEqual(option.selection_state, "dismissed")
+        result = self._review_tool(action="approve", base_version=3,
+            changes={"object_name": "Шугла", "current_action": "Подписаны накладные"}, reason="Объект проверен по переписке.")
+        self.assertTrue(result["success"])
+        correct.refresh_from_db()
+        self.assertEqual(correct.current_action, "Подписаны накладные")
+        self.project.refresh_from_db()
+        self.assertEqual(self.project.current_action, "")
+
+    def test_edit_removes_unknown_cost_without_confirming_project(self):
+        TeamMembership.objects.filter(user=self.user, team=self.team).update(role="finance")
+        self._project_candidate(contract_amount="25000000.00", cost_amount="0.00")
+        result = self._review_tool(action="edit", remove_fields=["cost_amount"], base_version=1,
+            reason="Источник подтверждает договор, но не нулевую себестоимость.")
+        self.assertTrue(result["success"])
+        self.candidate.refresh_from_db()
+        self.assertNotIn("cost_amount", self.candidate.proposed_changes)
+        self.assertEqual(self.candidate.status, "pending")
+        self.assertIn("нулевую себестоимость", self.candidate.review_reason)
+        self.project.refresh_from_db()
+        self.assertFalse(self.project.cost_confirmed)
+        self.assertEqual(self.project.contract_amount, 0)
+        self.assertFalse(OutboxEvent.objects.exists())
+        self.assertTrue(AuditEvent.objects.filter(target_id=self.candidate.id, action="edit", actor=self.user).exists())
+
+    def test_edit_financial_fields_requires_finance_even_when_adding_new_amount(self):
+        self._project_candidate()
+        result = self._review_tool(action="edit", changes={"contract_amount": "25000000.00"},
+            base_version=1, reason="Указана сумма договора.")
+        self.assertIn("error", result)
+        self.candidate.refresh_from_db()
+        self.assertNotIn("contract_amount", self.candidate.proposed_changes)
+
+    def test_edit_rejects_stale_version_and_cannot_delete_evidence(self):
+        result = self._review_tool(action="edit", changes={"responsible_name": "Асет"},
+            base_version=0, reason="Уточнение ответственного.")
+        self.assertIn("error", result)
+        result = self._review_tool(action="edit", remove_fields=["evidence"],
+            base_version=1, reason="Удаление доказательства запрещено.")
+        self.assertIn("error", result)
+        self.candidate.refresh_from_db()
+        self.assertTrue(self.candidate.proposed_changes["evidence"])
+
+    def test_unmatch_dismisses_completed_search_but_keeps_search_errors(self):
+        self._project_candidate()
+        self.candidate.crm_match_state = "matched"
+        self.candidate.crm_match_revision = 1
+        self.candidate.save()
+        option = CandidateCrmMatch.objects.create(candidate=self.candidate,
+            crm_match_revision=1, bitrix_deal_id="wrong", selection_state="selected")
+        result = self._review_tool(action="unmatch", base_version=1,
+            reason="Сделка содержит другой объект, все варианты просмотрены.")
+        self.assertTrue(result["success"])
+        self.candidate.refresh_from_db(); option.refresh_from_db()
+        self.assertIsNone(self.candidate.project_id)
+        self.assertEqual(self.candidate.crm_match_state, "not_found")
+        self.assertEqual(option.selection_state, "dismissed")
+        self.candidate.crm_match_revision = 2
+        self.candidate.crm_match_state = "error"
+        self.candidate.crm_match_error_code = "crm_unavailable"
+        self.candidate.save()
+        result = self._review_tool(action="unmatch", base_version=0, reason="Снята локальная связь.")
+        self.assertTrue(result["success"])
+        self.candidate.refresh_from_db()
+        self.assertEqual(self.candidate.crm_match_state, "error")
+        self.assertEqual(self.candidate.crm_match_error_code, "crm_unavailable")
+
+    def test_two_projects_in_one_report_are_approved_independently(self):
+        self._project_candidate(object_name="БЦ Восток")
+        revision = ThreadRevision.objects.create(thread=self.thread, version=1, state="ready")
+        self.candidate.thread_revision = revision
+        self.candidate.project = None
+        self.candidate.base_project_version = 0
+        self.candidate.crm_match_state = "not_found"
+        self.candidate.save()
+        other = FactCandidate.objects.create(team=self.team, trace=self.trace, source_key="other-project",
+            thread_revision=revision, fact_type="project", crm_match_state="not_found",
+            proposed_changes={"fact_type": "project", "object_name": "БЦ Запад", "evidence": self.raw_message.content,
+                "next_action": "Просчитать другой объект"})
+        result = self._review_tool(action="approve", base_version=0, reason="Подтверждён первый объект.")
+        self.assertTrue(result["success"])
+        other.refresh_from_db(); self.thread.refresh_from_db()
+        self.assertIsNone(other.project_id)
+        self.assertIsNone(self.thread.project_id)
+        self.candidate = other
+        result = self._review_tool(action="approve", base_version=0, reason="Подтверждён отдельный второй объект.")
+        self.assertTrue(result["success"])
+        other.refresh_from_db()
+        self.assertEqual(other.project.name, "БЦ Запад")
+        self.assertEqual(Project.objects.filter(name__in=["БЦ Восток", "БЦ Запад"]).count(), 2)
+
+
+    def test_edit_can_add_accessible_fulfillment_after_original_ai_snapshot(self):
+        self.trace.context_metadata = {"snapshot_max_id": self.raw_message.id}
+        self.trace.save()
+        self.candidate.proposed_changes.update({"promise_message_id": self.raw_message.id,
+            "responsible_name": "Асет", "assignment_kind": "reported_promise"})
+        self.candidate.save()
+        done = RawMessage.objects.create(config=self.config, team=self.team, message_id="reviewed-fulfillment",
+            timestamp=self.raw_message.timestamp + timedelta(minutes=1), content="Оплата выполнена, деньги поступили.")
+        refs = [{"raw_message_id": self.raw_message.id, "quote": self.candidate.proposed_changes["evidence"], "role": "promise"},
+            {"raw_message_id": done.id, "quote": done.content, "role": "fulfillment"}]
+        result = self._review_tool(action="edit", base_version=1, reason="Просмотрено подтверждение после исходного обещания.",
+            changes={"evidence_messages": refs, "fulfillment_message_id": done.id, "commitment_status": "fulfilled"})
+        self.assertTrue(result["success"])
+        result = self._review_tool(action="approve", base_version=1, reason="Выполнение явно подтверждено последующей репликой.")
+        self.assertTrue(result["success"])
+        self.candidate.refresh_from_db()
+        self.assertEqual(self.candidate.proposed_changes["commitment_status"], "fulfilled")
+        self.assertTrue(self.candidate.proposed_changes["fulfilled_at"])
+        self.trace.refresh_from_db()
+        self.assertEqual(self.trace.context_metadata["snapshot_max_id"], self.raw_message.id)
+
+    def test_edit_evidence_rejects_invented_quotes_and_other_chat(self):
+        result = self._review_tool(action="edit", base_version=1, reason="Несуществующая цитата запрещена.",
+            changes={"evidence_messages": [{"raw_message_id": self.raw_message.id,
+                "quote": "Все работы полностью закончены", "role": "fulfillment"}]})
+        self.assertIn("error", result)
+        other = WhatsAppConfig.objects.create(team=self.team, name="Другой чат", group_jid="other@g.us")
+        message = RawMessage.objects.create(config=other, team=self.team, message_id="other-chat", timestamp=timezone.now(), content="Оплата выполнена")
+        result = self._review_tool(action="edit", base_version=1, reason="Другой чат не доказывает обещание исходного чата.",
+            changes={"evidence_messages": [{"raw_message_id": message.id, "quote": message.content, "role": "fulfillment"}]})
+        self.assertIn("error", result)
+        self.assertEqual(self.candidate.evidence.count(), 1)

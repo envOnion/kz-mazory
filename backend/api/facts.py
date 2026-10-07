@@ -5,6 +5,7 @@ from datetime import datetime
 import math
 from zoneinfo import ZoneInfo
 from django.db import IntegrityError, transaction
+from django.shortcuts import get_object_or_404
 from django.db.models import Sum, Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -423,9 +424,7 @@ def select_crm_match(
                 "crm_match_error_code",
             ]
         )
-        if candidate.thread_revision_id and project:
-            from .models import DialogueThread
-            DialogueThread.objects.filter(pk=candidate.thread_revision.thread_id, team_id=candidate.team_id).update(project=project)
+        _link_thread_project(candidate, project)
         AuditEvent.objects.create(
             actor=user,
             target_type="FactCandidate",
@@ -548,6 +547,214 @@ def _materialize_crm_project(candidate, crm_match, data):
     crm_match.project = project
     crm_match.save(update_fields=["project"])
     return project
+
+
+
+def match_candidate(candidate_id, user, project_id, base_version, reason, *, action="match"):
+    """Apply the same scoped, audited project selection from REST and MCP."""
+    if not reason or not reason.strip():
+        raise serializers.ValidationError("Укажите основание сопоставления или новой проверки.")
+    candidate = get_object_or_404(access.candidates_for(user), pk=candidate_id)
+    with transaction.atomic():
+        lock_candidate_source(candidate)
+        candidate = (
+            access.candidates_for(user)
+            .select_for_update(of=("self",))
+            .get(pk=candidate.id)
+        )
+        access.require_review(user, candidate)
+        if candidate.status != "pending":
+            raise Conflict()
+        project = get_object_or_404(
+            access.projects_for(user).select_for_update(of=("self",)),
+            pk=project_id if project_id is not None else candidate.project_id,
+            team=candidate.team,
+        )
+        if base_version != project.version:
+            raise Conflict()
+        current_crm_matches = list(
+            candidate.crm_matches.select_for_update(of=("self",)).filter(
+                crm_match_revision=candidate.crm_match_revision
+            )
+        )
+        list(
+            candidate.crm_matches.select_for_update(of=("self",)).filter(
+                selection_state="selected"
+            )
+        )
+        compatible_crm_match = None
+        if project.bitrix_id:
+            compatible_crm_match = next(
+                (
+                    item
+                    for item in current_crm_matches
+                    if item.bitrix_deal_id == project.bitrix_id
+                ),
+                None,
+            )
+        else:
+            compatible_crm_match = next(
+                (
+                    item
+                    for item in current_crm_matches
+                    if item.selection_state == "selected"
+                    and item.project_id == project.id
+                ),
+                None,
+            )
+        selected_crm_matches = candidate.crm_matches.filter(
+            selection_state="selected"
+        )
+        if compatible_crm_match:
+            selected_crm_matches = selected_crm_matches.exclude(
+                pk=compatible_crm_match.pk
+            )
+        selected_crm_matches.update(selection_state="dismissed")
+        if compatible_crm_match:
+            compatible_crm_match.selection_state = "selected"
+            compatible_crm_match.project = project
+            compatible_crm_match.save(
+                update_fields=["selection_state", "project"]
+            )
+            candidate.crm_match_state = "matched"
+        else:
+            candidate.crm_match_state = (
+                "ambiguous" if current_crm_matches else "not_requested"
+            )
+        candidate.crm_match_error_code = ""
+        candidate.project, candidate.base_project_version = (
+            project,
+            project.version,
+        )
+        candidate.save(
+            update_fields=[
+                "project",
+                "base_project_version",
+                "crm_match_state",
+                "crm_match_error_code",
+            ]
+        )
+        _link_thread_project(candidate, project)
+        AuditEvent.objects.create(
+            actor=user,
+            target_type="FactCandidate",
+            target_id=candidate.id,
+            action=action,
+            before_after={
+                "project_id": project.id,
+                "base_version": project.version,
+                "crm_match_id": (
+                    compatible_crm_match.id if compatible_crm_match else None
+                ),
+                "crm_match_state": candidate.crm_match_state,
+                "reason": reason,
+            },
+        )
+    return candidate
+
+
+def edit_candidate(candidate_id, user, reason, changes, remove_fields, base_version, *, unmatch=False):
+    """Save review work without materializing or confirming a business fact."""
+    if not reason or not reason.strip():
+        raise serializers.ValidationError("Укажите основание исправления.")
+    with transaction.atomic():
+        candidates = access.candidates_for(user)
+        lock_candidate_source(get_object_or_404(candidates, pk=candidate_id))
+        candidate = candidates.select_for_update(of=("self",)).get(pk=candidate_id)
+        access.require_review(user, candidate)
+        if candidate.status != "pending":
+            raise Conflict("Исправлять можно только предложение на проверке.")
+        project = None
+        if candidate.project_id:
+            project = get_object_or_404(
+                access.projects_for(user).select_for_update(of=("self",)),
+                pk=candidate.project_id, team=candidate.team,
+            )
+        if base_version != (project.version if project else 0):
+            raise Conflict()
+        before = {"changes": candidate.proposed_changes, "project_id": candidate.project_id}
+        data = {**candidate.proposed_changes, **(changes or {})}
+        fields = FactSchema().fields
+        removable = {name for name, field in fields.items() if not field.required}
+        removable -= {"fact_type", "evidence", "evidence_messages", "evidence_message_id", "promise_message_id", "commitment_id", "base_commitment_version"}
+        if set(remove_fields or []) - removable:
+            raise serializers.ValidationError("Можно удалить только необязательные значения, сохранив тип и доказательства.")
+        if candidate.fact_type == "project" and {"contract_amount", "cost_amount"} & (set(data) | set(remove_fields or [])):
+            access.require_team_role(user, candidate.team_id, ["finance"])
+        for name in remove_fields or []:
+            data.pop(name, None)
+        schema = FactSchema(data=data)
+        schema.is_valid(raise_exception=True)
+        if schema.validated_data["fact_type"] != candidate.fact_type:
+            raise serializers.ValidationError("Тип факта изменить нельзя.")
+        evidence = None
+        if changes and "evidence_messages" in changes:
+            from .message_context import source_scope
+            from .pipeline import _source_quote
+            raw = candidate.trace.raw_message
+            refs = schema.validated_data["evidence_messages"]
+            ids = {ref["raw_message_id"] for ref in refs}
+            rows = {row.id: row for row in access.messages_for(user).filter(
+                pk__in=source_scope(raw).filter(pk__in=ids).values("pk"),
+            )} if raw else {}
+            if not refs or set(rows) != ids:
+                raise serializers.ValidationError("Доказательства должны быть доступны в исходном чате.")
+            before["evidence"] = list(candidate.evidence.values("raw_message_id", "quote", "field_name"))
+            for ref in refs:
+                ref["quote"] = _source_quote(ref["quote"], rows[ref["raw_message_id"]].content)
+            evidence = refs
+        if unmatch:
+            options = list(candidate.crm_matches.select_for_update(of=("self",)).filter(
+                crm_match_revision=candidate.crm_match_revision,
+            ))
+            candidate.crm_matches.filter(selection_state="selected").update(selection_state="dismissed")
+            candidate.crm_matches.filter(pk__in=[item.pk for item in options]).update(selection_state="dismissed")
+            candidate.project = None
+            candidate.base_project_version = 0
+            if candidate.thread_revision_id:
+                from .models import DialogueThread
+                DialogueThread.objects.filter(pk=candidate.thread_revision.thread_id, team=candidate.team).update(project=None)
+            if options and candidate.crm_match_state in ("matched", "ambiguous"):
+                # A reviewer explicitly dismissed every result of a completed search.
+                candidate.crm_match_state = "not_found"
+                candidate.crm_match_error_code = ""
+        candidate.proposed_changes = json_value(schema.validated_data)
+        candidate.review_reason = reason
+        candidate.save()
+        if evidence is not None:
+            candidate.evidence.all().delete()
+            FactEvidence.objects.bulk_create([FactEvidence(candidate=candidate, raw_message_id=ref["raw_message_id"],
+                quote=ref["quote"], field_name=ref["role"]) for ref in evidence])
+        AuditEvent.objects.create(
+            actor=user, target_type="FactCandidate", target_id=candidate.id,
+            action="unmatch" if unmatch else "edit",
+            before_after={"before": before, "after": {"changes": candidate.proposed_changes, "project_id": candidate.project_id}, "reason": reason},
+        )
+        return candidate
+
+
+def _link_thread_project(candidate, project):
+    """A report containing different objects cannot identify one shared project."""
+    if not candidate.thread_revision_id or not project:
+        return
+    from .models import DialogueThread
+    related = list(FactCandidate.objects.filter(
+        thread_revision__thread_id=candidate.thread_revision.thread_id,
+        team=candidate.team, status__in=("pending", "approved"),
+    ).exclude(pk=candidate.pk))
+    identity = normalize_deal_name(candidate.proposed_changes.get("object_name", ""))
+    compatible = bool(identity) and all(
+        item.project_id == project.id or (
+            item.project_id is None
+            and normalize_deal_name(item.proposed_changes.get("object_name", "")) == identity
+        ) for item in related
+    )
+    DialogueThread.objects.filter(pk=candidate.thread_revision.thread_id, team=candidate.team).update(
+        project=project if compatible else None,
+    )
+    if compatible:
+        ids = [item.id for item in related if item.project_id is None and item.id != candidate.id]
+        FactCandidate.objects.filter(pk__in=ids, status="pending").update(project=project, base_project_version=project.version)
 
 
 def review(candidate_id, user, action, reason="", changes=None, base_version=None):
@@ -834,7 +1041,11 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                 if candidate.thread_revision_id or system:
                     evidence_scope = source_scope(raw) if system else access.messages_for(user)
                     raw = evidence_scope.filter(pk=data.get("promise_message_id"), pk__in=candidate.evidence.values_list("raw_message_id", flat=True)).select_related("config").first()
-                if not raw or not validate_commitment(data, raw, candidate.trace.context_metadata.get("snapshot_max_id", raw.id), _source_quote, threaded=bool(candidate.thread_revision_id), autonomous=True if system else None):
+                snapshot_id = candidate.trace.context_metadata.get("snapshot_max_id", raw.id) if raw else 0
+                if not system:
+                    # New evidence saved by a reviewer must not rewrite the original AI snapshot.
+                    snapshot_id = max(snapshot_id, max(candidate.evidence.values_list("raw_message_id", flat=True), default=0))
+                if not raw or not validate_commitment(data, raw, snapshot_id, _source_quote, threaded=bool(candidate.thread_revision_id), autonomous=True if system else None):
                     raise serializers.ValidationError("Нужны конкретное действие и доказательства обязательства.")
                 evidence_ids = set(candidate.evidence.values_list("raw_message_id", flat=True))
                 if set((source_scope(raw) if system else access.messages_for(user)).filter(pk__in=evidence_ids).values_list("pk", flat=True)) != evidence_ids:
@@ -940,10 +1151,7 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
             projection["project_after"]=row_snapshot(project)
             candidate.materialization_snapshot=projection
             candidate.proposed_changes = json_value(data)
-            if project and candidate.thread_revision_id:
-                from .models import DialogueThread
-                DialogueThread.objects.filter(pk=candidate.thread_revision.thread_id, team_id=candidate.team_id).update(project=project)
-                FactCandidate.objects.filter(thread_revision__thread_id=candidate.thread_revision.thread_id, team_id=candidate.team_id, status="pending", project__isnull=True).exclude(pk=candidate.pk).update(project=project, base_project_version=project.version)
+            _link_thread_project(candidate, project)
         candidate.status = "approved" if action == "approve" else "rejected"
         candidate.reviewed_by, candidate.reviewed_at, candidate.review_reason = (
             user,
