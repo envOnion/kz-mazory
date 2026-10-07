@@ -484,7 +484,7 @@ class FactReviewMcpServerTests(TestCase):
         self.assertEqual(self.candidate.crm_match_error_code, "crm_unavailable")
 
     def test_two_projects_in_one_report_are_approved_independently(self):
-        self._project_candidate(object_name="БЦ Восток")
+        self._project_candidate(object_name="БЦ Восток", company_name=self.company.name)
         revision = ThreadRevision.objects.create(thread=self.thread, version=1, state="ready")
         self.candidate.thread_revision = revision
         self.candidate.project = None
@@ -493,10 +493,12 @@ class FactReviewMcpServerTests(TestCase):
         self.candidate.save()
         other = FactCandidate.objects.create(team=self.team, trace=self.trace, source_key="other-project",
             thread_revision=revision, fact_type="project", crm_match_state="not_found",
-            proposed_changes={"fact_type": "project", "object_name": "БЦ Запад", "evidence": self.raw_message.content,
+            proposed_changes={"fact_type": "project", "object_name": "БЦ Запад", "company_name": "Заказчик Запад", "evidence": self.raw_message.content,
                 "next_action": "Просчитать другой объект"})
         result = self._review_tool(action="approve", base_version=0, reason="Подтверждён первый объект.")
         self.assertTrue(result["success"])
+        self.candidate.refresh_from_db()
+        self.assertEqual(self.candidate.project.company_id, self.company.id)
         other.refresh_from_db(); self.thread.refresh_from_db()
         self.assertIsNone(other.project_id)
         self.assertIsNone(self.thread.project_id)
@@ -505,6 +507,8 @@ class FactReviewMcpServerTests(TestCase):
         self.assertTrue(result["success"])
         other.refresh_from_db()
         self.assertEqual(other.project.name, "БЦ Запад")
+        self.assertEqual(other.project.company.name, "Заказчик Запад")
+        self.assertEqual(other.project.company.team_id, self.team.id)
         self.assertEqual(Project.objects.filter(name__in=["БЦ Восток", "БЦ Запад"]).count(), 2)
 
 
