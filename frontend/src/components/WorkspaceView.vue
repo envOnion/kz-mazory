@@ -25,6 +25,7 @@
     <label>Статус <select class="field" v-model="candidateStatus" @change="candidatePage = 1; load()"><option value="pending">На проверке</option><option value="approved">Принято</option><option value="rejected">Отклонено</option><option value="superseded">Заменено</option></select></label>
     <label class="ml-3">Тип <select class="field" v-model="candidateFactType" @change="candidatePage = 1; load()"><option value="">Все факты</option><option value="project">Проекты — проверить и создать</option><option value="commitment">Обязательства</option><option value="payment">Платежи</option></select></label>
     <section class="panel space-y-2" aria-label="Справочник проектов CRM">
+      <p v-if="directory.crm_connection" class="text-sm">Подключение Bitrix: {{ directory.crm_connection.configured ? 'настроено' : 'не настроено' }} · Поиск сделок: {{ directory.crm_connection.matching_enabled ? 'включён' : 'выключен' }}</p>
       <p v-for="state in directory.crm_catalog || []" :key="state.team_id" :class="state.state === 'error' ? 'text-rose-300' : 'text-slate-300'">
         {{ catalogLabel(state.state) }} · Загружено: {{ state.imported_count }}
         <span v-if="state.last_success_at"> · Последняя загрузка: {{ new Date(state.last_success_at).toLocaleString('ru-RU') }}</span>
@@ -34,6 +35,7 @@
       <p v-if="!directory.projects.length">Доступных проектов пока нет. Справочник загружается из Bitrix CRM; общие обязательства команды можно подтверждать без проекта.</p>
       <p v-else>Проекты из CRM доступны для привязки. Финансовые данные подтверждаются отдельно.</p>
       <button class="btn" :disabled="busy || loading" @click="refreshDirectory">Обновить справочник</button>
+      <button v-for="team in (lead || financeRole ? directory.teams : [])" :key="team.id" class="btn ml-2" :disabled="busy || !directory.crm_connection?.matching_enabled" @click="retryCrm(team.id)">Повторить поиск CRM · {{ team.name }}</button>
     </section>
     <p class="text-sm text-slate-400">Предложений: {{ candidateCount }}. Связанные факты на этой странице собраны по проекту или чату.</p>
     <template v-for="group in candidateGroups" :key="group.key">
@@ -47,7 +49,7 @@
       <p v-if="!item.evidence.length" class="text-amber-300 text-sm">Первоисточник недоступен. Подтверждение невозможно без доступа к нему.</p></section>
       <FactConversation :candidate-id="item.id" />
       <label v-if="item.status === 'pending' && (canReview(item) || canApprove(item) || canSelectCrm(item))" class="block text-sm">Основание / причина<input class="field w-full mt-1" v-model="reasons[item.id]" /></label>
-      <section v-if="item.fact_type === 'project' || item.crm_resolution.state !== 'not_requested'" class="rounded-xl border border-sky-700/60 bg-sky-950/20 p-3 space-y-3" :data-crm-state="item.crm_resolution.state">
+      <section class="rounded-xl border border-sky-700/60 bg-sky-950/20 p-3 space-y-3" :data-crm-state="item.crm_resolution.state">
         <div class="flex flex-wrap items-start justify-between gap-2">
           <div>
             <h3 class="font-semibold text-sky-200">Сопоставление с CRM</h3>
@@ -56,6 +58,8 @@
           <span class="text-xs text-slate-400">Проверка №{{ item.crm_resolution.revision }}<template v-if="item.crm_resolution.checked_at"> · {{ new Date(item.crm_resolution.checked_at).toLocaleString() }}</template></span>
         </div>
         <p v-if="item.crm_resolution.error_code" class="text-sm text-rose-300">{{ crmErrors[item.crm_resolution.error_code] || 'Не удалось проверить сделку. Повторите обработку позже или обратитесь к администратору.' }}</p>
+        <p v-if="item.crm_resolution.not_requested_reason" class="text-sm text-slate-400">{{ item.crm_resolution.not_requested_reason }}</p>
+        <button v-if="item.status === 'pending' && (lead || financeRole) && ['disabled', 'error', 'not_requested'].includes(item.crm_resolution.state)" class="btn" :disabled="busy || !directory.crm_connection?.matching_enabled || Boolean(item.crm_resolution.not_requested_reason)" @click="retryCrm(item.team_id, item.id)">Повторить поиск сделки</button>
         <details v-if="item.crm_resolution.error_code" class="text-xs text-slate-500"><summary>Сведения для администратора</summary>{{ item.crm_resolution.error_code }}</details>
         <fieldset v-if="item.crm_resolution.options.length" class="space-y-2">
           <legend class="text-xs text-slate-400 mb-2">Варианты отсортированы по релевантности; оценка сама по себе не создаёт связь.</legend>
@@ -224,7 +228,7 @@ async function load() {
   } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка загрузки' } finally { loading.value = false }
 }
 function catalogLabel(state: string) { return ({ idle: 'Справочник ещё не загружен', queued: 'Загрузка CRM в очереди', running: 'Загрузка CRM выполняется', succeeded: 'Справочник CRM загружен', error: 'Ошибка загрузки CRM' } as Record<string, string>)[state] || 'Состояние загрузки неизвестно' }
-function catalogError(code: string) { return ({ crm_team_mapping_required: 'Не настроена команда CRM', crm_import_disabled: 'Импорт CRM отключён', crm_not_configured: 'Не настроено подключение к CRM', crm_project_scope_conflict: 'Сделка уже принадлежит другой команде' } as Record<string, string>)[code] || 'Не удалось загрузить данные; повторите загрузку' }
+function catalogError(code: string) { return ({ crm_team_mapping_required: 'Не настроена команда CRM', crm_import_disabled: 'Чтение каталога CRM отключено', crm_not_configured: 'Не настроено подключение к CRM', crm_project_scope_conflict: 'Сделка уже принадлежит другой команде' } as Record<string, string>)[code] || 'Не удалось загрузить данные; повторите загрузку' }
 async function refreshDirectory() {
   const first = await api<Directory>('/directory/')
   const entries = [...first.projects]
@@ -237,8 +241,15 @@ async function refreshDirectory() {
   directory.value = { ...first, projects: entries }
 }
 async function syncCatalog(teamId: number) { await perform(() => post('/directory/crm-sync/', { team_id: teamId }), 'Загрузка CRM поставлена в очередь. Обновите справочник после обработки.') }
+async function retryCrm(teamId: number, candidateId?: number) {
+  let queued = 0, skipped = 0
+  await perform(async () => {
+    const result = await post<{ queued: number; skipped: number }>('/candidates/crm-retry/', { team_id: teamId, ...(candidateId !== undefined ? { candidate_id: candidateId } : {}) })
+    queued = result.queued; skipped = result.skipped
+  }, () => `В очередь поиска CRM добавлено: ${queued}. Пропущено без доступного источника или признаков объекта/компании: ${skipped}. Обновите список после обработки.`)
+}
 async function selectTab(value: string) { tab.value = value; notice.value = ''; await load() }
-async function perform(work: () => Promise<unknown>, message = 'Сохранено') { busy.value = true; error.value = ''; notice.value = ''; try { await work(); notice.value = message; await refreshDirectory(); await load() } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка операции' } finally { busy.value = false } }
+async function perform(work: () => Promise<unknown>, message: string | (() => string) = 'Сохранено') { busy.value = true; error.value = ''; notice.value = ''; try { await work(); notice.value = typeof message === 'function' ? message() : message; await refreshDirectory(); await load() } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка операции' } finally { busy.value = false } }
 async function reviewItem(item: Candidate, action: string) {
   await perform(async () => {
     await post(`/candidates/${item.id}/review/`, { action, base_version: item.base_version, reason: reasons.value[item.id] || '', changes: {} })

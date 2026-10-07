@@ -33,6 +33,7 @@ from .whatsapp_views import WhatsAppStatusView, WhatsAppQrView, WhatsAppRestartV
 from .platform_views import (
     CandidateListView,
     CandidateReviewView,
+    CandidateCrmRetryView,
     CommitmentListView,
     CommitmentActionView,
     FinanceView,
@@ -52,7 +53,7 @@ from .platform_views import (
     LegacyProjectsView,
 )
 from .attachments import AttachmentView, AttachmentDetailView
-from .mcp_views import FactReviewMcpView, McpTokenView
+from .mcp_views import FactReviewMcpView, McpTokenView, McpConnectionView
 
 from .autonomous_reports import AutonomousOverviewView
 
@@ -114,4 +115,6 @@ urlpatterns = [
     path("attachments/<int:pk>/", AttachmentDetailView.as_view()),
     path("mcp/fact-review/", FactReviewMcpView.as_view()),
     path("mcp/tokens/", McpTokenView.as_view()),
+    path("mcp/connection/", McpConnectionView.as_view()),
+    path("candidates/crm-retry/", CandidateCrmRetryView.as_view()),
 ]

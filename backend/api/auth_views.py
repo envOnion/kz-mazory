@@ -154,6 +154,12 @@ class VerifyCodeView(PublicAuthView):
                 user=user, defaults={"full_name": user.first_name, "phone": phone}
             )
             session, access, refresh = create_session(user, request)
+            from .mcp_tokens import McpCredentialError, ensure_portal_token
+            try:
+                ensure_portal_token(user)
+            except McpCredentialError:
+                # Cabinet can display/retry the credential error independently of OTP.
+                pass
         return auth_response(request, session, access, refresh)
 
 

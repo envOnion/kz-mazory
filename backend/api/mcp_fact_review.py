@@ -10,10 +10,11 @@ from mcp.server.transport_security import TransportSecuritySettings
 from rest_framework.exceptions import PermissionDenied, ValidationError
 
 from . import access
-from .facts import review, select_crm_match, lock_candidate_source
+from .facts import review, select_crm_match, lock_candidate_source, json_value
 from .models import FactCandidate, Project, AuditEvent, ThreadMessage
 from .notifications import notify_on_candidate_approved
 from .security import Conflict
+from .platform_views import candidate_data
 
 
 def create_fact_review_mcp(user):
@@ -51,6 +52,7 @@ def create_fact_review_mcp(user):
 
         items = []
         for c in candidates:
+            safe = candidate_data(c, user)
             company_name = None
             if c.project and c.project.company:
                 company_name = c.project.company.name
@@ -64,7 +66,7 @@ def create_fact_review_mcp(user):
                 "project_id": c.project_id,
                 "project_name": c.project.name if c.project else None,
                 "company_name": company_name,
-                "proposed_changes": c.proposed_changes,
+                "proposed_changes": safe["proposed_changes"],
                 "confidence": c.trace.ai_confidence if c.trace else None,
                 "crm_resolution_state": c.crm_match_state,
                 "crm_matches_count": c.crm_matches.count(),
@@ -93,6 +95,7 @@ def create_fact_review_mcp(user):
             access.candidates_for(user).select_related("project__company", "trace"),
             pk=candidate_id,
         )
+        safe = candidate_data(c, user)
 
         evidence_list = [
             {
@@ -100,7 +103,7 @@ def create_fact_review_mcp(user):
                 "role": e.field_name,
                 "raw_message_id": e.raw_message_id,
             }
-            for e in c.evidence.all()
+            for e in c.evidence.all() if access.messages_for(user).filter(pk=e.raw_message_id).exists()
         ]
 
         crm_matches = [
@@ -113,7 +116,7 @@ def create_fact_review_mcp(user):
                 "stage_id": m.stage_id,
                 "selection_state": m.selection_state,
             }
-            for m in c.crm_matches.all()
+            for m in c.crm_matches.filter(crm_match_revision=c.crm_match_revision)
         ]
 
         company_name = None
@@ -131,87 +134,40 @@ def create_fact_review_mcp(user):
             "project_name": c.project.name if c.project else None,
             "project_version": c.project.version if c.project else None,
             "company_name": company_name,
-            "proposed_changes": c.proposed_changes,
+            "proposed_changes": safe["proposed_changes"],
             "evidence": evidence_list,
             "crm_matches": crm_matches,
             "crm_match_state": c.crm_match_state,
             "crm_match_revision": c.crm_match_revision,
             "review_reason": c.review_reason,
+            "uncertainties": c.uncertainties,
+            "crm_resolution": safe["crm_resolution"],
             "created_at": c.created_at.isoformat() if c.created_at else None,
         }
-        return json.dumps(data, ensure_ascii=False, indent=2)
+        return json.dumps(json_value(data), ensure_ascii=False, indent=2)
 
     @mcp.tool()
-    def get_candidate_context(candidate_id: int) -> str:
-        """Получить переписку WhatsApp и контекст диалога вокруг найденного факта.
-
-        Args:
-            candidate_id: Идентификатор кандидата на факт.
+    def get_candidate_context(candidate_id: int, direction: str = "around", anchor: int | None = None, ai_page: int = 1) -> str:
+        """Первоисточник, тема именно этого факта, переписка до/после и сохранённый AI контекст.
+        direction: around/before/after; anchor: ID из предыдущей страницы; ai_page: страница AI снимка.
         """
+        from .candidate_context import ContextInput, candidate_context
         c = get_object_or_404(
-            access.candidates_for(user).select_related("trace__raw_message__config"),
+            access.candidates_for(user).select_related("trace__raw_message__config", "thread_revision__thread"),
             pk=candidate_id,
         )
-
-        trace_data = None
-        source_message = None
-        thread_messages_list = []
-
-        if c.trace:
-            trace_data = {
-                "confidence": c.trace.ai_confidence,
-                "pipeline_action": c.trace.pipeline_action,
-                "thought_trace": c.trace.result_summary or "",
-            }
-            raw = c.trace.raw_message
-            if raw and access.messages_for(user).filter(pk=raw.pk).exists():
-                source_message = {
-                    "id": raw.id,
-                    "sender_phone": raw.sender_phone,
-                    "sender_name": raw.sender_name,
-                    "content": raw.content,
-                    "sent_at": raw.timestamp.isoformat() if raw.timestamp else None,
-                    "chat_name": getattr(raw.config, "chat_name", "") if hasattr(raw, "config") else "",
-                }
-
-                # Find dialogue thread messages
-                tm = ThreadMessage.objects.filter(raw_message=raw).select_related("thread").first()
-                if tm and tm.thread:
-                    msgs = (
-                        ThreadMessage.objects.filter(thread=tm.thread)
-                        .select_related("raw_message")
-                        .order_by("raw_message__timestamp")
-                    )
-                    for m in msgs:
-                        r = m.raw_message
-                        if r and access.messages_for(user).filter(pk=r.pk).exists():
-                            thread_messages_list.append({
-                                "id": r.id,
-                                "sender": r.sender_name or r.sender_phone,
-                                "content": r.content,
-                                "sent_at": r.timestamp.isoformat() if r.timestamp else None,
-                                "thought_state": m.thought_state,
-                                "relation": m.relation,
-                            })
-
-        evidence_quotes = [
-            {
-                "quote": e.quote,
-                "role": e.field_name,
-                "raw_message_id": e.raw_message_id,
-            }
-            for e in c.evidence.all()
-        ]
-
-        result = {
-            "candidate_id": c.id,
-            "fact_type": c.fact_type,
-            "trace": trace_data,
-            "source_message": source_message,
-            "thread_messages": thread_messages_list,
-            "evidence_quotes": evidence_quotes,
-        }
-        return json.dumps(result, ensure_ascii=False, indent=2)
+        schema = ContextInput(data={"direction": direction, "ai_page": ai_page, **({"anchor": anchor} if anchor is not None else {})})
+        schema.is_valid(raise_exception=True)
+        context = candidate_context(c, user, schema.validated_data)
+        visible = access.messages_for(user)
+        evidence = [{"quote": e.quote, "role": e.field_name, "raw_message_id": e.raw_message_id}
+                    for e in c.evidence.all() if visible.filter(pk=e.raw_message_id).exists()]
+        data = {**context, "candidate_id": c.id, "fact_type": c.fact_type,
+                "source_message": context["source"], "thread_messages": context["thread"]["messages"] if context.get("thread") else [],
+                "evidence_quotes": evidence, "uncertainties": c.uncertainties,
+                "trace": {"confidence": c.trace.ai_confidence, "pipeline_action": c.trace.pipeline_action,
+                          "thought_trace": c.trace.result_summary} if context["source"] else None}
+        return json.dumps(json_value(data), ensure_ascii=False, indent=2)
 
     @mcp.tool()
     def list_projects(search: str = "", page: int = 1) -> str:

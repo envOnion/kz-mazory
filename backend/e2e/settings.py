@@ -42,6 +42,9 @@ SECURE_SSL_REDIRECT = AUTH_COOKIE_SECURE = SESSION_COOKIE_SECURE = (
 ) = False
 DEBUG = False
 AI_DAILY_REQUEST_LIMIT = 10000
+# Serial browser scenarios share one fixture user and poll Q2 faster than a person.
+# Production rate limits remain in mazory_backend.settings and API unit tests.
+REST_FRAMEWORK = {**REST_FRAMEWORK, "DEFAULT_THROTTLE_RATES": {"user": "1000/min"}}
 MEDIA_ROOT = E2E_DIR / "media"
 QDRANT_URL = "https://localhost"
 

@@ -92,7 +92,8 @@ def extraction_schema(input_data=None):
     theme = serializer_schema(ThemeSchema())
     # Defaults are useful to old saved responses, but a new generation must
     # explicitly explain its classification rather than omit the reason.
-    theme["required"] = sorted(set(theme["required"]) | {"completion_reason"})
+    theme["required"] = sorted(set(theme["required"]) | {"completion_reason", "thread_id", "summary"})
+    theme["properties"]["summary"]["minLength"] = 1
     theme["properties"]["messages"]["minItems"] = 1
     shape = {"type": "object", "additionalProperties": False, "required": ["threads", "facts"],
             "properties": {"threads": {"type": "array", "minItems": 1, "items": theme},

@@ -221,7 +221,7 @@ def enqueue_crm_match(candidate_id, allowed_states=("not_requested",)):
         )
         if not candidate:
             return None
-        if candidate.fact_type != "project" and not candidate.project_id and not candidate.proposed_changes.get("object_name"):
+        if candidate.fact_type != "project" and not candidate.project_id and not candidate.proposed_changes.get("object_name") and not candidate.proposed_changes.get("company_name"):
             return None
         if candidate.crm_match_state == "queued" and candidate.crm_match_revision:
             key = f"crm_match:{candidate.id}:{candidate.crm_match_revision}"

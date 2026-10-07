@@ -133,6 +133,7 @@ def candidate_data(candidate, user, source_map=None, project_ids=None):
             "checked_at": candidate.crm_checked_at,
             "error_code": candidate.crm_match_error_code,
             "options": crm_options,
+            "not_requested_reason": ("Для поиска CRM не установлены объект или компания. Общие обязательства команды могут не иметь проекта." if candidate.crm_match_state == "not_requested" and not candidate.project_id and not values.get("object_name") and not values.get("company_name") else ""),
         },
     }
 
@@ -594,10 +595,10 @@ def catalog_status(user):
     from .models import CrmCatalogSync, BitrixSettings
     from .crm_catalog import enqueue_catalog
 
-    cfg = BitrixSettings.get_active()
+    cfg = BitrixSettings.objects.first() or BitrixSettings(is_active=False)
     team = Team.objects.filter(pk=settings.BITRIX_TEAM_ID, is_active=True).first()
     allowed = bool(team and (user.is_superuser or team.id in access.team_ids(user)))
-    if allowed and cfg.is_active and cfg.auto_import_deals:
+    if allowed and (cfg.crm_matching_enabled or (cfg.is_active and cfg.auto_import_deals)):
         if not CrmCatalogSync.objects.filter(team=team).exists():
             enqueue_catalog(team.id)
     elif allowed:
@@ -609,6 +610,49 @@ def catalog_status(user):
     if not user.is_superuser:
         states = states.filter(team_id__in=access.team_ids(user))
     return list(states.values("team_id", "state", "imported_count", "last_success_at", "error_code"))
+
+
+def crm_connection_status():
+    from .models import BitrixSettings
+    from .bitrix_config import effective_webhook_url
+    cfg = BitrixSettings.objects.first() or BitrixSettings(is_active=False)
+    return {"matching_enabled": cfg.crm_matching_enabled, "catalog_read_enabled": cfg.crm_matching_enabled or (cfg.is_active and cfg.auto_import_deals), "configured": bool(effective_webhook_url(cfg))}
+
+
+class CrmRetryInput(serializers.Serializer):
+    team_id = serializers.IntegerField(min_value=1)
+    candidate_id = serializers.IntegerField(min_value=1, required=False)
+
+
+class CandidateCrmRetryView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .bitrix_service import BitrixService, crm_match_query
+        from .tasks import enqueue_crm_match
+        schema = CrmRetryInput(data=request.data)
+        schema.is_valid(raise_exception=True)
+        values = schema.validated_data
+        access.require_team_role(request.user, values["team_id"], ["team_lead", "finance"])
+        if not BitrixService.matching_config():
+            raise ValidationError("Сопоставление CRM отключено. Включите его в настройках интеграции.")
+        qs = access.candidates_for(request.user).filter(team_id=values["team_id"], status="pending")
+        if "candidate_id" in values:
+            candidate = get_object_or_404(qs, pk=values["candidate_id"])
+            qs = qs.filter(pk=candidate.id)
+        states = ("disabled", "not_requested", "error")
+        qs = qs.filter(crm_match_state__in=states).select_related("project")
+        visible = access.messages_for(request.user)
+        queued, skipped = 0, 0
+        for candidate in qs.order_by("id")[:500]:
+            query = crm_match_query(candidate)
+            if not visible.filter(pk=candidate.trace.raw_message_id).exists() or not any(query.values()):
+                skipped += 1
+                continue
+            if enqueue_crm_match(candidate.id, allowed_states=states):
+                queued += 1
+        AuditEvent.objects.create(actor=request.user, target_type="Team", target_id=values["team_id"], action="crm_match_retry", before_after={"queued": queued, "skipped": skipped, **values})
+        return Response({"queued": queued, "skipped": skipped}, status=202)
 
 
 class DirectoryView(APIView):
@@ -667,6 +711,7 @@ class DirectoryView(APIView):
             "projects_count": count,
             "projects_next_page": values["project_page"] + 1 if start + 100 < count else None,
             "crm_catalog": catalog_status(request.user),
+            "crm_connection": crm_connection_status(),
             "autonomous_enabled": AISettings.get_active().autonomous_enabled,
             "chats": list(access.configs_for(request.user).values("id", "name", "team_id")),
         })

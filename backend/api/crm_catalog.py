@@ -235,9 +235,9 @@ def sync_page(payload):
         or sync.state == "succeeded"
     ):
         return
-    cfg = BitrixSettings.get_active()
+    cfg = BitrixSettings.objects.first()
     try:
-        if not cfg.is_active or not cfg.auto_import_deals:
+        if not cfg or not (cfg.crm_matching_enabled or (cfg.is_active and cfg.auto_import_deals)):
             raise ProviderUnavailable("crm_import_disabled")
         if sync.team_id != settings.BITRIX_TEAM_ID or not sync.team.is_active:
             raise ProviderUnavailable("crm_team_mapping_required")

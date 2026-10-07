@@ -42,6 +42,7 @@ export interface CrmMatchOption {
   captured_at: string
 }
 export interface CrmResolution {
+  not_requested_reason?: string
   state: CrmMatchState
   revision: number
   checked_at: string | null
@@ -96,6 +97,7 @@ export interface DirectoryProject {
 }
 
 export interface Directory {
+  crm_connection?: { matching_enabled: boolean; catalog_read_enabled: boolean; configured: boolean }
   autonomous_enabled?: boolean
   chats?: { id: number; name: string; team_id: number }[]
   crm_catalog?: CrmCatalogStatus[]

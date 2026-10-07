@@ -405,6 +405,52 @@ class HistoryPacketsTests(TestCase):
         event.refresh_from_db();self.assertEqual(event.payload['claim_generation'],'replacement')
 
 
+    def assert_saved_packet_context(self, size):
+        from .pipeline import _restore_request
+        self.message("Исходный отчёт по объекту Север")
+        event = self.packet(size)
+        sent = []
+        def answer(payload, *args, **kwargs):
+            sent.append(copy.deepcopy(payload))
+            return self.model_result(event), {}, {}
+        with patch("api.message_context.context_runtime", return_value=(gemma_counter(), endpoint())), patch.object(AIService, "analyze_payload", side_effect=answer):
+            run_outbox(event.id)
+        event.refresh_from_db()
+        self.assertEqual(event.state, "done")
+        for item in self.run.analysis_items.select_related("trace"):
+            trace = item.trace
+            self.assertGreater(trace.earlier_messages_count, 0)
+            self.assertEqual(trace.earlier_messages_count, trace.context_metadata["included_messages_count"])
+            self.assertEqual(len(trace.earlier_messages_context), trace.earlier_messages_count)
+            self.assertEqual(_restore_request(trace), sent[0])
+
+    def test_single_target_completion_does_not_erase_context(self):
+        self.assert_saved_packet_context(1)
+
+    def test_each_target_keeps_same_immutable_packet_context(self):
+        self.assert_saved_packet_context(3)
+
+    def test_provider_outage_keeps_previous_fact_and_thread(self):
+        from .pipeline import extract_message
+        from .models import FactCandidate, DialogueThread
+        event = self.packet(1)
+        raw = RawMessage.objects.get(pk=event.payload["raw_id"])
+        raw.content = "Объект Север: поступило 100000 тенге"; raw.save()
+        result = self.model_result(event)
+        result["facts"] = [{"fact_type": "payment", "thread_key": "info", "evidence_message_id": raw.id, "object_name": "Север", "amount": "100000", "currency": "KZT", "evidence": "поступило 100000 тенге", "confidence": 0.99}]
+        with patch("api.message_context.context_runtime", return_value=(gemma_counter(), endpoint())), patch.object(AIService, "analyze_payload", return_value=(result, {}, {})):
+            run_outbox(event.id)
+        candidate = FactCandidate.objects.get()
+        thread = DialogueThread.objects.get()
+        with patch("api.message_context.context_runtime", return_value=(gemma_counter(), endpoint())), patch.object(AIService, "analyze_payload", side_effect=ProviderUnavailable("provider_timeout")):
+            with self.assertRaisesMessage(ProviderUnavailable, "provider_timeout"):
+                extract_message(raw.id, reanalyze=True)
+        candidate.refresh_from_db(); thread.refresh_from_db()
+        self.assertEqual(candidate.status, "pending")
+        self.assertEqual(FactCandidate.objects.count(), 1)
+        self.assertEqual(thread.version, 1)
+        self.assertEqual(raw.traces.order_by("-id").first().error_code, "provider_timeout")
+
 class PostgresClaimTests(TransactionTestCase):
     @skipUnlessDBFeature('has_select_for_update')
     def test_two_dispatchers_keep_global_and_source_limits(self):
