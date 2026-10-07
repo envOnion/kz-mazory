@@ -133,7 +133,7 @@ def candidate_data(candidate, user, source_map=None, project_ids=None):
             "checked_at": candidate.crm_checked_at,
             "error_code": candidate.crm_match_error_code,
             "options": crm_options,
-            "not_requested_reason": ("Для поиска CRM не установлены объект или компания. Общие обязательства команды могут не иметь проекта." if candidate.crm_match_state == "not_requested" and not candidate.project_id and not values.get("object_name") and not values.get("company_name") else ""),
+            "not_requested_reason": ("Для поиска CRM не установлены объект или компания. Общие обязательства команды могут не иметь проекта." if candidate.crm_match_state in ("not_requested", "disabled", "error") and not candidate.project_id and not values.get("object_name") and not values.get("company_name") else ""),
         },
     }
 

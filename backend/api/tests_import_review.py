@@ -141,6 +141,12 @@ class ImportReviewTests(TestCase):
         self.assertEqual(result.data, {"queued": 0, "skipped": 1})
         self.assertEqual(OutboxEvent.objects.count(), 0)
 
+    def test_disabled_candidate_explains_missing_identity_before_retry(self):
+        from .platform_views import candidate_data
+        c = self.candidate(crm_match_state="disabled")
+        c.proposed_changes = {}; c.save()
+        self.assertIn("не установлены объект или компания", candidate_data(c, self.user)["crm_resolution"]["not_requested_reason"])
+
     def test_matching_permission_allows_catalog_without_automatic_import(self):
         from .crm_catalog import enqueue_catalog, sync_page
         from .bitrix_service import CrmReadConfig
