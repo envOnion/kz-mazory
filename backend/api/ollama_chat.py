@@ -36,8 +36,15 @@ def native_request(payload, cfg, *, structured=True):
         },
     }
     if structured:
-        from .extraction_schema import extraction_schema
-        request["format"] = extraction_schema()
+        from .extraction_schema import extraction_schema, resolution_schema
+        try:
+            input_data = json.loads(payload["messages"][-1]["content"])
+        except (KeyError, TypeError, ValueError):
+            raise ProviderUnavailable("provider_invalid_request") from None
+        bound = isinstance(input_data, dict) and "analysis_instructions" in input_data
+        if bound and type(input_data.get("target_message_id")) is not int:
+            raise ProviderUnavailable("provider_invalid_request")
+        request["format"] = resolution_schema(input_data) if bound and input_data.get("analysis_operation") == "commitment_resolution" else extraction_schema(input_data if bound else None)
     return request
 
 

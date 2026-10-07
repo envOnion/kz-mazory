@@ -5,7 +5,7 @@ from django.db import transaction
 from django.utils import timezone
 from .models import AISettings, HistoryAnalysisItem, OutboxEvent, RawMessage
 from .processing_attempts import reserve_attempt
-from .dialogue_threads import source_key
+from .dialogue_threads import source_key, analysis_position
 
 POLICY = "history-packets-v1"
 ACTIVE = ("queued", "processing", "retry_wait")
@@ -39,7 +39,7 @@ def schedule(run):
             traces[item.raw_message_id] = trace.id
         event, _ = OutboxEvent.objects.get_or_create(deduplication_key=operation, defaults={
             "event_type": "extract_message", "analysis_source_key": source_key(raw),
-            "analysis_position": raw.id, "payload": {
+            "analysis_position": analysis_position(raw), "payload": {
                 "raw_id": raw.id, "trace_id": traces[raw.id],
                 "trace_ids": [{"raw_id":pk,"trace_id":trace_id} for pk,trace_id in traces.items()], "batch_ids": [x.raw_message_id for x in packet],
                 "history_run_id": run.id, "analysis_policy": POLICY,
@@ -87,7 +87,8 @@ def counts(run):
     events = OutboxEvent.objects.filter(historyanalysisitem__run=run).distinct()
     waiting = events.filter(state="pending", attempt_count__gt=0).order_by("next_attempt_at").first()
     result["next_attempt_at"] = waiting.next_attempt_at.isoformat() if waiting else None
-    result["last_error"] = waiting.error_code if waiting else ""
+    last_failed = events.filter(state__in=("failed", "unknown")).exclude(error_code="").order_by("-id").first()
+    result["last_error"] = waiting.error_code if waiting else last_failed.error_code if last_failed else ""
     from .models import FactCandidate, ProviderUsage
     candidates = FactCandidate.objects.filter(trace_id__in=run.analysis_items.values("trace_id"))
     result["candidates"] = candidates.count()
@@ -106,7 +107,8 @@ def counts(run):
 def summary(value):
     if "no_text" not in value:
         return f"Обработано {value['processed']} / {value['total']}; ошибок: {value['errors']}"
-    return (f"Проанализировано: {value['processed']} / {value['total'] - value['no_text']} · "
+    accounted = value["processed"] + value["no_text"] + value["errors"] + value["cancelled"] + value["pending"]
+    return (f"Учтено: {accounted} / {value['total']} · Отменено: {value['cancelled']} · Проанализировано: {value['processed']} / {value['total'] - value['no_text']} · "
             f"Без текста: {value['no_text']} · С фактами: {value['facts']} · Без фактов: {value['no_facts']} · "
             f"Недостаточно данных: {value['insufficient_data']} · В работе: {value['processing']} · "
             f"В очереди: {value['queued']} · Повторы: {value['retry_wait']} · Ошибки: {value['errors']} · "
@@ -136,7 +138,7 @@ def split(event):
                    "repair_generation": event.payload.get("repair_generation", 0) + 1}
         child, _ = OutboxEvent.objects.get_or_create(deduplication_key=operation, defaults={
             "event_type": "extract_message", "payload": payload,
-            "analysis_source_key": event.analysis_source_key, "analysis_position": raw.id,
+            "analysis_source_key": event.analysis_source_key, "analysis_position": analysis_position(raw),
         })
         for item in group:
             item.outbox_event = child; item.trace_id = traces[item.raw_message_id]

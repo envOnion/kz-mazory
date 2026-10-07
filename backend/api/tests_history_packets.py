@@ -46,6 +46,57 @@ class HistoryPacketsTests(TestCase):
         value=counts(self.run)
         self.assertEqual((value['no_text'],value['processed'],value['pending']),(1,0,10))
 
+    def test_terminal_summary_accounts_for_non_text_and_errors(self):
+        from .history_analysis import summary
+        event=self.packet(2)
+        self.run.messages.add(self.message(""));schedule(self.run)
+        self.run.analysis_items.filter(outbox_event=event).update(state="failed",reason_code="thread_sources_unavailable")
+        value=counts(self.run)
+        self.assertEqual(value['processed']+value['errors']+value['no_text']+value['pending']+value['cancelled'],value['total'])
+        self.assertIn('Учтено: 3 / 3',summary(value))
+        self.assertIn('Без текста: 1',summary(value))
+
+    def test_wire_schema_binds_only_visible_complete_originals(self):
+        from .extraction_schema import extraction_schema
+        shape=extraction_schema({'target_message_id':42,'context':[{'raw_message_id':11},{'raw_message_id':12,'partial':True}],
+                                 'target_messages':[{'raw_message_id':43}],
+                                 'known_threads':[{'id':7,'message_ids':[999], 'commitments':[{'id':19}]}]})
+        theme=shape['properties']['threads']['items']['properties']
+        self.assertEqual(theme['messages']['items']['properties']['raw_message_id']['enum'],[11,42,43])
+        self.assertEqual(theme['thread_id']['anyOf'][0]['enum'],[7])
+        commitment=next(v for v in shape['properties']['facts']['items']['oneOf'] if v['properties']['fact_type']['enum']==['commitment'])
+        self.assertEqual(commitment['properties']['promise_message_id']['enum'],[11,42,43])
+        self.assertEqual(commitment['properties']['commitment_id']['enum'],[19])
+        empty=extraction_schema({'target_message_id':42})
+        self.assertEqual(empty['properties']['threads']['items']['properties']['thread_id'],{'type':'null'})
+        commitment=empty['properties']['facts']['items']['oneOf'][-1]
+        self.assertNotIn('commitment_id',commitment['properties'])
+
+    def test_missing_anchor_has_distinct_numeric_diagnostics(self):
+        from .dialogue_threads import prepare_themes
+        event=self.packet(2)
+        item=self.run.analysis_items.get(raw_message_id=event.payload['raw_id'])
+        other=next(pk for pk in event.payload['batch_ids'] if pk!=item.raw_message_id)
+        item.trace.earlier_messages_context=[{'raw_message_id':other}]
+        item.trace.context_metadata['snapshot_max_id']=other
+        result=self.model_result(event);result['threads'][0]['messages']=[{'raw_message_id':other,'thought_state':'final'}]
+        with self.assertRaises(ProviderUnavailable) as exc:
+            prepare_themes(result,item.raw_message,item.trace)
+        self.assertEqual(str(exc.exception),'batch_classification_missing')
+        self.assertEqual(exc.exception.diagnostics['missing_target_count'],1)
+        self.assertEqual(exc.exception.diagnostics['unoffered_reference_count'],0)
+
+    def test_thread_conflict_keeps_fresh_attempt_owned_by_history_run(self):
+        event=self.packet(1)
+        with patch('api.message_context.context_runtime',return_value=(gemma_counter(),endpoint())),patch.object(AIService,'analyze_payload',return_value=(self.model_result(event),{},{})),patch('api.dialogue_threads.persist_themes',side_effect=ProviderUnavailable('thread_revision_conflict')):
+            run_outbox(event.id)
+        event.refresh_from_db()
+        self.assertEqual(event.state,'pending')
+        self.assertTrue(event.payload['schema_repaired'])
+        self.assertEqual(event.payload['history_run_id'],self.run.id)
+        self.assertEqual(self.run.analysis_items.get().trace_id,event.payload['trace_id'])
+        self.assertFalse(OutboxEvent.objects.filter(deduplication_key__startswith='thread-conflict:').exists())
+
     def test_dispatch_does_not_enqueue_blocked_source_or_starve_other_source(self):
         self.packet(10)
         other_source=WhatsAppConfig.objects.create(team=self.source.team,group_jid="other@g.us")
@@ -63,6 +114,25 @@ class HistoryPacketsTests(TestCase):
         with patch("api.tasks.async_task") as send:
             self.assertEqual(dispatch_outbox(),1)
         self.assertNotEqual(send.call_args.args[1],first.id)
+
+    def test_split_children_finish_earlier_position_before_later_packets(self):
+        first=self.packet(10)
+        self.assertTrue(split(first))
+        child=OutboxEvent.objects.filter(deduplication_key=first.deduplication_key+':split:0').get()
+        with patch('api.tasks.async_task') as send:
+            self.assertEqual(dispatch_outbox(),1)
+        self.assertEqual(send.call_args.args[1],child.id)
+
+    def test_dispatch_order_follows_source_dates_when_import_ids_are_reversed(self):
+        self.run.settings_snapshot['analysis_target_message_limit']=2;self.run.save()
+        raws=[self.message(f'Сообщение {i}') for i in range(3)]
+        for i,raw in enumerate(raws):
+            raw.timestamp=timezone.now()-timedelta(days=i);raw.save()
+        self.run.messages.add(*raws);schedule(self.run)
+        with patch('api.tasks.async_task') as send:
+            self.assertEqual(dispatch_outbox(),1)
+        event=OutboxEvent.objects.get(pk=send.call_args.args[1])
+        self.assertEqual(event.payload['batch_ids'],[raws[2].id,raws[1].id])
 
     def test_packet_marks_each_target_only_after_validated_classification(self):
         event=self.packet()
@@ -90,6 +160,103 @@ class HistoryPacketsTests(TestCase):
         self.assertEqual(len(children),2)
         self.assertEqual(set(sum([child.payload['batch_ids'] for child in children],[])),set(event.payload['batch_ids']))
         self.assertEqual(self.run.analysis_items.exclude(state="queued").count(),0)
+
+    def test_unproven_ready_packet_is_split_without_accepting_results(self):
+        event=self.packet(4)
+        result=self.model_result(event)
+        result['threads'][0]['completion_reason']=''
+        with patch("api.message_context.context_runtime",return_value=(gemma_counter(),endpoint())),patch.object(AIService,"analyze_payload",return_value=(result,{},{})):
+            run_outbox(event.id)
+        event.refresh_from_db()
+        self.assertEqual(event.error_code,'thread_completion_unproven')
+        self.assertEqual(counts(self.run)['processed'],0)
+        self.assertEqual(self.run.analysis_items.filter(state='queued').count(),4)
+        self.assertEqual(OutboxEvent.objects.filter(event_type='extract_message',state='pending').count(),2)
+
+    def test_terminal_error_is_visible_without_a_waiting_retry(self):
+        event=self.packet(1)
+        event.state='failed';event.error_code='thread_completion_unproven';event.save()
+        from .history_analysis import synchronize
+        synchronize(event)
+        value=counts(self.run)
+        self.assertEqual(value['errors'],1)
+        self.assertEqual(value['last_error'],'thread_completion_unproven')
+        self.assertIsNone(value['next_attempt_at'])
+
+    def test_new_wire_schema_and_prompt_require_classification_explanations(self):
+        from .context_tokens import extraction_payload
+        from .ollama_chat import native_request
+        cfg=gemma_config();cfg.analysis_policy=POLICY
+        value=extraction_payload(cfg,endpoint(),'Привет','Автор',[],[],None,'UTC',target_message_id=3,batch_message_ids=[3,4])
+        import json
+        body=json.loads(value['messages'][-1]['content'])
+        self.assertIn('КАЖДЫЙ',body['analysis_instructions'])
+        self.assertGreater(value['messages'][-1]['content'].index('"batch_message_ids"'),value['messages'][-1]['content'].index('"context"'))
+        theme=native_request(value,cfg)['format']['properties']['threads']['items']
+        self.assertIn('completion_reason',theme['required'])
+        self.assertEqual(theme['properties']['messages']['minItems'],1)
+
+    def test_payment_wire_schema_cannot_omit_known_amount(self):
+        from .extraction_schema import extraction_schema
+        variants=extraction_schema()['properties']['facts']['items']['oneOf']
+        payment=[v for v in variants if v['properties']['fact_type']['enum']==['payment']]
+        self.assertEqual(len(payment),2)
+        known=next(v for v in payment if 'exact' in v['properties']['amount_precision']['enum'])
+        unknown=next(v for v in payment if v['properties']['amount_precision']['enum']==['unknown'])
+        self.assertIn('amount',known['required'])
+        self.assertEqual(known['properties']['amount']['type'],'number')
+        self.assertNotIn('amount',unknown['required'])
+        promise=next(v for v in variants if v['properties']['fact_type']['enum']==['commitment'])
+        self.assertTrue({'commitment_text','promise_message_id','evidence_messages'}.issubset(promise['required']))
+
+    def test_large_output_splits_a_single_report_before_repeating_whole_text(self):
+        event=self.packet(1)
+        raw=RawMessage.objects.get(pk=event.payload['raw_id'])
+        raw.content='Объект Альфа: поступило 100000 тенге.\n'*300;raw.save()
+        event.state='processing';event.attempt_count=1;event.save()
+        handle_failure(event,ProviderUnavailable('provider_output_truncated'))
+        event.refresh_from_db()
+        ranges=event.payload['segment_ranges']
+        self.assertGreater(len(ranges),1)
+        self.assertEqual(ranges[0][0],0)
+        self.assertEqual(ranges[-1][1],len(raw.content))
+        self.assertEqual(self.run.analysis_items.get().state,'queued')
+
+    def test_oversized_optional_report_does_not_displace_complete_sources(self):
+        from .message_context import build_context
+        target=self.message('Привет')
+        report=self.message('Длинный отчёт по всем объектам. '*10000)
+        reply=self.message('Добрый день')
+        cfg=gemma_config();cfg.analysis_policy=POLICY
+        with patch('api.message_context.context_runtime',return_value=(gemma_counter(),endpoint())):
+            context,metadata,value=build_context(target,cfg,[],reply.id,include_following=True,batch_ids=[target.id])
+        self.assertNotIn(report.id,[item['raw_message_id'] for item in context])
+        self.assertIn(reply.id,[item['raw_message_id'] for item in context])
+        self.assertFalse(any(item['partial'] for item in context))
+        self.assertLessEqual(metadata['input_tokens_preflight'],cfg.analysis_input_token_limit)
+
+    def test_targets_are_explicit_and_saved_request_restores_without_duplicates(self):
+        from .pipeline import _restore_request
+        event=self.packet(3)
+        with patch('api.message_context.context_runtime',return_value=(gemma_counter(),endpoint())),patch.object(AIService,'analyze_payload',return_value=(self.model_result(event),{},{})):
+            run_outbox(event.id)
+        trace=self.run.analysis_items.order_by('raw_message_id').first().trace
+        value=_restore_request(trace)
+        import json
+        body=json.loads(value['messages'][-1]['content'])
+        ids={row['raw_message_id'] for row in body['target_messages']}
+        self.assertEqual(ids,set(event.payload['batch_ids'])-{body['target_message_id']})
+        self.assertFalse(ids & {row['raw_message_id'] for row in body['context']})
+        self.assertEqual(gemma_counter().count_payload(value),trace.context_metadata['input_tokens_preflight'])
+
+    def test_deployment_probe_rejects_semantically_invalid_schema_response(self):
+        from .tasks import verify_history_packets
+        def response(value, **kwargs):
+            result={'threads':[{'key':'info','topic':'Проверка','state':'ready','messages':[{'raw_message_id':1,'thought_state':'intermediate'}]}],'facts':[]}
+            return result,{'prompt_tokens':gemma_counter().count_payload(value)},{}
+        with patch('api.context_tokens.context_runtime',return_value=(gemma_counter(),endpoint())),patch.object(AIService,'analyze_payload',side_effect=response):
+            with self.assertRaisesMessage(ProviderUnavailable,'analysis_probe_classification_invalid'):
+                verify_history_packets()
 
     def test_payment_is_attributed_to_its_own_target_trace(self):
         first=self.message('Привет')
@@ -186,7 +353,7 @@ class PostgresClaimTests(TransactionTestCase):
         from concurrent.futures import ThreadPoolExecutor
         from threading import Barrier
         from django.db import close_old_connections
-        cfg=gemma_config(is_active=True);cfg.save()
+        cfg=gemma_config(is_active=True,autonomous_max_in_flight=8);cfg.save()
         team=Team.objects.create(name='Concurrency')
         for index in range(3):
             source=WhatsAppConfig.objects.create(team=team,group_jid=f'{index}@g.us')

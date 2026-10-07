@@ -724,8 +724,10 @@ def process_step(payload, waha):
                 run.status_message = summary(counts)
                 enqueue_step(run, settings["poll_seconds"])
             else:
+                from .history_analysis import summary
                 finish(
                     run,
                     "completed_with_errors" if counts["errors"] or counts.get("insufficient_data") else "completed",
-                    f"Сообщений: {counts['total']}. Обработано: {counts['processed']}. Ошибок: {counts['errors']}. Извлечённые факты доступны для проверки.",
+                    ("Проход завершён с ошибками. " if counts["errors"] else "Проход завершён; есть сообщения, требующие уточнения. " if counts.get("insufficient_data") else "Проход завершён успешно. ")
+                    + summary(counts),
                 )

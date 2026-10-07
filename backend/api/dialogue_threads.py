@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+from datetime import datetime, timezone as datetime_timezone
 from django.db.models import Q
 from rest_framework import serializers
 from .models import (
@@ -52,6 +53,13 @@ def source_key(raw):
             ]
         ).encode()
     ).hexdigest()
+
+
+def analysis_position(raw):
+    """Import IDs may run backwards; source order follows the original date."""
+    at = raw.timestamp if raw.sent_at_known else raw.received_at
+    delta = at.astimezone(datetime_timezone.utc) - datetime(1970, 1, 1, tzinfo=datetime_timezone.utc)
+    return max(0, delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds)
 
 
 def context_threads(raw):
@@ -165,10 +173,13 @@ def prepare_themes(result, raw, trace):
         .exclude(processing_state__in=["deleted", "superseded"])
         .values_list("id", flat=True)
     )
-    if not ids.issubset(allowed) or ids != valid_ids or raw.id not in ids:
-        raise ProviderUnavailable("thread_sources_unavailable")
-    if not set(trace.context_metadata.get("batch_message_ids", [])).issubset(ids):
-        raise ProviderUnavailable("batch_classification_missing")
+    diagnostics = {"reference_count":len(ids), "unoffered_reference_count":len(ids - allowed),
+                   "unavailable_reference_count":len(ids - valid_ids),
+                   "missing_target_count":len(({raw.id} | set(trace.context_metadata.get("batch_message_ids", []))) - ids)}
+    if not ids.issubset(allowed) or ids != valid_ids:
+        raise ProviderUnavailable("thread_sources_unavailable", diagnostics=diagnostics)
+    if diagnostics["missing_target_count"]:
+        raise ProviderUnavailable("batch_classification_missing", diagnostics=diagnostics)
     offered = {item["id"] for item in trace.context_metadata.get("known_threads", [])}
     for theme in themes:
         if theme["thread_id"] is not None and theme["thread_id"] not in offered:

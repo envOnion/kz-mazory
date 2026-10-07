@@ -112,7 +112,8 @@ def _restore_request(trace):
         fixed = json.loads(user_message["content"])
         if not isinstance(fixed, dict):
             raise TypeError()
-        fixed["context"] = trace.earlier_messages_context
+        target_ids = {row["raw_message_id"] for row in fixed.get("target_messages", [])}
+        fixed["context"] = [row for row in trace.earlier_messages_context if row["raw_message_id"] not in target_ids]
         serialize = (
             extraction_input
             if trace.context_metadata.get("input_serialization") == "target-last-v1"
@@ -285,6 +286,17 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         from .commitment_resolution import resolve_remaining
         resolved = resolve_remaining(facts, raw, cfg, trace)
         facts = _facts({"facts": json_value(resolved)}, raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True)
+        if packet:
+            # Only add closing sources after their quote, source and chronology
+            # have passed the same commitment validation as the main request.
+            for fact in facts:
+                if fact["fact_type"] == "commitment" and fact["commitment_status"] == "fulfilled":
+                    theme = themes[fact["thread_key"]]
+                    linked = {row["raw_message_id"] for row in theme["messages"]}
+                    for ref in fact["evidence_messages"]:
+                        if ref["role"] == "fulfillment" and ref["raw_message_id"] not in linked:
+                            theme["messages"].append({"raw_message_id":ref["raw_message_id"], "thought_state":"final", "relation":"fulfills", "rationale":"Проверенное подтверждение выполнения обязательства."})
+                            linked.add(ref["raw_message_id"])
         trace.context_metadata["timings_ms"]["validate"] = round((time.monotonic()-validation_started)*1000)
         persistence_started = time.monotonic()
         with transaction.atomic():
@@ -468,7 +480,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         PermissionDenied,
         User.DoesNotExist,
     ) as exc:
-        if isinstance(exc, ProviderUnavailable) and str(exc) == "thread_revision_conflict":
+        if isinstance(exc, ProviderUnavailable) and str(exc) == "thread_revision_conflict" and not trace.historyanalysisitem_set.exists():
             # Never reuse an immutable request containing obsolete thread versions.
             # Reserve a fresh snapshot and let the durable queue retry the analysis.
             with transaction.atomic():

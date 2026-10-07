@@ -8,7 +8,7 @@ from .processing_attempts import reserve_attempt
 from .providers import ProviderUnavailable
 
 
-def prepare_segments(event):
+def prepare_segments(event, *, output_overflow=False):
     if event.payload.get("segment_ranges"):
         return False
     from .context_tokens import gemma_counter
@@ -21,6 +21,11 @@ def prepare_segments(event):
     original = raw.traces.get(pk=event.payload["trace_id"])
     limit = max(512, original.context_metadata.get("analysis_limits", {}).get("analysis_input_token_limit", 16384) - 6000)
     counter = gemma_counter()
+    if output_overflow:
+        original_tokens = counter.count_text(json.dumps(raw.content, ensure_ascii=False))
+        if original_tokens < 512:
+            return False
+        limit = min(limit, max(256, original_tokens // 2))
     ranges, start = [], 0
     while start < len(raw.content) and len(ranges) < 16:
         low, high = start + 1, len(raw.content)

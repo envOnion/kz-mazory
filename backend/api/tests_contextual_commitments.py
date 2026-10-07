@@ -28,6 +28,50 @@ ZONE = dt_timezone(timedelta(hours=6))
 
 
 class ContextualCommitmentTests(TestCase):
+    def test_bounded_status_checks_have_two_call_cap_and_reuse_validated_results(self):
+        import copy
+        import json
+        later=[self.message('Список объектов: '+('описание объекта '*100)) for _ in range(8)]
+        self.message('Большой отчёт '+('таблица '*10000))
+        trace=MessageProcessingTrace.objects.create(raw_message=self.promise,earlier_messages_context=[{'raw_message_id':self.request.id}],context_metadata={
+            'analysis_policy':'history-packets-v1','snapshot_max_id':RawMessage.objects.latest('id').id,
+            'history_complete_in_request':False,'analysis_time':timezone.now().isoformat(),
+            'effective_provider_url':'https://provider.test/v1','api_format':'openai_compatible'})
+        class Counter:
+            def count_payload(self,value):
+                return len(json.dumps(value,ensure_ascii=False))//4
+        cfg=AISettings(chat_model_name='test',context_window_tokens=4096,max_completion_tokens=512,context_safety_tokens=128,analysis_input_token_limit=2048)
+        cfg.analysis_policy='history-packets-v1'
+        returned={'facts':[{'draft_index':0,'promise_message_id':self.promise.id,'commitment_status':'pending','evidence_messages':[]}]}
+        with patch('api.commitment_resolution.context_runtime',return_value=(Counter(),{'tag':'test','api_format':'openai_compatible'})),patch('api.commitment_resolution.AIService.analyze_payload',return_value=(returned,{},{})) as provider:
+            facts=resolve_remaining([dict(copy.deepcopy(self.validated()),promise_message_id=self.promise.id,evidence_message_id=self.promise.id)],self.promise,cfg,trace)
+            self.assertEqual(provider.call_count,2)
+            self.assertTrue(facts[0]['uncertainties'])
+            self.assertGreater(trace.context_metadata['commitment_resolution_coverage']['skipped'],0)
+            self.assertTrue(all(Counter().count_payload(call.args[0])<=2048 for call in provider.call_args_list))
+            self.assertTrue(all(not row.get('partial') for call in provider.call_args_list for row in json.loads(call.args[0]['messages'][-1]['content'])['context']))
+            resolve_remaining([dict(copy.deepcopy(self.validated()),promise_message_id=self.promise.id,evidence_message_id=self.promise.id)],self.promise,cfg,trace)
+            self.assertEqual(provider.call_count,2)
+
+    def test_bounded_status_check_only_updates_verified_fulfillment(self):
+        import json
+        trace=MessageProcessingTrace.objects.create(raw_message=self.promise,earlier_messages_context=[{'raw_message_id':self.request.id}],context_metadata={
+            'analysis_policy':'history-packets-v1','snapshot_max_id':self.done.id,'history_complete_in_request':False,
+            'analysis_time':timezone.now().isoformat(),'effective_provider_url':'https://provider.test/v1','api_format':'openai_compatible'})
+        class Counter:
+            def count_payload(self,value):
+                return len(json.dumps(value,ensure_ascii=False))//4
+        cfg=AISettings(chat_model_name='test',context_window_tokens=8192,max_completion_tokens=512,context_safety_tokens=128,analysis_input_token_limit=4096)
+        cfg.analysis_policy='history-packets-v1'
+        facts=[dict(self.validated(),promise_message_id=self.promise.id,evidence_message_id=self.promise.id)]; original=facts[0]['commitment_text']
+        result={'facts':[{'draft_index':0,'promise_message_id':self.promise.id,'commitment_status':'fulfilled','evidence_messages':[{'raw_message_id':self.done.id,'quote':'Отправил список объектов за 2026 год из таблицы'}]}]}
+        with patch('api.commitment_resolution.context_runtime',return_value=(Counter(),{'tag':'test','api_format':'openai_compatible'})),patch('api.commitment_resolution.AIService.analyze_payload',return_value=(result,{},{})):
+            resolve_remaining(facts,self.promise,cfg,trace)
+        checked=_facts({'facts':json_value(facts)},self.promise,snapshot_id=self.done.id,threaded=True)
+        self.assertEqual(checked[0]['commitment_status'],'fulfilled')
+        self.assertEqual(checked[0]['fulfillment_message_id'],self.done.id)
+        self.assertEqual(checked[0]['commitment_text'],original)
+
     def setUp(self):
         self.team = Team.objects.create(name="Команда")
         self.config = WhatsAppConfig.objects.create(

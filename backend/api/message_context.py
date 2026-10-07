@@ -254,6 +254,7 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
             "received_at": row["received_at"].isoformat(),
             "partial": False,
         }
+        previous_estimate = estimated
         nearest.append(item)
         estimated += counter.count_text(canonical_json(item)) + 4
         if estimated > max_input:
@@ -265,12 +266,28 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
                 if counter.remote:
                     preflight_probes += 1
                 if actual > max_input:
-                    nearest = fit_boundary(nearest)
-                    full = True
+                    if bounded:
+                        # A clipped report is not evidence and should not consume
+                        # the whole budget for an unrelated short target. Keep
+                        # complete originals, then try the next relevant source.
+                        nearest.pop()
+                        estimated = previous_estimate
+                        if item["raw_message_id"] in requested_batch:
+                            raise ProviderUnavailable("context_batch_too_large")
+                    else:
+                        nearest = fit_boundary(nearest)
+                        full = True
                 else:
                     estimated = actual
     if counter.count_payload(payload(nearest)) > max_input:
-        nearest = fit_boundary(nearest)
+        if bounded:
+            while counter.count_payload(payload(nearest)) > max_input:
+                optional = [index for index, item in enumerate(nearest) if item["raw_message_id"] not in requested_batch]
+                if not optional:
+                    raise ProviderUnavailable("context_batch_too_large")
+                nearest.pop(optional[-1])
+        else:
+            nearest = fit_boundary(nearest)
     if requested_batch:
         included_ids = {raw.id} | {item["raw_message_id"] for item in nearest if not item["partial"]}
         if bounded and not set(requested_batch).issubset(included_ids):

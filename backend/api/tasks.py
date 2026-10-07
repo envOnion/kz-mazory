@@ -77,6 +77,37 @@ def verify_ai_context():
     }
 
 
+def verify_history_packets():
+    """Validate the production packet protocol without creating business data."""
+    import copy
+    from .ai_service import AIService
+    from .context_tokens import context_runtime, extraction_payload
+    from .dialogue_threads import ThemeSchema
+
+    cfg = copy.copy(AIService._config())
+    cfg.analysis_policy = "history-packets-v1"
+    cfg.max_completion_tokens = min(cfg.max_completion_tokens, cfg.analysis_output_token_limit)
+    counter, endpoint = context_runtime(cfg)
+    payload = extraction_payload(cfg, endpoint, "Тестовое сообщение без фактов.",
+        "Проверка подключения", [], [], None, "UTC", target_message_id=1, batch_message_ids=[1])
+    expected = counter.count_payload(payload)
+    result, usage, diagnostics = AIService.analyze_payload(payload,
+        provider_url=endpoint["effective_provider_url"], expected_api_format=endpoint["api_format"])
+    themes = ThemeSchema(data=result.get("threads"), many=True)
+    if not themes.is_valid() or not themes.validated_data or result.get("facts") != []:
+        raise ProviderUnavailable("analysis_probe_classification_invalid")
+    ids = {link["raw_message_id"] for theme in themes.validated_data for link in theme["messages"]}
+    if ids != {1} or any(theme["state"] == "ready" and (
+        not theme["completion_reason"] or not any(link["thought_state"] == "final" for link in theme["messages"])
+    ) for theme in themes.validated_data):
+        raise ProviderUnavailable("analysis_probe_classification_invalid")
+    if usage.get("prompt_tokens") != expected:
+        raise ProviderUnavailable("context_token_count_invalid")
+    return {"model":cfg.chat_model_name, "input_tokens_expected":expected,
+        "input_tokens_actual":usage["prompt_tokens"], "finish_reason":diagnostics.get("finish_reason"),
+        "classification_validated":True, "business_records_created":0}
+
+
 def dispatch_outbox(limit=100):
     now = timezone.now()
     # A crash after a non-idempotent HTTP request has an unknown external outcome.
@@ -115,7 +146,9 @@ def dispatch_outbox(limit=100):
     pending = pending.annotate(source_head=Window(
         expression=RowNumber(),
         partition_by=[Coalesce("analysis_source_key", Cast("id", CharField()))],
-        order_by=[F("next_attempt_at").asc(), F("id").asc()],
+        # Due retries are already filtered above. Complete an earlier packet's
+        # split children before starting later source positions.
+        order_by=[F("analysis_position").asc(nulls_last=True), F("id").asc()],
     )).filter(source_head=1)
     if AISettings.get_active().autonomous_enabled:
         pending = pending.annotate(work_priority=Case(When(event_type="operation", then=Value(0)), When(payload__priority="live", then=Value(1)), When(event_type="decide_fact", then=Value(2)), default=Value(3), output_field=IntegerField())).order_by("work_priority", "id")
@@ -136,9 +169,9 @@ def dispatch_outbox(limit=100):
             if event.state != "pending":
                 continue
             if event.event_type == "extract_message" and not event.analysis_source_key and event.payload.get("raw_id"):
-                from .dialogue_threads import source_key
+                from .dialogue_threads import source_key, analysis_position
                 raw = RawMessage.objects.select_related("config__team", "team", "project").get(pk=event.payload["raw_id"])
-                event.analysis_source_key, event.analysis_position = source_key(raw), raw.id
+                event.analysis_source_key, event.analysis_position = source_key(raw), analysis_position(raw)
                 event.save(update_fields=["analysis_source_key", "analysis_position"])
             if event.analysis_source_key and OutboxEvent.objects.filter(
                 analysis_source_key=event.analysis_source_key, state__in=["enqueued", "processing"]
@@ -146,7 +179,7 @@ def dispatch_outbox(limit=100):
                 continue
             if event.event_type in expensive:
                 in_flight = OutboxEvent.objects.filter(event_type__in=expensive, state__in=["enqueued", "processing"]).count()
-                if in_flight >= max(1, cfg.autonomous_max_in_flight):
+                if in_flight >= min(2, max(1, cfg.autonomous_max_in_flight)):
                     continue
                 in_flight += 1
             event.state, event.lease_until = "enqueued", now + timedelta(minutes=5)
