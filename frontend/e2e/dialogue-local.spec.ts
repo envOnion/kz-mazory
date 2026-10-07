@@ -97,6 +97,27 @@ async function waitForFactProcessing(request: APIRequestContext) {
 }
 
 // One browser session shares the real refresh rotation across serial scenarios.
+test('WhatsApp group creates a silent employee through Q2 without granting access', async ({ page, context, request }) => {
+  await authenticate(context)
+  const response = await request.post('/api/directory/participants-sync/', { headers, data: { config_id: session.config_id } })
+  expect(response.status()).toBe(202)
+  await expect.poll(async () => {
+    const data: Directory = await (await request.get('/api/directory/', { headers })).json()
+    return data.participants?.find(person => person.phone === '79990000003')?.user_id
+  }, { timeout: 20000 }).toBeTruthy()
+  const data: Directory = await (await request.get('/api/directory/', { headers })).json()
+  const person = data.participants!.find(row => row.phone === '79990000003')!
+  expect(person.access_status).toBe('not_granted')
+  const repeated = await request.post('/api/directory/participants-sync/', { headers, data: { config_id: session.config_id } })
+  expect(repeated.status()).toBe(202)
+  await page.goto('/')
+  await page.getByTestId('nav-workspace').click()
+  await page.getByRole('button', { name: 'Сотрудники', exact: true }).click()
+  await expect(page.getByTestId(`participant-${person.id}`)).toContainText('Тихий участник')
+  await expect(page.getByTestId(`participant-${person.id}`)).toContainText('+79990000003')
+  await expect(page.getByTestId(`participant-${person.id}`)).toContainText('Доступ не предоставлен')
+})
+
 test('CRM catalog, incomplete thought, interleaved themes and review through real Q2', async ({ page, context, request }) => {
   await authenticate(context)
   await page.goto('/')

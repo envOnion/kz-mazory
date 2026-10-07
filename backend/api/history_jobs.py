@@ -416,20 +416,21 @@ def persist_items(run, config, batch):
     keys,stored,before=[],{},set()
     originals=[]
     for item in batch:
-        msg=item.payload;extra=msg.get("_data") or {};extra=extra if isinstance(extra,dict) else {}
-        key=extra.get("key") or {};key=key if isinstance(key,dict) else {}
-        sender=msg.get("participant") or key.get("participant") or ""
-        name=msg.get("notifyName") or extra.get("pushName") or ""
-        if not isinstance(sender,str) or not isinstance(name,str):raise ProviderUnavailable("history_invalid_message")
+        msg=item.payload
+        from .participants import message_sender
+        author=message_sender(msg)
         content=msg.get("body") or ""
         revision=hashlib.sha256(content.encode()).hexdigest()
         identity=(item.message_id,revision)
         originals.append(dict(message_id=item.message_id,content=content,timestamp=item.timestamp,
-            sender_phone=sender.split("@")[0][:64],sender_name=name[:255],raw_payload={"event":"history.import","session":config.session_name,"payload":msg}))
+            sender_phone=author.phone,sender_name=author.name,raw_payload={"event":"history.import","session":config.session_name,"payload":msg}))
         keys.append(identity)
     for identity,(raw,created) in zip(keys,ingest_waha_batch(config,originals),strict=True):
         stored[identity]=raw
         if not created:before.add(identity)
+    if originals:
+        from .participants import enqueue_participants
+        enqueue_participants(config, message_evidence=[{"raw_id": stored[key].id, "payload": item["raw_payload"]["payload"]} for key, item in zip(keys, originals, strict=True) if stored[key].source == "whatsapp_export"])
     outbox, linked = [], []
     counted = (
         set(

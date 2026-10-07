@@ -570,6 +570,7 @@ class DirectoryView(APIView):
 
     def get(self, request):
         from .crm_catalog import available_projects
+        from .participants import directory_participants, directory_sync_status
         from .models import Company
         teams = Team.objects.filter(is_active=True)
         if not request.user.is_superuser:
@@ -616,6 +617,8 @@ class DirectoryView(APIView):
         return Response({
             "teams": list(teams.values("id", "name", "history_complete_from")),
             "profiles": list(access.profiles_for(request.user).values("id", "user_id", "full_name")),
+            "participants": directory_participants(request.user),
+            "participant_sync": directory_sync_status(request.user),
             "projects": projects_data,
             "companies": companies_data,
             "projects_count": count,
@@ -630,6 +633,26 @@ class DirectoryView(APIView):
 class DirectoryQuery(serializers.Serializer):
     project_page = serializers.IntegerField(min_value=1, default=1)
     project_search = serializers.CharField(max_length=255, allow_blank=True, default="")
+
+
+class ParticipantsSyncInput(serializers.Serializer):
+    config_id = serializers.IntegerField(min_value=1)
+
+
+class ParticipantsSyncView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from .participants import enqueue_participants
+        schema = ParticipantsSyncInput(data=request.data)
+        schema.is_valid(raise_exception=True)
+        config = get_object_or_404(access.configs_for(request.user), pk=schema.validated_data["config_id"])
+        access.require_team_role(request.user, config.team_id, ["team_lead"])
+        event = enqueue_participants(config, request.user)
+        if not event:
+            raise ValidationError("Источник WhatsApp выключен или не связан с командой.")
+        AuditEvent.objects.create(actor=request.user, target_type="WhatsAppConfig", target_id=config.id, action="participants_sync", before_after={"outbox_id": event.id})
+        return Response({"event_id": event.id, "state": event.state}, status=202)
 
 
 class CrmCatalogSyncView(APIView):

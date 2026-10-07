@@ -37,6 +37,8 @@ Q_CLUSTER = {
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver"]
 BITRIX_TEAM_ID = 1
 WAHA_WEBHOOK_SECRET = "isolated-local-webhook-secret"
+WAHA_API_URL = "https://localhost"
+WAHA_API_KEY = "isolated-local-waha-key"
 SECURE_SSL_REDIRECT = AUTH_COOKIE_SECURE = SESSION_COOKIE_SECURE = (
     CSRF_COOKIE_SECURE
 ) = False
