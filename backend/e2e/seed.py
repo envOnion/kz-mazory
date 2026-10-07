@@ -64,7 +64,6 @@ def seed():
         context_window_tokens=32768,
         max_completion_tokens=8192,
         context_safety_tokens=512,
-        message_processing_paused=False,
         chat_api_key_encrypted=encrypt_credential(
             "fixture-key", purpose="chat", api_format="anthropic_messages"
         ),

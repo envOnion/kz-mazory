@@ -2,6 +2,8 @@
 
 import logging
 import random
+import time
+import uuid
 from datetime import timedelta
 from urllib.parse import quote
 import requests
@@ -75,10 +77,56 @@ def verify_ai_context():
     }
 
 
+def verify_history_packets():
+    """Validate the production packet protocol without creating business data."""
+    import copy
+    from .ai_service import AIService
+    from .context_tokens import context_runtime, extraction_payload
+    from .dialogue_threads import ThemeSchema, LinkSchema, normalize_themes
+
+    cfg = copy.copy(AIService._config())
+    cfg.analysis_policy = "history-packets-v1"
+    cfg.max_completion_tokens = min(cfg.max_completion_tokens, cfg.analysis_output_token_limit)
+    counter, endpoint = context_runtime(cfg)
+    payload = extraction_payload(cfg, endpoint, "Тестовое сообщение без фактов.",
+        "Проверка подключения", [], [], None, "UTC", target_message_id=1, batch_message_ids=[1])
+    expected = counter.count_payload(payload)
+    result, usage, diagnostics = AIService.analyze_payload(payload,
+        provider_url=endpoint["effective_provider_url"], expected_api_format=endpoint["api_format"])
+    classification = result.get("target_classification")
+    link = LinkSchema(data=classification) if isinstance(classification,dict) else None
+    if link is None or not link.is_valid() or type(classification.get("raw_message_id")) is not int or classification["raw_message_id"] != 1:
+        raise ProviderUnavailable("analysis_probe_classification_invalid")
+    result["threads"] = normalize_themes(result.get("threads"))
+    selected = [row for row in result.get("threads",[]) if row.get("key") == classification.get("thread_key")]
+    if len(selected) != 1:
+        raise ProviderUnavailable("analysis_probe_classification_invalid")
+    if not any(row.get("raw_message_id") == 1 for row in selected[0].get("messages",[])):
+        selected[0].setdefault("messages",[]).append(link.validated_data)
+    themes = ThemeSchema(data=result.get("threads"), many=True)
+    if not themes.is_valid() or not themes.validated_data or result.get("facts") != []:
+        raise ProviderUnavailable("analysis_probe_classification_invalid")
+    ids = {link["raw_message_id"] for theme in themes.validated_data for link in theme["messages"]}
+    if ids != {1} or any(theme["state"] == "ready" and (
+        not theme["completion_reason"] or not any(link["thought_state"] == "final" for link in theme["messages"])
+    ) for theme in themes.validated_data):
+        raise ProviderUnavailable("analysis_probe_classification_invalid")
+    if usage.get("prompt_tokens") != expected:
+        raise ProviderUnavailable("context_token_count_invalid")
+    return {"model":cfg.chat_model_name, "input_tokens_expected":expected,
+        "input_tokens_actual":usage["prompt_tokens"], "finish_reason":diagnostics.get("finish_reason"),
+        "classification_validated":True, "business_records_created":0}
+
+
 def dispatch_outbox(limit=100):
     now = timezone.now()
     # A crash after a non-idempotent HTTP request has an unknown external outcome.
     expired = OutboxEvent.objects.filter(state="processing", lease_until__lte=now)
+    expired.filter(event_type="extract_message", payload__history_cancelled=True).update(
+        state="cancelled", lease_until=None
+    )
+    from .models import HistoryAnalysisItem
+    HistoryAnalysisItem.objects.filter(outbox_event__state="cancelled", state__in=["queued", "processing", "retry_wait"]).update(state="cancelled", reason_code="history_run_cancelled", reason_description="Запуск отменён.", updated_at=now)
     for item in expired.filter(event_type__in=NON_IDEMPOTENT):
         with transaction.atomic():
             if OutboxEvent.objects.filter(
@@ -88,13 +136,30 @@ def dispatch_outbox(limit=100):
                     NotificationDelivery.objects.filter(
                         pk=item.payload["delivery_id"], state="sending"
                     ).update(state="unknown", error_code="worker_interrupted")
-    expired.exclude(event_type__in=NON_IDEMPOTENT).update(state="pending")
+    for stale in expired.exclude(event_type__in=NON_IDEMPOTENT):
+        with transaction.atomic():
+            current = OutboxEvent.objects.select_for_update().get(pk=stale.pk)
+            if current.state == "processing" and current.lease_until and current.lease_until <= now:
+                current.payload = {**current.payload, "claim_generation": uuid.uuid4().hex}
+                current.state, current.lease_until = "pending", None
+                current.save(update_fields=["payload", "state", "lease_until"])
+                from .history_analysis import synchronize
+                synchronize(current)
     OutboxEvent.objects.filter(state="enqueued", lease_until__lte=now).update(
         state="pending"
     )
     pending = OutboxEvent.objects.filter(state="pending", next_attempt_at__lte=now)
-    if AISettings.get_active().message_processing_paused:
-        pending = pending.exclude(event_type__in=["extract_message", "index_message", "whatsapp_artifact"])
+    occupied_sources = OutboxEvent.objects.filter(state__in=["enqueued", "processing"]).exclude(analysis_source_key=None).values("analysis_source_key")
+    pending = pending.filter(Q(analysis_source_key__isnull=True) | ~Q(analysis_source_key__in=occupied_sources))
+    from django.db.models import Window, F, CharField
+    from django.db.models.functions import RowNumber, Coalesce, Cast
+    pending = pending.annotate(source_head=Window(
+        expression=RowNumber(),
+        partition_by=[Coalesce("analysis_source_key", Cast("id", CharField()))],
+        # Due retries are already filtered above. Complete an earlier packet's
+        # split children before starting later source positions.
+        order_by=[F("analysis_position").asc(nulls_last=True), F("id").asc()],
+    )).filter(source_head=1)
     if AISettings.get_active().autonomous_enabled:
         pending = pending.annotate(work_priority=Case(When(event_type="operation", then=Value(0)), When(payload__priority="live", then=Value(1)), When(event_type="decide_fact", then=Value(2)), default=Value(3), output_field=IntegerField())).order_by("work_priority", "id")
     else:
@@ -106,11 +171,25 @@ def dispatch_outbox(limit=100):
     dispatched = 0
     for pk in ids:
         with transaction.atomic():
+            # One short configuration lock serializes claims across dispatchers.
+            # No source/config lock is retained while contacting a provider.
+            if cfg.pk:
+                AISettings.objects.select_for_update().get(pk=cfg.pk)
             event = OutboxEvent.objects.select_for_update().get(pk=pk)
             if event.state != "pending":
                 continue
-            if cfg.autonomous_enabled and event.event_type in expensive:
-                if in_flight >= max(1, cfg.autonomous_max_in_flight):
+            if event.event_type == "extract_message" and not event.analysis_source_key and event.payload.get("raw_id"):
+                from .dialogue_threads import source_key, analysis_position
+                raw = RawMessage.objects.select_related("config__team", "team", "project").get(pk=event.payload["raw_id"])
+                event.analysis_source_key, event.analysis_position = source_key(raw), analysis_position(raw)
+                event.save(update_fields=["analysis_source_key", "analysis_position"])
+            if event.analysis_source_key and OutboxEvent.objects.filter(
+                analysis_source_key=event.analysis_source_key, state__in=["enqueued", "processing"]
+            ).exclude(pk=event.pk).exists():
+                continue
+            if event.event_type in expensive:
+                in_flight = OutboxEvent.objects.filter(event_type__in=expensive, state__in=["enqueued", "processing"]).count()
+                if in_flight >= min(2, max(1, cfg.autonomous_max_in_flight)):
                     continue
                 in_flight += 1
             event.state, event.lease_until = "enqueued", now + timedelta(minutes=5)
@@ -186,6 +265,18 @@ def enqueue_crm_match(candidate_id, allowed_states=("not_requested",)):
         return event
 
 
+def uncancelled_attempt(pk):
+    # A missing JSON key is SQL NULL: a plain exclude(key=True) would also
+    # exclude ordinary tasks without this cancellation marker on PostgreSQL.
+    from .ai_service import outbox_claim
+    query = OutboxEvent.objects.filter(pk=pk, state="processing")
+    if outbox_claim.get():
+        query = query.filter(payload__claim_generation=outbox_claim.get())
+    return query.filter(
+        Q(payload__history_cancelled__isnull=True) | Q(payload__history_cancelled=False)
+    )
+
+
 def run_outbox(pk):
     with transaction.atomic():
         event = OutboxEvent.objects.select_for_update().get(pk=pk)
@@ -194,14 +285,6 @@ def run_outbox(pk):
         if event.next_attempt_at > timezone.now():
             event.state, event.lease_until = "pending", None
             event.save(update_fields=["state", "lease_until"])
-            return
-        if (
-            event.event_type in ("extract_message", "index_message")
-            and AISettings.get_active().message_processing_paused
-        ):
-            event.state, event.lease_until = "pending", None
-            event.next_attempt_at = timezone.now() + timedelta(seconds=10)
-            event.save(update_fields=["state", "lease_until", "next_attempt_at"])
             return
         if event.event_type == "extract_message":
             # Lock the message while claiming work so two workers cannot claim
@@ -224,6 +307,8 @@ def run_outbox(pk):
             ).exclude(pk=event.pk).filter(
                 Q(state="processing") | Q(pk__lt=event.pk, state__in=["pending", "enqueued"])
             ).exists()
+            if event.analysis_source_key:
+                earlier = OutboxEvent.objects.filter(analysis_source_key=event.analysis_source_key, state="processing").exclude(pk=event.pk).exists()
             if earlier and not AISettings.get_active().autonomous_enabled:
                 event.state, event.lease_until = "pending", None
                 event.next_attempt_at = timezone.now() + timedelta(seconds=10)
@@ -239,15 +324,20 @@ def run_outbox(pk):
             ),
         )
         event.attempt_count += 1
+        event.payload = {**event.payload, "claim_generation": uuid.uuid4().hex}
         event.save()
     ai_retries.record_attempt(event, "processing")
-    from .ai_service import usage_event_id
+    from .ai_service import usage_event_id, extraction_deadline, outbox_claim
 
     if event.event_type == "extract_message":
+        from .history_analysis import synchronize
+        synchronize(event)
         from .models import SourceWorkItem
         item, _ = SourceWorkItem.objects.get_or_create(raw_message_id=event.payload["raw_id"], processing_version=AISettings.get_active().autonomous_policy_version)
         SourceWorkItem.objects.filter(pk=item.pk).update(state="processing", lease_until=event.lease_until, error_code="")
     context_token = usage_event_id.set(event.id)
+    claim_token = outbox_claim.set(event.payload.get("claim_generation"))
+    deadline_token = extraction_deadline.set(time.monotonic() + 240 if event.event_type == "extract_message" else None)
     try:
         handlers = {
             "extract_message": extract_message,
@@ -270,10 +360,13 @@ def run_outbox(pk):
             "thread_backfill": backfill_threads,
         }
         result = handlers[event.event_type](event.payload)
+        if isinstance(result, dict) and result.get("history_continuation"):
+            OutboxEvent.objects.filter(pk=pk, state="processing", payload__claim_generation=event.payload["claim_generation"]).update(state="pending", attempt_count=0, lease_until=None, next_attempt_at=timezone.now())
+            return
         if event.event_type == "delivery_ack":
             event.payload = {**event.payload, "receipt_outcome": result}
             event.save(update_fields=["payload"])
-        OutboxEvent.objects.filter(pk=pk, state="processing").update(
+        OutboxEvent.objects.filter(pk=pk, state="processing", payload__claim_generation=event.payload["claim_generation"]).update(
             state="done", error_code="", lease_until=None
         )
         ai_retries.record_attempt(event, "done")
@@ -290,7 +383,7 @@ def run_outbox(pk):
             if event.event_type in NON_IDEMPOTENT or event.event_type == "crm_sync"
             else ("failed" if event.attempt_count >= 3 else "pending")
         )
-        OutboxEvent.objects.filter(pk=pk).update(
+        uncancelled_attempt(pk).update(
             state=state,
             error_code="provider_timeout",
             next_attempt_at=timezone.now() + timedelta(minutes=2),
@@ -311,7 +404,7 @@ def run_outbox(pk):
         )
         if (event.event_type == "thread_backfill" and code == "thread_history_busy") or code in ("history_budget_reserved", "autonomous_crm_paused", "crm_deal_delivery_pending"):
             # Waiting for earlier pages is normal progress, not a failed attempt.
-            OutboxEvent.objects.filter(pk=pk).update(
+            uncancelled_attempt(pk).update(
                 state="pending", error_code="", lease_until=None,
                 next_attempt_at=timezone.now() + timedelta(seconds=max(10, getattr(exc, "retry_after", None) or 0)),
                 attempt_count=max(0, event.attempt_count - 1),
@@ -321,7 +414,7 @@ def run_outbox(pk):
             tomorrow = (timezone.now() + timedelta(days=1)).replace(
                 hour=0, minute=0, second=1, microsecond=0
             )
-            OutboxEvent.objects.filter(pk=pk).update(
+            uncancelled_attempt(pk).update(
                 state="pending",
                 error_code=code,
                 next_attempt_at=tomorrow,
@@ -365,7 +458,7 @@ def run_outbox(pk):
             or event.event_type in NON_IDEMPOTENT
             else "pending"
         )
-        OutboxEvent.objects.filter(pk=pk).update(
+        uncancelled_attempt(pk).update(
             state=state,
             error_code=code,
             next_attempt_at=timezone.now()
@@ -384,13 +477,23 @@ def run_outbox(pk):
         )
 
     finally:
+        extraction_deadline.reset(deadline_token)
+        outbox_claim.reset(claim_token)
+        if event.event_type == "extract_message":
+            from .history_analysis import synchronize
+            synchronize(OutboxEvent.objects.get(pk=event.pk))
         if event.event_type == "autonomous_crm":
             from .models import CrmDelivery
             current = OutboxEvent.objects.get(pk=event.pk)
             CrmDelivery.objects.filter(outbox_event=event).exclude(state__in=("delivered", "superseded")).update(state=current.state, error_code=current.error_code)
         if event.event_type == "extract_message":
             from .models import SourceWorkItem
+            OutboxEvent.objects.filter(
+                pk=event.pk, state="processing", payload__history_cancelled=True,
+            ).update(state="cancelled", lease_until=None)
             current = OutboxEvent.objects.get(pk=event.pk)
+            if current.state == "cancelled":
+                ai_retries.record_attempt(current, "cancelled", "history_run_cancelled")
             SourceWorkItem.objects.filter(raw_message_id=event.payload["raw_id"], processing_version=AISettings.get_active().autonomous_policy_version).update(state=current.state, error_code=current.error_code, lease_until=current.lease_until)
         usage_event_id.reset(context_token)
 
@@ -533,6 +636,9 @@ def apply_delivery_ack(payload):
 
 
 def extract_message(payload):
+    if payload.get("analysis_policy") == "history-packets-v1":
+        from .history_packets import extract_packet
+        return extract_packet(payload)
     from .pipeline import extract_message as extract
 
     if payload.get("history_run_id") and AISettings.get_active().autonomous_enabled and RawMessage.objects.filter(pk=payload["raw_id"], processed=True).exists():
@@ -544,6 +650,7 @@ def extract_message(payload):
         commitment_refresh=payload.get("commitment_refresh", False),
         batch_ids=payload.get("batch_ids"),
         reanalyze=payload.get("reanalyze", False),
+        **({"trace_ids": payload["trace_ids"]} if "trace_ids" in payload else {}),
     )
 
 
@@ -557,6 +664,10 @@ def import_history_step(payload):
     from .history_jobs import ERROR_LABELS, process_step
     from .models import WhatsAppHistoryRun
     from .new_messages import monitor_error
+
+    if WhatsAppHistoryRun.objects.filter(pk=payload["history_run_id"], import_kind="file").exists():
+        from .whatsapp_exports import process_file_step
+        return process_file_step(payload)
 
     try:
         process_step(payload, waha_request)

@@ -1,5 +1,7 @@
 """The complete source history, bounded only by the native model token budget."""
 
+import re
+
 from django.db.models import Exists, OuterRef, Q, F, Case, When, Value, IntegerField
 from django.db.models.functions import Abs
 from django.utils import timezone
@@ -27,9 +29,10 @@ def source_scope(raw):
     if raw.config_id:
         if not raw.config.is_active:
             raise ProviderUnavailable("context_source_unavailable")
+        from .whatsapp_identity import WHATSAPP_SOURCES
         return RawMessage.objects.filter(
             config_id=raw.config_id,
-            source=raw.source,
+            source__in=WHATSAPP_SOURCES if raw.source in WHATSAPP_SOURCES else [raw.source],
             session_name=raw.session_name,
             chat_id=raw.chat_id,
         ).filter(Q(team_id=team.id) | Q(team_id__isnull=True))
@@ -62,7 +65,7 @@ def history_queryset(raw, snapshot_id, include_following=False):
             session_name=raw.session_name,
             message_id=raw.message_id,
         )
-        .exclude(processing_state__in=["superseded", "deleted"])
+        .exclude(processing_state__in=["superseded", "deleted", "deduplication_ambiguous", "export_staged"])
     )
     if include_following:
         return qs.annotate(distance=Abs(F("id") - raw.id)).order_by("distance", "id"), "received_at"
@@ -76,7 +79,7 @@ def history_queryset(raw, snapshot_id, include_following=False):
     return qs.order_by(f"-{time_field}", "-id"), time_field
 
 
-def build_context(raw, cfg, known_projects, snapshot_id, include_following=False, batch_ids=None):
+def build_context(raw, cfg, known_projects, snapshot_id, include_following=False, batch_ids=None, target_content=None):
     from .dialogue_threads import context_threads
     themes = context_threads(raw)
     counter, endpoint = context_runtime(cfg)
@@ -88,6 +91,32 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
     if batch_ids and include_following and not themes:
         qs = qs.annotate(batch_priority=Case(When(pk__in=batch_ids, then=Value(0)), default=Value(1), output_field=IntegerField())).order_by("batch_priority", "distance", "id")
     requested_batch = list(batch_ids or [])
+    bounded = getattr(cfg, "analysis_policy", None) == "history-packets-v1"
+    if bounded and include_following:
+        # Lookup spans the whole immutable source; neighbors only seed retrieval.
+        neighbors = list(qs.values_list("id", flat=True)[:24])
+        linked = {pk for theme in themes for pk in theme["message_ids"]}
+        linked.update(task["source_message_id"] for theme in themes for task in theme.get("commitments", []))
+        target_texts = list(source_scope(raw).filter(pk__in=requested_batch or [raw.id]).values_list("content", flat=True))
+        words = set(re.findall(r"[\w-]{4,}", " ".join(target_texts).casefold())) - {
+            "сегодня", "завтра", "получили", "сделали", "добрый", "утром", "объект", "оплата", "работа"}
+        search = Q(pk__in=[])
+        for word in sorted(words, key=lambda value: (-len(value), value))[:12]:
+            search |= Q(content__icontains=word)
+        named = list(qs.filter(search).values_list("id", flat=True)[:24])
+        quoted_ids = set()
+        for target in source_scope(raw).filter(pk__in=requested_batch or [raw.id]):
+            data = target.raw_payload if isinstance(target.raw_payload, dict) else {}
+            for container in [data, data.get("_data", {}), data.get("replyTo", {})]:
+                if isinstance(container, dict):
+                    for key in ("quotedMessageId", "quotedStanzaID", "stanzaId"):
+                        if isinstance(container.get(key), str):
+                            quoted_ids.add(container[key])
+        quoted = list(qs.filter(message_id__in=quoted_ids).values_list("id", flat=True))
+        required = set(requested_batch) | linked | set(quoted)
+        qs = qs.filter(pk__in=set(neighbors + named) | required).annotate(
+            evidence_priority=Case(When(pk__in=requested_batch, then=Value(0)), When(pk__in=required, then=Value(1)), default=Value(2), output_field=IntegerField())
+        ).order_by("evidence_priority", "distance", "id")
     source = source_metadata(raw)
     source_timezone = source["timezone"]
     analysis_time = timezone.now().astimezone(source_zone(raw)).isoformat()
@@ -101,7 +130,7 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
         return extraction_payload(
             cfg,
             endpoint,
-            raw.content,
+            raw.content if target_content is None else target_content,
             source["sender"],
             ordered(nearest),
             known_projects,
@@ -121,6 +150,8 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
     )
     if incremental:
         max_input = min(max_input, max(1, cfg.autonomous_input_tokens))
+    if bounded:
+        max_input = min(max_input, cfg.analysis_input_token_limit)
     fixed = counter.count_payload(payload([]))
     if fixed > max_input:
         raise ProviderUnavailable("context_fixed_input_too_large")
@@ -224,6 +255,7 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
             "received_at": row["received_at"].isoformat(),
             "partial": False,
         }
+        previous_estimate = estimated
         nearest.append(item)
         estimated += counter.count_text(canonical_json(item)) + 4
         if estimated > max_input:
@@ -235,14 +267,32 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
                 if counter.remote:
                     preflight_probes += 1
                 if actual > max_input:
-                    nearest = fit_boundary(nearest)
-                    full = True
+                    if bounded:
+                        # A clipped report is not evidence and should not consume
+                        # the whole budget for an unrelated short target. Keep
+                        # complete originals, then try the next relevant source.
+                        nearest.pop()
+                        estimated = previous_estimate
+                        if item["raw_message_id"] in requested_batch:
+                            raise ProviderUnavailable("context_batch_too_large")
+                    else:
+                        nearest = fit_boundary(nearest)
+                        full = True
                 else:
                     estimated = actual
     if counter.count_payload(payload(nearest)) > max_input:
-        nearest = fit_boundary(nearest)
+        if bounded:
+            while counter.count_payload(payload(nearest)) > max_input:
+                optional = [index for index, item in enumerate(nearest) if item["raw_message_id"] not in requested_batch]
+                if not optional:
+                    raise ProviderUnavailable("context_batch_too_large")
+                nearest.pop(optional[-1])
+        else:
+            nearest = fit_boundary(nearest)
     if requested_batch:
         included_ids = {raw.id} | {item["raw_message_id"] for item in nearest if not item["partial"]}
+        if bounded and not set(requested_batch).issubset(included_ids):
+            raise ProviderUnavailable("context_batch_too_large")
         requested_batch = [pk for pk in requested_batch if pk in included_ids]
     request = payload(nearest)
     input_tokens = counter.count_payload(request)
@@ -256,7 +306,7 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
         "batch_message_ids": requested_batch,
         "known_threads": themes,
         "input_serialization": "target-last-v1",
-        "policy_version": POLICY,
+        "policy_version": "history-packets-v1" if bounded else POLICY,
         "source": "chat_history",
         "model": cfg.chat_model_name,
         "provider": endpoint["tag"],
@@ -298,5 +348,6 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
         else [None, None],
         "source_period": [context[0]["timestamp"], context[-1]["timestamp"]] if context else [None, None],
         "external_import_completeness": "unknown",
+        "relevance_selected": bounded,
     }
     return context, metadata, request

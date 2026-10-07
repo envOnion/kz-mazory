@@ -366,7 +366,8 @@ def extraction_input(value):
     """Keep the target adjacent to generation, after its reference history."""
     # PostgreSQL JSONB reorders nested keys. Canonicalize every value so a saved
     # request remains byte-identical on a delayed retry after reading it from DB.
-    keys = sorted(key for key in value if key != "content") + ["content"]
+    tail = [key for key in ("batch_message_ids", "target_messages", "target_message_id", "content", "analysis_instructions") if key in value] if "analysis_instructions" in value else ["content"]
+    keys = sorted(key for key in value if key not in tail) + tail
     return (
         "{"
         + ",".join(
@@ -380,12 +381,19 @@ def extraction_payload(
     cfg, endpoint, content, sender, context, known_projects, sent_at, source_timezone,
     source_metadata=None, current_time=None, target_message_id=None, known_threads=None, batch_message_ids=None,
 ):
-    from .ai_service import WORKER_PROMPT
+    from .ai_service import WORKER_PROMPT, PACKET_PROMPT
 
     system_prompt = WORKER_PROMPT
+    if getattr(cfg, "analysis_policy", None) == "history-packets-v1":
+        system_prompt = PACKET_PROMPT
+        if getattr(cfg, "analysis_repair_reason", None):
+            system_prompt += f"\nПредыдущий ответ отклонён: {cfg.analysis_repair_reason}. Исправь форму ответа по схеме и классифицируй все цели. Не угадывай факты."
     if getattr(cfg, "autonomous_enabled", False):
         system_prompt += "\nАвтономный режим: точное время дедлайна не выдумывай. Только день/утро означает deadline_precision=date; искусственные 09:00/18:00 не являются сообщенным временем. Сервер задает техническую границу дня отдельно от точности источника."
         system_prompt += "\nСвязь с объектом доказывается цитатами, а не наличием ID в known_projects/known_threads. Если название находится в более раннем сообщении, добавь буквальную цитату этого сообщения в evidence_messages с role=identity. Пустое object_name не подтверждает предложенный project. Не выбирай между активным и архивным одноименным объектом только по статусу активности."
+    bounded = getattr(cfg, "analysis_policy", None) == "history-packets-v1"
+    targets = [item for item in context if item["raw_message_id"] in (batch_message_ids or []) and item["raw_message_id"] != target_message_id and not item.get("partial")] if bounded else []
+    target_ids = {item["raw_message_id"] for item in targets}
     user_content = extraction_input(
         {
             "content": content,
@@ -396,8 +404,10 @@ def extraction_payload(
             **({"current_time": current_time} if current_time is not None else {}),
             **({"target_message_id": target_message_id} if target_message_id is not None else {}),
             **({"batch_message_ids": batch_message_ids} if batch_message_ids else {}),
-            "context": context,
+            "context": [item for item in context if item["raw_message_id"] not in target_ids] if bounded else context,
+            **({"target_messages": targets} if bounded else {}),
             "known_projects": known_projects,
+            **({"analysis_instructions": "Классифицируй КАЖДЫЙ ID из batch_message_ids (либо target_message_id, если пакета нет). content — текст target_message_id; target_messages — остальные целевые реплики с оригинальным текстом, автором и датой. context — только источники для понимания, не дополнительные цели. В threads.messages должны присутствовать все целевые ID. Для ready обязательны непустой completion_reason и хотя бы одна thought_state=final. Информационные сообщения с понятным смыслом: ready/final и facts=[]. unknown — только если реально не хватает источника; объясни, какого. Из явных обещаний/оплат извлекай facts в open или ready, даже если обсуждение ещё продолжается."} if bounded else {}),
             **({"known_threads": known_threads} if known_threads is not None else {}),
         }
     )

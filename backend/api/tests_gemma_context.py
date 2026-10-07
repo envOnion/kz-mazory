@@ -57,7 +57,7 @@ class GemmaRuntimeTests(SimpleTestCase):
         self.assertEqual(request['options']['num_predict'], 8192)
         self.assertFalse(request['think'])
         self.assertFalse(request['stream'])
-        self.assertEqual(request['format'], 'json')
+        self.assertEqual(request['format']['required'], ['threads', 'facts'])
 
     def test_cached_model_window_cannot_be_exceeded(self):
         self.runtime()

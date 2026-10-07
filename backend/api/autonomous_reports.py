@@ -36,7 +36,7 @@ def refresh_reports():
             raw = RawMessage.objects.filter(config_id=config_id).select_related("config__team").order_by("-id").first()
             if raw:
                 refresh_checkpoint(raw)
-        latest = FactEvent.objects.filter(team=team).exclude(event_type="daily_report").order_by("-id").first()
+        latest = FactEvent.objects.filter(team=team,is_superseded=False).exclude(event_type="daily_report").order_by("-id").first()
         if not latest:
             continue
         coverage = list(SourceCheckpoint.objects.filter(team=team).values("source_scope", "complete_through", "gaps", "counts"))
@@ -80,7 +80,7 @@ class AutonomousOverviewView(APIView):
             "waiting": waiting,
             "coverage": list(SourceCheckpoint.objects.filter(team_id__in=team_ids).values("source_scope", "complete_through", "gaps", "counts", "updated_at")),
             "reports": list(FactEvent.objects.filter(team_id__in=team_ids, event_type="daily_report").order_by("-id").values("id", "created_at", "payload")[:10]),
-            "observations": list(FactEvent.objects.filter(Q(project__in=projects) | Q(decision__candidate__in=candidates)).filter(event_type__in=["reported_cumulative", "reported_balance", "reported_debt", "reported_invoice", "reported_transfer", "payment_schedule"]).order_by("-id").values("id", "project_id", "project__name", "event_type", "occurred_at", "payload")[:100]),
+            "observations": list(FactEvent.objects.filter(Q(project__in=projects) | Q(decision__candidate__in=candidates)).filter(is_superseded=False,event_type__in=["reported_cumulative", "reported_balance", "reported_debt", "reported_invoice", "reported_transfer", "payment_schedule"]).order_by("-id").values("id", "project_id", "project__name", "event_type", "occurred_at", "payload")[:100]),
             "crm_deliveries": list(OutboxEvent.objects.filter(crmdelivery__external_object_link__team_id__in=team_ids).exclude(state="done").order_by("-id").values("id", "event_type", "state", "error_code", "next_attempt_at")[:50]),
             "schedule": list(PaymentScheduleItem.objects.filter(project__in=projects, is_verified=True, state="active").order_by("due_date").values("id", "project_id", "project__name", "due_date", "amount", "currency", "direction", "amount_precision")[:100]),
         }))

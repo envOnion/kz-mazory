@@ -6,7 +6,7 @@ from rest_framework.exceptions import PermissionDenied
 
 from . import access
 from .message_context import POLICY, source_scope
-from .models import AuditEvent, MessageProcessingTrace, OutboxEvent, RawMessage
+from .models import AISettings, AuditEvent, MessageProcessingTrace, OutboxEvent, RawMessage
 from .providers import ProviderUnavailable
 
 
@@ -26,6 +26,7 @@ def reserve_attempt(raw, operation_key):
     if existing:
         return existing
     attempt = (raw.traces.aggregate(last=Max("attempt_no"))["last"] or 0) + 1
+    cfg = AISettings.get_active()
     return MessageProcessingTrace.objects.create(
         raw_message=raw,
         operation_key=operation_key,
@@ -40,6 +41,9 @@ def reserve_attempt(raw, operation_key):
         status="warning",
         result_summary="Ожидает обработки с полной историей.",
         context_metadata={
+            "analysis_policy": "history-packets-v1",
+            "analysis_limits": {"analysis_input_token_limit":cfg.analysis_input_token_limit,
+                                "analysis_output_token_limit":cfg.analysis_output_token_limit},
             "schema_version": 1,
             "policy_version": POLICY,
             "source": "chat_history",

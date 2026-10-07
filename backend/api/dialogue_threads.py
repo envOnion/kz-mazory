@@ -3,6 +3,7 @@
 import hashlib
 import json
 import re
+from datetime import datetime, timezone as datetime_timezone
 from django.db.models import Q
 from rest_framework import serializers
 from .models import (
@@ -40,18 +41,27 @@ def lock_candidate_source(candidate):
 
 def source_key(raw):
     team_id = raw.config.team_id if raw.config_id else raw.team_id
+    from .whatsapp_identity import WHATSAPP_SOURCES
+    family = "waha" if raw.config_id and raw.source in WHATSAPP_SOURCES else raw.source
     return hashlib.sha256(
         json.dumps(
             [
                 team_id,
                 raw.config_id,
-                raw.source,
+                family,
                 raw.session_name,
                 raw.chat_id,
                 raw.project_id if not raw.config_id else None,
             ]
         ).encode()
     ).hexdigest()
+
+
+def analysis_position(raw):
+    """Import IDs may run backwards; source order follows the original date."""
+    at = raw.timestamp if raw.sent_at_known else raw.received_at
+    delta = at.astimezone(datetime_timezone.utc) - datetime(1970, 1, 1, tzinfo=datetime_timezone.utc)
+    return max(0, delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds)
 
 
 def context_threads(raw):
@@ -117,16 +127,49 @@ class ThemeSchema(serializers.Serializer):
     messages = LinkSchema(many=True, allow_empty=False)
 
 
+def normalize_themes(rows):
+    """Fixed wire slots prevent repeated keys; saved legacy arrays stay valid."""
+    if isinstance(rows, dict):
+        if "t0" not in rows or any(key not in {f"t{i}" for i in range(16)} or not isinstance(value,dict) or "key" in value for key,value in rows.items()):
+            raise ProviderUnavailable("thread_classification_invalid")
+        return [{**value,"key":key} for key,value in rows.items()]
+    return rows
+
+
 def prepare_themes(result, raw, trace):
     from .message_context import source_scope
 
-    rows = result.get("threads")
+    rows = normalize_themes(result.get("threads"))
+    result["threads"] = rows
     if rows is None:
         if result.get("facts"):
             raise ProviderUnavailable("thread_classification_missing")
         rows = []
     if not isinstance(rows, list):
         raise ProviderUnavailable("thread_classification_invalid")
+    classification = result.get("target_classification")
+    pairs = [(classification,raw.id)] if classification is not None else []
+    if "target_classifications" in result:
+        targets = trace.context_metadata.get("batch_message_ids") or [raw.id]
+        multiple = result["target_classifications"]
+        if not isinstance(multiple,dict) or set(multiple) != {f"c{i}" for i in range(len(targets))} or pairs:
+            raise ProviderUnavailable("target_classification_invalid")
+        pairs = [(multiple[f"c{i}"],pk) for i,pk in enumerate(targets)]
+    for classification, target_id in pairs:
+        # A dedicated required wire object pins the target even when the model
+        # classifies only nearby originals in threads. The model, not the server,
+        # supplies its theme and thought state; no inferred classification.
+        if not isinstance(classification, dict) or type(classification.get("raw_message_id")) is not int or classification["raw_message_id"] != target_id or not isinstance(classification.get("thread_key"), str):
+            raise ProviderUnavailable("target_classification_invalid")
+        selected = [row for row in rows if isinstance(row, dict) and row.get("key") == classification["thread_key"]]
+        schema = LinkSchema(data=classification)
+        if len(selected) != 1 or not schema.is_valid() or not isinstance(selected[0].get("messages"), list):
+            raise ProviderUnavailable("target_classification_invalid")
+        existing = [link for link in selected[0]["messages"] if isinstance(link, dict) and link.get("raw_message_id") == target_id]
+        if existing and any(link.get("thought_state") != schema.validated_data["thought_state"] for link in existing):
+            raise ProviderUnavailable("target_classification_conflict")
+        if not existing:
+            selected[0]["messages"].append(schema.validated_data)
     if not rows:
         rows = [
             {
@@ -165,10 +208,13 @@ def prepare_themes(result, raw, trace):
         .exclude(processing_state__in=["deleted", "superseded"])
         .values_list("id", flat=True)
     )
-    if not ids.issubset(allowed) or ids != valid_ids or raw.id not in ids:
-        raise ProviderUnavailable("thread_sources_unavailable")
-    if not set(trace.context_metadata.get("batch_message_ids", [])).issubset(ids):
-        raise ProviderUnavailable("batch_classification_missing")
+    diagnostics = {"reference_count":len(ids), "unoffered_reference_count":len(ids - allowed),
+                   "unavailable_reference_count":len(ids - valid_ids),
+                   "missing_target_count":len(({raw.id} | set(trace.context_metadata.get("batch_message_ids", []))) - ids)}
+    if not ids.issubset(allowed) or ids != valid_ids:
+        raise ProviderUnavailable("thread_sources_unavailable", diagnostics=diagnostics)
+    if diagnostics["missing_target_count"]:
+        raise ProviderUnavailable("batch_classification_missing", diagnostics=diagnostics)
     offered = {item["id"] for item in trace.context_metadata.get("known_threads", [])}
     for theme in themes:
         if theme["thread_id"] is not None and theme["thread_id"] not in offered:
@@ -331,9 +377,12 @@ def persist_themes(themes, raw, trace, facts):
                 completion_reason=theme["completion_reason"],
             )
             # A ready revision is a replacement snapshot for this thought, not a new task.
-            FactCandidate.objects.filter(
+            old_candidates = FactCandidate.objects.filter(
                 thread_revision__thread=thread, status="pending"
-            ).update(status="superseded")
+            )
+            if trace.context_metadata.get("replace_unsent"):
+                old_candidates = old_candidates.filter(trace__raw_message_id__in=trace.context_metadata.get("batch_message_ids") or [raw.id])
+            old_candidates.update(status="superseded")
             persisted[theme_key] = revision
             del pending[theme_key]
     # Reassign observed messages; retain unseen history and immutable old revisions.

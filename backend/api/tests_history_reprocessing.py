@@ -2,18 +2,20 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.admin.sites import AdminSite
+from django.core.exceptions import ValidationError
 from django.test import TestCase
 from django.utils import timezone
 
 from .admin import MessageProcessingTraceAdmin
-from .history_jobs import persist_items, progress, process_step, start_job
+from .history_jobs import control_run, persist_items, progress, process_step, start_job
 from .job_admin import WhatsAppHistoryRunAdmin
 from .models import (
     AISettings, Company, DialogueThread, FactCandidate, MessageProcessingTrace,
     OutboxEvent, Project, RawMessage, Team, ThreadMessage, ThreadRevision,
     WhatsAppConfig, WhatsAppHistoryItem, WhatsAppHistoryJob, WhatsAppHistoryRun,
 )
-from .tasks import run_outbox
+from .tasks import dispatch_outbox, run_outbox
+from .providers import ProviderUnavailable
 
 
 class HistoryReprocessingTests(TestCase):
@@ -89,13 +91,129 @@ class HistoryReprocessingTests(TestCase):
         run = start_job(self.job.id)
         self.assertEqual(run.settings_snapshot["analysis_mode"], "reprocess_all")
 
+    def test_dispatches_all_message_work_without_processing_toggle(self):
+        events = [
+            OutboxEvent.objects.create(event_type=kind, deduplication_key=kind)
+            for kind in ("extract_message", "index_message", "whatsapp_artifact")
+        ]
+        with patch("api.tasks.AISettings.get_active", return_value=AISettings()), patch(
+            "api.tasks.async_task"
+        ) as enqueue:
+            self.assertEqual(dispatch_outbox(), 2)
+        self.assertEqual(enqueue.call_count, 2)
+        self.assertEqual({call.args[1] for call in enqueue.call_args_list}, {e.pk for e in events[:2]})
+        for event in events[:2]:
+            event.refresh_from_db()
+            self.assertEqual(event.state, "enqueued")
+
+    def test_pending_history_message_reaches_analysis_without_processing_toggle(self):
+        run = self.run_record()
+        self.persist(run, [self.item(run)])
+        event = OutboxEvent.objects.get(payload__history_run_id=run.pk)
+        with patch("api.tasks.AISettings.get_active", return_value=AISettings()), patch(
+            "api.tasks.extract_message"
+        ) as extract:
+            run_outbox(event.pk)
+        event.refresh_from_db()
+        extract.assert_called_once_with(event.payload)
+        event.refresh_from_db()
+        self.assertEqual(event.state, "done")
+        self.assertEqual(event.attempt_count, 1)
+        self.assertEqual(event.error_code, "")
+
+    def test_cancel_analysis_preserves_messages_and_releases_next_run(self):
+        run = self.run_record()
+        self.persist(run, [self.item(run, "pending"), self.item(run, "done")])
+        run.state = "analyzing"
+        run.save()
+        event = OutboxEvent.objects.get(payload__history_run_id=run.pk, payload__raw_id=run.messages.get(message_id="pending").pk)
+        done = OutboxEvent.objects.get(payload__history_run_id=run.pk, payload__raw_id=run.messages.get(message_id="done").pk)
+        OutboxEvent.objects.filter(pk=done.pk).update(state="done")
+        MessageProcessingTrace.objects.filter(pk=done.payload["trace_id"]).update(status="success")
+        live = OutboxEvent.objects.create(event_type="extract_message", deduplication_key="live", payload={"raw_id":event.payload["raw_id"]})
+        with self.assertRaisesMessage(ValidationError, "незавершённый запуск"):
+            start_job(self.job.pk)
+        control_run(run.pk, "cancel", None)
+        run.refresh_from_db(); event.refresh_from_db(); done.refresh_from_db(); live.refresh_from_db()
+        self.assertEqual(run.state, "cancelled")
+        self.assertIsNotNone(run.finished_at)
+        self.assertEqual(run.messages.count(), 2)
+        self.assertEqual(event.state, "cancelled")
+        self.assertEqual(event.error_code, "history_run_cancelled")
+        self.assertEqual(done.state, "done")
+        self.assertEqual(live.state, "pending")
+        with patch("api.tasks.extract_message") as extract:
+            run_outbox(event.pk)
+        extract.assert_not_called()
+        new_run = start_job(self.job.pk)
+        self.assertNotEqual(new_run.pk, run.pk)
+
+    def test_cancel_during_request_prevents_provider_budget_and_generic_retries(self):
+        for index, error in enumerate((ProviderUnavailable("invalid_extraction_schema"), ProviderUnavailable("ai_daily_budget_exhausted"), ValueError("test"))):
+            with self.subTest(error=type(error).__name__):
+                run = self.run_record()
+                self.persist(run, [self.item(run, f"running-{index}")])
+                run.state = "analyzing"; run.save()
+                event = OutboxEvent.objects.get(payload__history_run_id=run.pk)
+                def cancel_then_fail(payload):
+                    control_run(run.pk, "cancel", None)
+                    event.refresh_from_db()
+                    self.assertEqual(event.state, "processing")
+                    self.assertTrue(event.payload["history_cancelled"])
+                    raise error
+                with patch("api.tasks.AISettings.get_active", return_value=AISettings()), patch("api.tasks.extract_message", side_effect=cancel_then_fail):
+                    run_outbox(event.pk)
+                event.refresh_from_db(); run.refresh_from_db()
+                self.assertEqual(event.state, "cancelled")
+                self.assertIsNone(event.lease_until)
+                self.assertEqual(event.attempt_count, 1)
+                self.assertEqual(run.state, "cancelled")
+                trace = MessageProcessingTrace.objects.get(pk=event.payload["trace_id"])
+                self.assertIsNone(trace.context_metadata["retry"]["next_attempt"])
+
+    def test_running_success_can_finish_after_cancellation(self):
+        run = self.run_record()
+        self.persist(run, [self.item(run)])
+        run.state = "analyzing"; run.save()
+        event = OutboxEvent.objects.get(payload__history_run_id=run.pk)
+        def cancel_then_succeed(payload):
+            control_run(run.pk, "cancel", None)
+        with patch("api.tasks.AISettings.get_active", return_value=AISettings()), patch("api.tasks.extract_message", side_effect=cancel_then_succeed):
+            run_outbox(event.pk)
+        run.refresh_from_db(); event.refresh_from_db()
+        self.assertEqual(run.state, "cancelled")
+        self.assertEqual(event.state, "done")
+
+    def test_ordinary_failures_still_schedule_retries_without_cancel_marker(self):
+        for index, error in enumerate((ProviderUnavailable("invalid_extraction_schema"), ProviderUnavailable("ai_daily_budget_exhausted"), ValueError("test"))):
+            with self.subTest(error=type(error).__name__):
+                run = self.run_record()
+                self.persist(run, [self.item(run, f"retry-{index}")])
+                event = OutboxEvent.objects.get(payload__history_run_id=run.pk)
+                with patch("api.tasks.AISettings.get_active", return_value=AISettings()), patch("api.tasks.extract_message", side_effect=error):
+                    run_outbox(event.pk)
+                event.refresh_from_db()
+                self.assertEqual(event.state, "pending")
+                self.assertGreater(event.next_attempt_at, timezone.now())
+                self.assertEqual(event.attempt_count, 0 if str(error) in ("ai_daily_budget_exhausted", "invalid_extraction_schema") else 1)
+                # Allow the next iteration's source message to be claimed.
+                OutboxEvent.objects.filter(pk=event.pk).update(state="failed")
+
+    def test_expired_cancelled_request_is_not_requeued(self):
+        event = OutboxEvent.objects.create(event_type="extract_message", deduplication_key="expired-cancel", state="processing", lease_until=timezone.now()-timedelta(seconds=1), payload={"history_cancelled":True})
+        with patch("api.tasks.AISettings.get_active", return_value=AISettings()), patch("api.tasks.async_task") as enqueue:
+            self.assertEqual(dispatch_outbox(), 0)
+        event.refresh_from_db()
+        self.assertEqual(event.state, "cancelled")
+        enqueue.assert_not_called()
+
     def test_worker_waits_for_older_attempt_without_consuming_retry(self):
         first = self.run_record()
         self.persist(first, [self.item(first)])
         second = self.run_record()
         self.persist(second, [self.item(second)])
         event = OutboxEvent.objects.get(payload__history_run_id=second.id)
-        with patch("api.tasks.AISettings.get_active", return_value=AISettings(message_processing_paused=False)), patch("api.tasks.extract_message") as extract:
+        with patch("api.tasks.AISettings.get_active", return_value=AISettings()), patch("api.tasks.extract_message") as extract:
             run_outbox(event.id)
         extract.assert_not_called()
         event.refresh_from_db()
@@ -186,7 +304,7 @@ class HistoryReprocessingTests(TestCase):
         older = OutboxEvent.objects.get(payload__history_run_id=first.id)
         newer = OutboxEvent.objects.get(payload__history_run_id=second.id)
         OutboxEvent.objects.filter(pk=newer.id).update(state="processing")
-        with patch("api.tasks.AISettings.get_active", return_value=AISettings(message_processing_paused=False)), patch("api.tasks.extract_message") as extract:
+        with patch("api.tasks.AISettings.get_active", return_value=AISettings()), patch("api.tasks.extract_message") as extract:
             run_outbox(older.id)
         extract.assert_not_called()
         MessageProcessingTrace.objects.filter(pk=older.payload["trace_id"]).update(status="error")
@@ -420,4 +538,3 @@ class HistoryReprocessingTests(TestCase):
         self.assertIn("Вне треда", empty_badge)
         empty_card = trace_admin.dialogue_thread_hierarchy_card(empty_trace)
         self.assertIn("Сообщение ещё не включено в тред диалога", empty_card)
-

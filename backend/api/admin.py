@@ -931,16 +931,18 @@ class AISettingsAdmin(IntegrationAdmin):
                     "context_window_tokens",
                     "max_completion_tokens",
                     "context_safety_tokens",
+                    "analysis_input_token_limit",
+                    "analysis_target_message_limit",
+                    "analysis_output_token_limit",
                     "tokenizer_id",
                     "tokenizer_revision",
                 ),
             },
         ),
         (
-            "Управление обработкой и бюджетом",
+            "Бюджет AI",
             {
                 "fields": (
-                    "message_processing_paused",
                     "daily_request_limit",
                     "daily_budget_usd",
                 )
@@ -983,15 +985,6 @@ class AISettingsAdmin(IntegrationAdmin):
             OutboxEvent.objects.filter(
                 state="pending", error_code="ai_daily_budget_exhausted"
             ).update(next_attempt_at=timezone.now())
-        if (
-            "message_processing_paused" in form.changed_data
-            and not obj.message_processing_paused
-        ):
-            OutboxEvent.objects.filter(
-                state="pending", event_type__in=["extract_message", "index_message"]
-            ).exclude(error_code="ai_daily_budget_exhausted").update(
-                next_attempt_at=timezone.now()
-            )
 
     @method_decorator(
         sensitive_post_parameters("new_chat_api_key", "new_embedding_api_key")

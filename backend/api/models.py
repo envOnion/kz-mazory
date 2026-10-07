@@ -629,6 +629,9 @@ class WhatsAppConfig(models.Model):
 
 
 class AISettings(models.Model):
+    analysis_input_token_limit = models.PositiveIntegerField("Вход анализа, токены", default=16384)
+    analysis_target_message_limit = models.PositiveIntegerField("Сообщений в пакете анализа", default=8)
+    analysis_output_token_limit = models.PositiveIntegerField("Ответ анализа, токены", default=4096)
     autonomous_daily_token_limit = models.PositiveBigIntegerField(default=1000000)
     autonomous_max_in_flight = models.PositiveIntegerField(default=2)
     autonomous_reconcile_cursor = models.PositiveBigIntegerField(default=0)
@@ -713,11 +716,6 @@ class AISettings(models.Model):
     context_safety_tokens = models.PositiveIntegerField(
         "Технический запас, токены", default=2048
     )
-    message_processing_paused = models.BooleanField(
-        "Приостановить анализ и индексацию сообщений",
-        default=False,
-        help_text="Новые задания ждут в очереди. Уже отправленные запросы завершаются.",
-    )
     daily_request_limit = models.PositiveIntegerField(
         "Лимит запросов AI в сутки",
         default=0,
@@ -756,6 +754,14 @@ class AISettings(models.Model):
         from django.core.exceptions import ValidationError
 
         super().clean()
+        if not 1 <= self.analysis_target_message_limit <= 30:
+            raise ValidationError({"analysis_target_message_limit": "Допустимо от 1 до 30 сообщений."})
+        if not self.analysis_input_token_limit or not self.analysis_output_token_limit:
+            raise ValidationError("Лимиты анализа должны быть положительными.")
+        if self.analysis_output_token_limit > self.max_completion_tokens:
+            raise ValidationError({"analysis_output_token_limit": "Ответ анализа не должен превышать резерв ответа модели."})
+        if self.analysis_input_token_limit + self.analysis_output_token_limit + self.context_safety_tokens > self.context_window_tokens:
+            raise ValidationError("Вход, ответ анализа и технический запас должны помещаться в окно модели.")
         if self.daily_budget_usd is not None and self.daily_budget_usd < 0:
             raise ValidationError(
                 {"daily_budget_usd": "Бюджет не может быть отрицательным."}
@@ -1358,6 +1364,7 @@ class CrmCatalogSync(models.Model):
 
 
 class FactCandidate(models.Model):
+    materialization_snapshot = models.JSONField(default=dict, blank=True)
     thread_revision = models.ForeignKey(ThreadRevision, null=True, blank=True, on_delete=models.PROTECT, related_name="candidates")
     CRM_MATCH_STATE_CHOICES = [
         ("not_requested", "Не запускалось"),
@@ -1661,6 +1668,8 @@ class ReminderOccurrence(models.Model):
 
 
 class OutboxEvent(models.Model):
+    analysis_source_key = models.CharField(max_length=64, null=True, blank=True, db_index=True)
+    analysis_position = models.PositiveBigIntegerField(null=True, blank=True)
     business_event = models.ForeignKey(
         BusinessEvent, null=True, blank=True, on_delete=models.PROTECT
     )
@@ -1673,6 +1682,9 @@ class OutboxEvent(models.Model):
     lease_until = models.DateTimeField(null=True, blank=True)
     error_code = models.CharField(max_length=64, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [models.Index(fields=["analysis_source_key", "state", "next_attempt_at", "analysis_position"], name="analysis_dispatch_idx")]
 
 
 class AsyncOperation(models.Model):
@@ -1890,6 +1902,9 @@ class WhatsAppHistoryRun(models.Model):
     requested_by = models.ForeignKey(
         User, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Запустил"
     )
+    import_kind = models.CharField(max_length=16, default="waha", choices=[("waha", "WhatsApp (WAHA)"), ("file", "TXT-экспорт"), ("saved", "Сохранённая история")])
+    run_kind = models.CharField(max_length=16, default="full", choices=[("full", "Полный проход"), ("monitor", "Монитор новых сообщений")])
+    export_upload = models.ForeignKey("WhatsAppExportUpload", null=True, blank=True, on_delete=models.PROTECT, related_name="runs")
     state = models.CharField(
         "Состояние",
         max_length=32,
@@ -1929,14 +1944,31 @@ class WhatsAppHistoryRun(models.Model):
         ordering = ["-id"]
         constraints = [
             models.UniqueConstraint(
-                fields=["job"],
+                fields=["job", "run_kind"],
                 condition=models.Q(state__in=HISTORY_ACTIVE_STATES),
-                name="one_active_whatsapp_import",
+                name="one_active_whatsapp_run_kind",
             )
         ]
 
     def __str__(self):
         return f"Импорт #{self.pk}: {self.get_state_display()}"
+
+
+class HistoryAnalysisItem(models.Model):
+    run = models.ForeignKey(WhatsAppHistoryRun, on_delete=models.PROTECT, related_name="analysis_items")
+    raw_message = models.ForeignKey(RawMessage, on_delete=models.PROTECT)
+    outbox_event = models.ForeignKey(OutboxEvent, null=True, blank=True, on_delete=models.PROTECT)
+    trace = models.ForeignKey(MessageProcessingTrace, null=True, blank=True, on_delete=models.PROTECT)
+    state = models.CharField(max_length=16, default="queued", db_index=True)
+    disposition = models.CharField(max_length=32, blank=True)
+    reason_code = models.CharField(max_length=64, blank=True)
+    reason_description = models.TextField(blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["run", "raw_message"], name="history_analysis_coverage_unique")]
+        verbose_name = "результат анализа сообщения"
+        verbose_name_plural = "Результаты анализа сообщений"
 
 
 class WhatsAppHistoryItem(models.Model):
@@ -1959,6 +1991,59 @@ class WhatsAppHistoryItem(models.Model):
                 fields=["run", "timestamp", "id"], name="history_item_time_idx"
             )
         ]
+
+
+class WhatsAppExportUpload(models.Model):
+    job = models.ForeignKey(WhatsAppHistoryJob, on_delete=models.PROTECT, related_name="exports")
+    uploaded_by = models.ForeignKey(User, on_delete=models.PROTECT)
+    file = models.FileField(upload_to="whatsapp_exports/%Y/%m/")
+    original_name = models.CharField(max_length=255)
+    sha256 = models.CharField(max_length=64)
+    source_key = models.CharField(max_length=64)
+    timezone = models.CharField(max_length=64)
+    date_order = models.CharField(max_length=3, default="DMY")
+    source_snapshot = models.JSONField(default=dict)
+    state = models.CharField(max_length=16, default="queued")
+    diagnostics = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["job", "source_key", "sha256", "timezone", "date_order"], name="whatsapp_export_upload_unique")]
+        verbose_name = "экспорт WhatsApp"
+        verbose_name_plural = "Экспорты WhatsApp"
+
+
+class WhatsAppExportEntry(models.Model):
+    upload = models.ForeignKey(WhatsAppExportUpload, on_delete=models.PROTECT, related_name="entries")
+    raw_message = models.ForeignKey(RawMessage, null=True, blank=True, on_delete=models.PROTECT)
+    ordinal = models.PositiveIntegerField()
+    line_start = models.PositiveIntegerField()
+    line_end = models.PositiveIntegerField()
+    sent_at = models.DateTimeField()
+    time_precision = models.CharField(max_length=8)
+    kind = models.CharField(max_length=16)
+    fingerprint = models.CharField(max_length=64, db_index=True)
+    resolution_state = models.CharField(max_length=32)
+    reason_code = models.CharField(max_length=64, blank=True)
+    reason_description = models.TextField(blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["upload", "ordinal"], name="whatsapp_export_entry_unique")]
+        verbose_name = "запись TXT-экспорта"
+        verbose_name_plural = "Записи TXT-экспорта и причины"
+
+
+class WhatsAppMessageAlias(models.Model):
+    config = models.ForeignKey(WhatsAppConfig, on_delete=models.PROTECT)
+    raw_message = models.ForeignKey(RawMessage, on_delete=models.PROTECT, related_name="transport_aliases")
+    session_name = models.CharField(max_length=64)
+    chat_id = models.CharField(max_length=128)
+    namespace = models.CharField(max_length=16)
+    external_id = models.CharField(max_length=128)
+    source_revision = models.CharField(max_length=64)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["config", "session_name", "chat_id", "namespace", "external_id", "source_revision"], name="whatsapp_transport_alias_unique")]
 
 
 class McpToken(models.Model):
@@ -2036,6 +2121,7 @@ class FactDecision(models.Model):
 
 
 class FactEvent(models.Model):
+    is_superseded = models.BooleanField(default=False, db_index=True)
     decision = models.ForeignKey(FactDecision, null=True, blank=True, on_delete=models.PROTECT, related_name="events")
     team = models.ForeignKey(Team, on_delete=models.PROTECT)
     project = models.ForeignKey(Project, null=True, blank=True, on_delete=models.PROTECT, related_name="fact_events")

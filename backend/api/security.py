@@ -72,6 +72,11 @@ class SecurityHeadersMiddleware:
             if request.path == "/api/attachments/"
             else settings.DATA_UPLOAD_MAX_MEMORY_SIZE
         )
+        if request.method == "POST" and re.fullmatch(
+            r"/admin/api/whatsapphistoryjob/[0-9]+/import-txt/", request.path
+        ) and request.content_type == "multipart/form-data":
+            from .whatsapp_export_parser import MAX_BYTES
+            limit = MAX_BYTES + 65536
         try:
             length = int(request.META.get("CONTENT_LENGTH") or 0)
         except ValueError:
