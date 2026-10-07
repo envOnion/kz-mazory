@@ -97,10 +97,9 @@ async function waitForFactProcessing(request: APIRequestContext) {
 }
 
 // One browser session shares the real refresh rotation across serial scenarios.
-test('WhatsApp group creates a silent employee through Q2 without granting access', async ({ page, context, request }) => {
+test('incoming WhatsApp message automatically creates a named silent employee through Q2', async ({ page, context, request }) => {
   await authenticate(context)
-  const response = await request.post('/api/directory/participants-sync/', { headers, data: { config_id: session.config_id } })
-  expect(response.status()).toBe(202)
+  await message(request, 'people-auto-trigger', 'Сделаешь завтра?')
   await expect.poll(async () => {
     const data: Directory = await (await request.get('/api/directory/', { headers })).json()
     return data.participants?.find(person => person.phone === '79990000003')?.user_id
@@ -108,14 +107,26 @@ test('WhatsApp group creates a silent employee through Q2 without granting acces
   const data: Directory = await (await request.get('/api/directory/', { headers })).json()
   const person = data.participants!.find(row => row.phone === '79990000003')!
   expect(person.access_status).toBe('not_granted')
-  const repeated = await request.post('/api/directory/participants-sync/', { headers, data: { config_id: session.config_id } })
-  expect(repeated.status()).toBe(202)
+  await message(request, 'people-auto-trigger', 'Сделаешь завтра?', true)
+  await expect.poll(async () => {
+    const value: Directory = await (await request.get('/api/directory/', { headers })).json()
+    return value.participant_sync?.find(row => row.config_id === session.config_id)?.state
+  }, { timeout: 20000 }).toBe('done')
+  const repeated: Directory = await (await request.get('/api/directory/', { headers })).json()
+  expect(repeated.participants!.map(row => row.id)).toEqual(data.participants!.map(row => row.id))
   await page.goto('/')
   await page.getByTestId('nav-workspace').click()
   await page.getByRole('button', { name: 'Сотрудники', exact: true }).click()
   await expect(page.getByTestId(`participant-${person.id}`)).toContainText('Тихий участник')
   await expect(page.getByTestId(`participant-${person.id}`)).toContainText('+79990000003')
   await expect(page.getByTestId(`participant-${person.id}`)).toContainText('Доступ не предоставлен')
+  await page.goto('/admin/login/?next=/admin/auth/user/')
+  await page.locator('#id_username').fill('79990000001')
+  await page.locator('#id_password').fill('local-e2e-only')
+  await page.locator('button[type="submit"], input[type="submit"]').click()
+  await page.goto(`/admin/auth/user/${person.user_id}/change/`)
+  await expect(page.locator('#id_first_name')).toHaveValue('Тихий участник')
+  await expect(page.locator('#id_last_name')).toHaveValue('')
 })
 
 test('CRM catalog, incomplete thought, interleaved themes and review through real Q2', async ({ page, context, request }) => {

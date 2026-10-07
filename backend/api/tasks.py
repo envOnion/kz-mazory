@@ -518,7 +518,7 @@ def waha_request(method, path, data=None, timeout=15):
 def sync_whatsapp_participants(payload):
     """Read group identity evidence in a worker; discovery sends no messages."""
     from .participants import (
-        Sender, bind_aliased_export, canonical_jid, link_export_names, message_sender,
+        DIRECTORY_VERSION, Sender, bind_aliased_export, canonical_jid, link_export_names, message_sender,
         person_name, phone_from_jid, register_sender, restore_saved, scope_matches,
     )
     config = WhatsAppConfig.objects.select_related("team").get(pk=payload["config_id"])
@@ -596,7 +596,7 @@ def sync_whatsapp_participants(payload):
             "phones_unknown": sum(not sender.phone for sender in evidence.values()),
             "contact_errors": names_errors,
         }
-        config.snapshot = {**config.snapshot, "participant_sync": summary}
+        config.snapshot = {**config.snapshot, "participant_sync": summary, "participant_directory_version": DIRECTORY_VERSION}
         config.save(update_fields=["snapshot"])
         return summary
 
