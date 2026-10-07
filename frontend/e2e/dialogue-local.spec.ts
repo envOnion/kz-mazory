@@ -1,7 +1,7 @@
 import { test, expect, type APIRequestContext, type BrowserContext } from '@playwright/test'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
-import { createHmac } from 'node:crypto'
+import { createHmac, randomUUID } from 'node:crypto'
 import type { Candidate, Directory, Health, Page } from '../src/types/platform'
 import type { DialogueThread } from '../src/types/factReview'
 import type { McpConnectionResponse } from '../src/types/mcp'
@@ -13,6 +13,12 @@ let currentRefresh = session.refresh
 let currentAccess = session.access
 const headers = { Authorization: `Bearer ${session.access}` }
 test.describe.configure({ mode: 'serial' })
+
+function writeProviderState(path: string, value: Record<string, unknown>) {
+  const temporary = `${path}.${randomUUID()}.tmp`
+  writeFileSync(temporary, JSON.stringify(value))
+  renameSync(temporary, path)
+}
 
 test('cabinet credential survives reload and authorizes only fact-review MCP', async ({ page, context, request }) => {
   await authenticate(context)
@@ -142,10 +148,10 @@ test('CRM catalog, incomplete thought, interleaved themes and review through rea
 })
 
 test('CRM error is shown separately and retry preserves imported identities', async ({ request }) => {
-  writeFileSync(join(directory, 'provider-state.json'), JSON.stringify({ crm_error: true }))
+  writeProviderState(join(directory, 'provider-state.json'), { crm_error: true })
   expect((await request.post('/api/directory/crm-sync/', { headers, data: { team_id: 1 } })).status()).toBe(202)
   await expect.poll(async () => { const response = await request.get('/api/directory/', { headers }); const value: Directory = await response.json(); return value.crm_catalog?.[0]?.state }).toBe('error')
-  writeFileSync(join(directory, 'provider-state.json'), '{}')
+  writeProviderState(join(directory, 'provider-state.json'), {})
   expect((await request.post('/api/directory/crm-sync/', { headers, data: { team_id: 1 } })).status()).toBe(202)
   await expect.poll(async () => { const response = await request.get('/api/directory/', { headers }); const value: Directory = await response.json(); return value.crm_catalog?.[0]?.state }).toBe('succeeded')
   const response = await request.get('/api/directory/', { headers }); const value: Directory = await response.json()
@@ -312,7 +318,7 @@ test('full flow from WhatsApp messages to KPI plan/fact, timeline and forecasts'
 
 test('autonomous WhatsApp receipt reaches CRM and reports without a review click', async ({ page, context, request }) => {
   const stateFile = join(directory, 'provider-state.json')
-  writeFileSync(stateFile, JSON.stringify({ ...JSON.parse(readFileSync(stateFile, 'utf8')), autonomous: true }))
+  writeProviderState(stateFile, { ...JSON.parse(readFileSync(stateFile, 'utf8')), autonomous: true })
   await expect.poll(async () => (await (await request.get('/api/directory/', { headers })).json()).autonomous_enabled).toBe(true)
   await message(request, 'south-auto-payment', 'БЦ Южный: оплата 20 000 000 ₸ поступила сегодня')
   await expect.poll(async () => {

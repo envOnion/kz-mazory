@@ -1001,8 +1001,6 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                 if reversal:
                     # Reversal first consumes unallocated money, then reverses allocation entries,
                     # preserving every original entry and keeping aged receivables consistent.
-                    from django.db.models import Q
-
                     related = PaymentAllocation.objects.filter(
                         Q(financial_record=reversal)
                         | Q(financial_record__reverses=reversal)
