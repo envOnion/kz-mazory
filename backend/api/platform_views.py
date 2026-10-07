@@ -34,7 +34,7 @@ from .models import (
     NotificationDelivery,
     WhatsAppConfig,
 )
-from .facts import review, select_crm_match, allocate_payment, json_value
+from .facts import review, select_crm_match, allocate_payment, json_value, match_candidate
 from .datamart import datamart, scoped_projects
 from .notifications import change_commitment
 from .security import Conflict
@@ -216,100 +216,10 @@ class CandidateReviewView(APIView):
                 raise ValidationError(
                     "Укажите основание сопоставления или новой проверки."
                 )
-            with transaction.atomic():
-                lock_candidate_source(candidate)
-                candidate = (
-                    access.candidates_for(request.user)
-                    .select_for_update(of=("self",))
-                    .get(pk=candidate.id)
-                )
-                access.require_review(request.user, candidate)
-                if candidate.status != "pending":
-                    raise Conflict()
-                project = get_object_or_404(
-                    access.projects_for(request.user).select_for_update(of=("self",)),
-                    pk=values.get("project_id", candidate.project_id),
-                    team=candidate.team,
-                )
-                if values["base_version"] != project.version:
-                    raise Conflict()
-                current_crm_matches = list(
-                    candidate.crm_matches.select_for_update(of=("self",)).filter(
-                        crm_match_revision=candidate.crm_match_revision
-                    )
-                )
-                list(
-                    candidate.crm_matches.select_for_update(of=("self",)).filter(
-                        selection_state="selected"
-                    )
-                )
-                compatible_crm_match = None
-                if project.bitrix_id:
-                    compatible_crm_match = next(
-                        (
-                            item
-                            for item in current_crm_matches
-                            if item.bitrix_deal_id == project.bitrix_id
-                        ),
-                        None,
-                    )
-                else:
-                    compatible_crm_match = next(
-                        (
-                            item
-                            for item in current_crm_matches
-                            if item.selection_state == "selected"
-                            and item.project_id == project.id
-                        ),
-                        None,
-                    )
-                selected_crm_matches = candidate.crm_matches.filter(
-                    selection_state="selected"
-                )
-                if compatible_crm_match:
-                    selected_crm_matches = selected_crm_matches.exclude(
-                        pk=compatible_crm_match.pk
-                    )
-                selected_crm_matches.update(selection_state="dismissed")
-                if compatible_crm_match:
-                    compatible_crm_match.selection_state = "selected"
-                    compatible_crm_match.project = project
-                    compatible_crm_match.save(
-                        update_fields=["selection_state", "project"]
-                    )
-                    candidate.crm_match_state = "matched"
-                else:
-                    candidate.crm_match_state = (
-                        "ambiguous" if current_crm_matches else "not_requested"
-                    )
-                candidate.crm_match_error_code = ""
-                candidate.project, candidate.base_project_version = (
-                    project,
-                    project.version,
-                )
-                candidate.save(
-                    update_fields=[
-                        "project",
-                        "base_project_version",
-                        "crm_match_state",
-                        "crm_match_error_code",
-                    ]
-                )
-                AuditEvent.objects.create(
-                    actor=request.user,
-                    target_type="FactCandidate",
-                    target_id=candidate.id,
-                    action=values["action"],
-                    before_after={
-                        "project_id": project.id,
-                        "base_version": project.version,
-                        "crm_match_id": (
-                            compatible_crm_match.id if compatible_crm_match else None
-                        ),
-                        "crm_match_state": candidate.crm_match_state,
-                        "reason": values["reason"],
-                    },
-                )
+            candidate = match_candidate(
+                pk, request.user, values.get("project_id"), values["base_version"],
+                values["reason"], action=values["action"],
+            )
         else:
             if (
                 values["action"] == "approve"
