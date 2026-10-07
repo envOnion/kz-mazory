@@ -2,6 +2,7 @@
 
 import datetime
 import json
+import uuid
 from http.server import BaseHTTPRequestHandler
 from django.utils import timezone
 
@@ -198,6 +199,11 @@ def classify(value):
 class ProviderHandler(BaseHTTPRequestHandler):
     control = None
 
+    def save_control(self, state):
+        temporary = self.control.with_suffix(f".{uuid.uuid4().hex}.tmp")
+        temporary.write_text(json.dumps(state))
+        temporary.replace(self.control)
+
     def log_message(self, *_):
         pass
 
@@ -222,7 +228,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
             if self.path.endswith("crm.timeline.comment.add.json"):
                 comment = {**body["fields"], "ID": str(1000 + len(state.get("comments", [])))}
                 state.setdefault("comments", []).append(comment)
-                self.control.write_text(json.dumps(state))
+                self.save_control(state)
                 return self.respond({"result": comment["ID"]})
             if self.path.endswith("tasks.task.list.json"):
                 return self.respond({"result": {"tasks": []}})
@@ -270,7 +276,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 )
             if self.path.endswith("crm.deal.add.json"):
                 state.setdefault("writes", []).append(body["fields"])
-                self.control.write_text(json.dumps(state))
+                self.save_control(state)
                 return self.respond({"result": "103"})
             return self.respond({"result": True})
         if self.path.endswith("/messages/count_tokens"):
