@@ -96,7 +96,22 @@ export interface DirectoryProject {
   bitrix_id?: string | null
 }
 
+export interface DirectoryParticipant {
+  id: number
+  team_id: number
+  team_name: string
+  display_name: string
+  profile_id: number | null
+  user_id: number | null
+  phone: string
+  resolution_state: 'resolved' | 'phone_unknown' | 'conflict'
+  access_status: 'active' | 'not_granted'
+  aliases: string[]
+}
+
 export interface Directory {
+  participants?: DirectoryParticipant[]
+  participant_sync?: { config_id: number; chat_name: string; state: string; error_code: string; summary: { synced_at: string; group_members: number; phones_resolved: number; phones_unknown: number; contact_errors: number } | null }[]
   crm_connection?: { matching_enabled: boolean; catalog_read_enabled: boolean; configured: boolean }
   autonomous_enabled?: boolean
   chats?: { id: number; name: string; team_id: number }[]

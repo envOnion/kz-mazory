@@ -3,6 +3,7 @@
 import datetime
 import json
 import uuid
+from urllib.parse import parse_qs, urlsplit
 from http.server import BaseHTTPRequestHandler
 from django.utils import timezone
 
@@ -217,6 +218,18 @@ class ProviderHandler(BaseHTTPRequestHandler):
         self.handle_request(body)
 
     def handle_request(self, body):
+        if self.path.endswith('/participants/v2'):
+            return self.respond([
+                {'id': '10001@lid', 'pn': '79990000001@c.us'},
+                {'id': '10002@lid', 'pn': '79990000002@c.us'},
+                {'id': '10003@lid', 'pn': '79990000003@c.us'},
+            ])
+        if self.path.startswith('/api/sessions/'):
+            return self.respond({'me': {'id': '79990000001@c.us', 'lid': '10001@lid', 'pushName': 'Проверяющий'}})
+        if self.path.startswith('/api/contacts?'):
+            jid = parse_qs(urlsplit(self.path).query)['contactId'][0]
+            names = {'10001@lid': 'Проверяющий', '10002@lid': 'Боб', '10003@lid': 'Тихий участник', '79990000002@c.us': 'Боб'}
+            return self.respond({'id': jid, 'pushname': names.get(jid, '')})
         if "/rest/" in self.path:
             state = json.loads(self.control.read_text())
             if state.get("crm_error"):

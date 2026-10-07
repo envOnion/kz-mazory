@@ -2081,6 +2081,9 @@ class Participant(models.Model):
     user_profile = models.ForeignKey(UserProfile, null=True, blank=True, on_delete=models.PROTECT)
     display_name = models.CharField(max_length=255)
 
+    def __str__(self):
+        return self.display_name
+
 
 class ParticipantIdentity(models.Model):
     participant = models.ForeignKey(Participant, on_delete=models.PROTECT, related_name="identities")

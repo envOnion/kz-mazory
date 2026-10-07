@@ -3,6 +3,14 @@
   <header><p class="text-xs text-indigo-300">{{ client ? 'КАБИНЕТ КЛИЕНТА' : 'РАБОЧИЙ КАБИНЕТ' }}</p><h1 class="text-2xl font-semibold">{{ currentUser?.name }}</h1><p class="text-sm text-slate-400">{{ currentUser?.roles.map(role => roleLabels[role]).join(' · ') }}</p></header>
   <nav class="flex gap-2 flex-wrap" aria-label="Разделы кабинета"><button v-for="item in tabs" :key="item.id" class="btn" :class="tab === item.id ? 'bg-indigo-600 border-indigo-400' : ''" @click="selectTab(item.id)">{{ item.label }}</button></nav>
   <p v-if="error" role="alert" class="panel text-rose-300">{{ error }}</p><p v-if="notice" role="status" class="text-emerald-300">{{ notice }}</p><p v-if="loading" role="status">Загрузка…</p>
+  <template v-if="tab === 'people'">
+    <header class="space-y-2"><h2 class="text-xl font-semibold">Сотрудники и участники WhatsApp</h2><p class="text-sm text-slate-400">Телефон связывает участника с учётной записью. Доступ к кабинету предоставляется отдельно.</p></header>
+    <div class="flex gap-2 flex-wrap"><button class="btn" :disabled="busy || loading" @click="load">Обновить список</button><button v-for="chat in (lead ? directory.chats || [] : [])" :key="chat.id" class="btn" :disabled="busy" @click="syncParticipants(chat.id)">Восстановить участников · {{ chat.name }}</button></div>
+    <p v-for="sync in directory.participant_sync || []" :key="sync.config_id" class="text-sm text-slate-400">{{ sync.chat_name }} · {{ participantSyncLabel(sync.state) }}<span v-if="sync.summary"> · Последняя загрузка: {{ new Date(sync.summary.synced_at).toLocaleString('ru-RU') }}</span><span v-if="sync.error_code" class="text-amber-300"> · Не удалось завершить восстановление. Обнаруженные участники сохранены; повторите загрузку.</span></p>
+    <p class="text-sm text-slate-400">Участников: {{ directory.participants?.length || 0 }} · С телефоном: {{ directory.participants?.filter(person => person.phone).length || 0 }}</p>
+    <div class="grid md:grid-cols-2 gap-4"><article v-for="person in directory.participants || []" :key="person.id" class="panel space-y-2" :data-testid="`participant-${person.id}`"><h3 class="font-semibold">{{ person.display_name }}</h3><p class="text-sm text-slate-400">{{ person.team_name }}</p><p>{{ person.phone ? `+${person.phone}` : 'Телефон не установлен' }}</p><p v-if="person.resolution_state === 'conflict'" class="text-amber-300">Данные идентификации противоречат друг другу — требуется проверка.</p><p v-else-if="!person.phone" class="text-sm text-slate-400">В источнике есть имя или WhatsApp ID; подтверждённый номер пока не получен.</p><p v-if="person.user_id" class="text-sm">Учётная запись создана · {{ person.access_status === 'active' ? 'Доступ предоставлен' : 'Доступ не предоставлен' }}</p><details v-if="person.aliases.length > 1" class="text-sm text-slate-400"><summary>Имена в переписке</summary>{{ person.aliases.join(' · ') }}</details></article></div>
+    <p v-if="!directory.participants?.length && !loading" class="panel">Участники ещё не загружены. Восстановите их из настроенного чата.</p>
+  </template>
   <template v-if="tab === 'projects'">
     <template v-if="!client">
       <nav class="flex gap-2 flex-wrap" aria-label="Данные проектов"><button v-for="group in projectGroups" :key="group.id" class="btn" :class="projectGroup === group.id ? 'bg-indigo-600 border-indigo-400' : ''" :disabled="loading" @click="projectGroup = group.id; filterProjects()">{{ group.label }} · {{ projectCounts[group.id] }}</button></nav>
@@ -122,6 +130,7 @@ const client = computed(() => roles.value.includes('client')), lead = computed((
 const tab = ref('projects'), loading = ref(false), busy = ref(false), error = ref(''), notice = ref('')
 const tabs = computed(() => [
   { id: 'projects', label: 'Проекты' },
+  ...(lead.value || financeRole.value ? [{ id: 'people', label: 'Сотрудники' }] : []),
   ...(!client.value ? [{ id: 'reports', label: 'Отчеты по WhatsApp' }] : []),
   ...(!client.value ? [
     { id: 'review', label: automatic.value ? 'Решения системы' : 'Проверка фактов' },
@@ -203,6 +212,7 @@ function crmStateLabel(item: Candidate) {
 async function load() {
   loading.value = true; error.value = ''
   try {
+    if (tab.value === 'people') await refreshDirectory()
     if (tab.value === 'projects') {
       const query = new URLSearchParams({ page: String(projectPage.value), group: projectGroup.value, completeness: projectCompleteness.value })
       if (projectSearch.value.trim()) query.set('search', projectSearch.value.trim())
@@ -241,6 +251,8 @@ async function refreshDirectory() {
   directory.value = { ...first, projects: entries }
 }
 async function syncCatalog(teamId: number) { await perform(() => post('/directory/crm-sync/', { team_id: teamId }), 'Загрузка CRM поставлена в очередь. Обновите справочник после обработки.') }
+async function syncParticipants(configId: number) { await perform(() => post('/directory/participants-sync/', { config_id: configId }), 'Восстановление участников запущено. Обновите список после обработки.') }
+function participantSyncLabel(state: string) { return ({ not_started: 'Ещё не загружено', pending: 'В очереди', enqueued: 'В очереди', processing: 'Загружаем участников', done: 'Участники загружены', failed: 'Ошибка загрузки', cancelled: 'Загрузка отменена' } as Record<string, string>)[state] || 'Ожидает повторной загрузки' }
 async function retryCrm(teamId: number, candidateId?: number) {
   let queued = 0, skipped = 0
   await perform(async () => {

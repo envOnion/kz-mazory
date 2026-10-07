@@ -290,6 +290,9 @@ class WebhookInput(serializers.Serializer):
         if not isinstance(chat, str) or not chat or len(chat) > 128:
             raise ValidationError("Не указан чат.")
         data["chat_id"] = chat
+        if "_data" in original and not isinstance(original["_data"], dict):
+            raise ValidationError("Некорректные данные автора WhatsApp.")
+        data["original_payload"] = original
         own_sender = original.get("from", "") if data["payload"]["fromMe"] else ""
         if isinstance(own_sender, str) and own_sender.endswith(("@c.us", "@s.whatsapp.net")):
             data["payload"]["participant"] = data["payload"]["participant"] or own_sender
@@ -353,7 +356,9 @@ class MessageIngestView(APIView):
         if sent > timezone.now() + timedelta(minutes=5):
             raise ValidationError("Время сообщения находится в будущем.")
         revision = hashlib.sha256(payload["body"].encode()).hexdigest()
-        sender = (payload["participant"] or "").split("@")[0]
+        from .participants import enqueue_participants, message_sender
+        original_payload = data["original_payload"]
+        author = message_sender(original_payload)
         with transaction.atomic():
             from .models import (
                 WhatsAppHistoryJob,
@@ -377,8 +382,9 @@ class MessageIngestView(APIView):
                 raise PermissionDenied("Источник изменился или выключен.")
             from .whatsapp_identity import ingest_waha
             raw, created = ingest_waha(cfg, message_id=payload["id"], content=payload["body"],
-                timestamp=sent, sent_at_known=bool(stamp), sender_phone=sender,
-                sender_name=payload["notifyName"], raw_payload={"event":data["event"],"session":data["session"],"payload":payload})
+                timestamp=sent, sent_at_known=bool(stamp), sender_phone=author.phone,
+                sender_name=author.name, raw_payload={"event":data["event"],"session":data["session"],"payload":original_payload})
+            enqueue_participants(cfg, message_evidence=[{"raw_id": raw.id, "payload": original_payload}] if raw.source == "whatsapp_export" else [])
             from .message_artifacts import register
             register(raw)
             if raw.config_id != cfg.id:

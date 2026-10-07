@@ -85,7 +85,8 @@ class HistoryReprocessingTests(TestCase):
         self.persist(run, [self.item(run, "empty", ""), self.item(run, "text")])
         self.assertEqual(run.no_text_count, 1)
         self.assertEqual(run.scheduled_count, 0)
-        self.assertFalse(OutboxEvent.objects.exists())
+        self.assertFalse(OutboxEvent.objects.filter(event_type="extract_message").exists())
+        self.assertEqual(OutboxEvent.objects.filter(event_type="whatsapp_participants").count(), 1)
 
     def test_start_snapshots_full_reprocessing_mode(self):
         run = start_job(self.job.id)

@@ -2319,8 +2319,17 @@ from .models import (FactDecision, FactEvent, FieldAssertion, SourceCheckpoint,
                      SourceWorkItem, MessageArtifact, CrmDelivery,
                      ExternalObjectLink, ProviderReservation, Participant,
                      ParticipantIdentity, ProjectParty, ProjectAlias, CompanyAlias)
+
+
+@admin.register(Participant)
+class ParticipantAdmin(ScopedReadOnlyAdmin):
+    list_display = ("display_name", "team", "user_profile")
+    search_fields = ("display_name", "user_profile__phone", "user_profile__full_name")
+    list_select_related = ("team", "user_profile__user")
+
+
 for model in (FactDecision, FactEvent, FieldAssertion, SourceCheckpoint,
               SourceWorkItem, MessageArtifact, CrmDelivery, ExternalObjectLink,
-              ProviderReservation, Participant, ParticipantIdentity,
+              ProviderReservation, ParticipantIdentity,
               ProjectParty, ProjectAlias, CompanyAlias):
     admin.site.register(model, ScopedReadOnlyAdmin)

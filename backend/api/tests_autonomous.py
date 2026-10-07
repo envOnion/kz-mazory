@@ -5,6 +5,7 @@ import hmac
 import json
 from unittest.mock import patch
 
+from django.conf import settings
 from django.contrib.auth.models import User
 from django.test import TestCase, override_settings
 from django.utils import timezone
@@ -27,7 +28,7 @@ from .models import (
 class AutonomousAccountingTests(TestCase):
     def setUp(self):
         self.team = Team.objects.create(name="Sales")
-        self.config = WhatsAppConfig.objects.create(team=self.team, group_jid="sales@g.us", name="Sales")
+        self.config = WhatsAppConfig.objects.create(team=self.team, group_jid="sales@g.us", name="Sales", snapshot={"timezone": settings.TIME_ZONE})
         self.cfg = AISettings.objects.create(name="AI", autonomous_enabled=True)
         self.project = Project.objects.create(team=self.team, name="Объект 343", normalized_name="объект 343", identity_confirmed=True)
         self.counter = 0

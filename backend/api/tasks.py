@@ -45,6 +45,7 @@ CLUSTERS = {
     "history_import": "history",
     "whatsapp_artifact": "history",
     "thread_backfill": "history",
+    "whatsapp_participants": "history",
 }
 NON_IDEMPOTENT = {"otp", "notification", "waha_control"}
 
@@ -358,6 +359,7 @@ def run_outbox(pk):
             "waha_control": waha_control,
             "history_import": import_history_step,
             "thread_backfill": backfill_threads,
+            "whatsapp_participants": sync_whatsapp_participants,
         }
         result = handlers[event.event_type](event.payload)
         if isinstance(result, dict) and result.get("history_continuation"):
@@ -511,6 +513,92 @@ def waha_request(method, path, data=None, timeout=15):
     )
     response.raise_for_status()
     return response.json() if response.content else {}
+
+
+def sync_whatsapp_participants(payload):
+    """Read group identity evidence in a worker; discovery sends no messages."""
+    from .participants import (
+        Sender, bind_aliased_export, canonical_jid, link_export_names, message_sender,
+        person_name, phone_from_jid, register_sender, restore_saved, scope_matches,
+    )
+    config = WhatsAppConfig.objects.select_related("team").get(pk=payload["config_id"])
+    if not scope_matches(config, payload):
+        raise ProviderUnavailable("participants_source_changed")
+    if payload.get("requested_by_id"):
+        actor = User.objects.get(pk=payload["requested_by_id"])
+        if not actor.is_active:
+            raise ProviderUnavailable("participants_access_revoked")
+        access.require_team_role(actor, config.team_id, ["team_lead"])
+    with transaction.atomic():
+        config = WhatsAppConfig.objects.select_for_update(of=("self",)).select_related("team").get(pk=config.pk)
+        if not scope_matches(config, payload):
+            raise ProviderUnavailable("participants_source_changed")
+        restore_saved(config)
+    session = quote(config.session_name, safe="")
+    chat = quote(config.group_jid, safe="")
+    group = waha_request("GET", f"/api/{session}/groups/{chat}/participants/v2", timeout=10)
+    if not isinstance(group, list) or len(group) > 1000:
+        raise ProviderUnavailable("participants_invalid_group")
+    me = waha_request("GET", f"/api/sessions/{session}", timeout=10)
+    me = me.get("me") if isinstance(me, dict) else None
+    me = me if isinstance(me, dict) else {}
+    self_jid = canonical_jid(me.get("id"))
+    evidence = {}
+    for item in group:
+        if not isinstance(item, dict) or not canonical_jid(item.get("id")):
+            raise ProviderUnavailable("participants_invalid_group")
+        jid = canonical_jid(item["id"])
+        evidence[jid] = Sender(jid, phone_from_jid(jid) or phone_from_jid(item.get("pn")))
+    # Former members still occur in the retained history.
+    for raw in RawMessage.objects.filter(config=config, team_id=config.team_id, session_name=config.session_name, chat_id=config.group_jid, source="waha").iterator(chunk_size=500):
+        sender = message_sender(raw.raw_payload.get("payload", {}), self_jid)
+        if sender.jid:
+            evidence.setdefault(sender.jid, sender)
+    for item in payload.get("message_evidence", []):
+        sender = message_sender(item["payload"], self_jid)
+        if sender.jid:
+            evidence.setdefault(sender.jid, sender)
+    names_errors = 0
+    deadline = time.monotonic() + 180
+    for jid, sender in list(evidence.items()):
+        if time.monotonic() > deadline:
+            raise ProviderUnavailable("participants_lookup_timeout")
+        phone = sender.phone
+        if not phone and jid.endswith("@lid"):
+            mapping = waha_request("GET", f"/api/{session}/lids/{quote(jid, safe='')}", timeout=5)
+            if not isinstance(mapping, dict) or mapping.get("lid") != jid:
+                raise ProviderUnavailable("participants_invalid_mapping")
+            phone = phone_from_jid(mapping.get("pn"))
+        name = sender.name
+        try:
+            contact = waha_request("GET", f"/api/contacts?session={session}&contactId={quote(jid, safe='')}", timeout=5)
+            if isinstance(contact, dict) and canonical_jid(contact.get("id")) == jid:
+                name = person_name(contact.get("name")) or person_name(contact.get("pushname")) or name
+        except (requests.RequestException, ProviderUnavailable):
+            names_errors += 1
+        if jid == canonical_jid(me.get("lid")) or jid == self_jid:
+            name = name or person_name(me.get("pushName"))
+        evidence[jid] = Sender(jid, phone, name)
+    with transaction.atomic():
+        config = WhatsAppConfig.objects.select_for_update(of=("self",)).select_related("team").get(pk=config.pk)
+        if not scope_matches(config, payload):
+            raise ProviderUnavailable("participants_source_changed")
+        for sender in evidence.values():
+            register_sender(config, sender)
+        for item in payload.get("message_evidence", []):
+            bind_aliased_export(config, item, self_jid)
+        restore_saved(config, self_jid)
+        link_export_names(config, self_jid)
+        restore_saved(config, self_jid)
+        summary = {
+            "synced_at": timezone.now().isoformat(), "group_members": len(group),
+            "phones_resolved": len({sender.phone for sender in evidence.values() if sender.phone}),
+            "phones_unknown": sum(not sender.phone for sender in evidence.values()),
+            "contact_errors": names_errors,
+        }
+        config.snapshot = {**config.snapshot, "participant_sync": summary}
+        config.save(update_fields=["snapshot"])
+        return summary
 
 
 def send_waha_whatsapp_message_task(phone_or_group, text, session="default"):

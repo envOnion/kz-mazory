@@ -60,6 +60,15 @@ def start_file(job_id,file,zone,date_order,user,request_key):
 
 
 def _entries(upload,records,run):
+    from .participants import Sender, register_sender
+    from .phone_numbers import normalize_phone
+    authors = {(row.sender, row.phone) for row in records[run.offset:run.offset+100] if row.sender}
+    for name, phone in authors:
+        normalized = ''
+        if phone:
+            try: normalized = normalize_phone(phone)
+            except ValidationError: pass
+        register_sender(run.job.config, Sender(phone=normalized, name=name))
     groups=defaultdict(list)
     for row in records:
         if row.kind=='text':groups[row.fingerprint].append(row.ordinal)
@@ -132,6 +141,8 @@ def process_file_step(payload):
             _entries(upload,records,run)
             if run.offset<len(records):enqueue_step(run);return
             upload.state='ready';upload.diagnostics['blocked']=upload.entries.filter(resolution_state='blocked').count();upload.save()
+            from .participants import enqueue_participants
+            enqueue_participants(config)
             RawMessage.objects.filter(raw_payload__export_upload_id=upload.id,processing_state='export_staged').update(processing_state='received')
             scope=whatsapp_scope(config)
             newer=scope.filter(source=OuterRef('source'),message_id=OuterRef('message_id'),id__gt=OuterRef('id'))
