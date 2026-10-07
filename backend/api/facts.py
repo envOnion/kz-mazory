@@ -628,6 +628,8 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                 or candidate.base_project_version != project.version
             ):
                 raise Conflict()
+            from .replay_replacement import row_snapshot
+            projection={"project_before":row_snapshot(project)}
             before = snapshot(project) if project else {}
             raw = candidate.trace.raw_message
             if raw:
@@ -687,6 +689,8 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                             normalized_name=normalized,
                             source="chat",
                         )
+                if not projection["project_before"]:
+                    projection["project_before"]=row_snapshot(project)
                 if crm_match:
                     bitrix_deal_id = crm_match.bitrix_deal_id.strip()
                     if project.bitrix_id in (None, ""):
@@ -734,7 +738,7 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                     )
                 if (
                     not reason.strip()
-                    and FinancialRecord.objects.filter(
+                    and FinancialRecord.objects.exclude(candidate__status="superseded").filter(
                         project=project,
                         is_verified=True,
                         direction=data["direction"],
@@ -869,6 +873,7 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                         raise serializers.ValidationError("Доказательство постановки не соответствует обязательству.")
                     if not system and data["commitment_status"] != "fulfilled":
                         raise serializers.ValidationError("Ручное предложение может только подтвердить выполнение.")
+                    projection["commitment_before"]=row_snapshot(existing)
                     before_commitment = {"status": existing.status, "version": existing.version}
                     existing.status = data["commitment_status"]
                     existing.fulfilled_at = data.get("fulfilled_at") if existing.status == "fulfilled" else None
@@ -881,9 +886,12 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                         updated += ["deadline_at", "deadline", "deadline_precision", "postponed_reason"]
                     existing.version += 1
                     existing.save(update_fields=updated)
+                    projection["commitment_after"]=row_snapshot(existing)
                     AuditEvent.objects.create(actor=user, target_type="Commitment", target_id=existing.id, action="approve_fulfillment", before_after={"before": before_commitment, "candidate_id": candidate.id, "status": existing.status})
                 else:
-                    Commitment.objects.create(**commitment_values)
+                    task=Commitment.objects.create(**commitment_values)
+                    projection["commitment_before"]={}
+                    projection["commitment_after"]=row_snapshot(task)
             if project is not None:
                 if project.pk:
                     project.paid_amount = project.financial_records.filter(
@@ -929,6 +937,8 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                         },
                     )
         if action == "approve":
+            projection["project_after"]=row_snapshot(project)
+            candidate.materialization_snapshot=projection
             candidate.proposed_changes = json_value(data)
             if project and candidate.thread_revision_id:
                 from .models import DialogueThread

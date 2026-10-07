@@ -10,4 +10,11 @@
 <a class="font-medium inline-flex items-center justify-center rounded-default px-3 py-2 border border-base-200 bg-white text-important dark:border-base-700 dark:bg-transparent cursor-pointer" href="{% url 'admin:api_whatsapphistoryrun_changelist' %}?job__id__exact={{ original.pk }}">Все запуски</a>
 {% endif %}
 </div>
+{% if original and has_change_permission %}
+<section class="module rounded-default border border-base-200 dark:border-base-800 p-4 mb-4" data-testid="history-export-upload">
+<h2>Экспорт WhatsApp из TXT</h2>
+<p>Файл будет загружен в чат «{{ original.config.name }}». Полный анализ объединит экспорт с сохранённой историей этого чата. Подключение WAHA не требуется.</p>
+<form method="post" enctype="multipart/form-data" action="{% url 'admin:api_whatsapphistoryjob_import_txt' original.pk %}">{% csrf_token %}{{ export_form.as_p }}<button type="submit" class="font-medium inline-flex items-center justify-center rounded-default px-3 py-2 bg-primary-600 text-white cursor-pointer" data-testid="history-import-txt">Импортировать и выполнить полный анализ</button></form>
+</section>
+{% endif %}
 {% endblock %}

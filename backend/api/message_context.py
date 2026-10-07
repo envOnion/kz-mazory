@@ -29,9 +29,10 @@ def source_scope(raw):
     if raw.config_id:
         if not raw.config.is_active:
             raise ProviderUnavailable("context_source_unavailable")
+        from .whatsapp_identity import WHATSAPP_SOURCES
         return RawMessage.objects.filter(
             config_id=raw.config_id,
-            source=raw.source,
+            source__in=WHATSAPP_SOURCES if raw.source in WHATSAPP_SOURCES else [raw.source],
             session_name=raw.session_name,
             chat_id=raw.chat_id,
         ).filter(Q(team_id=team.id) | Q(team_id__isnull=True))
@@ -64,7 +65,7 @@ def history_queryset(raw, snapshot_id, include_following=False):
             session_name=raw.session_name,
             message_id=raw.message_id,
         )
-        .exclude(processing_state__in=["superseded", "deleted"])
+        .exclude(processing_state__in=["superseded", "deleted", "deduplication_ambiguous", "export_staged"])
     )
     if include_following:
         return qs.annotate(distance=Abs(F("id") - raw.id)).order_by("distance", "id"), "received_at"

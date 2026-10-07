@@ -665,6 +665,10 @@ def import_history_step(payload):
     from .models import WhatsAppHistoryRun
     from .new_messages import monitor_error
 
+    if WhatsAppHistoryRun.objects.filter(pk=payload["history_run_id"], import_kind="file").exists():
+        from .whatsapp_exports import process_file_step
+        return process_file_step(payload)
+
     try:
         process_step(payload, waha_request)
     except (requests.RequestException, ProviderUnavailable) as exc:

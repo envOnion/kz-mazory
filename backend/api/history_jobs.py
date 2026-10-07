@@ -95,7 +95,7 @@ def start_job(job_id, user=None, *, scheduled=False):
     )
     if not job.enabled:
         raise ValidationError("Сначала включите задание в его настройках.")
-    active = job.runs.filter(state__in=HISTORY_ACTIVE_STATES).first()
+    active = job.runs.filter(run_kind="monitor" if job.only_new else "full", state__in=HISTORY_ACTIVE_STATES).first()
     if active:
         if not job.only_new or scheduled:
             raise ValidationError("Для этой группы уже есть незавершённый запуск.")
@@ -118,6 +118,7 @@ def start_job(job_id, user=None, *, scheduled=False):
         initialize_checkpoint(job, config)
     run = WhatsAppHistoryRun.objects.create(
         job=job,
+        run_kind="monitor" if job.only_new else "full",
         requested_by=user,
         source_snapshot=snapshot,
         settings_snapshot={
@@ -167,6 +168,8 @@ def control_run(run_id, action, user):
     initial = WhatsAppHistoryRun.objects.get(pk=run_id)
     job = WhatsAppHistoryJob.objects.select_for_update().get(pk=initial.job_id)
     run = WhatsAppHistoryRun.objects.select_for_update().get(pk=run_id)
+    if action == "pause" and run.import_kind == "file":
+        raise ValidationError("TXT-импорт можно отменить; пауза не поддерживается.")
     if action == "pause" and run.state in IMPORT_STATES:
         run.resume_state, run.state = run.state, "paused"
         run.status_message = "Импорт приостановлен администратором. Прогресс сохранён."
@@ -356,6 +359,8 @@ def locked_run(run_id, step):
 def finish(run, state, message):
     run.state, run.status_message, run.finished_at = state, message, timezone.now()
     run.save()
+    if run.import_kind == "file":
+        return
     job = run.job
     job.next_run_at = (
         timezone.now() + timedelta(minutes=job.interval_minutes)
@@ -407,58 +412,24 @@ def validate_page(page, run):
 
 
 def persist_items(run, config, batch):
-    rows, keys = [], []
+    from .whatsapp_identity import ingest_waha_batch
+    keys,stored,before=[],{},set()
+    originals=[]
     for item in batch:
-        msg, content = item.payload, item.payload.get("body") or ""
-        extra = msg.get("_data") or {}
-        extra = extra if isinstance(extra, dict) else {}
-        key = extra.get("key") or {}
-        key = key if isinstance(key, dict) else {}
-        sender = msg.get("participant") or key.get("participant") or ""
-        name = msg.get("notifyName") or extra.get("pushName") or ""
-        if not isinstance(sender, str) or not isinstance(name, str):
-            raise ProviderUnavailable("history_invalid_message")
-        revision = hashlib.sha256(content.encode()).hexdigest()
-        keys.append((item.message_id, revision))
-        rows.append(
-            RawMessage(
-                source="waha",
-                session_name=config.session_name,
-                message_id=item.message_id,
-                source_revision=revision,
-                config=config,
-                team_id=config.team_id,
-                chat_id=config.group_jid,
-                timestamp=item.timestamp,
-                sent_at_known=True,
-                content=content,
-                sender_phone=sender.split("@")[0][:64],
-                sender_name=name[:255],
-                raw_payload={
-                    "event": "history.import",
-                    "session": config.session_name,
-                    "payload": msg,
-                },
-                processed=not bool(content.strip()),
-                processing_state="received" if content.strip() else "no_text",
-            )
-        )
-    before = set(
-        RawMessage.objects.filter(
-            source="waha",
-            session_name=config.session_name,
-            message_id__in=[k[0] for k in keys],
-        ).values_list("message_id", "source_revision")
-    )
-    RawMessage.objects.bulk_create(rows, ignore_conflicts=True, batch_size=250)
-    stored = {
-        (m.message_id, m.source_revision): m
-        for m in RawMessage.objects.filter(
-            source="waha",
-            session_name=config.session_name,
-            message_id__in=[k[0] for k in keys],
-        )
-    }
+        msg=item.payload;extra=msg.get("_data") or {};extra=extra if isinstance(extra,dict) else {}
+        key=extra.get("key") or {};key=key if isinstance(key,dict) else {}
+        sender=msg.get("participant") or key.get("participant") or ""
+        name=msg.get("notifyName") or extra.get("pushName") or ""
+        if not isinstance(sender,str) or not isinstance(name,str):raise ProviderUnavailable("history_invalid_message")
+        content=msg.get("body") or ""
+        revision=hashlib.sha256(content.encode()).hexdigest()
+        identity=(item.message_id,revision)
+        originals.append(dict(message_id=item.message_id,content=content,timestamp=item.timestamp,
+            sender_phone=sender.split("@")[0][:64],sender_name=name[:255],raw_payload={"event":"history.import","session":config.session_name,"payload":msg}))
+        keys.append(identity)
+    for identity,(raw,created) in zip(keys,ingest_waha_batch(config,originals),strict=True):
+        stored[identity]=raw
+        if not created:before.add(identity)
     outbox, linked = [], []
     counted = (
         set(
@@ -489,7 +460,7 @@ def persist_items(run, config, batch):
             run.no_text_count += int(not bool(raw.content.strip()))
             if run.settings_snapshot.get("only_new"):
                 run.fetched_count += 1
-        if run.settings_snapshot.get("analysis_policy"):
+        if run.settings_snapshot.get("analysis_policy") or raw.processing_state == "deduplication_ambiguous":
             continue
         if (
             run.settings_snapshot.get("analysis_mode") == "reprocess_all"

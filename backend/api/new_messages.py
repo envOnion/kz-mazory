@@ -62,7 +62,7 @@ def sync_monitor_settings(job, changed, user):
         return
     if job.enabled:
         initialize_checkpoint(job, job.config)
-    active = job.runs.filter(state__in=(*IMPORT_STATES, "paused")).first()
+    active = job.runs.filter(run_kind="monitor", state__in=(*IMPORT_STATES, "paused")).first()
     if not active or not active.settings_snapshot.get("only_new"):
         return
     if not job.enabled and active.state != "paused":

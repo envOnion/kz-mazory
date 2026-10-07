@@ -18,6 +18,15 @@ def schedule(run):
     items = []
     for raw in run.messages.order_by("timestamp", "id"):
         item, _ = HistoryAnalysisItem.objects.get_or_create(run=run, raw_message=raw)
+        if run.settings_snapshot.get("replace_unsent") and item.outbox_event_id is None:
+            from .replay_replacement import guard, LABELS
+            code = guard(raw, lock=True)
+            if code:
+                item.state = "succeeded" if code == "skipped_crm_delivered" else "blocked"
+                item.disposition = code if item.state == "succeeded" else "blocked"
+                item.reason_code, item.reason_description = code, LABELS[code]
+                item.save()
+                continue
         if not raw.content.strip():
             item.state, item.disposition = "succeeded", "no_text"
             item.reason_code, item.reason_description = "no_text", "Сообщение не содержит текста для анализа."
@@ -35,6 +44,8 @@ def schedule(run):
                 name: run.settings_snapshot.get(name, getattr(cfg, name))
                 for name in ("analysis_input_token_limit", "analysis_output_token_limit")
             })
+            if run.settings_snapshot.get("replace_unsent"):
+                trace.context_metadata.update(replace_unsent=True, snapshot_max_id=run.settings_snapshot["snapshot_max_id"])
             trace.save(update_fields=["context_metadata"])
             traces[item.raw_message_id] = trace.id
         event, _ = OutboxEvent.objects.get_or_create(deduplication_key=operation, defaults={
@@ -58,7 +69,7 @@ def schedule(run):
 
 def synchronize(event):
     """Reflect durable queue states; succeeded coverage is never reopened."""
-    items = HistoryAnalysisItem.objects.filter(outbox_event=event).exclude(state="succeeded")
+    items = HistoryAnalysisItem.objects.filter(outbox_event=event).exclude(state__in=["succeeded", "blocked"])
     state = {"pending": "retry_wait" if event.attempt_count else "queued", "enqueued": "queued",
              "processing": "processing", "cancelled": "cancelled", "failed": "failed",
              "unknown": "failed"}.get(event.state)
@@ -78,8 +89,9 @@ def counts(run):
     rows = list(run.analysis_items.values("state", "disposition", "reason_code"))
     states = Counter(x["state"] for x in rows)
     outcomes = Counter(x["disposition"] for x in rows if x["state"] == "succeeded")
-    result = {"total": len(rows), "processed": states["succeeded"] - outcomes["no_text"],
+    result = {"total": len(rows), "processed": states["succeeded"] - outcomes["no_text"] - outcomes["skipped_crm_delivered"],
               "no_text": outcomes["no_text"], "errors": states["failed"],
+              "skipped_crm_delivered": outcomes["skipped_crm_delivered"], "blocked":states["blocked"],
               "pending": sum(states[x] for x in ACTIVE), "cancelled": states["cancelled"],
               "facts": outcomes["facts"], "no_facts": outcomes["no_facts"],
               "insufficient_data": outcomes["insufficient_data"],
@@ -107,9 +119,9 @@ def counts(run):
 def summary(value):
     if "no_text" not in value:
         return f"Обработано {value['processed']} / {value['total']}; ошибок: {value['errors']}"
-    accounted = value["processed"] + value["no_text"] + value["errors"] + value["cancelled"] + value["pending"]
+    accounted = value["processed"] + value["no_text"] + value["errors"] + value["cancelled"] + value["pending"] + value.get("skipped_crm_delivered",0) + value.get("blocked",0)
     return (f"Учтено: {accounted} / {value['total']} · Отменено: {value['cancelled']} · Проанализировано: {value['processed']} / {value['total'] - value['no_text']} · "
-            f"Без текста: {value['no_text']} · С фактами: {value['facts']} · Без фактов: {value['no_facts']} · "
+            f"Без текста: {value['no_text']} · Уже доставлено в CRM: {value.get('skipped_crm_delivered',0)} · Заблокировано: {value.get('blocked',0)} · С фактами: {value['facts']} · Без фактов: {value['no_facts']} · "
             f"Недостаточно данных: {value['insufficient_data']} · В работе: {value['processing']} · "
             f"В очереди: {value['queued']} · Повторы: {value['retry_wait']} · Ошибки: {value['errors']} · "
             f"Кандидатов: {value['candidates']} · Принято: {value['accepted']}")
@@ -131,6 +143,8 @@ def split(event):
             old = item.trace
             trace = reserve_attempt(item.raw_message, f"{operation}:target:{item.raw_message_id}")
             trace.context_metadata.update(analysis_policy=POLICY, analysis_limits=old.context_metadata.get("analysis_limits", {}), parent_trace_id=old.id)
+            for field in ("replace_unsent", "snapshot_max_id"):
+                if field in old.context_metadata:trace.context_metadata[field]=old.context_metadata[field]
             trace.save(update_fields=["context_metadata"])
             traces[item.raw_message_id] = trace.id
         payload = {**event.payload, "raw_id": raw.id, "trace_id": traces[raw.id],

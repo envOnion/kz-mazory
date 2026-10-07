@@ -364,33 +364,16 @@ class MessageIngestView(APIView):
                 or cfg.group_jid != data["chat_id"]
             ):
                 raise PermissionDenied("Источник изменился или выключен.")
-            raw, created = RawMessage.objects.get_or_create(
-                source="waha",
-                session_name=data["session"],
-                message_id=payload["id"],
-                source_revision=revision,
-                defaults={
-                    "config": cfg,
-                    "team_id": cfg.team_id,
-                    "chat_id": data["chat_id"],
-                    "sender_phone": sender,
-                    "sender_name": payload["notifyName"],
-                    "timestamp": sent,
-                    "sent_at_known": bool(stamp),
-                    "content": payload["body"],
-                    "raw_payload": {
-                        "event": data["event"],
-                        "session": data["session"],
-                        "payload": payload,
-                    },
-                },
-            )
+            from .whatsapp_identity import ingest_waha
+            raw, created = ingest_waha(cfg, message_id=payload["id"], content=payload["body"],
+                timestamp=sent, sent_at_known=bool(stamp), sender_phone=sender,
+                sender_name=payload["notifyName"], raw_payload={"event":data["event"],"session":data["session"],"payload":payload})
             from .message_artifacts import register
             register(raw)
             if raw.config_id != cfg.id:
                 raise Conflict("Идентификатор источника уже связан с другим чатом.")
             analyze = not job or not job.only_new or job.analyze_after_import
-            if created and analyze:
+            if created and analyze and raw.processing_state != "deduplication_ambiguous":
                 OutboxEvent.objects.create(
                     event_type="extract_message",
                     deduplication_key=f"extract:{raw.id}",
@@ -399,7 +382,7 @@ class MessageIngestView(APIView):
             if created and job and job.only_new:
                 run = (
                     WhatsAppHistoryRun.objects.select_for_update()
-                    .filter(job=job, state__in=HISTORY_ACTIVE_STATES)
+                    .filter(job=job, run_kind="monitor", state__in=HISTORY_ACTIVE_STATES)
                     .first()
                 )
                 if run:

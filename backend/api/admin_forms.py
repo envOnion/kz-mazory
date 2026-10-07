@@ -1,4 +1,5 @@
 import re
+import uuid
 from urllib.parse import urlsplit
 
 from django import forms
@@ -8,6 +9,20 @@ from unfold.widgets import INPUT_CLASSES
 from .bitrix_config import checked_bitrix_webhook_base
 from .models import AISettings, BitrixSettings
 from .providers import ProviderUnavailable, checked_base_url
+
+
+class WhatsAppExportForm(forms.Form):
+    file = forms.FileField(label="TXT-экспорт WhatsApp", widget=forms.ClearableFileInput(attrs={"accept":".txt,text/plain"}), help_text="До 20 МиБ. Многострочные сообщения будут сохранены целиком.")
+    timezone = forms.CharField(label="Часовой пояс экспорта", max_length=64, help_text="Например, Asia/Almaty или UTC+03:00. Используется для дат и относительных сроков сообщений.")
+    date_order = forms.ChoiceField(label="Порядок даты", choices=[("DMY","День / месяц / год"),("MDY","Месяц / день / год")], initial="DMY")
+    request_key = forms.UUIDField(widget=forms.HiddenInput, initial=uuid.uuid4)
+
+    def clean_timezone(self):
+        from .whatsapp_export_parser import ExportError,export_zone
+        value=self.cleaned_data["timezone"].strip()
+        try:export_zone(value)
+        except ExportError as exc:raise forms.ValidationError(exc.description) from None
+        return value
 
 
 class BitrixSettingsForm(forms.ModelForm):

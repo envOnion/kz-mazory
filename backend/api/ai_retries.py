@@ -101,13 +101,20 @@ def handle_failure(event, exc):
                                "root_event_id":current.id}
             current.save(update_fields=["payload"])
     if current.payload.get("analysis_policy") == "history-packets-v1":
-        structural = {"extraction_json_parse", "extraction_top_level_type", "extraction_facts_missing", "extraction_facts_type", "invalid_extraction_schema", "invalid_schema", "batch_classification_missing", "thread_classification_invalid", "thread_completion_unproven", "thread_sources_unavailable", "thread_source_conflict", "thread_sources_duplicate", "thread_keys_duplicate", "thread_parent_invalid", "thread_revision_conflict", "target_classification_invalid", "target_classification_conflict", "fact_thread_missing", "fact_thread_evidence_missing", "fact_thread_evidence_conflict", "provider_output_truncated", "context_batch_too_large", "context_fixed_input_too_large"}
+        structural = {"source_revision_changed", "skipped_crm_delivered", "blocked_delivery", "projection_changed", "projection_snapshot_missing", "deduplication_ambiguous", "extraction_json_parse", "extraction_top_level_type", "extraction_facts_missing", "extraction_facts_type", "invalid_extraction_schema", "invalid_schema", "batch_classification_missing", "thread_classification_invalid", "thread_completion_unproven", "thread_sources_unavailable", "thread_source_conflict", "thread_sources_duplicate", "thread_keys_duplicate", "thread_parent_invalid", "thread_revision_conflict", "target_classification_invalid", "target_classification_conflict", "fact_thread_missing", "fact_thread_evidence_missing", "fact_thread_evidence_conflict", "provider_output_truncated", "context_batch_too_large", "context_fixed_input_too_large"}
         from .history_analysis import split
         if code in structural:
             current.error_code = code
             current.save(update_fields=["error_code"])
             if split(current):
                 record_attempt(current, "failed", code)
+                return True
+            from .replay_replacement import LABELS
+            if code in LABELS:
+                from .models import HistoryAnalysisItem
+                current.state,current.lease_until="done",None
+                current.save(update_fields=["state","lease_until"])
+                HistoryAnalysisItem.objects.filter(outbox_event=current).update(state="succeeded" if code=="skipped_crm_delivered" else "blocked",disposition=code if code=="skipped_crm_delivered" else "blocked",reason_code=code,reason_description=LABELS[code])
                 return True
             if code in ("context_fixed_input_too_large", "provider_output_truncated"):
                 from .history_packets import prepare_segments
@@ -121,6 +128,8 @@ def handle_failure(event, exc):
                 limits = dict(previous.context_metadata.get("analysis_limits", {}))
                 limits["analysis_input_token_limit"] = max(4096, limits.get("analysis_input_token_limit", 16384) // 2)
                 trace.context_metadata.update(analysis_policy="history-packets-v1", analysis_limits=limits, repair_reason=code)
+                for field in ("replace_unsent", "snapshot_max_id"):
+                    if field in previous.context_metadata:trace.context_metadata[field]=previous.context_metadata[field]
                 trace.save(update_fields=["context_metadata"])
                 current.payload = {**current.payload, "trace_id": trace.id, "trace_ids": [{"raw_id":raw.id,"trace_id":trace.id}], "schema_repaired":True}
                 if current.payload.get("segment_trace_ids"):

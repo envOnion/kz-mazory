@@ -193,7 +193,7 @@ def _validate(candidate, data, primary, text):
             if field in data and (not _money_matches(data[field], text) or APPROXIMATE.search(text)):
                 raise Deferred("unknown_amount", "Точная сумма договора/себестоимости не доказана цитатой.")
         occurred = source_time(primary)[0]
-        if candidate.project_id and occurred and FieldAssertion.objects.filter(project_id=candidate.project_id, field_name__in=[key for key in ("contract_amount", "cost_amount", "stage") if key in data], fact_event__occurred_at__gt=occurred).exists():
+        if candidate.project_id and occurred and FieldAssertion.objects.filter(fact_event__is_superseded=False,project_id=candidate.project_id, field_name__in=[key for key in ("contract_amount", "cost_amount", "stage") if key in data], fact_event__occurred_at__gt=occurred).exists():
             raise Deferred("older_source_revision", "Более поздняя переписка уже уточнила значение; старый факт не заменяет текущий.")
         if "contract_amount" in data and not re.search(r"договор|контракт", text, re.I):
             raise Deferred("plan_not_contract", "Сумма без договорного основания не является суммой договора.")
@@ -266,10 +266,14 @@ def _validate(candidate, data, primary, text):
             raise Deferred("unsupported_payment_date", "Дата движения не подтверждена цитатой или датой отправки WhatsApp.")
         if data["payment_date"] > timezone.now().astimezone(source_zone(primary)).date():
             raise Deferred("plan_not_actual", "Будущая дата не подтверждает поступивший платеж.", True)
-        edited = FinancialRecord.objects.filter(is_verified=True, candidate__trace__raw_message__source=primary.source, candidate__trace__raw_message__session_name=primary.session_name, candidate__trace__raw_message__message_id=primary.message_id).exclude(candidate__trace__raw_message__source_revision=primary.source_revision).first()
+        previous_ids=primary.raw_payload.get("previous_original_ids", [])
+        edited = FinancialRecord.objects.exclude(candidate__status="superseded").filter(is_verified=True).filter(
+            Q(candidate__trace__raw_message_id__in=previous_ids)
+            | Q(candidate__trace__raw_message__source=primary.source, candidate__trace__raw_message__session_name=primary.session_name, candidate__trace__raw_message__message_id=primary.message_id)
+        ).exclude(candidate__trace__raw_message_id=primary.id).first()
         if edited:
             raise Deferred("source_revision_requires_correction", f"Предыдущая версия сообщения уже дала движение №{edited.id}; изменение сообщения не является вторым платежом.")
-        prior = FinancialRecord.objects.filter(project=candidate.project, is_verified=True, amount=data["amount"], currency=data.get("currency", candidate.project.currency), payment_date=data["payment_date"], direction=data["direction"]).select_related("candidate__trace__raw_message").first()
+        prior = FinancialRecord.objects.exclude(candidate__status="superseded").filter(project=candidate.project, is_verified=True, amount=data["amount"], currency=data.get("currency", candidate.project.currency), payment_date=data["payment_date"], direction=data["direction"]).select_related("candidate__trace__raw_message").first()
         if prior:
             origin = prior.candidate.trace.raw_message if prior.candidate_id else None
             if origin and origin.source == primary.source and origin.session_name == primary.session_name and origin.message_id == primary.message_id:
@@ -499,7 +503,7 @@ def reconcile(limit=100):
         decide(candidate.id)
     if candidates:
         AISettings.objects.filter(pk=cfg.pk).update(autonomous_reconcile_cursor=candidates[-1].pk)
-    for raw in RawMessage.objects.filter(processed=False, team__is_active=True).order_by("id")[:limit]:
+    for raw in RawMessage.objects.filter(processed=False, team__is_active=True).exclude(processing_state__in=["export_staged", "deduplication_ambiguous", "superseded", "deleted"]).order_by("id")[:limit]:
         active = OutboxEvent.objects.filter(event_type="extract_message", payload__raw_id=raw.id, state__in=("pending", "enqueued", "processing")).exists()
         if not active and not OutboxEvent.objects.filter(event_type="extract_message", payload__raw_id=raw.id, state="failed").exists():
             OutboxEvent.objects.get_or_create(deduplication_key=f"recover:{raw.id}:{cfg.autonomous_policy_version}", defaults={"event_type": "extract_message", "payload": {"raw_id": raw.id}})

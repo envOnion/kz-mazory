@@ -13,6 +13,9 @@ EXPORT_HEADER = re.compile(
 
 
 def source_zone(raw):
+    if raw.source == "whatsapp_export" and raw.raw_payload.get("export_timezone"):
+        from .whatsapp_export_parser import export_zone
+        return export_zone(raw.raw_payload["export_timezone"])
     snapshot = raw.config.snapshot if raw.config_id else {}
     name = snapshot.get("timezone", "UTC+06:00")
     match = re.fullmatch(r"UTC([+-])(\d{2}):(\d{2})", name)
@@ -29,6 +32,8 @@ def source_zone(raw):
 
 def source_time(raw):
     zone = source_zone(raw)
+    if raw.source == "whatsapp_export":
+        return raw.timestamp.astimezone(zone) if raw.sent_at_known else None, raw.sender_name, "export_header"
     snapshot = raw.config.snapshot if raw.config_id else {}
     cutoff = parse_datetime(snapshot.get("export_imported_until", ""))
     imported = snapshot.get("message_format") == "whatsapp_export" and (

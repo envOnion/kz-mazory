@@ -1,7 +1,8 @@
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Count, OuterRef, Prefetch, Q, Subquery
-from django.http import JsonResponse
+from django.http import JsonResponse, FileResponse
+from django.conf import settings
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import path, reverse
 from django.utils import timezone
@@ -114,12 +115,49 @@ class WhatsAppHistoryJobAdmin(IntegrationAdmin):
 
     def get_urls(self):
         return [
+            path("<int:object_id>/import-txt/", self.admin_site.admin_view(require_POST(self.import_txt)), name="api_whatsapphistoryjob_import_txt"),
+            path("<int:object_id>/exports/<int:upload_id>/download/",self.admin_site.admin_view(self.download_export),name="api_whatsapphistoryjob_export_download"),
             path(
                 "<int:object_id>/start/",
                 self.admin_site.admin_view(require_POST(self.start)),
                 name="api_whatsapphistoryjob_start",
             )
         ] + super().get_urls()
+
+    def change_view(self, request, object_id, form_url="", extra_context=None):
+        from .admin_forms import WhatsAppExportForm
+        job=self.get_object(request,object_id)
+        zone=job.config.snapshot.get("timezone",settings.TIME_ZONE) if job else settings.TIME_ZONE
+        return super().change_view(request,object_id,form_url,{"export_form":WhatsAppExportForm(initial={"timezone":zone}),**(extra_context or {})})
+
+    def import_txt(self, request, object_id):
+        from .admin_forms import WhatsAppExportForm
+        from .whatsapp_exports import start_file
+        from .whatsapp_export_parser import ExportError
+        job=get_object_or_404(self.get_queryset(request),pk=object_id)
+        if not self.has_change_permission(request,job):raise PermissionDenied()
+        form=WhatsAppExportForm(request.POST,request.FILES)
+        if form.is_valid():
+            try:
+                run=start_file(job.id,form.cleaned_data["file"],form.cleaned_data["timezone"],form.cleaned_data["date_order"],request.user,str(form.cleaned_data["request_key"]))
+                return redirect("admin:api_whatsapphistoryrun_change",run.id)
+            except (ValidationError,ExportError,ProviderUnavailable) as exc:
+                form.add_error(None,exc.messages[0] if isinstance(exc,ValidationError) else exc.description if isinstance(exc,ExportError) else ERROR_LABELS.get(str(exc),str(exc)))
+        import copy
+        display_request=copy.copy(request)
+        display_request.method="GET"
+        return self.change_view(display_request,str(object_id),extra_context={"export_form":form})
+
+    def download_export(self, request, object_id, upload_id):
+        from .models import WhatsAppExportUpload
+        from django.http import HttpResponseNotAllowed
+        if request.method!="GET":return HttpResponseNotAllowed(["GET"])
+        job=get_object_or_404(self.get_queryset(request),pk=object_id)
+        if not self.has_view_permission(request,job):raise PermissionDenied()
+        upload=get_object_or_404(WhatsAppExportUpload,pk=upload_id,job=job)
+        response=FileResponse(upload.file.open("rb"),as_attachment=True,filename=upload.original_name)
+        response["Cache-Control"]="private, no-store";response["X-Content-Type-Options"]="nosniff"
+        return response
 
     def start(self, request, object_id):
         job = get_object_or_404(self.get_queryset(request), pk=object_id)
@@ -462,6 +500,9 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
     search_fields = ("job__config__name", "error_code", "status_message")
     fields = (
         "job",
+        "import_kind",
+        "run_kind",
+        "export_details",
         "state",
         "status_message",
         "error_code",
@@ -493,6 +534,15 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
     @admin.display(description="Последняя успешная проверка")
     def last_check(self, obj):
         return obj.job.last_checked_at or "—"
+
+    @admin.display(description="TXT-экспорт и основания исключений")
+    def export_details(self, obj):
+        if not obj.export_upload_id:return "Источник: WhatsApp / сохранённые сообщения."
+        upload=obj.export_upload
+        diagnostics=upload.diagnostics
+        categories=diagnostics.get("categories",{})
+        entries_url=reverse("admin:api_whatsappexportentry_changelist")+f"?upload__id__exact={upload.id}"
+        return format_html('<p><a href="{}">{}</a> · Часовой пояс: {}</p><p>Записей файла: {} · Текстовых: {} · Медиа без содержания: {} · Служебных: {} · Неоднозначных: {}</p><p>Период: {} — {}</p><a href="{}">Записи экспорта и причины →</a>',reverse("admin:api_whatsapphistoryjob_export_download",args=[obj.job_id,upload.id]),upload.original_name,upload.timezone,diagnostics.get("total",0),categories.get("text",0),categories.get("media",0),categories.get("system",0),diagnostics.get("blocked",0),diagnostics.get("first_at","—"),diagnostics.get("last_at","—"),entries_url)
 
     @admin.display(description="Следующая проверка")
     def next_check(self, obj):
@@ -919,6 +969,7 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
             state=run.get_state_display(),
             source_snapshot=run.source_snapshot,
             analysis_progress=self.analysis_progress(run),
+            export_details=self.export_details(run),
         )
         for name, value in (
             ("last_check", run.job.last_checked_at),
@@ -989,7 +1040,7 @@ class WhatsAppHistoryRunAdmin(IntegrationAdmin):
                 "history_field_names": self.fields,
                 "thematic_tree_card": self.thematic_tree_card(obj) if obj else "",
                 "can_control_import": can_control,
-                "can_pause_import": can_control and obj.state in IMPORT_STATES,
+                "can_pause_import": can_control and obj.import_kind != "file" and obj.state in IMPORT_STATES,
                 "can_resume_import": can_control and obj.state == "paused",
                 "can_cancel_import": can_control
                 and obj.state in IMPORT_STATES | {"paused", "analyzing"},
@@ -1005,7 +1056,7 @@ class AnalysisAttentionFilter(admin.SimpleListFilter):
         return [("1", "Недостаточно данных / ошибки"), ("0", "Готовые результаты")]
 
     def queryset(self, request, queryset):
-        condition = Q(disposition="insufficient_data") | Q(state__in=["failed", "cancelled"])
+        condition = Q(disposition="insufficient_data") | Q(state__in=["failed", "cancelled", "blocked"])
         if self.value() == "1":
             return queryset.filter(condition)
         if self.value() == "0":
@@ -1145,3 +1196,19 @@ from .models import RawMessage
 for model in (RawMessage, MessageProcessingTrace):
     registered = admin.site.get_model_admin(model)
     registered.list_filter = (*registered.list_filter, HistoryRunFilter)
+
+
+from .models import WhatsAppExportEntry
+
+
+@admin.register(WhatsAppExportEntry)
+class WhatsAppExportEntryAdmin(IntegrationAdmin):
+    list_display=('ordinal','upload','sent_at','kind','resolution_state','reason_code','reason_description','line_start','line_end','raw_message')
+    list_filter=('upload','kind','resolution_state','reason_code')
+    readonly_fields=('upload','ordinal','line_start','line_end','sent_at','time_precision','kind','fingerprint','resolution_state','reason_code','reason_description','raw_message')
+    fields=readonly_fields
+    ordering=('upload_id','ordinal')
+    list_per_page=50
+
+    def has_add_permission(self,request):return False
+    def has_change_permission(self,request,obj=None):return False

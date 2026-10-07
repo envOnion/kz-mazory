@@ -169,6 +169,15 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             return
     try:
         source_scope(raw)
+        if trace.context_metadata.get("replace_unsent"):
+            from .replay_replacement import guard,LABELS
+            code=next((reason for member in source_scope(raw).filter(pk__in=batch_ids or [raw.id]) if (reason:=guard(member))),None)
+            if code:
+                if len(batch_ids or [raw.id])>1:raise ProviderUnavailable(code)
+                from .models import HistoryAnalysisItem
+                trace.result_summary=LABELS[code];trace.error_code=code;trace.status="warning";trace.save()
+                HistoryAnalysisItem.objects.filter(trace=trace).update(state="succeeded" if code=="skipped_crm_delivered" else "blocked",disposition=code if code=="skipped_crm_delivered" else "blocked",reason_code=code,reason_description=LABELS[code],updated_at=timezone.now())
+                return
         if commitment_refresh and trace.context_metadata.get("request_state") == "not_sent":
             from django.db.models import Max
             trace.context_metadata["snapshot_max_id"] = source_scope(raw).aggregate(last=Max("id"))["last"] or raw.id
@@ -239,6 +248,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 metadata.update(analysis_policy="history-packets-v1", analysis_limits=limits,
                                 retry=trace.context_metadata.get("retry", {}), repair_reason=cfg.analysis_repair_reason)
             metadata.setdefault("snapshot_max_id", trace.context_metadata["snapshot_max_id"])
+            if trace.context_metadata.get("replace_unsent"):
+                metadata["replace_unsent"] = True
             trace.earlier_messages_context, trace.earlier_messages_count = (
                 context,
                 len(context),
@@ -335,6 +346,10 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 trace.save()
                 return
             team = locked.config.team if locked.config_id else locked.team
+            replacing=trace.context_metadata.get("replace_unsent",False)
+            if replacing:
+                from .replay_replacement import replace_unsent
+                replace_unsent(batch_ids or [raw.id],trace)
             revisions = persist_themes(themes, locked, trace, json_value(facts))
             origin = RawMessage.objects.filter(
                 source=raw.source,
@@ -344,6 +359,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             previous = FactCandidate.objects.filter(
                 Q(trace__raw_message__in=origin) | Q(thread_revision__thread_id__in=[revision.thread_id for revision in revisions.values()])
             ).exclude(trace=trace)
+            if replacing:previous=FactCandidate.objects.filter(trace__raw_message_id__in=batch_ids or [raw.id]).exclude(trace=trace)
             accepted = list(previous.filter(status="approved"))
             sender = (
                 UserProfile.objects.filter(
@@ -389,14 +405,16 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                     profiles = UserProfile.objects.filter(user__memberships__team=team, user__memberships__status="active", user__is_active=True)
                     # A closing reply may come from the requester. Resolve the actor
                     # from the promise or the explicit assignment, never the target.
-                    if fact["assignment_kind"] == "promise" and source_time(promise_raw)[2] != "export_header" and promise_raw.sender_phone:
+                    if fact["assignment_kind"] == "promise" and promise_raw.sender_phone:
                         authors = profiles.filter(phone=promise_raw.sender_phone).distinct()
+                    elif promise_raw.source == "whatsapp_export":
+                        authors = profiles.none()
                     else:
                         authors = profiles.filter(full_name=fact.get("responsible_name", "")).distinct()
                     sender = authors.first() if authors.count() == 1 else None
                 identity = hashlib.sha256(f"{fact['evidence_message_id']}:{fact_identity(fact)}".encode()).hexdigest()
                 candidate, created = FactCandidate.objects.get_or_create(
-                    source_key=f"thread:{revision.thread_id}:revision:{revision.version}:fact:{identity}",
+                    source_key=(f"replay:{trace.id}:" if replacing else "")+f"thread:{revision.thread_id}:revision:{revision.version}:fact:{identity}",
                     defaults={
                         "thread_revision": revisions[fact["thread_key"]],
                         "trace": target_traces.get(fact["evidence_message_id"], trace),

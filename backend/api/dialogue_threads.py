@@ -41,12 +41,14 @@ def lock_candidate_source(candidate):
 
 def source_key(raw):
     team_id = raw.config.team_id if raw.config_id else raw.team_id
+    from .whatsapp_identity import WHATSAPP_SOURCES
+    family = "waha" if raw.config_id and raw.source in WHATSAPP_SOURCES else raw.source
     return hashlib.sha256(
         json.dumps(
             [
                 team_id,
                 raw.config_id,
-                raw.source,
+                family,
                 raw.session_name,
                 raw.chat_id,
                 raw.project_id if not raw.config_id else None,
@@ -375,9 +377,12 @@ def persist_themes(themes, raw, trace, facts):
                 completion_reason=theme["completion_reason"],
             )
             # A ready revision is a replacement snapshot for this thought, not a new task.
-            FactCandidate.objects.filter(
+            old_candidates = FactCandidate.objects.filter(
                 thread_revision__thread=thread, status="pending"
-            ).update(status="superseded")
+            )
+            if trace.context_metadata.get("replace_unsent"):
+                old_candidates = old_candidates.filter(trace__raw_message_id__in=trace.context_metadata.get("batch_message_ids") or [raw.id])
+            old_candidates.update(status="superseded")
             persisted[theme_key] = revision
             del pending[theme_key]
     # Reassign observed messages; retain unseen history and immutable old revisions.
