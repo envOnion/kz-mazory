@@ -326,6 +326,24 @@ class ChatAnswerTests(SimpleTestCase):
             with self.assertRaises(ProviderUnavailable):
                 build(self.chart_context(), arguments)
 
+    def test_timeline_orders_dates_without_changing_registry_values(self):
+        context = self.chart_context()
+        dataset = context.registry["known"]
+        dataset["columns"][0]["type"] = "date"
+        rows = [
+            {"name": "2026-09-21", "amount": "80.00"},
+            {"name": "2026-09-07", "amount": "200.00"},
+            {"name": "2026-09-14", "amount": "100.00"},
+        ]
+        dataset["rows"] = rows
+        arguments = self.chart_arguments()
+        arguments["blocks"][0]["kind"] = "line"
+        document = build(context, arguments)
+        self.assertEqual(
+            document["datasets"]["known"]["rows"], [rows[1], rows[2], rows[0]]
+        )
+        self.assertEqual(context.registry["known"]["rows"], rows)
+
     def context(self):
         return SimpleNamespace(
             check=lambda: None,

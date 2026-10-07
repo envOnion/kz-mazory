@@ -209,6 +209,15 @@ def build(context, arguments):
                             fail("presentation_invalid")
                     except InvalidOperation:
                         fail("presentation_invalid")
+        if kind in ["line", "area"] and columns[encoding["category"]]["type"] == "date":
+            category = encoding["category"]
+            dataset = {
+                **dataset,
+                "rows": sorted(
+                    dataset["rows"],
+                    key=lambda row: (row[category] is None, row[category] or ""),
+                ),
+            }
         used[dataset["dataset_id"]] = dataset
         blocks.append(normalized)
     context.check()
