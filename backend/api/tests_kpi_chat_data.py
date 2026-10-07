@@ -14,6 +14,7 @@ from rest_framework.test import APIClient
 
 from .analytics.data import queryset, aggregate
 from .analytics.host import run
+from .analytics.presentation import build
 from .datamart import datamart
 from .models import (
     Team,
@@ -216,6 +217,115 @@ class DashboardDataTests(TestCase):
 
 
 class ChatAnswerTests(SimpleTestCase):
+    def chart_context(self):
+        from .tests_analytics import fixture_dataset
+
+        context = self.context()
+        context.registry = {"known": fixture_dataset()}
+        return context
+
+    def chart_arguments(self):
+        return {
+            "version": "1.0",
+            "title": "Answer",
+            "blocks": [
+                {
+                    "id": "chart",
+                    "kind": "bar",
+                    "dataset_id": "known",
+                    "encoding": {"category": "name", "value": "amount"},
+                }
+            ],
+        }
+
+    def test_semantic_errors_explain_dataset_and_encoding_contract(self):
+        for field, value, expected in [
+            ("dataset_id", "previous-request", "Available dataset IDs: ['known']"),
+            (
+                "encoding",
+                {"category": "missing", "value": "amount"},
+                "required encoding keys",
+            ),
+        ]:
+            arguments = self.chart_arguments()
+            arguments["blocks"][0][field] = value
+            with self.assertRaises(ProviderUnavailable) as caught:
+                build(self.chart_context(), arguments)
+            self.assertEqual(str(caught.exception), "presentation_invalid")
+            self.assertIn(
+                expected, caught.exception.diagnostics["validation_errors"][0]
+            )
+
+    def test_history_chart_recovers_from_semantic_error_and_empty_turn(self):
+        arguments = self.chart_arguments()
+        invalid = self.chart_arguments()
+        invalid["blocks"][0]["dataset_id"] = "previous-request"
+        turns = iter(
+            [
+                {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "bad",
+                            "name": "build_presentation",
+                            "arguments": invalid,
+                        }
+                    ],
+                },
+                {"text": "", "tool_calls": []},
+                {
+                    "text": "",
+                    "tool_calls": [
+                        {
+                            "id": "fixed",
+                            "name": "build_presentation",
+                            "arguments": arguments,
+                        }
+                    ],
+                },
+            ]
+        )
+        seen = []
+
+        def model(messages, *args):
+            seen.append([message.copy() for message in messages])
+            return next(turns)
+
+        history = [
+            {"role": "user", "content": "Покажи воронку"},
+            {"role": "assistant", "content": "Результат по доступным данным."},
+        ]
+        with patch("api.analytics.host.AIService.analytics_turn", side_effect=model):
+            result = async_to_sync(run)(
+                self.chart_context(), "Построй график", history=history
+            )
+        self.assertEqual(result["presentation"]["blocks"][0]["dataset_id"], "known")
+        self.assertEqual(seen[0][1:3], history)
+        self.assertIn("Available dataset IDs", seen[1][-1]["content"])
+        self.assertIn("build_presentation", seen[2][-1]["content"])
+
+    def test_cartesian_axes_bind_existing_columns_without_ambiguity(self):
+        for encoding in [
+            {"x": "name", "y": "amount"},
+            {"category": "name", "x": "name", "y": "amount"},
+        ]:
+            arguments = self.chart_arguments()
+            arguments["blocks"][0]["encoding"] = encoding
+            document = build(self.chart_context(), arguments)
+            self.assertEqual(
+                document["blocks"][0]["encoding"],
+                {"category": "name", "value": "amount"},
+            )
+        for encoding in [
+            {"category": "amount", "x": "name", "y": "amount"},
+            {"x": "missing", "y": "amount"},
+            {"x": "name", "y": "name"},
+        ]:
+            arguments = self.chart_arguments()
+            arguments["blocks"][0]["encoding"] = encoding
+            with self.assertRaises(ProviderUnavailable):
+                build(self.chart_context(), arguments)
+
     def context(self):
         return SimpleNamespace(
             check=lambda: None,

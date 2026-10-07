@@ -1,6 +1,7 @@
 import json
 from decimal import Decimal, InvalidOperation
 
+from ..providers import ProviderUnavailable
 from .data import fail, validate
 from .text import financial_values
 
@@ -60,6 +61,12 @@ PRESENTATION_SCHEMA = {
 }
 
 
+def invalid(message):
+    raise ProviderUnavailable(
+        "presentation_invalid", diagnostics={"validation_errors": [message]}
+    )
+
+
 def build(context, arguments):
     context.check()
     validate(PRESENTATION_SCHEMA, arguments)
@@ -67,13 +74,28 @@ def build(context, arguments):
     blocks = []
     ids = set()
     for block in arguments["blocks"]:
-        if block["id"] in ids or block["dataset_id"] not in context.registry:
-            fail("presentation_invalid")
+        if block["id"] in ids:
+            invalid("Block id must be unique within this presentation.")
+        if block["dataset_id"] not in context.registry:
+            invalid(
+                "dataset_id must match a query_dataset result in this request. "
+                f"Available dataset IDs: {list(context.registry)}."
+            )
         ids.add(block["id"])
         dataset = context.registry[block["dataset_id"]]
         columns = {c["name"]: c for c in dataset["columns"]}
-        encoding = block.get("encoding", {})
+        encoding = dict(block.get("encoding", {}))
         kind = block["kind"]
+        # Cartesian x/y are common native-model output and already part of the
+        # tool schema. Normalize only explicit, nonconflicting column references.
+        if kind in ["bar", "line", "area"]:
+            for axis, channel in [("x", "category"), ("y", "value")]:
+                if axis in encoding:
+                    if channel in encoding and encoding[channel] != encoding[axis]:
+                        invalid(
+                            f"Encoding {axis} and {channel} must reference the same column."
+                        )
+                    encoding[channel] = encoding.pop(axis)
         required = {
             "bar": ["category", "value"],
             "line": ["category", "value"],
@@ -97,39 +119,56 @@ def build(context, arguments):
             or not set(encoding) <= set(allowed)
             or any(name not in columns for name in encoding.values())
         ):
-            fail("presentation_invalid")
+            invalid(
+                f"For {kind}, required encoding keys: {required}; allowed keys: {allowed}. "
+                f"Use exact column names: {list(columns)}. Received encoding: {encoding}."
+            )
         for channel in ["value", "x", "y"]:
             if channel in encoding and columns[encoding[channel]]["type"] not in [
                 "money",
                 "count",
                 "percent",
             ]:
-                fail("presentation_invalid")
+                invalid(
+                    f"Encoding {channel} must reference a money, count or percent column."
+                )
         if kind == "table" and (
             not block.get("columns") or not set(block["columns"]) <= columns.keys()
         ):
-            fail("presentation_invalid")
+            invalid(
+                f"Table columns must select existing column names: {list(columns)}."
+            )
         if kind != "table" and "columns" in block:
-            fail("presentation_invalid")
+            invalid("Only table blocks accept columns; charts use encoding.")
         if kind == "kpi" and len(dataset["rows"]) != 1:
-            fail("presentation_invalid")
+            invalid(
+                "KPI requires exactly one dataset row. Aggregate or choose a chart/table."
+            )
         if kind in ["donut", "funnel"] and any(
             row[encoding["value"]] is not None
             and Decimal(str(row[encoding["value"]])) < 0
             for row in dataset["rows"]
         ):
-            fail("presentation_invalid")
+            invalid(
+                "Donut and funnel values must be nonnegative. Choose bar/line for signed values."
+            )
         if kind == "funnel" and encoding.get("category") != "status":
-            fail("presentation_invalid")
+            invalid(
+                "Funnel category must be the status column. Choose bar for other categories."
+            )
         if kind in ["bar", "line", "area", "donut", "funnel"]:
             channels = [encoding["category"]] + (
                 [encoding["series"]] if "series" in encoding else []
             )
             keys = [tuple(row[name] for name in channels) for row in dataset["rows"]]
             if len(keys) != len(set(keys)):
-                fail("presentation_invalid")
+                invalid(
+                    "Category/series keys must be unique. Include the series dimension or aggregate the dataset."
+                )
         if financial_values(block.get("title", "")):
-            fail("presentation_invalid")
+            invalid(
+                "Block titles cannot contain financial claims. Render amounts from the dataset."
+            )
         normalized = {**block, "size": block.get("size", "wide"), "encoding": encoding}
         if kind == "waterfall":
             if (

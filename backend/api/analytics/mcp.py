@@ -66,7 +66,7 @@ def create_servers(context):
     )
     viz_tool = Tool(
         name="build_presentation",
-        description="Create browser charts referencing dataset IDs/columns from query_dataset. No manual values/code. Use bar/line/area/scatter/donut/funnel/waterfall/table/kpi. Waterfall requires projects contract_amount and confirmed_cost. Financial amounts come only from datasets.",
+        description="Create browser charts referencing dataset IDs/columns from query_dataset. No manual values/code. Use bar/line/area/scatter/donut/funnel/waterfall/table/kpi. Bar/line/area encoding uses category/value (x/y aliases accepted); scatter uses x/y. Waterfall requires projects contract_amount and confirmed_cost. Financial amounts come only from datasets.",
         inputSchema=PRESENTATION_SCHEMA,
         outputSchema=OBJECT,
         annotations=ToolAnnotations(readOnlyHint=True),

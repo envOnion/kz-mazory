@@ -133,8 +133,6 @@ async def _run(context, prompt, mode="detailed", suggest=True, history=None):
             if not turn["tool_calls"]:
                 # Numeric facts are rendered by trusted datasets, never invented prose.
                 text = turn["text"]
-                if not document and not text.strip():
-                    fail("provider_invalid_response")
                 issue = (
                     "Финансовые значения должны быть в dataset и проверенном представлении."
                     if financial_values(text)
@@ -157,6 +155,8 @@ async def _run(context, prompt, mode="detailed", suggest=True, history=None):
                         if needs_chart
                         else "ungrounded_financial_response"
                     )
+                if not document and not text.strip():
+                    fail("provider_invalid_response")
                 return {
                     "text": text,
                     "presentation": document,
