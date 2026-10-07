@@ -47,7 +47,8 @@ def workspace_projects(user, filters):
     group = filters['group']
     if group != 'all':
         qs = qs.filter(with_data if group == 'with_data' else ~with_data)
-    return qs.annotate(workspace_has_data=Case(When(with_data, then=Value(1)), default=Value(0), output_field=IntegerField())).order_by('-workspace_has_data', 'name', 'id'), counts
+    confirmed = Q(contract_known=True) | Q(contract_amount__gt=0) | Q(workspace_payment_count__gt=0)
+    return qs.annotate(workspace_has_data=Case(When(with_data, then=Value(1)), default=Value(0), output_field=IntegerField()), workspace_confirmed_data=Case(When(confirmed, then=Value(1)), default=Value(0), output_field=IntegerField())).order_by('-workspace_confirmed_data', '-workspace_has_data', 'name', 'id'), counts
 
 
 def workspace_rows(user, projects):

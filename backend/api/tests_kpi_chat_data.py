@@ -28,6 +28,7 @@ from .models import (
     UserProfile,
 )
 from .views import ChatInput
+from .providers import ProviderUnavailable
 
 
 class DashboardDataTests(TestCase):
@@ -125,6 +126,22 @@ class DashboardDataTests(TestCase):
         self.assertTrue(mart["timeline"]["empty_reason"])
         self.assertTrue(all(v is None for v in mart["timeline"]["datasets"][0]["data"]))
 
+    def test_confirmed_contracts_precede_crm_only_entries_in_first_page(self):
+        self.project.name = "ZZZ confirmed"
+        self.project.contract_amount = Decimal("1000")
+        self.project.contract_known = True
+        self.project.save()
+        for index in range(55):
+            project = Project.objects.create(
+                name=f"AAA CRM {index}", team=self.team, identity_confirmed=True
+            )
+            CrmProjectSnapshot.objects.create(project=project, opportunity="500.00")
+        pipeline = datamart.get_pipeline_mart(self.user)
+        self.assertEqual(pipeline["projects"][0]["id"], self.project.id)
+        self.assertEqual(len(pipeline["projects"]), 50)
+        self.assertEqual(pipeline["next_page"], 2)
+        self.assertEqual(pipeline["total_count"], 56)
+
     def test_crm_snapshot_does_not_approve_contract_or_change_stage(self):
         from .crm_catalog import _sync_deals_page
 
@@ -216,6 +233,37 @@ class ChatAnswerTests(SimpleTestCase):
         ):
             result = async_to_sync(run)(self.context(), "Уточни период")
         self.assertEqual(result["text"], text)
+
+    def test_repeated_native_call_has_a_new_identity_per_turn(self):
+        def turn(text=""):
+            return {
+                "text": text,
+                "tool_calls": []
+                if text
+                else [
+                    {"id": "ollama_0_same", "name": "describe_schema", "arguments": {}}
+                ],
+            }
+
+        with patch(
+            "api.analytics.host.AIService.analytics_turn",
+            side_effect=[turn(), turn(), turn("Доступны сообщения и проекты.")],
+        ):
+            result = async_to_sync(run)(self.context(), "Какие данные доступны?")
+        self.assertIn("Доступны", result["text"])
+
+    def test_mcp_cleanup_preserves_domain_error_code(self):
+        with patch(
+            "api.analytics.host.AIService.analytics_turn",
+            return_value={
+                "text": "",
+                "tool_calls": [{"id": "a", "name": "unknown", "arguments": {}}],
+            },
+        ):
+            with self.assertRaisesMessage(
+                ProviderUnavailable, "invalid_tool_arguments"
+            ):
+                async_to_sync(run)(self.context(), "График")
 
     def test_unproven_money_gets_one_correction_and_real_explanation(self):
         with patch(

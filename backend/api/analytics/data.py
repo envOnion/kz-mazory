@@ -183,8 +183,19 @@ RECORDS_SCHEMA = {
 
 
 def validate(schema, value):
-    if list(Draft202012Validator(schema).iter_errors(value)):
-        fail()
+    errors = list(Draft202012Validator(schema).iter_errors(value))
+    if errors:
+        raise ProviderUnavailable(
+            "invalid_tool_arguments",
+            diagnostics={
+                "validation_errors": [
+                    "/".join(str(part) for part in error.path)
+                    + ": "
+                    + error.message[:1200]
+                    for error in errors[:5]
+                ]
+            },
+        )
 
 
 @dataclass

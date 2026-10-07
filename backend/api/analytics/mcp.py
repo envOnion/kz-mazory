@@ -136,6 +136,16 @@ def create_servers(context):
 
     async def execute(name, arguments):
         try:
+            schema = {
+                "describe_schema": EMPTY,
+                "query_dataset": QUERY_SCHEMA,
+                "read_sources": SOURCES,
+                "read_records": RECORDS_SCHEMA,
+                "build_presentation": PRESENTATION_SCHEMA,
+            }.get(name)
+            if schema is None:
+                fail("unsupported_query")
+            validate(schema, arguments)
             fn = {
                 "describe_schema": lambda a: context.schema(),
                 "query_dataset": context.query,
@@ -160,7 +170,10 @@ def create_servers(context):
             return CallToolResult(
                 isError=True,
                 content=[
-                    TextContent(type="text", text=json.dumps({"error": str(exc)[:64]}))
+                    TextContent(
+                        type="text",
+                        text=json.dumps({"error": str(exc)[:64], **exc.diagnostics}),
+                    )
                 ],
             )
         except Exception:
@@ -174,13 +187,13 @@ def create_servers(context):
                 ],
             )
 
-    @data.call_tool()
+    @data.call_tool(validate_input=False)
     async def call_data(name, arguments):
         if name == "build_presentation":
             fail("unsupported_query")
         return await execute(name, arguments)
 
-    @presentation.call_tool()
+    @presentation.call_tool(validate_input=False)
     async def call_viz(name, arguments):
         if name != "build_presentation":
             fail("unsupported_query")

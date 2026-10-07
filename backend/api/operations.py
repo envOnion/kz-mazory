@@ -52,10 +52,17 @@ def _execute_operation(pk):
             qs, currency = scoped_projects(user, values)
             start, end, today = period_bounds(period, mart["timezone"])
             from .datamart import confirmed_payments
-            rows = confirmed_payments(user, values).filter(
-                payment_date__gte=start,
-                payment_date__lt=min(end, today + __import__("datetime").timedelta(days=1)),
-            ).order_by("payment_date", "id")
+
+            rows = (
+                confirmed_payments(user, values)
+                .filter(
+                    payment_date__gte=start,
+                    payment_date__lt=min(
+                        end, today + __import__("datetime").timedelta(days=1)
+                    ),
+                )
+                .order_by("payment_date", "id")
+            )
             if rows.count() > 10000:
                 raise ProviderUnavailable("export_limit_use_filters")
             for row in rows.values(
@@ -81,7 +88,10 @@ def _execute_operation(pk):
                     "type": "chart",
                     "data": datamart.get_sales_chart_dataset(user, period, values),
                 }
-                text = widget["data"].get("empty_reason") or "Подтверждённые поступления по дате платежа."
+                text = (
+                    widget["data"].get("empty_reason")
+                    or "Подтверждённые поступления по дате платежа."
+                )
             elif query == "какие обещания просрочены?":
                 widget = {
                     "type": "commitments_list",
@@ -113,13 +123,25 @@ def _execute_operation(pk):
                     op.access_fingerprint,
                     op.expires_at,
                     deadline,
-                    {key: values[key] for key in ["period", "currency", "team_id", "manager_id", "project_id"] if key in values},
+                    {
+                        key: values[key]
+                        for key in [
+                            "period",
+                            "currency",
+                            "team_id",
+                            "manager_id",
+                            "project_id",
+                        ]
+                        if key in values
+                    },
                 )
                 from .ai_service import analytics_deadline
 
                 deadline_token = analytics_deadline.set(deadline)
                 try:
-                    dynamic = async_to_sync(run)(context, prompt, mode, suggest, values.get("history", []))
+                    dynamic = async_to_sync(run)(
+                        context, prompt, mode, suggest, values.get("history", [])
+                    )
                     text, widget = dynamic["text"], None
                     presentation = dynamic["presentation"]
                     quotes = dynamic.get("quotes", [])
@@ -164,7 +186,12 @@ def _execute_operation(pk):
             if isinstance(exc, ProviderUnavailable)
             else "operation_failed"
         )
-        logger.warning("operation_failed operation_id=%s code=%s", pk, code)
+        logger.warning(
+            "operation_failed operation_id=%s code=%s",
+            pk,
+            code,
+            exc_info=not isinstance(exc, ProviderUnavailable),
+        )
         AsyncOperation.objects.filter(pk=pk, status="running").update(
             status="expired" if code == "access_or_lifetime_changed" else "failed",
             result={},
