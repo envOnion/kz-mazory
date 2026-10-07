@@ -28,4 +28,16 @@ describe('operation generation boundary', () => {
     const pending=chat.handlePromptSubmit('First');await chat.cancel();receipt.resolve({operation_id:3,status:'queued'});await pending
     expect(mocks.api).toHaveBeenCalledWith('/operations/3/', {method:'DELETE'});expect(chat.chatResponseText.value).toBe('');scope.stop()
   })
+  it('answers a clarification using the completed conversation only', async () => {
+    mocks.post.mockResolvedValue({operation_id:4})
+    mocks.pollOperation.mockResolvedValueOnce(response('За какой месяц?')).mockResolvedValueOnce(response('Сентябрь 2026'))
+    const scope=effectScope(); const chat=scope.run(()=>useChat())!
+    await chat.handlePromptSubmit('Покажи поступления')
+    await chat.handlePromptSubmit('Сентябрь')
+    expect(mocks.post.mock.lastCall?.[1].history).toEqual([
+      {role:'user',content:'Покажи поступления'}, {role:'assistant',content:'За какой месяц?'}
+    ])
+    scope.stop()
+  })
+
 })

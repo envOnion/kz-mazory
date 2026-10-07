@@ -59,9 +59,20 @@ class KpiSummaryView(APIView):
         )
 
 
+class ChatHistoryItem(serializers.Serializer):
+    role = serializers.ChoiceField(choices=["user", "assistant"])
+    content = serializers.CharField(max_length=4000)
+
+
 class ChatInput(Filters):
     prompt = serializers.CharField(max_length=4000)
     idempotency_key = serializers.CharField(max_length=64)
+    history = ChatHistoryItem(many=True, required=False, max_length=8)
+
+    def validate_history(self, value):
+        if sum(len(item["content"]) for item in value) > 12000:
+            raise serializers.ValidationError("Контекст диалога слишком большой.")
+        return value
 
 
 def create_operation(user, values, kind="chat"):
@@ -167,7 +178,7 @@ class ProjectListView(APIView):
         qs, counts = workspace_projects(request.user, schema.validated_data)
         paginator = PageNumberPagination()
         page = paginator.paginate_queryset(
-            qs.select_related("company", "manager"), request
+            qs.select_related("company", "manager", "crm_snapshot"), request
         )
         response = paginator.get_paginated_response(workspace_rows(request.user, page))
         response.data['group_counts'] = counts

@@ -7,7 +7,7 @@
           <Layers class="w-4 h-4 text-indigo-400" />
           <span>Воронка проектов и контроль экономики сделок</span>
         </h3>
-        <p class="text-xs text-slate-400 mt-0.5">Доступные подтверждённые проекты; валюта указана у каждой суммы</p>
+        <p class="text-xs text-slate-400 mt-0.5">Проекты и сведения источников; сумма сделки CRM показана отдельно от договора и оплат</p>
       </div>
 
       <!-- Margin alert summary badge -->
@@ -17,6 +17,9 @@
       </div>
     </div>
 
+    <p v-if="data.coverage" class="text-xs text-slate-400" data-testid="pipeline-coverage">
+      Всего {{ data.coverage.projects }} · Договор известен: {{ data.coverage.contracts_known }} · С оплатами: {{ data.coverage.payments_known }} · Стадия известна: {{ data.coverage.known_stages }} · Снимков CRM: {{ data.coverage.crm_snapshots }}
+    </p>
     <!-- Funnel Stages Bar -->
     <div class="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2">
       <div
@@ -24,10 +27,11 @@
         :key="st.code"
         class="p-2.5 rounded-xl bg-slate-900/50 border border-slate-800/60 flex flex-col justify-between"
       >
-        <span class="text-[11px] text-slate-400 truncate">{{ st.label }}</span>
-        <div class="mt-1 flex items-baseline justify-between">
+        <span class="text-[11px] text-slate-400 break-words" :title="st.label">{{ st.label }}</span>
+        <div class="mt-1 space-y-1">
           <span class="text-sm font-bold text-white">{{ st.count }}</span>
-          <span class="text-[10px] text-indigo-400 truncate max-w-[70px]">{{ st.volume_formatted }}</span>
+          <p class="text-[10px] text-indigo-300">Договоры: {{ st.volume_formatted }}</p>
+          <p v-if="st.crm_volume_formatted" class="text-[10px] text-slate-400">CRM: {{ st.crm_volume_formatted }}</p>
         </div>
       </div>
     </div>
@@ -52,7 +56,7 @@
         </thead>
         <tbody class="divide-y divide-slate-800/40">
           <tr
-            v-for="p in data.projects"
+            v-for="p in projects"
             :key="p.id"
             class="hover:bg-slate-800/30 transition-colors"
           >
@@ -69,6 +73,7 @@
             </td>
             <td class="py-3 px-3 text-right text-slate-200 font-semibold font-mono">
               {{ p.contract_formatted }}
+              <span v-if="p.crm_formatted" class="block text-[10px] text-slate-400 font-normal">CRM: {{ p.crm_formatted }}</span>
             </td>
             <td class="py-3 px-3 text-right text-emerald-400 font-mono font-medium">
               {{ p.paid_formatted }}
@@ -87,14 +92,14 @@
             <td class="py-3 px-3">
               <div class="flex items-center gap-1.5 flex-wrap">
                 <span class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] bg-slate-800 text-slate-300 border border-slate-700/60">
-                  {{ p.status }}
+                  {{ p.status }}{{ p.stage_source ? ` · ${p.stage_source}` : '' }}
                 </span>
                 <span
                   v-if="p.is_verified === false"
                   class="inline-flex items-center px-1.5 py-0.5 rounded-full text-[9px] font-semibold bg-amber-500/10 text-amber-400 border border-amber-500/30"
                   title="Ожидает проверки"
                 >
-                  ⏳ Не проверено
+                  Сведения неполные
                 </span>
                 <span
                   v-else-if="p.is_verified === true"
@@ -104,17 +109,43 @@
                   ✓ Проверено
                 </span>
               </div>
+              <details v-if="p.missing_data_reasons?.length" class="text-[10px] text-slate-400 mt-2 max-w-60">
+                <summary class="cursor-pointer">Почему нет данных</summary>
+                <p v-for="reason in p.missing_data_reasons" :key="reason.code" class="mt-1">{{ reason.message }}</p>
+              </details>
             </td>
           </tr>
         </tbody>
       </table>
     </div>
+    <p class="text-xs text-slate-400">Показано {{ projects.length }} из {{ data.total_count }} проектов.</p>
+    <button v-if="nextPage" class="btn" :disabled="loading" @click="loadMore">{{ loading ? 'Загрузка…' : 'Загрузить ещё' }}</button>
+    <p v-if="error" role="alert" class="text-sm text-rose-300">{{ error }}</p>
   </div>
 </template>
 
 <script setup lang="ts">
+import { ref, watch } from 'vue'
+import { api } from '../../composables/api'
+import type { Page } from '../../types/platform'
 import { Layers, AlertTriangle } from 'lucide-vue-next'
 
-import type { PipelineData } from '../../types/chat'
-defineProps<{ data: PipelineData }>()
+import type { PipelineData, ProjectWorkspaceSummary } from '../../types/chat'
+const props = defineProps<{ data: PipelineData }>()
+const projects = ref(props.data.projects)
+const nextPage = ref(props.data.next_page ?? null)
+const loading = ref(false), error = ref('')
+watch(() => props.data, value => { projects.value = value.projects; nextPage.value = value.next_page ?? null; error.value = '' })
+async function loadMore() {
+  if (!nextPage.value || !props.data.source_path || loading.value) return
+  loading.value = true; error.value = ''
+  const data = props.data
+  try {
+    const page = await api<Page<ProjectWorkspaceSummary>>(`${data.source_path}&page=${nextPage.value}`)
+    if (props.data !== data) return
+    projects.value = [...projects.value, ...page.results]
+    nextPage.value = page.next ? nextPage.value + 1 : null
+  } catch (e) { error.value = e instanceof Error ? e.message : 'Не удалось загрузить проекты' }
+  finally { loading.value = false }
+}
 </script>

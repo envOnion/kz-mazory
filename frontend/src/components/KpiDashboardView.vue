@@ -23,6 +23,14 @@
     <template v-if="data && !presentation && !isLoading && ((!hasChatResponse && !widget) || widget?.type === 'kpi_grid')">
       <p class="text-sm text-slate-400">{{ data.querySubtitle }} · {{ data.updatedAtText }}</p>
       <p class="panel" :class="data.coverage.status === 'partial' ? 'text-amber-300' : 'text-emerald-300'">{{ data.coverage.message }}</p>
+      <div v-if="data.data_availability?.message" class="panel space-y-2" data-testid="kpi-data-availability">
+        <p>{{ data.data_availability.message }}</p>
+        <p v-if="data.data_availability.last_payment_date" class="text-xs text-slate-400">Последняя зарегистрированная оплата: {{ data.data_availability.last_payment_date }}</p>
+        <button class="btn" @click="$emit('openWorkspace')">Открыть источники в рабочем кабинете</button>
+      </div>
+      <div v-if="data.project_summary" class="panel text-sm" data-testid="kpi-project-summary">
+        Проектов: {{ data.project_summary.count }} · Известных договоров: {{ data.project_summary.contracts_known }} · {{ data.project_summary.contract_formatted }}
+      </div>
       <div class="grid md:grid-cols-3 gap-4" data-testid="kpi-metrics-grid">
         <button
           v-for="metric in data.summaryMetrics"
@@ -79,7 +87,7 @@
       <div class="grid md:grid-cols-3 gap-4">
         <ManagerCard v-for="manager in data.managers" :key="manager.id" :manager="manager" />
       </div>
-      <p v-if="!data.managers.length" class="panel">Нет доступных показателей. Доступ к команде и полноту источников настраивает администратор.</p>
+      <p v-if="!data.managers.length" class="panel">Персональные KPI появятся после назначения менеджеров. Общие показатели проектов и поступлений доступны выше.</p>
       <div class="panel" data-testid="kpi-forecast">
         <h2 class="font-semibold" data-testid="kpi-forecast-heading">Прогноз поступлений</h2>
         <p v-if="data.forecast.available" data-testid="kpi-forecast-value">{{ data.forecast.amount }} {{ data.forecast.currency }} · на {{ data.forecast.as_of }}</p>
@@ -100,7 +108,7 @@ import ManagerCard from './ManagerCard.vue'
 import PresentationRenderer from '../presentation/PresentationRenderer.vue'
 import type { PresentationDocument } from '../types/presentation'
 const props = defineProps<{ data: KpiDashboardData | null; widget: ChatWidget | null; responseText: string; presentation: PresentationDocument | null; hasChatResponse: boolean; isLoading: boolean; period: string }>()
-const emit = defineEmits<{ changePeriod: [period: string]; changeFilters: [filters: KpiFilters]; selectPrompt: [prompt: string]; openSource: [id: number] }>()
+const emit = defineEmits<{ changePeriod: [period: string]; changeFilters: [filters: KpiFilters]; selectPrompt: [prompt: string]; openSource: [id: number]; openWorkspace: [] }>()
 const filters = reactive<KpiFilters>({ currency: 'KZT' })
 const directory = ref<Directory>({ teams: [], profiles: [], projects: [] })
 watch(filters, value => emit('changeFilters', { ...value }), { deep: true })
@@ -110,7 +118,7 @@ const paymentRows = ref<Payment[]>([])
 const paymentPage = ref(1)
 watch(() => props.data, value => { paymentRows.value = value?.source_rows || []; paymentPage.value = 1 }, { immediate: true })
 async function loadPayments() { if (props.data) { const page = await api<Page<Payment>>(`${props.data.source_path}&page=${paymentPage.value + 1}`); paymentRows.value.push(...page.results); paymentPage.value++ } }
-const agingChart = computed<ChartPayload | null>(() => props.data ? ({ title: 'Дебиторка по возрасту', unit: props.data.currency, labels: ['Срок не наступил', '1–30 дней', '31–60 дней', '61–90 дней', 'Более 90 дней'], datasets: [{ label: 'Непогашенная сумма', data: ['not_due', '1_30', '31_60', '61_90', 'over_90'].map(key => props.data!.receivables.buckets[key] || '0.00'), backgroundColor: '#fbbf24' }] }) : null)
+const agingChart = computed<ChartPayload | null>(() => props.data?.receivables.rows.length ? ({ title: 'Дебиторка по возрасту', unit: props.data.currency, labels: ['Срок не наступил', '1–30 дней', '31–60 дней', '61–90 дней', 'Более 90 дней'], datasets: [{ label: 'Непогашенная сумма', data: ['not_due', '1_30', '31_60', '61_90', 'over_90'].map(key => props.data!.receivables.buckets[key] || '0.00'), backgroundColor: '#fbbf24' }] }) : null)
 
 function getMetricTestId(id: string): string {
   if (id === 'receipts') return 'kpi-metric-received'

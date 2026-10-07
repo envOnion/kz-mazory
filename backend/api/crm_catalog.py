@@ -1,6 +1,6 @@
 """Paginated CRM identities. Imported catalog entries do not approve finances."""
 
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
@@ -14,6 +14,7 @@ from .models import (
     Project,
     Team,
     UserProfile,
+    CrmProjectSnapshot,
 )
 from .providers import ProviderUnavailable
 
@@ -139,7 +140,15 @@ def _sync_deals_page(sync, config, cfg, payload):
             "start": sync.cursor,
             "order": {"ID": "ASC"},
             "filter": {"CATEGORY_ID": cfg.deal_category_id},
-            "select": ["ID", "TITLE", "COMPANY_ID", "ASSIGNED_BY_ID", "CURRENCY_ID", "OPPORTUNITY"],
+            "select": [
+                "ID",
+                "TITLE",
+                "COMPANY_ID",
+                "ASSIGNED_BY_ID",
+                "CURRENCY_ID",
+                "OPPORTUNITY",
+                "STAGE_ID",
+            ],
         },
         config=config,
         budget=CrmReadBudget(),
@@ -160,6 +169,51 @@ def _sync_deals_page(sync, config, cfg, payload):
             or not str(row.get("TITLE", "")).strip()
         ):
             raise ProviderUnavailable("crm_invalid_response")
+    stages = {}
+    if any(row.get("STAGE_ID") for row in rows):
+        entity = (
+            "DEAL_STAGE"
+            if not cfg.deal_category_id
+            else f"DEAL_STAGE_{cfg.deal_category_id}"
+        )
+        result = BitrixService.read_call(
+            "crm.status.list",
+            {"filter": {"ENTITY_ID": entity}, "order": {"SORT": "ASC"}},
+            config=config,
+            budget=CrmReadBudget(),
+        ).get("result")
+        if not isinstance(result, list) or any(
+            not isinstance(item, dict) for item in result
+        ):
+            raise ProviderUnavailable("crm_invalid_response")
+        stages = {
+            str(item["STATUS_ID"]): str(item.get("NAME", ""))[:255]
+            for item in result
+            if item.get("STATUS_ID")
+        }
+    manager_ids = sorted(
+        {str(row["ASSIGNED_BY_ID"]) for row in rows if row.get("ASSIGNED_BY_ID")}
+    )
+    manager_names = {}
+    if manager_ids:
+        # Some read-only webhooks lack user_brief. The CRM identity remains useful.
+        try:
+            users = BitrixService.read_call(
+                "user.get",
+                {"filter": {"ID": manager_ids}},
+                config=config,
+                budget=CrmReadBudget(),
+            ).get("result")
+            if isinstance(users, list):
+                manager_names = {
+                    str(item["ID"]): " ".join(
+                        str(item.get(k) or "").strip() for k in ["NAME", "LAST_NAME"]
+                    ).strip()[:255]
+                    for item in users
+                    if isinstance(item, dict) and item.get("ID")
+                }
+        except ProviderUnavailable:
+            pass
     with transaction.atomic():
         locked = CrmCatalogSync.objects.select_for_update().get(pk=sync.pk)
         if (
@@ -170,9 +224,7 @@ def _sync_deals_page(sync, config, cfg, payload):
             return
         for row in rows:
             project = (
-                Project.objects.select_for_update()
-                .filter(bitrix_id=row["ID"])
-                .first()
+                Project.objects.select_for_update().filter(bitrix_id=row["ID"]).first()
             )
             if project and project.team_id != locked.team_id:
                 raise ProviderUnavailable("crm_project_scope_conflict")
@@ -216,6 +268,33 @@ def _sync_deals_page(sync, config, cfg, payload):
             project.last_bitrix_synced_at = timezone.now()
             project.identity_confirmed = True
             project.save()
+            opportunity = None
+            if row.get("OPPORTUNITY") not in (None, ""):
+                try:
+                    opportunity = Decimal(str(row["OPPORTUNITY"]))
+                    if (
+                        not opportunity.is_finite()
+                        or abs(opportunity) >= Decimal("1000000000000")
+                        or opportunity != opportunity.quantize(Decimal(".01"))
+                    ):
+                        raise InvalidOperation
+                except (ValueError, InvalidOperation):
+                    raise ProviderUnavailable("crm_invalid_amount") from None
+            stage_id = str(row.get("STAGE_ID") or "")[:128]
+            manager_id = str(row.get("ASSIGNED_BY_ID") or "")[:64]
+            CrmProjectSnapshot.objects.update_or_create(
+                project=project,
+                defaults={
+                    "external_stage_id": stage_id,
+                    "external_stage_name": stages.get(stage_id, ""),
+                    "external_manager_id": manager_id,
+                    "external_manager_name": manager_names.get(manager_id)
+                    or ("Сотрудник CRM #" + manager_id if manager_id else ""),
+                    "opportunity": opportunity,
+                    "currency": str(row.get("CURRENCY_ID") or project.currency)[:3],
+                    "synced_at": timezone.now(),
+                },
+            )
         locked.imported_count += len(rows)
         locked.error_code = ""
         if next_cursor is None:
@@ -237,7 +316,9 @@ def sync_page(payload):
         return
     cfg = BitrixSettings.objects.first()
     try:
-        if not cfg or not (cfg.crm_matching_enabled or (cfg.is_active and cfg.auto_import_deals)):
+        if not cfg or not (
+            cfg.crm_matching_enabled or (cfg.is_active and cfg.auto_import_deals)
+        ):
             raise ProviderUnavailable("crm_import_disabled")
         if sync.team_id != settings.BITRIX_TEAM_ID or not sync.team.is_active:
             raise ProviderUnavailable("crm_team_mapping_required")

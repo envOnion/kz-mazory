@@ -2,6 +2,7 @@ import json
 from decimal import Decimal, InvalidOperation
 
 from .data import fail, validate
+from .text import financial_values
 
 ENCODINGS = ["category", "series", "value", "x", "y", "label"]
 PRESENTATION_SCHEMA = {
@@ -127,16 +128,17 @@ def build(context, arguments):
             keys = [tuple(row[name] for name in channels) for row in dataset["rows"]]
             if len(keys) != len(set(keys)):
                 fail("presentation_invalid")
-        if kind != "waterfall" and any(
-            char.isdigit() for char in block.get("title", "")
-        ):
+        if financial_values(block.get("title", "")):
             fail("presentation_invalid")
         normalized = {**block, "size": block.get("size", "wide"), "encoding": encoding}
         if kind == "waterfall":
             if (
                 dataset["normalized_query"]["dataset"] != "projects"
                 or not {"contract_amount", "confirmed_cost"} <= columns.keys()
-                or any(r["confirmed_cost"] is None for r in dataset["rows"])
+                or any(
+                    r["confirmed_cost"] is None or r["contract_amount"] is None
+                    for r in dataset["rows"]
+                )
             ):
                 fail("unsupported_query")
             contract = sum(
@@ -175,7 +177,7 @@ def build(context, arguments):
         "version": "1.0",
         "title": arguments["title"],
         "summary": arguments.get("summary", "")
-        if not any(c.isdigit() for c in arguments.get("summary", ""))
+        if not financial_values(arguments.get("summary", ""))
         else "",
         "blocks": blocks,
         "datasets": used,

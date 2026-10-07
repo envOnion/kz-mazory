@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
-from django.db.models import Sum, Q
+from django.db.models import Sum, Q, Count, Min, Max
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from . import access
@@ -54,10 +54,11 @@ def period_bounds(period, zone="Asia/Almaty", today=None):
     return start, end, today
 
 
-def scoped_projects(user, filters=None):
+def scoped_projects(user, filters=None, *, using="default"):
     filters = filters or {}
     qs = (
         access.projects_for(user)
+        .using(using)
         .filter(
             Q(is_verified=True)
             | Q(identity_confirmed=True)
@@ -83,40 +84,99 @@ def scoped_projects(user, filters=None):
     return qs.filter(currency=currency), currency
 
 
-def project_row(p, *, paid_total=None):
+def confirmed_payments(user, filters=None, *, using="default"):
+    """Payment attribution belongs to the ledger, not the current project owner."""
+    filters = filters or {}
+    projects, currency = scoped_projects(
+        user, {k: v for k, v in filters.items() if k != "manager_id"}, using=using
+    )
+    qs = FinancialRecord.objects.using(using).filter(
+        project__in=projects,
+        is_verified=True,
+        status="received",
+        direction="income",
+        amount_precision="exact",
+        currency=currency,
+    )
+    if filters.get("manager_id"):
+        qs = qs.filter(credited_profile_id=filters["manager_id"])
+    return qs
+
+
+def project_stage(p):
+    if "stage" in p.whatsapp_fields:
+        return p.status, p.get_status_display(), "Учёт"
+    crm = getattr(p, "crm_snapshot", None)
+    if crm and crm.external_stage_id:
+        return (
+            "crm:" + crm.external_stage_id,
+            crm.external_stage_name or crm.external_stage_id,
+            "CRM",
+        )
+    return "unknown", "Стадия не определена", ""
+
+
+def project_row(p, *, paid_total=None, payments_known=None):
     margin = (
         (p.contract_amount - p.cost_amount) / p.contract_amount * 100
         if p.cost_confirmed and p.contract_amount
         else None
     )
-    paid = paid_total if paid_total is not None else (
-        p.financial_records.filter(is_verified=True, status="received", direction="income", amount_precision="exact").aggregate(
-            s=Sum("amount")
-        )["s"]
-        or ZERO
-    )
+    if paid_total is None or payments_known is None:
+        totals = p.financial_records.filter(
+            is_verified=True,
+            status="received",
+            direction="income",
+            amount_precision="exact",
+            currency=p.currency,
+        ).aggregate(s=Sum("amount"), n=Count("id"))
+        paid_total, payments_known = totals["s"] or ZERO, bool(totals["n"])
+    paid = paid_total
     due = p.contract_amount - paid
+    contract_known = p.contract_known or p.contract_amount > 0
+    balance_known = contract_known and payments_known
+    stage, stage_label, stage_source = project_stage(p)
+    crm = getattr(p, "crm_snapshot", None)
     return {
         "id": p.id,
         "name": p.name,
         "company": p.company.name if p.company else "",
-        "manager": p.manager.full_name if p.manager else "Не назначен",
+        "manager": p.manager.full_name
+        if p.manager
+        else (crm.external_manager_name if crm else "") or "Не назначен",
         "manager_id": p.manager_id,
         "team_id": p.team_id,
         "version": p.version,
         "currency": p.currency,
-        "contract_amount": money(p.contract_amount),
-        "contract_formatted": formatted(p.contract_amount, p.currency),
-        "paid_amount": money(paid),
-        "paid_formatted": formatted(paid, p.currency),
-        "due_amount": money(due),
-        "due_formatted": formatted(due, p.currency),
-        "overpayment": money(max(ZERO, -due)),
+        "contract_known": contract_known,
+        "payments_known": payments_known,
+        "balance_known": balance_known,
+        "contract_amount": money(p.contract_amount) if contract_known else None,
+        "contract_formatted": formatted(p.contract_amount, p.currency)
+        if contract_known
+        else "Нет данных",
+        "paid_amount": money(paid) if payments_known else None,
+        "paid_formatted": formatted(paid, p.currency)
+        if payments_known
+        else "Нет данных",
+        "due_amount": money(due) if balance_known else None,
+        "due_formatted": formatted(due, p.currency)
+        if balance_known
+        else "Не определён",
+        "overpayment": money(max(ZERO, -due)) if balance_known else None,
         "cost_amount": money(p.cost_amount) if p.cost_confirmed else None,
         "margin_percent": round(float(margin), 2) if margin is not None else None,
         "margin_alert": margin is not None and margin < 15,
-        "status": p.get_status_display(),
-        "status_code": p.status,
+        "status": stage_label,
+        "status_code": stage,
+        "stage_source": stage_source,
+        "crm_amount": money(crm.opportunity)
+        if crm and crm.opportunity is not None
+        else None,
+        "crm_formatted": formatted(crm.opportunity, crm.currency)
+        if crm and crm.opportunity is not None
+        else None,
+        "crm_synced_at": crm.synced_at.isoformat() if crm else None,
         "priority": p.priority,
         "equipment": p.equipment_type,
         "is_verified": p.is_verified,
@@ -131,11 +191,8 @@ class DataMartService:
         profile = UserProfile.objects.filter(user=user).first()
         zone = profile.timezone if profile else "Asia/Almaty"
         start, end, today = period_bounds(period, zone)
-        payments = FinancialRecord.objects.filter(
-            project__in=qs,
-            is_verified=True,
-            status="received", direction="income", amount_precision="exact",
-            currency=currency,
+        all_payments = confirmed_payments(user, filters)
+        payments = all_payments.filter(
             payment_date__gte=start,
             payment_date__lt=min(end, today + timedelta(days=1)),
         )
@@ -154,7 +211,9 @@ class DataMartService:
         profiles = (
             access.profiles_for(user)
             .filter(
-                user__memberships__role="manager", user__memberships__status="active"
+                user__memberships__role="manager",
+                user__memberships__status="active",
+                user__is_active=True,
             )
             .distinct()
         )
@@ -208,7 +267,10 @@ class DataMartService:
                     "name": manager.full_name or manager.user.username,
                     "role": manager.role,
                     "avatar": manager.avatar_url,
-                    "salesAmount": formatted(own_fact, currency),
+                    "salesAmount": formatted(own_fact, currency)
+                    if complete or payments.filter(credited_profile=manager).exists()
+                    else "Нет зарегистрированных оплат",
+                    "source_count": payments.filter(credited_profile=manager).count(),
                     "fact": money(own_fact),
                     "targetAmount": money(target) if target is not None else None,
                     "targetFormatted": formatted(target, currency)
@@ -259,13 +321,8 @@ class DataMartService:
         days = (min(end, today + timedelta(days=1)) - start).days
         compare_end = min(previous_end, previous_start + timedelta(days=days))
         previous = (
-            FinancialRecord.objects.filter(
-                project__in=qs,
-                is_verified=True,
-                status="received", direction="income", amount_precision="exact",
-                currency=currency,
-                payment_date__gte=previous_start,
-                payment_date__lt=compare_end,
+            all_payments.filter(
+                payment_date__gte=previous_start, payment_date__lt=compare_end
             ).aggregate(s=Sum("amount"))["s"]
             or ZERO
         )
@@ -295,7 +352,10 @@ class DataMartService:
             "datasets": [
                 {
                     "label": "Подтверждённые поступления",
-                    "data": [m["fact"] for m in managers],
+                    "data": [
+                        m["fact"] if complete or m["source_count"] else None
+                        for m in managers
+                    ],
                     "backgroundColor": "#34d399",
                 },
                 {
@@ -305,7 +365,52 @@ class DataMartService:
                 },
             ],
         }
+        source_count = payments.count()
+        history = all_payments.aggregate(
+            first=Min("payment_date"), last=Max("payment_date"), count=Count("id")
+        )
+        reason = (
+            ""
+            if source_count
+            else "За выбранный период поступлений нет. Полнота истории подтверждена."
+            if complete
+            else (
+                "За выбранный период поступления не зарегистрированы. Выберите период с имеющимися операциями."
+                if history["count"]
+                else "Поступления ещё не зарегистрированы. Сведения и причины отсутствия данных доступны в рабочем кабинете и решениях системы."
+            )
+        )
+        unassigned = payments.exclude(
+            credited_profile_id__in=[m["id"] for m in managers]
+        ).aggregate(s=Sum("amount"), n=Count("id"))
+        if unassigned["n"]:
+            chart["labels"].append("Без персонального KPI")
+            chart["datasets"][0]["data"].append(money(unassigned["s"]))
+            chart["datasets"][1]["data"].append(None)
+        chart["empty_reason"] = (
+            reason if not source_count and total_target is None else ""
+        )
+        known_contracts = qs.filter(
+            Q(contract_known=True) | Q(contract_amount__gt=0)
+        ).aggregate(n=Count("id"), amount=Sum("contract_amount"))
+        availability = {
+            "period_payments": source_count,
+            "all_payments": history["count"],
+            "first_payment_date": history["first"].isoformat()
+            if history["first"]
+            else None,
+            "last_payment_date": history["last"].isoformat()
+            if history["last"]
+            else None,
+            "message": reason,
+            "manager_count": len(managers),
+            "unattributed_payments": unassigned["n"],
+            "target_known": total_target is not None,
+            "projects": qs.count(),
+            "contracts_known": known_contracts["n"],
+        }
         return {
+            "data_availability": availability,
             "categoryBadge": "ПОДТВЕРЖДЁННЫЕ ДАННЫЕ",
             "queryTitle": "KPI отдела продаж",
             "querySubtitle": f"{title} · {currency}",
@@ -339,7 +444,9 @@ class DataMartService:
                 {
                     "id": "receipts",
                     "title": "Подтверждённые поступления",
-                    "value": formatted(fact, currency),
+                    "value": formatted(fact, currency)
+                    if source_count or complete
+                    else "Нет данных о поступлениях",
                     "trend": trend,
                     "trendPositive": growth is not None and growth >= 0,
                     "icon": "bar-chart",
@@ -357,16 +464,36 @@ class DataMartService:
                 {
                     "id": "overdue",
                     "title": "Просроченная дебиторка",
-                    "value": formatted(Decimal(receivables["overdue"]), currency),
+                    "value": formatted(Decimal(receivables["overdue"]), currency)
+                    if receivables["rows"]
+                    else "Нет графика платежей",
                     "trend": "По графику платежей",
                     "trendPositive": False,
                     "icon": "users",
                 },
             ],
+            "project_summary": {
+                "count": qs.count(),
+                "contracts_known": known_contracts["n"],
+                "contract_amount": money(known_contracts["amount"])
+                if known_contracts["n"]
+                else None,
+                "contract_formatted": formatted(known_contracts["amount"], currency)
+                if known_contracts["n"]
+                else "Договоры не зарегистрированы",
+            },
             "managers": managers,
             "chartData": chart,
             "receivables": receivables,
-            "timeline": self.timeline(payments, start, end, today, currency),
+            "timeline": self.timeline(
+                payments,
+                start,
+                end,
+                today,
+                currency,
+                complete=complete,
+                empty_reason=reason if not complete else "",
+            ),
             "source_rows": list(
                 payments.order_by("payment_date", "id").values(
                     "id",
@@ -419,7 +546,9 @@ class DataMartService:
             FinancialRecord.objects.filter(
                 project__in=projects,
                 is_verified=True,
-                status="received", direction="income", amount_precision="exact",
+                status="received",
+                direction="income",
+                amount_precision="exact",
                 currency=currency,
                 payment_date__gte=history,
                 payment_date__lt=current,
@@ -430,7 +559,9 @@ class DataMartService:
             FinancialRecord.objects.filter(
                 project__in=projects,
                 is_verified=True,
-                status="received", direction="income", amount_precision="exact",
+                status="received",
+                direction="income",
+                amount_precision="exact",
                 currency=currency,
                 payment_date__gte=current,
                 payment_date__lte=today,
@@ -451,7 +582,9 @@ class DataMartService:
             "reason": "Факт на сегодня + средние дневные поступления трёх закрытых месяцев × оставшиеся дни. Сезонность не учитывается.",
         }
 
-    def timeline(self, payments, start, end, today, currency):
+    def timeline(
+        self, payments, start, end, today, currency, *, complete=False, empty_reason=""
+    ):
         rows = {
             str(day["payment_date"]): money(day["s"])
             for day in payments.values("payment_date").annotate(s=Sum("amount"))
@@ -462,12 +595,16 @@ class DataMartService:
         ]
         return {
             "title": "Поступления по дням",
+            "empty_reason": empty_reason,
             "unit": currency,
             "labels": [d.isoformat() for d in days],
             "datasets": [
                 {
                     "label": "Факт",
-                    "data": [rows.get(d.isoformat(), "0.00") for d in days],
+                    "data": [
+                        rows.get(d.isoformat(), "0.00" if complete else None)
+                        for d in days
+                    ],
                     "backgroundColor": "#34d399",
                 }
             ],
@@ -482,7 +619,11 @@ class DataMartService:
         rows = []
         for item in (
             PaymentScheduleItem.objects.filter(
-                project__in=qs, is_verified=True, currency=currency, direction="income", amount_precision="exact"
+                project__in=qs,
+                is_verified=True,
+                currency=currency,
+                direction="income",
+                amount_precision="exact",
             )
             .annotate(paid=Sum("allocations__amount"))
             .order_by("due_date", "id")
@@ -524,24 +665,66 @@ class DataMartService:
         }
 
     def get_pipeline_mart(self, user, filters=None):
+        from .project_workspace import workspace_projects, workspace_rows
+
+        filters = filters or {}
         qs, currency = scoped_projects(user, filters)
-        projects = [
-            project_row(p)
-            for p in qs.select_related("company", "manager").order_by("id")[:500]
-        ]
-        stages = []
-        for code, label in Project.STATUS_CHOICES:
-            subset = qs.filter(status=code)
-            volume = subset.aggregate(s=Sum("contract_amount"))["s"] or ZERO
-            stages.append(
+        all_projects = list(qs.select_related("company", "manager", "crm_snapshot"))
+        listing, _ = workspace_projects(
+            user, {**filters, "group": "all", "completeness": "all"}
+        )
+        projects = workspace_rows(
+            user, listing.select_related("company", "manager", "crm_snapshot")[:50]
+        )
+        groups = {}
+        for project in all_projects:
+            code, label, source = project_stage(project)
+            stage = groups.setdefault(
+                code,
                 {
                     "code": code,
                     "label": label,
-                    "count": subset.count(),
-                    "volume": money(volume),
-                    "volume_formatted": formatted(volume, currency),
-                }
+                    "source": source,
+                    "count": 0,
+                    "contract_count": 0,
+                    "volume": ZERO,
+                    "crm_count": 0,
+                    "crm_volume": ZERO,
+                },
             )
+            stage["count"] += 1
+            if project.contract_known or project.contract_amount > 0:
+                stage["volume"] += project.contract_amount
+                stage["contract_count"] += 1
+            crm = getattr(project, "crm_snapshot", None)
+            if crm and crm.opportunity is not None and crm.currency == currency:
+                stage["crm_volume"] += crm.opportunity
+                stage["crm_count"] += 1
+        stages = []
+        for stage in groups.values():
+            stage["volume_formatted"] = (
+                formatted(stage["volume"], currency)
+                if stage["contract_count"]
+                else "Договоры неизвестны"
+            )
+            stage["volume"] = (
+                money(stage["volume"]) if stage["contract_count"] else None
+            )
+            stage["crm_volume_formatted"] = (
+                formatted(stage["crm_volume"], currency) if stage["crm_count"] else None
+            )
+            stage["crm_volume"] = (
+                money(stage["crm_volume"]) if stage["crm_count"] else None
+            )
+            stages.append(stage)
+        order = [code for code, _ in Project.STATUS_CHOICES]
+        stages.sort(
+            key=lambda row: (
+                row["code"] == "unknown",
+                order.index(row["code"]) if row["code"] in order else len(order),
+                row["label"],
+            )
+        )
         known = qs.filter(cost_confirmed=True, contract_amount__gt=0).aggregate(
             contract=Sum("contract_amount"), cost=Sum("cost_amount")
         )
@@ -552,31 +735,51 @@ class DataMartService:
             if known["contract"]
             else None
         )
+        margins = [
+            ((p.contract_amount - p.cost_amount) / p.contract_amount * 100)
+            if p.cost_confirmed and p.contract_amount
+            else None
+            for p in all_projects
+        ]
+        coverage = {
+            "projects": len(all_projects),
+            "contracts_known": sum(
+                p.contract_known or p.contract_amount > 0 for p in all_projects
+            ),
+            "crm_snapshots": sum(
+                getattr(p, "crm_snapshot", None) is not None for p in all_projects
+            ),
+            "known_stages": sum(project_stage(p)[0] != "unknown" for p in all_projects),
+            "payments_known": confirmed_payments(user, filters)
+            .values("project_id")
+            .distinct()
+            .count(),
+        }
         return {
             "projects": projects,
-            "total_count": qs.count(),
+            "total_count": len(all_projects),
             "stages": stages,
+            "next_page": 2 if len(all_projects) > 50 else None,
+            "source_path": "/projects/?"
+            + urlencode(
+                {
+                    k: v
+                    for k, v in filters.items()
+                    if k in ["team_id", "manager_id", "project_id", "currency"]
+                }
+            ),
+            "coverage": coverage,
             "weighted_margin": weighted,
             "margin_distribution": {
-                "low_under_15": sum(
-                    p["margin_percent"] is not None and p["margin_percent"] < 15
-                    for p in projects
-                ),
-                "norm_15_to_20": sum(
-                    p["margin_percent"] is not None and 15 <= p["margin_percent"] <= 20
-                    for p in projects
-                ),
-                "high_over_20": sum(
-                    p["margin_percent"] is not None and p["margin_percent"] > 20
-                    for p in projects
-                ),
-                "unknown": sum(p["margin_percent"] is None for p in projects),
+                "low_under_15": sum(m is not None and m < 15 for m in margins),
+                "norm_15_to_20": sum(m is not None and 15 <= m <= 20 for m in margins),
+                "high_over_20": sum(m is not None and m > 20 for m in margins),
+                "unknown": sum(m is None for m in margins),
             },
-            **self.stage_analytics(qs),
-            "stage_history": list(
-                StageTransition.objects.filter(project__in=qs)
-                .order_by("effective_at")
-                .values("project_id", "from_stage", "to_stage", "effective_at")[:500]
+            **self.stage_analytics(
+                qs.filter(
+                    id__in=[p.id for p in all_projects if "stage" in p.whatsapp_fields]
+                )
             ),
         }
 
@@ -662,12 +865,16 @@ class DataMartService:
                     "id": c.id,
                     "text": c.commitment_text,
                     "project_id": c.project_id,
-                    "project_name": c.project.name if c.project else "Общая задача команды",
-                    "manager_name": c.manager.full_name if c.manager else c.responsible_name or "Не назначен",
+                    "project_name": c.project.name
+                    if c.project
+                    else "Общая задача команды",
+                    "manager_name": c.manager.full_name
+                    if c.manager
+                    else c.responsible_name or "Не назначен",
                     "deadline": deadline.isoformat() if deadline else None,
-                    "deadline_formatted": deadline.astimezone(KAZAKHSTAN_OFFSET).strftime(
-                        "%d.%m.%Y %H:%M"
-                    )
+                    "deadline_formatted": deadline.astimezone(
+                        KAZAKHSTAN_OFFSET
+                    ).strftime("%d.%m.%Y %H:%M")
                     if deadline
                     else "Срок не определён",
                     "status_code": c.status,
@@ -697,7 +904,7 @@ class DataMartService:
         }
 
     def get_sales_chart_dataset(self, user, period="this_month", filters=None):
-        return self.get_sales_kpi_mart(user, period, filters)["chartData"]
+        return self.get_sales_kpi_mart(user, period, filters)["timeline"]
 
 
 datamart = DataMartService()

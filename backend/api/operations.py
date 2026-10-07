@@ -51,15 +51,10 @@ def _execute_operation(pk):
 
             qs, currency = scoped_projects(user, values)
             start, end, today = period_bounds(period, mart["timezone"])
-            rows = FinancialRecord.objects.filter(
-                project__in=qs,
-                is_verified=True,
-                status="received",
-                currency=currency,
+            from .datamart import confirmed_payments
+            rows = confirmed_payments(user, values).filter(
                 payment_date__gte=start,
-                payment_date__lt=min(
-                    end, today + __import__("datetime").timedelta(days=1)
-                ),
+                payment_date__lt=min(end, today + __import__("datetime").timedelta(days=1)),
             ).order_by("payment_date", "id")
             if rows.count() > 10000:
                 raise ProviderUnavailable("export_limit_use_filters")
@@ -86,7 +81,7 @@ def _execute_operation(pk):
                     "type": "chart",
                     "data": datamart.get_sales_chart_dataset(user, period, values),
                 }
-                text = "План и подтверждённые поступления за одинаковый период. План не задан там, где серия отсутствует."
+                text = widget["data"].get("empty_reason") or "Подтверждённые поступления по дате платежа."
             elif query == "какие обещания просрочены?":
                 widget = {
                     "type": "commitments_list",
@@ -98,7 +93,7 @@ def _execute_operation(pk):
                     "type": "project_table",
                     "data": datamart.get_pipeline_mart(user, values),
                 }
-                text = "Подтверждённые проекты. Маржа доступна только при подтверждённой стоимости."
+                text = "Проекты и сведения CRM. Источник стадии и суммы указан; неизвестные значения отмечены отдельно."
             elif query == "покажи kpi команды":
                 data = datamart.get_sales_kpi_mart(user, period, values)
                 widget = {"type": "kpi_grid", "data": data}
@@ -118,13 +113,13 @@ def _execute_operation(pk):
                     op.access_fingerprint,
                     op.expires_at,
                     deadline,
-                    values,
+                    {key: values[key] for key in ["period", "currency", "team_id", "manager_id", "project_id"] if key in values},
                 )
                 from .ai_service import analytics_deadline
 
                 deadline_token = analytics_deadline.set(deadline)
                 try:
-                    dynamic = async_to_sync(run)(context, prompt, mode, suggest)
+                    dynamic = async_to_sync(run)(context, prompt, mode, suggest, values.get("history", []))
                     text, widget = dynamic["text"], None
                     presentation = dynamic["presentation"]
                     quotes = dynamic.get("quotes", [])

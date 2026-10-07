@@ -23,6 +23,9 @@ from api.models import (
     FinancialRecord,
     SalesTarget,
     Commitment,
+    CrmProjectSnapshot,
+    WhatsAppConfig,
+    RawMessage,
 )
 from api.providers import ProviderUnavailable
 from api.tasks import dispatch_outbox
@@ -113,14 +116,50 @@ def verify():
     )
     Commitment.objects.create(
         manager=a,
+        team=team,
         project=None,
         commitment_text="Own standalone",
         deadline_at=timezone.now() - timedelta(hours=2),
         is_verified=True,
     )
+    imported = Project.objects.create(
+        name="CRM identity", team=team, identity_confirmed=True
+    )
+    CrmProjectSnapshot.objects.create(
+        project=imported,
+        external_stage_id="WON",
+        external_stage_name="Выиграна",
+        opportunity="500.00",
+    )
+    config = WhatsAppConfig.objects.create(
+        team=team, group_jid="review-" + suffix + "@g.us"
+    )
+    for revision, state, known in [
+        ("1", "received", True),
+        ("2", "received", True),
+        ("unknown", "received", False),
+        ("deleted", "deleted", True),
+    ]:
+        RawMessage.objects.create(
+            config=config,
+            team=team,
+            message_id=suffix if revision in ["1", "2"] else suffix + revision,
+            source_revision=revision,
+            timestamp=timezone.now(),
+            processing_state=state,
+            sent_at_known=known,
+            content="Original",
+        )
     business = lambda: {
         m.__name__: list(m.objects.order_by("id").values())
-        for m in [Project, FinancialRecord, SalesTarget, Commitment]
+        for m in [
+            Project,
+            FinancialRecord,
+            SalesTarget,
+            Commitment,
+            CrmProjectSnapshot,
+            RawMessage,
+        ]
     }
     before = business()
     op = AsyncOperation.objects.create(
@@ -174,6 +213,38 @@ def verify():
         }
     )
     assert commitments["rows"][0]["overdue_count"] == 1
+    messages = ctx.query(
+        {
+            "dataset": "messages",
+            "dimensions": ["message_day"],
+            "measures": ["message_count"],
+            "currency": "USD",
+        }
+    )
+    assert messages["rows"][0]["message_count"] == 1, messages
+    assert messages["normalized_query"]["currency"] is None
+    assert "1 сообщений" in messages["coverage"]["message"]
+    crm = ctx.query(
+        {
+            "dataset": "crm_projects",
+            "dimensions": ["status"],
+            "measures": ["project_count", "crm_amount"],
+        }
+    )
+    assert crm["rows"] == [
+        {"status": "Выиграна", "project_count": 1, "crm_amount": "500.00"}
+    ], crm
+    unknown_stages = ctx.query(
+        {
+            "dataset": "projects",
+            "dimensions": ["status"],
+            "measures": ["project_count"],
+            "filters": [{"field": "status", "op": "eq", "value": "qualification"}],
+        }
+    )
+    assert not unknown_stages["rows"], unknown_stages
+    records = ctx.records({"overdue_only": True, "limit": 5})
+    assert records["rows"][0]["text"] == "Own standalone", records
     try:
         ctx.query(
             {

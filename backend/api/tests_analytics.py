@@ -298,7 +298,7 @@ class ContractsTests(SimpleTestCase):
             async with create_connected_server_and_client_session(server) as client:
                 names = [t.name for t in (await client.list_tools()).tools]
                 self.assertEqual(
-                    names, ["describe_schema", "query_dataset", "read_sources"]
+                    names, ["describe_schema", "query_dataset", "read_sources", "read_records"]
                 )
                 result = await client.call_tool(
                     "query_dataset",

@@ -8,7 +8,7 @@ from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 
 from .. import access
 from ..providers import ProviderUnavailable
-from .data import ALIAS, QUERY_SCHEMA, fail, validate
+from .data import ALIAS, QUERY_SCHEMA, RECORDS_SCHEMA, fail, validate
 from .presentation import PRESENTATION_SCHEMA, build
 
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
@@ -55,6 +55,15 @@ def create_servers(context):
             annotations=ToolAnnotations(readOnlyHint=True),
         ),
     ]
+    tools.append(
+        Tool(
+            name="read_records",
+            description="Read latest authorized confirmed commitments, including old overdue deadlines. overdue_only defaults to true. Returns a dataset for a table; use build_presentation. Latest means registration time. Current access filters apply.",
+            inputSchema=RECORDS_SCHEMA,
+            outputSchema=OBJECT,
+            annotations=ToolAnnotations(readOnlyHint=True),
+        )
+    )
     viz_tool = Tool(
         name="build_presentation",
         description="Create browser charts referencing dataset IDs/columns from query_dataset. No manual values/code. Use bar/line/area/scatter/donut/funnel/waterfall/table/kpi. Waterfall requires projects contract_amount and confirmed_cost. Financial amounts come only from datasets.",
@@ -104,7 +113,7 @@ def create_servers(context):
                 access.messages_for(user)
                 .using(ALIAS)
                 .filter(id__in=ids)
-                .values("id", "content", "sender_name", "timestamp")
+                .values("id", "content", "sender_name", "timestamp", "sent_at_known")
             )
             if len(raw) != len(ids):
                 fail("source_not_available")
@@ -113,7 +122,9 @@ def create_servers(context):
                     "id": r["id"],
                     "content": r["content"],
                     "sender_name": r["sender_name"],
-                    "sent_at": r["timestamp"].isoformat() if r["timestamp"] else None,
+                    "sent_at": r["timestamp"].isoformat()
+                    if r["timestamp"] and r["sent_at_known"]
+                    else None,
                     "source_url": f"/api/messages/{r['id']}/",
                 }
                 for r in raw
@@ -129,6 +140,9 @@ def create_servers(context):
                 "describe_schema": lambda a: context.schema(),
                 "query_dataset": context.query,
                 "read_sources": sources,
+                "read_records": getattr(
+                    context, "records", lambda a: fail("unsupported_query")
+                ),
                 "build_presentation": lambda a: build(context, a),
             }.get(name)
             if fn is None:

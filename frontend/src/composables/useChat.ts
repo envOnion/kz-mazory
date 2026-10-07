@@ -1,5 +1,5 @@
 import { ref, watch } from 'vue'
-import type { ViewMode, KpiDashboardData, ChatWidget, ChatQuote, ChatResponse } from '../types/chat'
+import type { ViewMode, KpiDashboardData, ChatWidget, ChatQuote, ChatResponse, ChatHistoryItem } from '../types/chat'
 import type { Period, OperationReceipt, KpiFilters } from '../types/platform'
 import { validatePresentation, type PresentationDocument } from '../types/presentation'
 import { api, post, pollOperation } from './api'
@@ -10,6 +10,7 @@ export function useChat() {
   const activePresentation = ref<PresentationDocument | null>(null), hasChatResponse = ref(false)
   const chatResponseText = ref(''), error = ref(''), quotes = ref<ChatQuote[]>([])
   const kpiData = ref<KpiDashboardData | null>(null), selectedPeriod = ref<Period>('this_month')
+  const history = ref<ChatHistoryItem[]>([])
   const filters = ref<KpiFilters>({ currency: 'KZT' })
   const welcomeSuggestions = ref(['Покажи график поступлений ↗', 'Покажи KPI команды ↗', 'Какие обещания просрочены? ↗', 'Покажи воронку проектов ↗'])
   const dashboardSuggestions = welcomeSuggestions
@@ -23,9 +24,9 @@ export function useChat() {
     if (pending !== undefined) void api(`/operations/${pending}/`, { method: 'DELETE' }).catch(() => undefined)
     activeWidget.value = null; activePresentation.value = null; chatResponseText.value = ''; quotes.value = []; error.value = ''; hasChatResponse.value = false
   }
-  watch(sessionVersion, () => { reset(); kpiData.value = null; currentView.value = 'welcome' })
+  watch(sessionVersion, () => { history.value = []; reset(); kpiData.value = null; currentView.value = 'welcome' })
   async function fetchKpiData(period?: string) {
-    if (period && ['this_month', 'last_month', 'quarter', 'year'].includes(period)) { reset(); selectedPeriod.value = period as Period }
+    if (period && ['this_month', 'last_month', 'quarter', 'year'].includes(period)) { history.value = []; reset(); selectedPeriod.value = period as Period }
     if (!currentUser.value || currentUser.value.roles.includes('client')) return
     error.value = ''
     const ownGeneration = generation
@@ -40,7 +41,7 @@ export function useChat() {
     const ownController = new AbortController(); controller = ownController
     currentView.value = 'dashboard'; isGenerating.value = true; hasChatResponse.value = true
     try {
-      const receipt = await post<OperationReceipt>('/chat/query/', { ...filters.value, prompt, period: selectedPeriod.value, idempotency_key: crypto.randomUUID() })
+      const receipt = await post<OperationReceipt>('/chat/query/', { ...filters.value, prompt, history: history.value.map(item => ({ ...item })), period: selectedPeriod.value, idempotency_key: crypto.randomUUID() })
       if (generation !== ownGeneration) { void api(`/operations/${receipt.operation_id}/`, { method: 'DELETE' }).catch(() => undefined); return }
       operationId = receipt.operation_id
       const response = await pollOperation<ChatResponse>(receipt.operation_id, ownController.signal)
@@ -51,12 +52,15 @@ export function useChat() {
         catch { throw new Error('Получен неверный формат графиков. Повторите запрос или уточните условия.') }
       }
       activePresentation.value = presentation; chatResponseText.value = response.text; activeWidget.value = presentation ? null : response.widget; quotes.value = response.quotes
+      history.value.push({ role: 'user', content: prompt.slice(0, 4000) }, { role: 'assistant', content: response.text.slice(0, 4000) })
+      history.value = history.value.slice(-8)
+      while (history.value.reduce((sum, item) => sum + item.content.length, 0) > 12000) history.value.shift()
       if (response.widget?.type === 'kpi_grid' && !presentation) kpiData.value = response.widget.data
     } catch (e) { if (generation === ownGeneration && !ownController.signal.aborted) error.value = e instanceof Error ? e.message : 'Ошибка обработки' }
     finally { if (generation === ownGeneration) { isGenerating.value = false; operationId = undefined } }
   }
   async function cancel() { reset(); hasChatResponse.value = true; error.value = 'Запрос отменён' }
-  async function changeKpiFilters(value: KpiFilters) { reset(); filters.value = value; await fetchKpiData() }
-  function goHome() { reset(); currentView.value = 'welcome' }
+  async function changeKpiFilters(value: KpiFilters) { history.value = []; reset(); filters.value = value; await fetchKpiData() }
+  function goHome() { history.value = []; reset(); currentView.value = 'welcome' }
   return { currentView, isGenerating, activeWidget, activePresentation, hasChatResponse, chatResponseText, quotes, error, welcomeSuggestions, dashboardSuggestions, selectedPeriod, kpiData, fetchKpiData, handlePromptSubmit, goHome, cancel, changeKpiFilters }
 }
