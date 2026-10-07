@@ -2054,9 +2054,12 @@ class McpToken(models.Model):
     last_used_at = models.DateTimeField(null=True, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
+    purpose = models.CharField(max_length=16, default="external", choices=[("external", "External"), ("portal", "Portal")])
+    token_encrypted = models.TextField(blank=True, default="")
 
     class Meta:
         ordering = ["-created_at"]
+        constraints = [models.UniqueConstraint(fields=["user"], condition=models.Q(purpose="portal", is_active=True), name="one_active_portal_mcp_token")]
 
 
 

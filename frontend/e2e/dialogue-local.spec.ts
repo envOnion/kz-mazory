@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { createHmac } from 'node:crypto'
 import type { Candidate, Directory, Health, Page } from '../src/types/platform'
 import type { DialogueThread } from '../src/types/factReview'
+import type { McpConnectionResponse } from '../src/types/mcp'
 
 const directory = process.env.MAZORY_E2E_DIR
 if (!directory) throw new Error('Use backend/e2e/run.py to start the isolated local stack')
@@ -12,6 +13,42 @@ let currentRefresh = session.refresh
 let currentAccess = session.access
 const headers = { Authorization: `Bearer ${session.access}` }
 test.describe.configure({ mode: 'serial' })
+
+test('cabinet credential survives reload and authorizes only fact-review MCP', async ({ page, context, request }) => {
+  await authenticate(context)
+  const openSecurity = async () => {
+    await page.goto('/')
+    await page.getByTestId('nav-profile').click()
+    await page.getByRole('button', { name: 'Безопасность и сессии', exact: true }).click()
+  }
+  await openSecurity()
+  await page.getByRole('button', { name: 'Получить токен MCP', exact: true }).click()
+  const region = page.getByRole('region', { name: 'MCP проверки фактов' })
+  const input = region.getByLabel('Персональный токен')
+  await expect(input).toHaveAttribute('type', 'password')
+  await expect(input).toHaveValue(/^mcp_/)
+  const token = await input.inputValue()
+  await openSecurity()
+  await expect(input).toHaveValue(token)
+  await page.screenshot({ path: join(directory, 'desktop-mcp.png'), fullPage: true })
+  const mcpHeaders = { Authorization: `Bearer ${token}`, Accept: 'application/json, text/event-stream' }
+  const call = async (method: string, params?: Record<string, unknown>) => request.post('/api/mcp/fact-review/', { headers: mcpHeaders, data: { jsonrpc: '2.0', id: 1, method, ...(params ? { params } : {}) } })
+  const initialized = await call('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'local-cabinet-test', version: '1' } })
+  expect(initialized.status()).toBe(200)
+  const tools = await call('tools/list')
+  expect(tools.status()).toBe(200)
+  expect((await tools.json()).result.tools.map((tool: { name: string }) => tool.name)).toContain('get_candidate_context')
+  expect((await request.get('/api/mcp/connection/', { headers: mcpHeaders })).status()).toBe(401)
+  await region.getByRole('button', { name: 'Перевыпустить токен', exact: true }).click()
+  await expect(input).not.toHaveValue(token)
+  expect((await call('tools/list')).status()).toBe(401)
+  const connection: McpConnectionResponse = await (await request.get('/api/mcp/connection/', { headers })).json()
+  expect(connection.connection?.token).toBe(await input.inputValue())
+  await region.getByRole('button', { name: 'Отозвать токен', exact: true }).click()
+  await openSecurity()
+  await expect(region.getByRole('button', { name: 'Получить токен MCP', exact: true })).toBeVisible()
+  expect((await (await request.get('/api/mcp/connection/', { headers })).json()).connection).toBeNull()
+})
 
 async function authenticate(context: BrowserContext) {
   context.on('response', async res => {

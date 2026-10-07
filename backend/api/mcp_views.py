@@ -10,9 +10,10 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .authentication import generate_mcp_token
+from .authentication import generate_mcp_token, McpTokenAuthentication, SessionJWTAuthentication
 from .mcp_fact_review import create_fact_review_mcp
 from .models import McpToken
+from .mcp_tokens import McpCredentialError, ensure_portal_token, reveal, revoke_portal_token
 
 
 def run_mcp_asgi(app, session_manager, request):
@@ -102,6 +103,7 @@ class FactReviewMcpView(APIView):
     """Streamable HTTP endpoint for Fact Review MCP protocol."""
 
     permission_classes = [IsAuthenticated]
+    authentication_classes = [McpTokenAuthentication, SessionJWTAuthentication]
 
     def post(self, request, *args, **kwargs):
         mcp = create_fact_review_mcp(request.user)
@@ -119,10 +121,53 @@ class CreateMcpTokenSerializer(serializers.Serializer):
     expires_in_days = serializers.IntegerField(min_value=1, max_value=365, required=False, allow_null=True)
 
 
+class McpConnectionAction(serializers.Serializer):
+    action = serializers.ChoiceField(choices=["create", "rotate", "revoke"])
+
+
+class McpConnectionView(APIView):
+    permission_classes = [IsAuthenticated]
+    authentication_classes = [SessionJWTAuthentication]
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        response["Cache-Control"] = "no-store"
+        return response
+
+    def get(self, request):
+        token = McpToken.objects.filter(user=request.user, purpose="portal", is_active=True).first()
+        if not token:
+            return Response({"connection": None})
+        try:
+            raw = reveal(token)
+        except McpCredentialError:
+            return Response({"error": "Токен MCP недоступен. Перевыпустите его; при повторной ошибке обратитесь к администратору."}, status=503)
+        return Response({"connection": {"id": token.id, "token": raw, "created_at": token.created_at.isoformat(), "last_used_at": token.last_used_at.isoformat() if token.last_used_at else None, "expires_at": token.expires_at.isoformat() if token.expires_at else None}})
+
+    def post(self, request):
+        schema = McpConnectionAction(data=request.data)
+        schema.is_valid(raise_exception=True)
+        action = schema.validated_data["action"]
+        if action == "revoke":
+            revoke_portal_token(request.user)
+        else:
+            try:
+                ensure_portal_token(request.user, rotate=action == "rotate")
+            except McpCredentialError:
+                return Response({"error": "Не удалось защитить токен MCP. Обратитесь к администратору."}, status=503)
+        return self.get(request)
+
+
 class McpTokenView(APIView):
     """Manage dedicated MCP tokens for external Agent LLMs."""
 
     permission_classes = [IsAuthenticated]
+    authentication_classes = [SessionJWTAuthentication]
+
+    def finalize_response(self, request, response, *args, **kwargs):
+        response = super().finalize_response(request, response, *args, **kwargs)
+        response["Cache-Control"] = "no-store"
+        return response
 
     def get(self, request):
         tokens = McpToken.objects.filter(user=request.user, is_active=True).order_by("-created_at")

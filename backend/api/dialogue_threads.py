@@ -71,6 +71,7 @@ def context_threads(raw):
     # Recent themes plus named older themes. Summary is a retrieval hint, never evidence.
     words = [
         word for word in re.findall(r"\w+", raw.content.casefold()) if len(word) >= 4
+        and word not in {"принято", "спасибо", "хорошо", "понятно"}
     ][:8]
     named = Q(pk__in=[])
     for word in words:
@@ -91,7 +92,7 @@ def context_threads(raw):
             "summary": item.summary[:600],
             "commitments": [{**task, "deadline_at": task["deadline_at"].isoformat() if task["deadline_at"] else None} for task in Commitment.objects.filter(candidate__thread_revision__thread_id=item.id, status__in=["pending", "overdue"], is_verified=True).values("id", "version", "commitment_text", "responsible_name", "source_message_id", "deadline_at")[:10]],
             "message_ids": list(
-                item.message_links.order_by("-raw_message_id").values_list(
+                item.message_links.order_by("-raw_message__timestamp", "-raw_message_id").values_list(
                     "raw_message_id", flat=True
                 )[:40]
             ),
@@ -220,6 +221,15 @@ def prepare_themes(result, raw, trace):
         if theme["thread_id"] is not None and theme["thread_id"] not in offered:
             raise ProviderUnavailable("thread_source_conflict")
         member_ids = [link["raw_message_id"] for link in theme["messages"]]
+        if theme["thread_id"] is None:
+            # Exact topic and an observed shared original identify a saved theme;
+            # neither time adjacency nor a similar title alone proves continuity.
+            matching = [item for item in trace.context_metadata.get("known_threads", [])
+                        if item["topic"].casefold() == theme["topic"].casefold()
+                        and set(item["message_ids"]) & set(member_ids)]
+            if len(matching) == 1:
+                theme["thread_id"] = matching[0]["id"]
+                trace.context_metadata.setdefault("schema_repairs", []).append("existing_source_thread")
         if len(set(member_ids)) != len(member_ids):
             raise ProviderUnavailable("thread_sources_duplicate")
         if theme["state"] == "ready" and (
@@ -380,8 +390,9 @@ def persist_themes(themes, raw, trace, facts):
             old_candidates = FactCandidate.objects.filter(
                 thread_revision__thread=thread, status="pending"
             )
-            if trace.context_metadata.get("replace_unsent"):
-                old_candidates = old_candidates.filter(trace__raw_message_id__in=trace.context_metadata.get("batch_message_ids") or [raw.id])
+            replaced_origins = set(trace.context_metadata.get("batch_message_ids") or [raw.id])
+            replaced_origins.update(fact["evidence_message_id"] for fact in theme_facts)
+            old_candidates = old_candidates.filter(trace__raw_message_id__in=replaced_origins)
             old_candidates.update(status="superseded")
             persisted[theme_key] = revision
             del pending[theme_key]

@@ -191,7 +191,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         target_traces = {raw.id: trace}
         if packet:
             from .models import MessageProcessingTrace
-            target_traces.update({entry["raw_id"]: MessageProcessingTrace.objects.get(pk=entry["trace_id"], raw_message_id=entry["raw_id"]) for entry in (trace_ids or [])})
+            target_traces.update({entry["raw_id"]: MessageProcessingTrace.objects.get(pk=entry["trace_id"], raw_message_id=entry["raw_id"]) for entry in (trace_ids or []) if entry["raw_id"] != raw.id})
             cfg = copy.copy(cfg)
             limits = trace.context_metadata.get("analysis_limits", {})
             cfg.analysis_policy = "history-packets-v1"
@@ -440,7 +440,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                         quote=reference["quote"],
                         field_name=reference["role"],
                     )
-                if created and (candidate.fact_type == "project" or fact["object_name"]):
+                if created and (candidate.fact_type == "project" or fact["object_name"] or fact["company_name"] or project):
                     from .tasks import enqueue_crm_match
 
                     enqueue_crm_match(candidate.id)
@@ -452,7 +452,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                     notify_on_new_candidate(candidate)
                 proposed += 1
                 retained.append(candidate.pk)
-            previous.filter(status="pending").exclude(pk__in=retained).update(status="superseded")
+            replaced_origins = {raw.id, *(batch_ids or []), *(fact["evidence_message_id"] for fact in facts)}
+            previous.filter(status="pending", trace__raw_message_id__in=replaced_origins).exclude(pk__in=retained).update(status="superseded")
             locked.processed, locked.processing_state = (
                 True,
                 ("analyzed" if cfg.autonomous_enabled else "needs_review") if proposed else "no_facts",
@@ -485,7 +486,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                     member.status, member.error_code = "success", ""
                     member.ai_extracted_facts = json_value({"facts": local_facts})
                     member.result_summary = reason
-                    member.save()
+                    member.pipeline_action = "proposed_facts" if local_facts else "non_commercial"
+                    member.save(update_fields=["context_metadata", "status", "error_code", "ai_extracted_facts", "result_summary", "pipeline_action"])
                     HistoryAnalysisItem.objects.filter(trace=member, outbox_event_id=usage_event_id.get()).update(state="succeeded", disposition=disposition, reason_code=disposition, reason_description=reason, updated_at=timezone.now())
             for indexed_id in {raw.id, *batch_covered}:
                 OutboxEvent.objects.get_or_create(deduplication_key=f"index:{indexed_id}", defaults={"event_type": "index_message", "payload": {"raw_id": indexed_id}})

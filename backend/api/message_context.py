@@ -2,8 +2,7 @@
 
 import re
 
-from django.db.models import Exists, OuterRef, Q, F, Case, When, Value, IntegerField
-from django.db.models.functions import Abs
+from django.db.models import Exists, OuterRef, Q, F, Case, When, Value, IntegerField, DateTimeField, DurationField, ExpressionWrapper
 from django.utils import timezone
 from .message_time import source_metadata, source_zone
 
@@ -68,7 +67,14 @@ def history_queryset(raw, snapshot_id, include_following=False):
         .exclude(processing_state__in=["superseded", "deleted", "deduplication_ambiguous", "export_staged"])
     )
     if include_following:
-        return qs.annotate(distance=Abs(F("id") - raw.id)).order_by("distance", "id"), "received_at"
+        at = raw.timestamp if raw.sent_at_known else raw.received_at
+        qs = qs.annotate(order_time=Case(When(sent_at_known=True, then=F("timestamp")), default=F("received_at"), output_field=DateTimeField()))
+        distance = Case(
+            When(order_time__gte=at, then=ExpressionWrapper(F("order_time") - Value(at), output_field=DurationField())),
+            default=ExpressionWrapper(Value(at) - F("order_time"), output_field=DurationField()),
+            output_field=DurationField(),
+        )
+        return qs.annotate(distance=distance).order_by("distance", "order_time", "id"), "order_time"
     time_field = "timestamp" if raw.sent_at_known else "received_at"
     before = getattr(raw, time_field)
     qs = qs.filter(
@@ -94,12 +100,15 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
     bounded = getattr(cfg, "analysis_policy", None) == "history-packets-v1"
     if bounded and include_following:
         # Lookup spans the whole immutable source; neighbors only seed retrieval.
-        neighbors = list(qs.values_list("id", flat=True)[:24])
+        chronological = qs.order_by("distance", "order_time", "id")
+        neighbors = list(chronological.values_list("id", flat=True)[:24])
+        at = raw.timestamp if raw.sent_at_known else raw.received_at
+        preceding = list(chronological.filter(Q(order_time__lt=at) | Q(order_time=at, id__lt=raw.id)).order_by("-order_time", "-id").values_list("id", flat=True)[:2])
         linked = {pk for theme in themes for pk in theme["message_ids"]}
         linked.update(task["source_message_id"] for theme in themes for task in theme.get("commitments", []))
         target_texts = list(source_scope(raw).filter(pk__in=requested_batch or [raw.id]).values_list("content", flat=True))
         words = set(re.findall(r"[\w-]{4,}", " ".join(target_texts).casefold())) - {
-            "сегодня", "завтра", "получили", "сделали", "добрый", "утром", "объект", "оплата", "работа"}
+            "сегодня", "завтра", "получили", "сделали", "добрый", "утром", "объект", "оплата", "работа", "принято", "спасибо", "хорошо", "понятно"}
         search = Q(pk__in=[])
         for word in sorted(words, key=lambda value: (-len(value), value))[:12]:
             search |= Q(content__icontains=word)
@@ -113,9 +122,10 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
                         if isinstance(container.get(key), str):
                             quoted_ids.add(container[key])
         quoted = list(qs.filter(message_id__in=quoted_ids).values_list("id", flat=True))
-        required = set(requested_batch) | linked | set(quoted)
+        reply_context = set(preceding) | set(quoted)
+        required = set(requested_batch) | linked | reply_context
         qs = qs.filter(pk__in=set(neighbors + named) | required).annotate(
-            evidence_priority=Case(When(pk__in=requested_batch, then=Value(0)), When(pk__in=required, then=Value(1)), default=Value(2), output_field=IntegerField())
+            evidence_priority=Case(When(pk__in=requested_batch, then=Value(0)), When(pk__in=reply_context, then=Value(1)), When(pk__in=linked, then=Value(2)), default=Value(3), output_field=IntegerField())
         ).order_by("evidence_priority", "distance", "id")
     source = source_metadata(raw)
     source_timezone = source["timezone"]
@@ -124,7 +134,7 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
     def ordered(items):
         if not include_following:
             return list(reversed(items))
-        return sorted(items, key=lambda item: (item["timestamp"] or item["received_at"], item["raw_message_id"]))
+        return sorted(items, key=lambda item: (item.get("order_time") or item["timestamp"] or item["received_at"], item["raw_message_id"]))
 
     def payload(nearest):
         return extraction_payload(
@@ -238,7 +248,7 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
             empty += 1
             continue
         available += 1
-        when = row[time_field].isoformat()
+        when = getattr(message, time_field).isoformat()
         available_first = when
         if available_last is None:
             available_last = when
@@ -254,6 +264,7 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
             "source_metadata": original,
             "received_at": row["received_at"].isoformat(),
             "partial": False,
+            **({"order_time": message.order_time.isoformat()} if include_following else {}),
         }
         previous_estimate = estimated
         nearest.append(item)
@@ -349,5 +360,6 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
         "source_period": [context[0]["timestamp"], context[-1]["timestamp"]] if context else [None, None],
         "external_import_completeness": "unknown",
         "relevance_selected": bounded,
+        "omitted_reply_context_ids": sorted(reply_context - {item["raw_message_id"] for item in context}) if bounded and include_following else [],
     }
     return context, metadata, request
