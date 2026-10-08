@@ -651,21 +651,34 @@ class AIService:
         payload = analytics_payload(
             cfg.chat_model_name, messages, tools, cfg.max_completion_tokens, api_format
         )
-        # Conservative byte bound includes tools and envelopes, and cannot silently
-        # discard facts. Byte-per-token overestimation also supports unknown gateways.
+        native = api_format == ANTHROPIC_MESSAGES
+        gemma = not native and cfg.chat_model_name == "gemma4:e4b"
+        # Gemma's complete rendered conversation is counted by its pinned native
+        # tokenizer below. UTF-8 bytes are not tokens (especially for Russian).
         available = (
             cfg.context_window_tokens
             - cfg.max_completion_tokens
             - cfg.context_safety_tokens
         )
-        if len(json.dumps(payload, ensure_ascii=False).encode()) + 4096 > available:
+        if native:
+            count_payload = {k: v for k, v in payload.items() if k in {'model', 'messages', 'system', 'tools'}}
+            counted = AIService._post(
+                f"{AIService.effective_chat_provider_url(cfg)}/v1/messages/count_tokens",
+                count_payload, min(15, max(1, deadline - time.monotonic())),
+                api_format=api_format, operation="token_count",
+                headers=anthropic_headers(AIService._credential(cfg, api_format=api_format)),
+                response_validator=validate_anthropic_count,
+            )
+            if counted['input_tokens'] > available:
+                raise ProviderUnavailable('context_budget_exceeded', diagnostics={
+                    'input_tokens': counted['input_tokens'], 'available_input_tokens': available,
+                })
+        elif not gemma and len(json.dumps(payload, ensure_ascii=False).encode()) + 4096 > available:
             raise ProviderUnavailable("context_budget_use_filters")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise ProviderUnavailable("analytics_timeout")
         key = AIService._credential(cfg, api_format=api_format)
-        native = api_format == ANTHROPIC_MESSAGES
-        gemma = not native and cfg.chat_model_name == "gemma4:e4b"
         if gemma:
             from .ollama_chat import analytics_request, normalize_response
 

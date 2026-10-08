@@ -125,13 +125,35 @@ class GemmaCounter(NativeCounter):
             or any(set(message) != {"role", "content"} or not isinstance(message.get("content"), str) for message in messages)
         ):
             raise ProviderUnavailable("context_token_count_unavailable")
+        return self.count_messages(messages)
+
+    def count_messages(self, messages):
+        """Pinned text-only renderer, including multi-turn analytics envelopes."""
+        if not messages or any(
+            set(message) != {"role", "content"}
+            or message["role"] not in {"system", "user", "assistant"}
+            or not isinstance(message["content"], str)
+            for message in messages
+        ) or any(message["role"] == "system" for message in messages[1:]):
+            raise ProviderUnavailable("context_token_count_unavailable")
         # Go strings.TrimSpace uses Unicode White_Space, excluding Python's
         # additional U+001C..U+001F separators.
         whitespace = "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
-        rendered = "<bos>" + "".join(
-            f"<|turn>{message['role']}\n{message['content'].strip(whitespace)}<turn|>\n"
-            for message in messages
-        ) + "<|turn>model\n"
+        rendered = "<bos>"
+        previous = None
+        for index, message in enumerate(messages):
+            role = message["role"]
+            if role != "assistant" or previous != "assistant":
+                rendered += f"<|turn>{'model' if role == 'assistant' else role}\n"
+            content = message["content"]
+            if role == "assistant":
+                content = re.sub(r"<\|channel>.*?(?:<channel\|>|$)", "", content, flags=re.S)
+            rendered += content.strip(whitespace)
+            following = messages[index + 1]["role"] if index + 1 < len(messages) else None
+            if role != "assistant" or following != "assistant":
+                rendered += "<turn|>\n"
+            previous = role
+        rendered += "<|turn>model\n"
         return self.count_text(rendered)
 
 

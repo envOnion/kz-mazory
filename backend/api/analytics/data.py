@@ -173,8 +173,8 @@ QUERY_SCHEMA = {
 }
 
 
-def fail(code="invalid_tool_arguments"):
-    raise ProviderUnavailable(code)
+def fail(code="invalid_tool_arguments", message=None):
+    raise ProviderUnavailable(code, diagnostics={"validation_errors": [message]} if message else None)
 
 
 RECORDS_SCHEMA = {
@@ -182,6 +182,7 @@ RECORDS_SCHEMA = {
     "additionalProperties": False,
     "properties": {
         "overdue_only": {"type": "boolean"},
+        "group_by": {"enum": ["responsible", "project", "status", "deadline_day"]},
         "limit": {"type": "integer", "minimum": 1, "maximum": 50},
     },
 }
@@ -355,7 +356,7 @@ class OperationContext:
                         and effective_deadline(c) < timezone.now()
                     ]
                 total = len(commitments)
-                chosen = commitments[: arguments.get("limit", 20)]
+                chosen = commitments if arguments.get('group_by') else commitments[: arguments.get("limit", 20)]
                 rows = [
                     {
                         "commitment_id": c.id,
@@ -374,6 +375,22 @@ class OperationContext:
                     }
                     for c in chosen
                 ]
+                if arguments.get('group_by'):
+                    groups = defaultdict(int)
+                    group = arguments['group_by']
+                    for commitment, row in zip(chosen, rows):
+                        if group == 'responsible':
+                            key = (commitment.manager_id, row['responsible'])
+                        elif group == 'project':
+                            key = (commitment.project_id, row['project'])
+                        elif group == 'deadline_day':
+                            key = (row['deadline'][:10] if row['deadline'] else None,)
+                        else:
+                            key = (row['status'],)
+                        groups[key] += 1
+                    rows = [{group: key[-1], **({'group_id': key[0]} if len(key) == 2 else {}),
+                             'commitment_count': count} for key, count in groups.items()]
+                    rows.sort(key=lambda row: (-row['commitment_count'], str(row[group])))
                 evidence = list(
                     access.messages_for(user)
                     .using(ALIAS)
@@ -424,6 +441,27 @@ class OperationContext:
             "definition": "Последние подтверждённые обязательства по дате регистрации; только доступные источники.",
             "evidence": evidence,
         }
+        if arguments.get('group_by'):
+            group = arguments['group_by']
+            dataset['columns'] = [
+                {'name': group, 'type': 'date' if group == 'deadline_day' else 'text',
+                 'unit': None, 'label': 'День срока' if group == 'deadline_day' else column_label(group, 'commitments'),
+                 'source': 'commitments', 'semantic_role': 'dimension'},
+                {'name': 'commitment_count', 'type': 'count', 'unit': None,
+                 'label': column_label('commitment_count', 'commitments'), 'source': 'commitments', 'semantic_role': 'measure'},
+            ]
+            if group in {'responsible', 'project'}:
+                dataset['columns'].append({'name': 'group_id', 'type': 'id', 'unit': None,
+                                           'label': 'ID группы', 'source': 'commitments', 'semantic_role': 'dimension'})
+            dataset.update(returned_count=len(rows), total_groups=len(rows), truncated=False)
+            dataset['coverage']['message'] = 'Все подтверждённые обязательства по выбранным условиям. Просрочки включены независимо от месяца исходного срока.'
+        else:
+            self.facts[f'{dataset["dataset_id"]}:records:total'] = {
+                'dataset_id': dataset['dataset_id'], 'measure': 'commitment_count', 'formula': 'sum',
+                'value': total, 'display': str(total), 'label': 'Найдено обязательств', 'type': 'count', 'unit': None,
+                'scope': dataset['normalized_query'],
+            }
+        self.facts.update(collect_facts(dataset))
         self.registry[dataset["dataset_id"]] = dataset
         return dataset
 
@@ -441,7 +479,7 @@ class OperationContext:
             not set(dims) <= FIELDS[dataset].keys()
             or not set(measures) <= MEASURES[dataset].keys()
         ):
-            fail("unsupported_query")
+            fail("unsupported_query", f"Dataset {dataset}: dimensions must use {list(FIELDS[dataset])}; measures must use {list(MEASURES[dataset])}. Received dimensions={dims}, measures={measures}.")
         filters = list(arguments.get("filters", []))
         for key in ["team_id", "manager_id", "project_id"]:
             if (
@@ -464,7 +502,7 @@ class OperationContext:
         if start >= end or (end - start).days > 3660:
             fail("unsupported_query")
         if dataset in ["projects", "crm_projects"] and arguments.get("date_range"):
-            fail("unsupported_query")
+            fail("unsupported_query", f"{dataset} is a current snapshot without historical dates. Remove date_range; do not substitute synchronization date. Other query parameters may remain unchanged.")
         if dataset == "targets" and (
             start.day != 1
             or end.day != 1
@@ -499,7 +537,7 @@ class OperationContext:
                 for f in filters:
                     path, kind = filter_fields(dataset).get(f["field"], (None, None))
                     if path is None:
-                        fail("unsupported_query")
+                        fail("unsupported_query", f"Dataset {dataset}: allowed filter fields are {list(filter_fields(dataset))}. Remove or correct the unsupported filter field.")
                     vals = f["value"] if f["op"] == "in" else [f["value"]]
                     if (
                         f["op"] == "in"
