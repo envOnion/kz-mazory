@@ -15,7 +15,7 @@ class UserProfile(models.Model):
     department = models.CharField(max_length=255, default="")
     email = models.EmailField(blank=True, default="")
     phone = models.CharField(max_length=32, blank=True, default="")
-    avatar_url = models.URLField(blank=True, default="")
+    avatar_url = models.CharField(max_length=200, blank=True, default="")
 
     timezone = models.CharField(max_length=64, default="Asia/Almaty")
     notification_preferences = models.JSONField(default=dict, blank=True)

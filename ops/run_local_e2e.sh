@@ -21,4 +21,11 @@ while kill -0 "$runner_pid" 2>/dev/null; do
   fi
   sleep 2
 done
-wait "$runner_pid"
+wait "$runner_pid" || exit $?
+
+# Profile images must survive replacement of both application containers.
+docker "${docker_args[@]}" compose -f compose.e2e.yml up -d --no-deps --force-recreate --wait backend nginx || exit $?
+docker "${docker_args[@]}" compose -f compose.e2e.yml run --rm --no-deps \
+  -e MAZORY_AVATAR_RECREATED=1 -e MAZORY_E2E_OUTPUT=/e2e/playwright/avatar-recreated browser \
+  node node_modules/@playwright/test/cli.js test --config=playwright.local.config.ts avatar-local.spec.ts \
+  --grep 'persists after backend and nginx'

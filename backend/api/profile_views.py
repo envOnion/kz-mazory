@@ -1,17 +1,18 @@
 from datetime import time
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-from django.utils import timezone
+from django.db import transaction
 from rest_framework import serializers
+from rest_framework.parsers import JSONParser, MultiPartParser
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from .models import UserProfile
 from .datamart import datamart
+from .avatars import delete_avatar, normalize_avatar, store_avatar
 
 EDITABLE = (
     "full_name",
     "email",
-    "avatar_url",
     "timezone",
     "notification_preferences",
     "whatsapp_daily_digest",
@@ -23,12 +24,15 @@ EDITABLE = (
 
 
 class ProfileUpdate(serializers.ModelSerializer):
+    avatar = serializers.FileField(required=False, write_only=True)
+    remove_avatar = serializers.BooleanField(required=False, write_only=True)
+
     class Meta:
         model = UserProfile
-        fields = EDITABLE
+        fields = (*EDITABLE, "avatar", "remove_avatar")
 
     def to_internal_value(self, data):
-        unknown = set(data) - set(EDITABLE)
+        unknown = set(data) - set(self.fields)
         if unknown:
             raise serializers.ValidationError(
                 {key: "Поле доступно только для чтения." for key in sorted(unknown)}
@@ -42,11 +46,35 @@ class ProfileUpdate(serializers.ModelSerializer):
             raise serializers.ValidationError("Неизвестный часовой пояс.")
         return value
 
-    def validate_avatar_url(self, value):
-        # No arbitrary external image tracking or active URL schemes.
-        if value and not value.startswith("/avatars/"):
-            raise serializers.ValidationError("Используйте локальный аватар.")
-        return value
+    def validate_avatar(self, value):
+        return normalize_avatar(value)
+
+    def validate(self, attrs):
+        if "avatar" in attrs and attrs.get("remove_avatar"):
+            raise serializers.ValidationError(
+                {"avatar": "Нельзя одновременно загрузить и удалить фото."}
+            )
+        return attrs
+
+    def update(self, instance, validated_data):
+        content = validated_data.pop("avatar", None)
+        remove = validated_data.pop("remove_avatar", False)
+        previous = instance.avatar_url
+        new_url = ""
+        try:
+            if content is not None:
+                new_url = store_avatar(content)
+                validated_data["avatar_url"] = new_url
+            elif remove:
+                validated_data["avatar_url"] = ""
+            updated = super().update(instance, validated_data)
+        except Exception:
+            if new_url:
+                delete_avatar(new_url)
+            raise
+        if previous and previous != updated.avatar_url:
+            transaction.on_commit(lambda: delete_avatar(previous))
+        return updated
 
     def validate_notification_preferences(self, value):
         if not isinstance(value, dict):
@@ -87,6 +115,7 @@ def profile_data(user, profile):
     data.update(
         {
             "id": profile.id,
+            "avatar_url": profile.avatar_url,
             "phone": profile.phone,
             "role": profile.role,
             "department": profile.department,
@@ -115,6 +144,7 @@ def profile_data(user, profile):
 
 class ProfileView(APIView):
     permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser]
 
     def get(self, request):
         profile, _ = UserProfile.objects.get_or_create(
@@ -130,9 +160,20 @@ class ProfileView(APIView):
         profile, _ = UserProfile.objects.get_or_create(
             user=request.user, defaults={"phone": request.user.username}
         )
-        schema = ProfileUpdate(profile, data=request.data, partial=True)
-        schema.is_valid(raise_exception=True)
-        schema.save()
+        new_url = ""
+        previous = profile.avatar_url
+        try:
+            with transaction.atomic():
+                profile = UserProfile.objects.select_for_update().get(pk=profile.pk)
+                previous = profile.avatar_url
+                schema = ProfileUpdate(profile, data=request.data, partial=True)
+                schema.is_valid(raise_exception=True)
+                schema.save()
+                new_url = profile.avatar_url if profile.avatar_url != previous else ""
+        except Exception:
+            if new_url:
+                delete_avatar(new_url)
+            raise
         return Response(profile_data(request.user, profile))
 
     patch = put

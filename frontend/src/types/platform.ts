@@ -6,6 +6,12 @@ export interface AuthResponse { access: string; user: AuthUser; session_id: numb
 export interface ApiError { error?: string; code?: string; fields?: Record<string, unknown> }
 export interface Page<T> { count: number; next: string | null; previous?: string | null; results: T[]; stats?: { total: number; open: number; ready: number; commitments?: number } }
 export interface Coverage { status: 'complete' | 'partial'; message: string }
+export type ProfileUpdate = Partial<Pick<Profile,
+  'full_name' | 'email' | 'timezone' | 'notification_preferences' |
+  'whatsapp_daily_digest' | 'whatsapp_stalled_deals' | 'whatsapp_critical_kpi' |
+  'ai_response_mode' | 'ai_auto_suggest_next_actions'
+>> & { avatar?: File; remove_avatar?: boolean }
+
 export interface Profile {
   id: number; full_name: string; role: string; department: string; email: string; phone: string; avatar_url: string;
   timezone: string; notification_preferences: NotificationPreferences;

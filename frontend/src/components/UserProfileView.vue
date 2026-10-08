@@ -27,7 +27,11 @@
               :src="profile.avatar_url" v-if="profile.avatar_url"
               :alt="profile.full_name"
               class="w-20 h-20 rounded-3xl object-cover ring-2 ring-indigo-500/60 shadow-xl"
+              data-testid="profile-avatar"
             />
+            <div v-else class="w-20 h-20 rounded-3xl bg-indigo-500/15 border border-indigo-400/30 flex items-center justify-center text-xl font-semibold text-indigo-200" role="img" aria-label="Фото профиля не добавлено">
+              {{ profileInitials(profile.full_name) }}
+            </div>
             <div class="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-emerald-400 ring-4 ring-[#0b1226] shadow-[0_0_8px_rgba(52,211,153,0.8)]"></div>
           </div>
 
@@ -115,6 +119,7 @@ import {
   LogOut
 } from 'lucide-vue-next'
 import { useProfile } from '../composables/useProfile'
+import { profileInitials } from '../composables/profileInitials'
 import { useAuth } from '../composables/useAuth'
 
 import ProfileGeneralTab from './profile/ProfileGeneralTab.vue'
@@ -171,4 +176,3 @@ async function handleLogout() {
   emit('loggedOut')
 }
 </script>
-
