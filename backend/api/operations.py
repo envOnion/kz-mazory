@@ -41,6 +41,8 @@ def _execute_operation(pk):
         suggest = profile.ai_auto_suggest_next_actions if profile else True
         quotes = []
         presentation = None
+        dynamic = None
+        parent_artifact = None
         if op.operation_type == "export":
             mart = datamart.get_sales_kpi_mart(user, period, values)
             buffer = io.StringIO()
@@ -83,7 +85,7 @@ def _execute_operation(pk):
                 "coverage": mart["coverage"],
             }
         else:
-            if query == "покажи график поступлений":
+            if query == "покажи график поступлений" and not values.get("dialogue"):
                 widget = {
                     "type": "chart",
                     "data": datamart.get_sales_chart_dataset(user, period, values),
@@ -92,19 +94,19 @@ def _execute_operation(pk):
                     widget["data"].get("empty_reason")
                     or "Подтверждённые поступления по дате платежа."
                 )
-            elif query == "какие обещания просрочены?":
+            elif query == "какие обещания просрочены?" and not values.get("dialogue"):
                 widget = {
                     "type": "commitments_list",
                     "data": datamart.get_commitments_sla_mart(user, period),
                 }
                 text = f"На контроле: {widget['data']['total_count']}. Просрочено: {widget['data']['overdue_count']}."
-            elif query == "покажи воронку проектов":
+            elif query == "покажи воронку проектов" and not values.get("dialogue"):
                 widget = {
                     "type": "project_table",
                     "data": datamart.get_pipeline_mart(user, values),
                 }
                 text = "Проекты и сведения CRM. Источник стадии и суммы указан; неизвестные значения отмечены отдельно."
-            elif query == "покажи kpi команды":
+            elif query == "покажи kpi команды" and not values.get("dialogue"):
                 data = datamart.get_sales_kpi_mart(user, period, values)
                 widget = {"type": "kpi_grid", "data": data}
                 text = data["insight"]["headline"] + " " + data["coverage"]["message"]
@@ -139,9 +141,21 @@ def _execute_operation(pk):
 
                 deadline_token = analytics_deadline.set(deadline)
                 try:
-                    dynamic = async_to_sync(run)(
-                        context, prompt, mode, suggest, values.get("history", [])
-                    )
+                    history = values.get("history", [])
+                    if values.get("dialogue"):
+                        from .analytics.dialogue import prepare, recalculate
+                        turn, parent_artifact, history = prepare(context, op)
+                        patch = turn.resolved_intent.get("patch", {})
+                        if patch and parent_artifact:
+                            try:
+                                dynamic = recalculate(context, parent_artifact.query_plan, patch)
+                            except ProviderUnavailable as exc:
+                                if str(exc) not in ["plan_requires_months", "crm_history_unavailable"]:
+                                    raise
+                                message = "План утверждён по месяцам. Перейти к месяцам для сравнения плана и факта?" if str(exc) == "plan_requires_months" else "CRM содержит текущие стадии сделок. Для динамики по датам нужна история изменений; сейчас можно сравнить текущие стадии или ответственных."
+                                dynamic = {"text": message, "presentation": None, "quotes": [], "answer_document": {"version": "1.0", "kind": "clarification", "markdown": message, "facts": {}, "artifact_ids": [], "suggested_actions": []}}
+                    if dynamic is None:
+                        dynamic = async_to_sync(run)(context, prompt, mode, suggest, history)
                     text, widget = dynamic["text"], None
                     presentation = dynamic["presentation"]
                     quotes = dynamic.get("quotes", [])
@@ -149,7 +163,7 @@ def _execute_operation(pk):
                     analytics_deadline.reset(deadline_token)
                     context.registry.clear()
                     context.sources.clear()
-            if mode == "concise":
+            if mode == "concise" and not values.get("dialogue"):
                 text = text.split("\n\n")[0][:600]
             if mode == "finance" and widget and widget["type"] == "kpi_grid":
                 data = widget["data"]
@@ -177,9 +191,18 @@ def _execute_operation(pk):
                 status="expired", result={}, error_code="access_changed"
             )
         else:
-            AsyncOperation.objects.filter(pk=pk, status="running").update(
-                status="succeeded", result=json_value(result), error_code=""
-            )
+            from django.db import transaction
+            with transaction.atomic():
+                locked = AsyncOperation.objects.select_for_update().get(pk=pk)
+                if locked.status != "running":
+                    return
+                if values.get("dialogue"):
+                    from .analytics.dialogue import persist
+                    if dynamic and dynamic.get("answer_document"):
+                        result["answer_document"] = dynamic["answer_document"]
+                    persist(op, result, parent_artifact)
+                locked.status, locked.result, locked.error_code = "succeeded", json_value(result), ""
+                locked.save(update_fields=["status", "result", "error_code"])
     except Exception as exc:
         code = (
             str(exc)[:64]
@@ -203,7 +226,11 @@ def execute_operation(pk):
     # The worker holds the lock for the complete operation, including tool turns.
     # Separate operation namespace prevents collisions with other advisory users.
     if connection.vendor != "postgresql":
-        return _execute_operation(pk)
+        try:
+            return _execute_operation(pk)
+        finally:
+            from .analytics.dialogue import settle
+            settle(pk)
     with connection.cursor() as cursor:
         cursor.execute("SELECT pg_try_advisory_lock(%s, %s)", [73104, pk])
         acquired = cursor.fetchone()[0]
@@ -212,5 +239,7 @@ def execute_operation(pk):
     try:
         _execute_operation(pk)
     finally:
+        from .analytics.dialogue import settle
+        settle(pk)
         with connection.cursor() as cursor:
             cursor.execute("SELECT pg_advisory_unlock(%s, %s)", [73104, pk])

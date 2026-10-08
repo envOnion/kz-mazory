@@ -7,7 +7,7 @@ import type { DialogueThread } from '../src/types/factReview'
 import type { McpConnectionResponse } from '../src/types/mcp'
 
 const directory = process.env.MAZORY_E2E_DIR
-if (!directory) throw new Error('Use backend/e2e/run.py to start the isolated local stack')
+if (!directory) throw new Error('Use docker compose -f compose.e2e.yml to start the isolated local stack')
 const session: { access: string; refresh: string; cookie_name: string; config_id: number } = JSON.parse(readFileSync(join(directory, 'session.json'), 'utf8'))
 let currentRefresh = session.refresh
 let currentAccess = session.access
@@ -136,7 +136,7 @@ test('CRM catalog, incomplete thought, interleaved themes and review through rea
   await page.getByRole('button', { name: 'Проверка фактов', exact: true }).click()
   await expect.poll(async () => {
     const response = await request.get('/api/directory/', { headers }); const value: Directory = await response.json(); return value.projects_count
-  }).toBe(2)
+  }).toBe(5)
   await page.getByRole('button', { name: 'Обновить справочник', exact: true }).click()
   await expect(page.getByText('Справочник CRM загружен', { exact: false })).toBeVisible()
   await message(request, 'north-request', 'БЦ Север: подготовь смету')
@@ -187,7 +187,7 @@ test('CRM error is shown separately and retry preserves imported identities', as
   expect((await request.post('/api/directory/crm-sync/', { headers, data: { team_id: 1 } })).status()).toBe(202)
   await expect.poll(async () => { const response = await request.get('/api/directory/', { headers }); const value: Directory = await response.json(); return value.crm_catalog?.[0]?.state }).toBe('succeeded')
   const response = await request.get('/api/directory/', { headers }); const value: Directory = await response.json()
-  expect(value.projects_count).toBe(2)
+  expect(value.projects_count).toBe(5)
 })
 
 test('general obligation needs no project and survives another topic', async ({ request }) => {
@@ -217,7 +217,7 @@ test('new project requires completed CRM search and sends identity without fabri
   expect(fields.TITLE).toBe('БЦ Восток')
   expect(fields.OPPORTUNITY).toBeUndefined()
   const catalog: Directory = await (await request.get('/api/directory/', { headers })).json()
-  expect(catalog.projects_count).toBe(3)
+  expect(catalog.projects_count).toBe(6)
 })
 
 test('full flow from WhatsApp messages to KPI plan/fact, timeline and forecasts', async ({ page, context, request }) => {
@@ -343,7 +343,8 @@ test('full flow from WhatsApp messages to KPI plan/fact, timeline and forecasts'
   const chatInput = page.getByPlaceholder('Спросите Mazory...')
   await chatInput.fill('покажи kpi команды')
   await chatInput.press('Enter')
-  await expect(page.getByTestId('chart-kpi').first()).toBeVisible({ timeout: 20000 })
+  await expect(page.getByTestId('presentation')).toBeVisible({ timeout: 30000 })
+  await expect(page.getByTestId('chat-response')).toContainText('50\u202f000\u202f000,00 KZT')
   await expect(page.locator('canvas').first()).toBeVisible()
 })
 
@@ -357,7 +358,7 @@ test('autonomous WhatsApp receipt reaches CRM and reports without a review click
     const response = await request.get('/api/autonomous/overview/', { headers })
     const value = await response.json()
     return value.totals.find((row: { currency: string; direction: string; amount_precision: string }) => row.currency === 'KZT' && row.direction === 'income' && row.amount_precision === 'exact')?.amount
-  }).toBe('70000000')
+  }).toBe('70000290.00')
   await message(request, 'south-auto-payment', 'БЦ Южный: оплата 20 000 000 ₸ поступила сегодня', true)
   await expect.poll(() => JSON.parse(readFileSync(stateFile, 'utf8')).comments?.some((row: { COMMENT: string }) => row.COMMENT.includes('20 000 000'))).toBe(true)
   await authenticate(context)
@@ -365,6 +366,6 @@ test('autonomous WhatsApp receipt reaches CRM and reports without a review click
   await page.getByRole('button', { name: 'Рабочий кабинет', exact: true }).click()
   await page.getByRole('button', { name: 'Отчеты по WhatsApp', exact: true }).click()
   await expect(page.getByText('Автоматическая обработка включена', { exact: false })).toBeVisible()
-  await expect(page.getByText('70 000 000', { exact: true }).first()).toBeVisible()
+  await expect(page.getByText('70 000 290', { exact: true }).first()).toBeVisible()
   await expect(page.getByRole('button', { name: 'Подтвердить факт', exact: true })).toHaveCount(0)
 })

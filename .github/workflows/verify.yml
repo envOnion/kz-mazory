@@ -11,50 +11,36 @@ concurrency:
   cancel-in-progress: true
 jobs:
   verify:
-    name: Build, Django and security checks
+    name: Docker build and local E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - name: Scan committed sources for secrets
         run: docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:v8.24.3 dir /repo --config /repo/.gitleaks.toml --redact --no-banner
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-      - name: Install frontend dependencies
-        run: npm ci
-        working-directory: frontend
-      - name: Typecheck and build frontend
-        run: npm run build
-        working-directory: frontend
-      - name: Frontend analytics regression tests
-        run: npm test
-        working-directory: frontend
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-      - name: Django configuration and migration drift
+      - name: Build and run browser, API, PostgreSQL and Q2
         run: |
-          uv run --project backend python backend/manage.py check
-          uv run --project backend python backend/manage.py makemigrations --check
-      - name: Fetch pinned tokenizer data
-        run: uv run --project backend python backend/fetch_tokenizer.py
-      - name: Backend analytics contracts and access tests
-        run: uv run --project backend python backend/manage.py test api.tests_analytics api.tests_provider_urls api.tests_qwen_context api.tests_gemma_context api.tests_history_reprocessing api.tests_history_admin api.tests_history_packets api.tests_whatsapp_exports api.tests_e2e_providers api.tests_user_access api.tests_fact_review api.tests_mcp_fact_review api.tests_import_review api.tests_contextual_commitments api.tests_delivery_receipts api.tests_embedding_chunks api.tests_dialogue_threads api.tests_project_workspace api.tests_autonomous api.tests_kpi_chat_data api.tests_participants
-      - name: Install local e2e browser
-        run: |
-          printf 'https://archive.ubuntu.com/ubuntu/\tpriority:1\nhttps://security.ubuntu.com/ubuntu/\tpriority:2\n' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
-          npx playwright install --with-deps chromium
-        working-directory: frontend
-      - name: Local browser, API and Q2 end-to-end tests
-        run: uv run --project backend python backend/e2e/run.py
-      - name: Production security settings
-        run: uv run --project backend python ops/check_deployment.py
-      - name: Dependency audit
-        run: |
-          npm --prefix frontend run audit:security
-          pipx run --spec pip-audit==2.9.0 pip-audit --no-deps --disable-pip -r backend/requirements.txt
+          docker compose -f compose.e2e.yml up -d --build nginx qcluster outbox
+          docker compose -f compose.e2e.yml up --build --no-deps --abort-on-container-exit --exit-code-from browser browser
+      - name: Production settings check inside Docker
+        run: docker run --rm -v "$PWD/ops:/checks:ro" --entrypoint python mazory-e2e-backend /checks/check_deployment.py /app
+      - name: Frontend dependency audit inside Docker
+        run: docker compose -f compose.e2e.yml run --rm --no-deps browser npm run audit:security
+      - name: Backend dependency audit inside Docker
+        run: docker run --rm --user 0 --entrypoint sh mazory-e2e-backend -c 'pip install --no-cache-dir pip-audit==2.9.0 && pip-audit --no-deps --disable-pip -r /app/requirements.txt'
       - name: Compose configuration
         run: docker compose config --no-interpolate --quiet
+      - name: Collect E2E screenshots, traces and service logs
+        if: always()
+        run: |
+          mkdir -p artifacts
+          docker compose -f compose.e2e.yml logs --no-color > artifacts/services.log
+          docker cp "$(docker compose -f compose.e2e.yml ps -a -q browser):/e2e/playwright" artifacts/ || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: local-docker-e2e
+          path: artifacts
+      - name: Remove isolated containers and volumes
+        if: always()
+        run: docker compose -f compose.e2e.yml down --volumes --remove-orphans

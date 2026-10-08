@@ -218,6 +218,8 @@ class ProviderHandler(BaseHTTPRequestHandler):
         self.handle_request(body)
 
     def handle_request(self, body):
+        if self.path == "/health":
+            return self.respond({"status": "ok"})
         if self.path.endswith('/participants/v2'):
             return self.respond([
                 {'id': '10001@lid', 'pn': '79990000001@c.us'},
@@ -296,6 +298,18 @@ class ProviderHandler(BaseHTTPRequestHandler):
             return self.respond(
                 {"input_tokens": max(1, len(json.dumps(body, ensure_ascii=False)) // 4)}
             )
+        if self.path.endswith("/v1/messages") and any(t.get("name") == "query_dataset" for t in body.get("tools", [])):
+            import time
+            state = json.loads(self.control.read_text())
+            if state.get('analytics_delay'):
+                time.sleep(state['analytics_delay'])
+            if state.get('analytics_narrative_error') and any(
+                json.loads(block['content']).get('presentation_created')
+                for message in body['messages'] if isinstance(message['content'], list)
+                for block in message['content'] if block.get('type') == 'tool_result'
+            ):
+                return self.respond({'error': {'type': 'overloaded_error', 'message': 'Fixture narrative outage'}}, 503)
+            return self.respond(analytical_response(body))
         if self.path.endswith("/v1/messages"):
             value = json.loads(body["messages"][-1]["content"])
             result = classify(value)
@@ -322,3 +336,95 @@ class ProviderHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+
+def analytical_response(body):
+    """Native tool turns over real query results, no frontend/API mock."""
+    messages = body['messages']
+    tools = {b['id']: b for m in messages for b in (m['content'] if isinstance(m['content'], list) else []) if b.get('type') == 'tool_use'}
+    results = [(tools.get(b['tool_use_id'], {}).get('name'), json.loads(b['content'])) for m in messages for b in (m['content'] if isinstance(m['content'], list) else []) if b.get('type') == 'tool_result']
+    prompts = [m['content'] for m in messages if m['role'] == 'user' and isinstance(m['content'], str)]
+    prompt = prompts[-1].lower() if prompts else ''
+    last_name, last = results[-1] if results else (None, {})
+    def response(text=None, name=None, arguments=None):
+        content = [{'type': 'text', 'text': text}] if text is not None else [{'type': 'tool_use', 'id': 'fixture-' + uuid.uuid4().hex, 'name': name, 'input': arguments}]
+        return {'id': 'fixture-response', 'type': 'message', 'role': 'assistant', 'model': 'local-fixture', 'content': content,
+                'stop_reason': 'end_turn' if text is not None else 'tool_use', 'usage': {'input_tokens': 100, 'output_tokens': 100}}
+    if 'форматирование' in prompt:
+        return response(text='**Проверено** <img src=x onerror=window.__xss=1><script>window.__xss=1</script> [ссылка](javascript:alert(1))')
+    if prompt.strip() in ['йо', 'привет']:
+        return response(text='Привет! **Помогу с аналитикой.** Что посмотрим: поступления, сделки или задачи?')
+    if 'истори' in prompt or ('crm' in prompt and 'дат' in prompt):
+        return response(text='CRM содержит текущие стадии сделок без истории переходов. Для динамики нужна история изменений; сейчас можно сравнить текущие стадии или ответственных.')
+    datasets = [data for name, data in results if name == 'query_dataset' and 'dataset_id' in data]
+    if last_name == 'build_presentation':
+        if 'fallback' in prompt:
+            # Valid model text with invented financial values must trigger the grounded fallback.
+            return response(text='Итого 999999 KZT и 777 сделок.')
+        facts = last.get('grounded_facts', {})
+        ratio = next((key for key, fact in facts.items() if fact['formula'] == 'ratio_percent'), None)
+        if ratio:
+            return response(text=f'Выполнение плана — {{{{fact:{ratio}}}}}.')
+        total = next((key for key, fact in facts.items() if fact['formula'] == 'sum'), None)
+        return response(text=f'По выбранным условиям итог — {{{{fact:{total}}}}}. Подробности доступны на графике и в таблице.' if total else 'Данные подготовлены.')
+    if last_name == 'derived_facts':
+        last = next(data for name, data in reversed(results) if name == 'combine_datasets' and 'dataset_id' in data)
+    if last_name in ['query_dataset', 'combine_datasets', 'derived_facts'] and 'dataset_id' in last:
+        if 'объедини категории' in prompt and last_name == 'query_dataset':
+            return response(name='combine_datasets', arguments={'mode': 'categories', 'dataset_ids': [last['dataset_id']], 'category': 'status', 'groups': {row['status']: 'Общая группа' for row in last['rows']}})
+        if 'объедини август и сентябрь' in prompt and last_name == 'query_dataset':
+            if len(datasets) == 1:
+                return response(name='query_dataset', arguments={**last['normalized_query'], 'date_range': {'start': '2026-09-01', 'end_exclusive': '2026-10-01'}})
+            return response(name='combine_datasets', arguments={'mode': 'append', 'dataset_ids': [ds['dataset_id'] for ds in datasets]})
+        if 'процент выполнения' in prompt and last_name == 'combine_datasets':
+            return response(name='derived_facts', arguments={'operation': 'ratio_percent', 'left': f'{last["dataset_id"]}:series0:total', 'right': f'{last["dataset_id"]}:series1:total', 'label': 'Выполнение плана'})
+        if 'два графика' in prompt:
+            if len(datasets) == 1:
+                return response(name='query_dataset', arguments={'dataset': 'crm_projects', 'dimensions': ['status'], 'measures': ['project_count']})
+            return response(name='build_presentation', arguments={'version': '1.0', 'title': 'Поступления и сделки', 'blocks': [
+                {'id': 'payments', 'title': 'Поступления', 'kind': 'bar', 'dataset_id': datasets[0]['dataset_id'], 'encoding': {'category': 'payment_month', 'value': 'received_amount'}},
+                {'id': 'deals', 'title': 'Сделки CRM', 'kind': 'bar', 'dataset_id': datasets[1]['dataset_id'], 'encoding': {'category': 'status', 'value': 'project_count'}}]})
+        if 'план' in prompt and len(datasets) == 1:
+            base = last['normalized_query']
+            if 'payment_month' not in base.get('dimensions', []):
+                return response(text='План утверждён по месяцам. Перейти к месяцам для сравнения плана и факта?')
+            return response(name='query_dataset', arguments={'dataset': 'targets', 'dimensions': ['month'], 'measures': ['target_amount'], 'date_range': base['date_range']})
+        if 'план' in prompt and last_name == 'query_dataset' and len(datasets) == 2:
+            return response(name='combine_datasets', arguments={'mode': 'series', 'dataset_ids': [ds['dataset_id'] for ds in datasets], 'keys': ['payment_month'], 'labels': ['Поступления', 'План']})
+        if 'договор' in prompt and len(datasets) == 1:
+            return response(name='query_dataset', arguments={'dataset': 'projects', 'dimensions': ['project_id'], 'measures': ['contract_amount']})
+        if 'договор' in prompt and last_name == 'query_dataset' and len(datasets) == 2:
+            return response(name='combine_datasets', arguments={'mode': 'join', 'dataset_ids': [ds['dataset_id'] for ds in datasets], 'keys': ['project_id'], 'join': 'full'})
+        columns = last['columns']; dimension = next(c['name'] for c in columns if c['type'] in ['text', 'date', 'id'])
+        measure = next(c['name'] for c in columns if c['type'] in ['count', 'money'])
+        title = 'Сделки по стадиям CRM' if last['normalized_query']['dataset'] == 'crm_projects' or last['normalized_query'].get('mode') == 'categories' else 'Поступления'
+        if last['normalized_query'].get('mode') == 'join':
+            block = {'id': 'chart', 'kind': 'table', 'dataset_id': last['dataset_id'], 'columns': [c['name'] for c in columns]}
+        else:
+            encoding = {'category': dimension, 'value': measure}
+            if last['normalized_query'].get('mode') == 'series': encoding['series'] = 'series'
+            block = {'id': 'chart', 'kind': 'bar', 'dataset_id': last['dataset_id'], 'encoding': encoding}
+        return response(name='build_presentation', arguments={'version': '1.0', 'title': title, 'blocks': [block]})
+    if any(word in prompt for word in ['crm', 'сделк', 'стади', 'объедини категории']) and 'два графика' not in prompt:
+        spec = {'dataset': 'crm_projects', 'dimensions': ['crm_manager'] if 'ответствен' in prompt else ['status'], 'measures': ['project_count']}
+    else:
+        spec = {'dataset': 'payments', 'dimensions': ['project_id'] if 'договор' in prompt else ['payment_week'] if 'недел' in prompt else ['payment_month'], 'measures': ['received_amount'], 'date_range': {'start': '2026-08-01', 'end_exclusive': '2026-10-01'}}
+        if 'kpi' in prompt:
+            spec.pop('date_range')
+        if 'объедини август и сентябрь' in prompt:
+            spec['date_range'] = {'start': '2026-08-01', 'end_exclusive': '2026-09-01'}
+        # Refinement context is read from the server's persisted normalized plan.
+        for previous in reversed(prompts[:-1]):
+            if previous.startswith('Контекст выбранного результата'):
+                plan = json.loads(previous.split(': ', 1)[1]); base = plan['blocks'][0]['query']
+                if base.get('dataset') == 'payments':
+                    spec['date_range'] = base['date_range']
+                    spec['filters'] = base.get('filters', [])
+                    spec['currency'] = base.get('currency', 'KZT')
+                    if not any(word in prompt for word in ['недел', 'месяц', 'договор']):
+                        spec['dimensions'] = base['dimensions']
+                        spec['order_by'] = base.get('order_by', [])
+                break
+    if 'топ' in prompt:
+        spec.update({'limit': 1, 'top_n': True, 'order_by': [{'field': spec['measures'][0], 'direction': 'desc'}]})
+    return response(name='query_dataset', arguments=spec)

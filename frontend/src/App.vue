@@ -11,7 +11,8 @@
     />
 
     <nav v-if="isAuthenticated" class="relative z-30 max-w-6xl mx-auto w-full px-4 flex flex-wrap gap-2" aria-label="Главная навигация">
-      <button v-if="!currentUser?.roles.includes('client')" class="btn" data-testid="nav-kpi-dashboard" @click="currentView = 'dashboard'; fetchKpiData()">KPI и чат</button>
+      <button v-if="!currentUser?.roles.includes('client')" class="btn" data-testid="nav-kpi-dashboard" @click="currentView = 'dashboard'; hasChatResponse = false; fetchKpiData()">KPI и чат</button>
+      <button v-if="conversationId" class="btn" @click="currentView = 'dashboard'; hasChatResponse = true">Продолжить диалог</button>
       <button class="btn" data-testid="nav-workspace" @click="currentView = 'workspace'">Рабочий кабинет</button>
       <button class="btn" data-testid="nav-profile" @click="currentView = 'profile'">Настройки профиля</button>
     </nav>
@@ -46,7 +47,8 @@
         <WorkspaceView v-else-if="isAuthenticated && (currentView === 'workspace' || currentUser?.roles.includes('client'))" :key="currentUser?.id" />
         <!-- View 3: KPI Dashboard Active Chat View -->
         <div v-else class="flex-1 flex flex-col justify-between py-2">
-          <KpiDashboardView
+          <ChatWorkspace v-if="hasChatResponse" :turns="turns" :conversations="conversations" :conversation-id="conversationId" :selected-turn-id="selectedTurnId" :artifact="selectedArtifact" :presentation="activePresentation" :is-generating="isGenerating" :error="error" :period="selectedPeriod" @submit="handlePromptSubmit" @select-turn="selectTurn" @followup="followup" @load-conversation="loadConversation" @new-conversation="newConversation" @cancel="cancel" @open-source="openQuote" @change-filters="changeKpiFilters" @change-period="fetchKpiData" />
+          <KpiDashboardView v-else
             :data="kpiData"
             :widget="activeWidget"
             :presentation="activePresentation"
@@ -62,13 +64,13 @@
           />
 
           <div class="max-w-6xl mx-auto w-full px-4 space-y-3">
-            <p v-if="error" role="alert" class="panel text-rose-300">{{ error }}</p>
-            <button v-if="isGenerating" class="btn" @click="cancel">Отменить запрос</button>
+            <p v-if="error && !hasChatResponse" role="alert" class="panel text-rose-300">{{ error }}</p>
+            <button v-if="isGenerating && !hasChatResponse" class="btn" @click="cancel()">Отменить запрос</button>
             <dialog ref="sourceDialog" class="panel max-w-2xl backdrop:bg-black/70"><button class="btn mb-4" @click="sourceDialog?.close()">Закрыть источник</button><pre class="whitespace-pre-wrap">{{ sourceText }}</pre></dialog>
             <blockquote v-for="quote in quotes" :key="quote.id" class="panel text-sm"><p>{{ quote.content }}</p><p class="text-xs text-slate-400">{{ quote.sender_name }} · {{ quote.sent_at }} · <button class="underline" @click="openQuote(quote.id)">Открыть источник #{{ quote.id }}</button></p></blockquote>
           </div>
           <!-- Bottom Docked Chat Input Bar for Dashboard View -->
-          <div class="w-full pb-6 pt-4 mt-auto">
+          <div v-if="!hasChatResponse" class="w-full pb-6 pt-4 mt-auto">
             <ChatInput
               :suggestions="dashboardSuggestions"
               placeholder="Спросите Mazory..."
@@ -115,6 +117,7 @@ import AppHeader from './components/AppHeader.vue'
 import WelcomeView from './components/WelcomeView.vue'
 import KpiDashboardView from './components/KpiDashboardView.vue'
 import ChatInput from './components/ChatInput.vue'
+import ChatWorkspace from './components/ChatWorkspace.vue'
 import AuthModal from './components/AuthModal.vue'
 import UserProfileView from './components/UserProfileView.vue'
 import { api } from './composables/api'
@@ -133,7 +136,8 @@ const {
   chatResponseText,
   fetchKpiData,
   handlePromptSubmit,
-  goHome, error, quotes, cancel, changeKpiFilters
+  goHome, error, quotes, cancel, changeKpiFilters,
+  turns, conversations, conversationId, selectedTurnId, selectedArtifact, selectTurn, followup, loadConversation, newConversation, restoreConversations
 } = useChat()
 
 const { isAuthenticated, currentUser, checkAuth, isAuthModalOpen } = useAuth()
@@ -148,7 +152,7 @@ const toastMessage = ref('')
 let toastTimer: number | null = null
 
 onMounted(() => {
-  void checkAuth().then(ok => { if (ok) fetchKpiData() })
+  void checkAuth().then(ok => { if (ok) { fetchKpiData(); restoreConversations() } })
 })
 
 function showToast(msg: string) {
@@ -169,7 +173,7 @@ function handleOpenProfile() {
 
 function handleAuthSuccess() {
   showToast('✓ Вы успешно вошли в систему')
-  fetchKpiData()
+  fetchKpiData(); restoreConversations()
 }
 
 function handleLogout() {

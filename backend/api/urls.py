@@ -1,5 +1,6 @@
 from django.urls import path
 from .health import health
+from .analytics.dialogue import ConversationList, ConversationDetail, TurnList, ArtifactDetail
 from .thread_views import ThreadListView, ThreadDetailView, ThreadBackfillView, ThreadSubscribeView
 from .platform_views import CrmCatalogSyncView, ParticipantsSyncView
 from .candidate_context import CandidateContextView, CandidatePaymentsView
@@ -58,6 +59,10 @@ from .mcp_views import FactReviewMcpView, McpTokenView, McpConnectionView
 from .autonomous_reports import AutonomousOverviewView
 
 urlpatterns = [
+    path("chat/conversations/", ConversationList.as_view()),
+    path("chat/conversations/<int:pk>/", ConversationDetail.as_view()),
+    path("chat/conversations/<int:pk>/turns/", TurnList.as_view()),
+    path("chat/artifacts/<int:pk>/", ArtifactDetail.as_view()),
     path("autonomous/overview/", AutonomousOverviewView.as_view()),
     path("legacy/projects/", LegacyProjectsView.as_view()),
     path("health/<str:mode>/", health),

@@ -2232,3 +2232,39 @@ class ProviderReservation(models.Model):
     state = models.CharField(max_length=16, default="reserved")
     lease_until = models.DateTimeField()
     created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+
+class AnalyticsConversation(models.Model):
+    owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name="analytics_conversations")
+    title = models.CharField(max_length=200, default="Новый диалог")
+    default_scope = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, db_index=True)
+
+
+class AnalyticsTurn(models.Model):
+    conversation = models.ForeignKey(AnalyticsConversation, on_delete=models.CASCADE, related_name="turns")
+    parent_turn = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL)
+    operation = models.OneToOneField(AsyncOperation, null=True, on_delete=models.SET_NULL, related_name="analytics_turn")
+    sequence = models.PositiveIntegerField()
+    user_text = models.TextField()
+    answer_document = models.JSONField(default=dict)
+    resolved_intent = models.JSONField(default=dict)
+    effective_scope = models.JSONField(default=dict)
+    state = models.CharField(max_length=16, default="queued")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["sequence"]
+        constraints = [models.UniqueConstraint(fields=["conversation", "sequence"], name="analytics_turn_sequence_unique")]
+
+
+class AnalyticsArtifact(models.Model):
+    turn = models.ForeignKey(AnalyticsTurn, on_delete=models.CASCADE, related_name="artifacts")
+    parent_artifact = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL)
+    query_plan = models.JSONField(default=dict)
+    presentation = models.JSONField(default=dict)
+    coverage = models.JSONField(default=dict)
+    access_fingerprint = models.CharField(max_length=64)
+    generated_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField(db_index=True)

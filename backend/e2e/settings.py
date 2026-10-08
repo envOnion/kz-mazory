@@ -4,24 +4,15 @@ import os
 from pathlib import Path
 from urllib.parse import urlsplit
 
-if os.getenv("MAZORY_ENV") != "test" or not os.getenv("MAZORY_E2E_DIR"):
-    raise RuntimeError("E2E settings require the isolated runner")
+if os.getenv("MAZORY_ENV") != "test" or os.getenv("MAZORY_E2E_DOCKER") != "1" or not Path('/.dockerenv').exists():
+    raise RuntimeError("E2E runs only in the isolated Docker Compose stack")
 from mazory_backend.settings import *  # noqa: F403
 
 E2E_DIR = Path(os.environ["MAZORY_E2E_DIR"]).resolve()
 if not (E2E_DIR / "isolated-e2e.marker").exists():
     raise RuntimeError("Missing isolated database marker")
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": E2E_DIR / "e2e.sqlite3",
-        "OPTIONS": {
-            "timeout": 30,
-            "transaction_mode": "IMMEDIATE",
-            "init_command": "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;",
-        },
-    }
-}
+# Writer and read-only analytical credentials are configured by compose.e2e.yml.
+# Production OperationContext reads the real PostgreSQL alias without a fallback.
 CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 Q_CLUSTER = {
     "name": "local_e2e",
@@ -34,7 +25,7 @@ Q_CLUSTER = {
     "ack_failures": True,
     "max_attempts": 1,
 }
-ALLOWED_HOSTS = ["localhost", "127.0.0.1", "testserver"]
+ALLOWED_HOSTS = ["localhost", "127.0.0.1", "backend", "nginx"]
 BITRIX_TEAM_ID = 1
 WAHA_WEBHOOK_SECRET = "isolated-local-webhook-secret"
 WAHA_API_URL = "https://localhost"
@@ -45,7 +36,7 @@ SECURE_SSL_REDIRECT = AUTH_COOKIE_SECURE = SESSION_COOKIE_SECURE = (
 DEBUG = False
 AI_DAILY_REQUEST_LIMIT = 10000
 # Serial browser scenarios share one fixture user and poll Q2 faster than a person.
-# Production rate limits remain in mazory_backend.settings and API unit tests.
+# Production rate limits remain in mazory_backend.settings.
 REST_FRAMEWORK = {**REST_FRAMEWORK, "DEFAULT_THROTTLE_RATES": {"user": "1000/min"}}
 MEDIA_ROOT = E2E_DIR / "media"
 QDRANT_URL = "https://localhost"
@@ -67,7 +58,10 @@ def _local_transport(self, method, url, **kwargs):
     ):
         raise RuntimeError("Non-local provider call refused by isolated e2e runtime")
     port = os.environ["MAZORY_E2E_PROVIDER_PORT"]
-    url = url.replace("https://localhost", f"https://localhost:{port}", 1)
+    host = os.environ["MAZORY_E2E_PROVIDER_HOST"]
+    if host != "provider":
+        raise RuntimeError("Only the Docker fixture provider is permitted")
+    url = url.replace("https://localhost", f"https://{host}:{port}", 1)
     return _original_request(self, method, url, **kwargs)
 
 
