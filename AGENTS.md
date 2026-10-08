@@ -19,6 +19,19 @@ Docker Compose:
 - **QCluster** (`qcluster`) выполняет асинхронную обработку очередей (отправка OTP, взаимодействие с WAHA, долгие аналитические операции).
 - **WAHA** (`waha`) шлюз WhatsApp Web/Noweb API для приема и отправки сообщений.
 
+## Окружение и тесты — обязательные ограничения
+
+- **Выбор Docker context обязателен перед запуском.** Для любой непродуктивной версии, временного стенда, разработки или E2E использовать `docker context use kk-minsk`. Production запускать, обновлять и проверять через `docker context use mazory-remote`.
+- Не запускать тестовые контейнеры в `mazory-remote` и не разворачивать production в `kk-minsk`. Для команд с явным выбором контекста использовать соответственно `docker --context kk-minsk ...` и `docker --context mazory-remote ...`.
+- В CI допускается собственный одноразовый Docker Engine runner: он не подключается ни к production, ни к данным пользователя. Это исключение не меняет выбор `kk-minsk` для проверок агента.
+- **Проект запускается, собирается и проверяется только через Docker / Docker Compose.** Не устанавливать backend, frontend, их зависимости и сервисы на хост. Не использовать локальные `uv`, `pip`, `npm install`, `brew install` для подготовки окружения проекта.
+- **Никогда не устанавливать PostgreSQL или другие дополнительные СУБД на локальную машину.** PostgreSQL проекта и временных проверок работает только в контейнере с отдельным Docker volume.
+- Не запускать серверы Django, Vite, PostgreSQL, Redis, Q2 и провайдеры E2E непосредственно на хосте. При отсутствии Docker Engine сообщить об ограничении; не заменять Docker установкой сервисов на компьютер.
+- **НЕ СОЗДАВАТЬ unit, component, integration и mock-тесты.** Не добавлять pytest, Django TestCase, Vitest и аналогичные наборы тестов.
+- Допускаются и важны **только локальные E2E**, проверяющие пользовательский сценарий через браузер, настоящий API, БД, outbox и очередь Q2 в изолированном Docker Compose. Не подменять API фронтенда через `page.route` и не считать такой сценарий E2E.
+- E2E-провайдер внешних интеграций может быть детерминированным локальным сервисом в том же Docker-стенде; обращения к рабочим аккаунтам и данным для этих проверок запрещены.
+- Сборка TypeScript/Vite, `manage.py check`, `makemigrations --check`, применение миграций и просмотр логов сохраняются как обязательные проверки и выполняются внутри Docker.
+
 ## Процесс работы над задачей
 
 Каждая задача выполняется в следующем порядке:
@@ -140,13 +153,9 @@ Docker Compose:
 
 ```bash
 # Проверка конфигурации Django
-uv run --project backend python manage.py check
-# или внутри Docker:
 docker compose exec backend python manage.py check
 
 # Проверка отсутствия расхождений между моделями и схемой миграций
-uv run --project backend python manage.py makemigrations --check
-# или внутри Docker:
 docker compose exec backend python manage.py makemigrations --check
 ```
 
@@ -158,11 +167,10 @@ docker compose exec backend python manage.py makemigrations --check
 Для любого изменения Frontend (`frontend/`) выполнить:
 
 ```bash
-cd frontend
-npm run build
+docker compose build nginx
 ```
 
-Команда `npm run build` выполняет проверку типов через `vue-tsc -b` и сборку Vite. Сборка должна проходить
+В Dockerfile nginx команда `npm run build` выполняет проверку типов через `vue-tsc -b` и сборку Vite. Сборка должна проходить
 без единой ошибки компиляции TypeScript.
 
 Также проверить отработку воркера `qcluster` и WAHA через логи:
@@ -175,6 +183,8 @@ docker compose logs --tail=50 backend qcluster waha
 Обязательная проверка миграций моделей сохраняется.
 
 ## Локальный запуск
+
+Использовать только Docker. Для изолированных E2E: `docker compose -f compose.e2e.yml up -d --build nginx qcluster outbox`, затем `docker compose -f compose.e2e.yml up --build --no-deps --abort-on-container-exit --exit-code-from browser browser`.
 
 ```bash
 # Сборка и запуск всех сервисов в фоне

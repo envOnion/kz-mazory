@@ -1,0 +1,81 @@
+name: mazory-e2e
+x-environment: &environment
+  MAZORY_ENV: test
+  MAZORY_E2E_DOCKER: '1'
+  DJANGO_SETTINGS_MODULE: e2e.settings
+  MAZORY_E2E_DIR: /e2e
+  MAZORY_E2E_PROVIDER_PORT: '9443'
+  MAZORY_E2E_PROVIDER_HOST: provider
+  REQUESTS_CA_BUNDLE: /e2e/localhost.crt
+  POSTGRES_HOST: postgres
+  POSTGRES_DB: mazory_e2e
+  POSTGRES_USER: mazory_e2e
+  POSTGRES_PASSWORD: isolated-writer-fixture
+  ANALYTICS_DB_USER: e2e_analytics
+  ANALYTICS_DB_PASSWORD: isolated-readonly-fixture
+  AI_CREDENTIAL_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
+x-backend: &backend
+  image: mazory-e2e-backend
+  build: ./backend
+  environment: *environment
+  volumes: [fixtures:/e2e]
+  networks: [isolated]
+services:
+  postgres:
+    build: {context: ./backend, dockerfile: e2e/postgres.Dockerfile}
+    environment: {POSTGRES_DB: mazory_e2e, POSTGRES_USER: mazory_e2e, POSTGRES_PASSWORD: isolated-writer-fixture}
+    volumes: [database:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U mazory_e2e -d mazory_e2e']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [isolated]
+  provider:
+    <<: *backend
+    user: "0:0"
+    command: [python, -m, e2e.server]
+    healthcheck:
+      test: [CMD, python, -c, 'import urllib.request; urllib.request.urlopen("https://localhost:9443/health", context=__import__("ssl")._create_unverified_context())']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  seed:
+    <<: *backend
+    command: [sh, -c, 'python manage.py migrate --noinput && python manage.py check && python manage.py makemigrations --check && python manage.py shell -c "from e2e.seed import seed; seed()"']
+    depends_on:
+      postgres: {condition: service_healthy}
+      provider: {condition: service_healthy}
+  backend:
+    <<: *backend
+    command: [gunicorn, mazory_backend.wsgi:application, --bind, '0.0.0.0:8000', --workers, '2', --timeout, '30']
+    depends_on: {seed: {condition: service_completed_successfully}}
+    healthcheck:
+      test: [CMD, python, -c, 'import urllib.request; urllib.request.urlopen("http://localhost:8000/api/health/live/")']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  qcluster:
+    <<: *backend
+    command: [python, manage.py, qcluster]
+    depends_on: {seed: {condition: service_completed_successfully}}
+  outbox:
+    <<: *backend
+    command: [python, manage.py, shell, -c, 'from e2e.dispatch import dispatch_forever; dispatch_forever()']
+    depends_on: {seed: {condition: service_completed_successfully}}
+  nginx:
+    build: {context: ., dockerfile: nginx/Dockerfile}
+    depends_on: {backend: {condition: service_healthy}}
+    networks: [isolated]
+  browser:
+    build: {context: ., dockerfile: frontend/e2e/Dockerfile}
+    environment: {MAZORY_E2E_DIR: /e2e, MAZORY_E2E_URL: 'http://nginx', MAZORY_E2E_OUTPUT: /e2e/playwright}
+    volumes: [fixtures:/e2e]
+    depends_on: {nginx: {condition: service_started}, qcluster: {condition: service_started}, outbox: {condition: service_started}}
+    ipc: host
+    networks: [isolated]
+networks:
+  isolated: {}
+volumes:
+  fixtures: {}
+  database: {}

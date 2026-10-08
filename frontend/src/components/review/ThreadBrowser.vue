@@ -422,6 +422,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { api, post } from '../../composables/api'
 import { currentUser } from '../../composables/session'
+import { requestKey } from '../../utils/requestKey'
 import type { Page, Directory } from '../../types/platform'
 import type { DialogueThread } from '../../types/factReview'
 
@@ -678,7 +679,7 @@ async function toggleSubscription() {
 async function rebuild() {
   if (!chatId.value) return
   try {
-    await post('/threads/backfill/', { config_id: chatId.value, request_key: crypto.randomUUID() })
+    await post('/threads/backfill/', { config_id: chatId.value, request_key: requestKey() })
     notice.value = 'Разбор истории поставлен в очередь. Обновите список тем после обработки.'
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Не удалось запустить разбор'

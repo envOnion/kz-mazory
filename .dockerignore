@@ -20,3 +20,7 @@ frontend/*
 nginx/*
 !nginx/Dockerfile
 !nginx/default.conf
+
+!frontend/playwright.local.config.ts
+!frontend/e2e
+!frontend/e2e/**

@@ -141,6 +141,8 @@ class OperationView(APIView):
                 "access_or_lifetime_changed",
             )
             op.save(update_fields=["status", "result", "error_code"])
+            from .analytics.dialogue import settle
+            settle(op.id)
         return Response(
             {
                 "id": op.id,
@@ -156,6 +158,8 @@ class OperationView(APIView):
         AsyncOperation.objects.filter(
             pk=op.id, status__in=["queued", "running"]
         ).update(status="cancelled", result={})
+        from .analytics.dialogue import settle
+        settle(op.id)
         return Response(status=204)
 
 

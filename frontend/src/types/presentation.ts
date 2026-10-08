@@ -12,7 +12,7 @@ const decimal = /^-?\d+(?:\.\d+)?$/
 const value = z.union([z.string().max(2000), z.number().finite(), z.null()])
 const dataset = z.object({
   dataset_id: z.string().max(64),
-  columns: z.array(z.object({ name: z.string().max(64), type: z.enum(['id', 'text', 'date', 'money', 'count', 'percent']), unit: z.string().max(10).nullable() }).strict()).max(10),
+  columns: z.array(z.object({ name: z.string().max(64), label: z.string().max(200).optional(), source: z.string().max(64).optional(), semantic_role: z.string().max(64).optional(), type: z.enum(['id', 'text', 'date', 'money', 'count', 'percent']), unit: z.string().max(10).nullable() }).strict()).max(10),
   rows: z.array(z.record(z.string(), value)).max(1000), normalized_query: z.record(z.string(), z.unknown()), timezone: z.string().max(64), effective_end_exclusive: z.string().max(10).nullable().optional(),
   coverage: z.object({ status: z.enum(['complete', 'partial']), message: text }).strict(),
   returned_count: z.number().int().nonnegative(), total_groups: z.number().int().nonnegative(), truncated: z.boolean(), definition: text,

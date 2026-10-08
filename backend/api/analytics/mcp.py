@@ -10,6 +10,8 @@ from .. import access
 from ..providers import ProviderUnavailable
 from .data import ALIAS, QUERY_SCHEMA, RECORDS_SCHEMA, fail, validate
 from .presentation import PRESENTATION_SCHEMA, build
+from .combine import COMBINE_SCHEMA, combine
+from .derived import DERIVED_SCHEMA, derive
 
 EMPTY = {"type": "object", "properties": {}, "additionalProperties": False}
 OBJECT = {"type": "object", "additionalProperties": True}
@@ -55,6 +57,8 @@ def create_servers(context):
             annotations=ToolAnnotations(readOnlyHint=True),
         ),
     ]
+    tools.append(Tool(name="combine_datasets", description="Combine authorized aggregates. mode series aligns same-grain dates (payment_month and month for plan/fact); join left/full requires unique project_id after aggregation; categories uses explicit groups mapping and optional other; append requires disjoint date ranges. Never join manager names or raw payments to contracts. NULL stays unknown. Returns dataset for build_presentation.", inputSchema=COMBINE_SCHEMA, outputSchema=OBJECT, annotations=ToolAnnotations(readOnlyHint=True)))
+    tools.append(Tool(name="derived_facts", description="Compute a difference, ratio_percent (left/right*100), or change_percent over registered sum fact keys with compatible units. Decimal arithmetic, full results before top-N; zero denominator is rejected. No manual numbers. Use the returned fact_key placeholder in prose.", inputSchema=DERIVED_SCHEMA, outputSchema=OBJECT, annotations=ToolAnnotations(readOnlyHint=True)))
     tools.append(
         Tool(
             name="read_records",
@@ -139,6 +143,8 @@ def create_servers(context):
             schema = {
                 "describe_schema": EMPTY,
                 "query_dataset": QUERY_SCHEMA,
+                "combine_datasets": COMBINE_SCHEMA,
+                "derived_facts": DERIVED_SCHEMA,
                 "read_sources": SOURCES,
                 "read_records": RECORDS_SCHEMA,
                 "build_presentation": PRESENTATION_SCHEMA,
@@ -149,6 +155,8 @@ def create_servers(context):
             fn = {
                 "describe_schema": lambda a: context.schema(),
                 "query_dataset": context.query,
+                "combine_datasets": lambda a: combine(context, a),
+                "derived_facts": lambda a: derive(context, a),
                 "read_sources": sources,
                 "read_records": getattr(
                     context, "records", lambda a: fail("unsupported_query")

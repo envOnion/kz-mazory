@@ -37,5 +37,5 @@ export interface PipelineData { total_count: number; next_page?: number | null; 
 export type ChatWidget = { type: 'chart'; data: ChartPayload } | { type: 'commitments_list'; data: CommitmentData } | { type: 'project_table'; data: PipelineData } | { type: 'kpi_grid'; data: KpiDashboardData }
 export type WidgetType = ChatWidget['type']
 export interface ChatQuote { id: number; content: string; sender_name: string; sent_at: string; source_url: string }
-export interface ChatResponse { presentation?: PresentationDocument | null; prompt: string; text: string; widget: ChatWidget | null; insights: string[]; quotes: ChatQuote[] }
+export interface ChatResponse { artifact_id?: number; presentation?: PresentationDocument | null; prompt: string; text: string; widget: ChatWidget | null; insights: string[]; quotes: ChatQuote[] }
 export type ViewMode = 'welcome' | 'dashboard' | 'profile' | 'workspace'

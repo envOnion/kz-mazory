@@ -14,6 +14,7 @@ from django.db.models import Q, Exists, OuterRef
 from django.utils import timezone
 from jsonschema import Draft202012Validator
 
+from .answers import column_label, collect_facts
 from .. import access
 from ..datamart import period_bounds, scoped_projects, confirmed_payments, project_stage
 from ..models import (
@@ -47,7 +48,7 @@ FIELDS = {
         "project_id": ("project_id", "id"),
         "status": ("project__status", "text"),
         "project_type": ("project__project_type", "text"),
-        **{f"payment_{k}": ("payment_date", "date") for k in ["day", "week", "month"]},
+        **{f"payment_{k}": ("payment_date", "date") for k in ["day", "week", "month", "quarter", "year"]},
     },
     "commitments": {
         "responsible_manager": ("manager__full_name", "text"),
@@ -57,13 +58,13 @@ FIELDS = {
         "status": ("status", "text"),
         **{
             f"effective_deadline_{k}": ("effective_deadline", "date")
-            for k in ["day", "week", "month"]
+            for k in ["day", "week", "month", "quarter", "year"]
         },
     },
     "messages": {
         "team": ("team__name", "text"),
         "chat": ("chat_id", "text"),
-        **{f"message_{k}": ("timestamp", "date") for k in ["day", "week", "month"]},
+        **{f"message_{k}": ("timestamp", "date") for k in ["day", "week", "month", "quarter", "year"]},
     },
     "crm_projects": {
         "project_id": ("project_id", "id"),
@@ -77,6 +78,10 @@ FIELDS = {
         "month": ("month", "date"),
     },
 }
+for source in ['projects', 'payments', 'commitments', 'messages', 'crm_projects', 'targets']:
+    FIELDS[source]['team_id'] = ('project__team_id' if source in ['payments', 'crm_projects'] else 'team_id', 'id')
+for source, path in [('projects', 'manager_id'), ('payments', 'credited_profile_id'), ('commitments', 'manager_id'), ('targets', 'profile_id')]:
+    FIELDS[source]['profile_id'] = (path, 'id')
 MEASURES = {
     "projects": {
         "project_count": "count",
@@ -209,6 +214,7 @@ class OperationContext:
     registry: dict = field(default_factory=dict)
     queries: int = 0
     sources: dict = field(default_factory=dict)
+    facts: dict = field(default_factory=dict)
 
     def check(self):
         if time.monotonic() >= self.deadline:
@@ -386,7 +392,7 @@ class OperationContext:
         dataset = {
             "dataset_id": str(uuid.uuid4()),
             "columns": [
-                {"name": name, "type": kind, "unit": None}
+                {"name": name, "type": kind, "unit": None, "label": column_label(name, "commitments"), "source": "commitments", "semantic_role": "dimension"}
                 for name, kind in [
                     ("commitment_id", "id"),
                     ("text", "text"),
@@ -534,14 +540,15 @@ class OperationContext:
                             **{prefix + "whatsapp_fields__contains": ["stage"]}
                         )
                     qs = qs.filter(**{f"{path}__{lookup}": f["value"]})
+                unknown_dates = 0
                 if dataset == "payments":
+                    unknown_dates = qs.filter(payment_date__isnull=True).count()
                     qs = qs.filter(
                         payment_date__gte=start,
                         payment_date__lt=min(end, today + timedelta(days=1)),
                     )
                 elif dataset == "targets":
                     qs = qs.filter(month__gte=start, month__lt=end)
-                unknown_dates = 0
                 if dataset == "messages":
                     unknown_dates = qs.filter(sent_at_known=False).count()
                     qs = qs.filter(
@@ -568,9 +575,15 @@ class OperationContext:
                     zone,
                     self.deadline,
                 )
+                coverage_teams = Team.objects.using(ALIAS).filter(id__in=access.team_ids(user))
+                for selected_filter in filters:
+                    if selected_filter['field'] == 'team_id':
+                        if selected_filter['op'] == 'eq':
+                            coverage_teams = coverage_teams.filter(id=selected_filter['value'])
+                        elif selected_filter['op'] == 'in':
+                            coverage_teams = coverage_teams.filter(id__in=selected_filter['value'])
                 teams = list(
-                    Team.objects.using(ALIAS)
-                    .filter(id__in=access.team_ids(user))
+                    coverage_teams
                     .values_list("history_complete_from", flat=True)
                 )
                 complete = (
@@ -589,7 +602,22 @@ class OperationContext:
         else:
             unknown_costs = 0
         self.check()
-        orders = arguments.get("order_by", [])
+        if complete and dataset in ['payments', 'messages'] and len(dims) == 1 and FIELDS[dataset][dims[0]][1] == 'date':
+            dimension = dims[0]
+            current = start
+            actual_end = min(end, today + timedelta(days=1))
+            existing = {r[dimension] for r in result}
+            while current < actual_end:
+                bucket = date_bucket(current, dimension)
+                if bucket not in existing:
+                    result.append({dimension: bucket, **{m: '0.00' if MEASURES[dataset][m] == 'money' else 0 for m in measures}})
+                    existing.add(bucket)
+                if len(existing) > 1000:
+                    fail('dataset_limit_use_filters')
+                current += timedelta(days=1)
+        orders = arguments.get("order_by") or [{"field": d, "direction": "asc"} for d in dims if FIELDS[dataset][d][1] == "date"]
+        if not orders and dims:
+            orders = [{"field": measures[0], "direction": "desc"}]
         if any(o["field"] not in dims + measures for o in orders):
             fail()
         result.sort(key=lambda r: json.dumps(r, sort_keys=True))
@@ -597,7 +625,7 @@ class OperationContext:
             name = order["field"]
             result.sort(
                 key=lambda r: (
-                    r[name] is not None,
+                    r[name] is None,
                     Decimal(str(r[name]))
                     if MEASURES[dataset].get(name) in ["money", "count", "percent"]
                     and r[name] is not None
@@ -607,7 +635,9 @@ class OperationContext:
                 ),
                 reverse=order["direction"] == "desc",
             )
+        result = [r for r in result if all(r[o["field"]] is not None for o in orders)] + [r for r in result if any(r[o["field"]] is None for o in orders)]
         total = len(result)
+        full_result = list(result)
         limit = arguments.get("limit", 1000)
         if total > limit and not arguments.get("top_n", False):
             fail("dataset_limit_use_filters")
@@ -628,11 +658,12 @@ class OperationContext:
         ]
         output = {
             "dataset_id": str(uuid.uuid4()),
-            "columns": columns,
+            "columns": [{**c, "label": column_label(c["name"], dataset), "source": dataset, "semantic_role": "measure" if c["type"] in ["money", "count", "percent"] else "dimension"} for c in columns],
             "rows": result,
             "normalized_query": {
                 **arguments,
                 "filters": filters,
+                "order_by": orders,
                 "currency": None if dataset == "messages" else currency,
                 "date_range": {
                     "start": start.isoformat(),
@@ -643,14 +674,22 @@ class OperationContext:
             },
             "timezone": zone,
             "effective_end_exclusive": min(end, today + timedelta(days=1)).isoformat()
-            if dataset == "payments"
+            if dataset in ["payments", "messages"]
             else None,
             "coverage": {
-                "status": "complete" if complete and not unknown_costs else "partial",
-                "message": f"У {unknown_dates} сообщений неизвестна исходная дата; они не включены. Полнота истории не подтверждена."
+                "status": "complete" if complete and not unknown_costs and dataset not in ['crm_projects', 'projects', 'targets'] and end <= today + timedelta(days=1) else "partial",
+                "message": "Текущий срез CRM; история переходов между стадиями отсутствует."
+                if dataset == 'crm_projects'
+                else "Только утверждённые месячные планы; отсутствующий план не считается нулём."
+                if dataset == 'targets'
+                else f"У {unknown_dates} {'платежей' if dataset == 'payments' else 'сообщений'} неизвестна исходная дата; они не включены. Полнота истории не подтверждена."
                 if unknown_dates
                 else f"Стоимость не подтверждена для {unknown_costs} проектов; маржа только по известным данным"
                 if unknown_costs
+                else "Текущий срез доступных проектов."
+                if dataset == 'projects'
+                else f"Данные по состоянию на {today.isoformat()}; период ещё не завершён."
+                if end > today + timedelta(days=1)
                 else "Полная история"
                 if complete
                 else "Полнота истории не подтверждена",
@@ -663,13 +702,14 @@ class OperationContext:
         }
         if len(json.dumps(output, ensure_ascii=False).encode()) > 256 * 1024:
             fail("dataset_limit_use_filters")
+        self.facts.update(collect_facts(output, full_result))
         self.registry[output["dataset_id"]] = output
         return output
 
 
 def definition(dataset):
     return {
-        "payments": "Подтверждённые received-поступления, включая отрицательные корректировки; менеджер — credited_profile, не текущий владелец проекта.",
+        "payments": "Подтверждённые поступления, включая отрицательные корректировки. Менеджер — сотрудник, на которого записан платёж.",
         "messages": "Доступные оригиналы WhatsApp по исходной дате; дубли, старые версии и неизвестные даты исключены. Валюта не применяется.",
         "crm_projects": "Текущие снимки CRM: стадия, ответственный и сумма сделки, не фактические поступления и не подтверждённый договор.",
         "projects": "Доступные неархивные проекты с подтверждённой идентичностью или платежом; договорная маржа по подтверждённой стоимости, не бухгалтерская прибыль.",
@@ -703,6 +743,9 @@ def filter_fields(dataset):
             "project_id": ("project_id", "id"),
             "manager_id": ("project__manager_id", "id"),
             "status": ("external_stage_id", "text"),
+            "stage_name": ("external_stage_name", "text"),
+            "crm_manager_id": ("external_manager_id", "text"),
+            "crm_manager_name": ("external_manager_name", "text"),
         }
     prefix = "project__" if dataset in ["payments", "commitments"] else ""
     fields = {
@@ -854,6 +897,10 @@ def aggregate(dataset, objects, dims, measures, start, end, zone, deadline):
             if kind == "date" and v is not None:
                 if d.endswith("_week"):
                     v -= timedelta(days=v.weekday())
+                elif d.endswith("_year"):
+                    v = v.replace(month=1, day=1)
+                elif d.endswith("_quarter"):
+                    v = v.replace(month=((v.month - 1) // 3) * 3 + 1, day=1)
                 elif d.endswith("_month"):
                     v = v.replace(day=1)
                 v = v.isoformat()
@@ -939,3 +986,15 @@ def aggregate(dataset, objects, dims, measures, start, end, zone, deadline):
             row[m] = value
         result.append(row)
     return result
+
+
+def date_bucket(value, dimension):
+    if dimension.endswith('_week'):
+        value -= timedelta(days=value.weekday())
+    elif dimension.endswith('_month'):
+        value = value.replace(day=1)
+    elif dimension.endswith('_quarter'):
+        value = value.replace(month=((value.month - 1) // 3) * 3 + 1, day=1)
+    elif dimension.endswith('_year'):
+        value = value.replace(month=1, day=1)
+    return value.isoformat()
