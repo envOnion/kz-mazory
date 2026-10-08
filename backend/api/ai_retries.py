@@ -10,6 +10,10 @@ from .models import MessageProcessingTrace, OutboxEvent, RawMessage
 from .providers import ProviderUnavailable
 
 MAX_ATTEMPTS = 5
+EVIDENCE_ERRORS = {'evidence_not_in_source', 'commitment_evidence_unavailable', 'commitment_promise_evidence_unavailable',
+                   'commitment_deadline_evidence_unavailable', 'commitment_fulfillment_evidence_unavailable',
+                   'commitment_fulfillment_date_invalid', 'commitment_fulfillment_ambiguous',
+                   'commitment_cancellation_evidence_unavailable', 'commitment_cancellation_ambiguous'}
 EVENT_TYPES = {"extract_message", "index_message"}
 RETRYABLE = {
     "provider_rate_limited",
@@ -102,6 +106,7 @@ def handle_failure(event, exc):
             current.save(update_fields=["payload"])
     if current.payload.get("analysis_policy") == "history-packets-v1":
         structural = {"source_revision_changed", "skipped_crm_delivered", "blocked_delivery", "projection_changed", "projection_snapshot_missing", "deduplication_ambiguous", "extraction_json_parse", "extraction_top_level_type", "extraction_facts_missing", "extraction_facts_type", "invalid_extraction_schema", "invalid_schema", "batch_classification_missing", "thread_classification_invalid", "thread_completion_unproven", "thread_sources_unavailable", "thread_source_conflict", "thread_sources_duplicate", "thread_keys_duplicate", "thread_parent_invalid", "thread_revision_conflict", "target_classification_invalid", "target_classification_conflict", "fact_thread_missing", "fact_thread_evidence_missing", "fact_thread_evidence_conflict", "provider_output_truncated", "context_batch_too_large", "context_fixed_input_too_large"}
+        structural |= EVIDENCE_ERRORS
         from .history_analysis import split
         if code in structural:
             current.error_code = code
@@ -118,20 +123,42 @@ def handle_failure(event, exc):
                 return True
             if code in ("context_fixed_input_too_large", "provider_output_truncated"):
                 from .history_packets import prepare_segments
-                if prepare_segments(current, output_overflow=code == "provider_output_truncated"):
+                previous = MessageProcessingTrace.objects.get(pk=current.payload['trace_id'])
+                if previous.context_metadata.get('full_history_policy') != 'thread-context-v2' and prepare_segments(current, output_overflow=code == "provider_output_truncated"):
                     return True
-            if not current.payload.get("schema_repaired") and code != "context_fixed_input_too_large":
+            previous = MessageProcessingTrace.objects.get(pk=current.payload['trace_id'])
+            full_output = code == 'provider_output_truncated' and previous.context_metadata.get('full_history_policy') == 'thread-context-v2'
+            output_generation = previous.context_metadata.get('output_retry_generation', 0)
+            if (full_output and output_generation < 4) or (not full_output and not current.payload.get("schema_repaired") and code != "context_fixed_input_too_large"):
                 from .processing_attempts import reserve_attempt
                 raw = RawMessage.objects.select_for_update().get(pk=current.payload["raw_id"])
                 previous = raw.traces.get(pk=current.payload["trace_id"])
-                trace = reserve_attempt(raw, f"{current.deduplication_key}:schema-repair")
+                repair_key = f"{current.deduplication_key}:schema-repair"
+                if previous.context_metadata.get('full_history_policy') == 'thread-context-v2':
+                    repair_key += f':{previous.id}'
+                trace = reserve_attempt(raw, repair_key)
                 limits = dict(previous.context_metadata.get("analysis_limits", {}))
-                limits["analysis_input_token_limit"] = max(4096, limits.get("analysis_input_token_limit", 16384) // 2)
+                if previous.context_metadata.get('full_history_policy') != 'thread-context-v2':
+                    limits["analysis_input_token_limit"] = max(4096, limits.get("analysis_input_token_limit", 16384) // 2)
+                elif full_output:
+                    from .models import AISettings
+                    cfg = AISettings.get_active()
+                    limits['analysis_output_token_limit'] = min(cfg.max_completion_tokens, limits.get('analysis_output_token_limit', cfg.analysis_output_token_limit) * 2)
+                    trace.context_metadata['output_retry_generation'] = output_generation + 1
+                    if limits['analysis_output_token_limit'] == previous.context_metadata['completion_reserve_tokens']:
+                        trace.context_metadata['analysis_chunk_input_limit'] = max(512,
+                            (previous.context_metadata.get('analysis_chunk_input_limit') or previous.context_metadata['input_tokens_preflight']) // 2)
                 trace.context_metadata.update(analysis_policy="history-packets-v1", analysis_limits=limits, repair_reason=code)
+                for field in ('full_history_policy', 'full_history', 'analysis_chunk_input_limit', 'output_retry_generation'):
+                    if field in previous.context_metadata:
+                        if field in ('analysis_chunk_input_limit', 'output_retry_generation'):
+                            trace.context_metadata.setdefault(field, previous.context_metadata[field])
+                        else:
+                            trace.context_metadata[field] = previous.context_metadata[field]
                 for field in ("replace_unsent", "snapshot_max_id"):
                     if field in previous.context_metadata:trace.context_metadata[field]=previous.context_metadata[field]
                 trace.save(update_fields=["context_metadata"])
-                current.payload = {**current.payload, "trace_id": trace.id, "trace_ids": [{"raw_id":raw.id,"trace_id":trace.id}], "schema_repaired":True}
+                current.payload = {**current.payload, "trace_id": trace.id, "trace_ids": [{"raw_id":raw.id,"trace_id":trace.id}], "schema_repaired":current.payload.get('schema_repaired', False) if full_output else True}
                 if current.payload.get("segment_trace_ids"):
                     trace_list = list(current.payload["segment_trace_ids"])
                     trace_list[current.payload["segment_cursor"]] = trace.id

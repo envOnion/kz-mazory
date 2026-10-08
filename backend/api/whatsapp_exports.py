@@ -49,8 +49,9 @@ def start_file(job_id,file,zone,date_order,user,request_key):
         created=True
     try:
         cfg=AISettings.get_active()
-        limits={name:getattr(cfg,name) for name in ('analysis_input_token_limit','analysis_target_message_limit','analysis_output_token_limit')}
-        run=WhatsAppHistoryRun.objects.create(job=job,requested_by=user,import_kind='file',export_upload=upload,state='importing',source_snapshot=snapshot,settings_snapshot={**limits,'analysis_policy':'history-packets-v1','analysis_mode':'reprocess_all','replace_unsent':True,'only_new':False,'analyze_after_import':True,'poll_seconds':5,'request_key':request_key,'existing_entry_ordinal':upload.entries.aggregate(value=Max('ordinal'))['value'] or 0},status_message='Проверяем TXT-экспорт. Подключение WAHA не требуется.')
+        from .processing_attempts import ANALYSIS_CONFIG_FIELDS
+        limits={name:getattr(cfg,name) for name in ('analysis_input_token_limit','analysis_target_message_limit','analysis_output_token_limit', *ANALYSIS_CONFIG_FIELDS)}
+        run=WhatsAppHistoryRun.objects.create(job=job,requested_by=user,import_kind='file',export_upload=upload,state='importing',source_snapshot=snapshot,settings_snapshot={**limits,'analysis_policy':'history-packets-v1','full_history_policy':'thread-context-v2','analysis_mode':'reprocess_all','replace_unsent':True,'only_new':False,'analyze_after_import':True,'poll_seconds':5,'request_key':request_key,'existing_entry_ordinal':upload.entries.aggregate(value=Max('ordinal'))['value'] or 0},status_message='Проверяем TXT-экспорт. Подключение WAHA не требуется.')
         enqueue_step(run)
         AuditEvent.objects.create(actor=user,target_type='WhatsAppHistoryRun',target_id=run.id,action='history_export_upload',before_after={'upload_id':upload.id,'bytes':size})
         return run

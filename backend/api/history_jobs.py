@@ -140,9 +140,10 @@ def start_job(job_id, user=None, *, scheduled=False):
         from .models import AISettings
         from .history_analysis import POLICY
         cfg = AISettings.get_active()
-        run.settings_snapshot.update(analysis_policy=POLICY, **{
+        from .processing_attempts import ANALYSIS_CONFIG_FIELDS
+        run.settings_snapshot.update(analysis_policy=POLICY, full_history_policy='thread-context-v2', **{
             name: getattr(cfg, name) for name in (
-                "analysis_input_token_limit", "analysis_target_message_limit", "analysis_output_token_limit")
+                "analysis_input_token_limit", "analysis_target_message_limit", "analysis_output_token_limit", *ANALYSIS_CONFIG_FIELDS)
         })
     enqueue_step(run)
     job.next_run_at = (

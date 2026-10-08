@@ -30,6 +30,8 @@ ASSIGNMENTS = {
 
 
 def classify(value):
+    if value['content'].startswith('Полный разбор:'):
+        return classify_full_history(value)
     records = list(value.get("context", [])) + [
         {"raw_message_id": value["target_message_id"], "content": value["content"], "timestamp": value["sent_at"]}
     ]
@@ -197,6 +199,64 @@ def classify(value):
     return {"threads": themes, "facts": facts}
 
 
+def classify_full_history(value):
+    previous = value.get('analysis_state', {}).get('previous_result') or {}
+    records = {row['raw_message_id']: row for row in value.get('context', [])}
+    records[value['target_message_id']] = {'raw_message_id':value['target_message_id'], 'content':value['content'], 'timestamp':value['sent_at']}
+    for fact in previous.get('facts', []):
+        for ref in fact.get('evidence_messages', []):
+            records.setdefault(ref['raw_message_id'], {'raw_message_id':ref['raw_message_id'], 'content':ref['quote']})
+    rows = sorted(records.values(), key=lambda row: row['raw_message_id'])
+    meaningful = [row for row in rows if row['content'].startswith(('Полный разбор:', 'Смету Альфа', 'Смета Альфа'))]
+    request = next((row for row in meaningful if row['content'] == 'Полный разбор: подготовь смету Альфа'), None)
+    promise = next((row for row in meaningful if row['content'] == 'Полный разбор: да, подготовлю смету Альфа завтра'), None)
+    deadline = next((row for row in meaningful if row['content'] == 'Смету Альфа перенесу на послезавтра'), None)
+    closed = next((row for row in meaningful if row['content'] in ('Смету Альфа отменяем, готовить не нужно', 'Смета Альфа готова и отправлена')), None)
+    theme = {'key':'full', 'thread_id':None, 'topic':'Полный разбор сметы Альфа', 'summary':'Смета Альфа: запрос, обещание, срок, исполнение или отмена',
+             'state':'ready' if request and promise else 'open', 'completion_reason':'Конкретная просьба и явное обещание' if request and promise else '',
+             'messages':[{'raw_message_id':row['raw_message_id'], 'thought_state':'final' if row == promise else 'intermediate',
+                          'relation':'fulfills' if row == closed and not row['content'].startswith('Смету') else 'cancels' if row == closed else 'clarifies' if row == deadline else 'answers' if row == promise else 'discusses'} for row in meaningful]}
+    facts = []
+    if request and promise:
+        refs = [{'raw_message_id':request['raw_message_id'], 'quote':request['content'], 'role':'request'},
+                {'raw_message_id':promise['raw_message_id'], 'quote':promise['content'], 'role':'promise'}]
+        if deadline:
+            refs.append({'raw_message_id':deadline['raw_message_id'], 'quote':deadline['content'], 'role':'deadline'})
+        cancelled = closed and closed['content'].startswith('Смету')
+        if closed:
+            refs.append({'raw_message_id':closed['raw_message_id'], 'quote':closed['content'], 'role':'cancellation' if cancelled else 'fulfillment'})
+        facts.append({'thread_key':'full', 'fact_type':'commitment', 'object_name':'', 'commitment_text':'Подготовить смету Альфа',
+                      'currency':None, 'contract_amount':None,
+                      'responsible_name':'Боб', 'promise_message_id':promise['raw_message_id'], 'evidence_message_id':promise['raw_message_id'],
+                      'evidence':'Пересказ: Боб обещал подготовить смету Альфа.', 'evidence_messages':refs, 'deadline_message_id':promise['raw_message_id'],
+                      'deadline_at':value['sent_at'], 'deadline_precision':'date', 'confidence':.98,
+                      'commitment_status':'cancelled' if cancelled else 'fulfilled' if closed else 'pending',
+                      'fulfillment_message_id':closed['raw_message_id'] if closed and not cancelled else None})
+    themes = [theme]
+    for index in range(10):
+        pair = [row for row in rows if row['content'].startswith(f'Параллельный разбор {index}:')]
+        request = next((row for row in pair if ': подготовь' in row['content']), None)
+        promise = next((row for row in pair if ': да, подготовлю' in row['content']), None)
+        finished = next((row for row in pair if 'готов и отправлен' in row['content']), None)
+        if not pair:
+            continue
+        key = f'document_{index}'
+        themes.append({'key':key, 'thread_id':None, 'topic':f'Параллельный документ {index}', 'summary':f'Подготовить документ {index}',
+                       'state':'ready' if request and promise else 'open', 'completion_reason':'Конкретная просьба и обещание' if request and promise else '',
+                       'messages':[{'raw_message_id':row['raw_message_id'], 'thought_state':'final' if row == promise else 'intermediate',
+                                    'relation':'fulfills' if row == finished else 'answers' if row == promise else 'discusses'} for row in pair]})
+        if request and promise:
+            refs = [{'raw_message_id':request['raw_message_id'], 'quote':request['content'], 'role':'request'},
+                    {'raw_message_id':promise['raw_message_id'], 'quote':promise['content'], 'role':'promise'}]
+            if finished:
+                refs.append({'raw_message_id':finished['raw_message_id'], 'quote':finished['content'], 'role':'fulfillment'})
+            facts.append({'thread_key':key, 'fact_type':'commitment', 'object_name':'', 'commitment_text':f'Подготовить документ {index}',
+                          'responsible_name':'Боб', 'promise_message_id':promise['raw_message_id'], 'evidence_message_id':promise['raw_message_id'],
+                          'evidence':promise['content'], 'evidence_messages':refs, 'confidence':.98,
+                          'commitment_status':'fulfilled' if finished else 'pending', 'fulfillment_message_id':finished['raw_message_id'] if finished else None})
+    return {'threads':themes, 'facts':facts}
+
+
 class ProviderHandler(BaseHTTPRequestHandler):
     control = None
 
@@ -319,7 +379,28 @@ class ProviderHandler(BaseHTTPRequestHandler):
             return self.respond(analytical_response(body))
         if self.path.endswith("/v1/messages"):
             value = json.loads(body["messages"][-1]["content"])
+            stop_reason = 'end_turn'
+            if value['content'].startswith('Полный разбор:'):
+                entry = {'target_id':value['target_message_id'], 'source_ids':[row['raw_message_id'] for row in value.get('context', [])] + [value['target_message_id']],
+                         'phase':value.get('analysis_state', {}).get('phase'), 'input_tokens':len(json.dumps(body, ensure_ascii=False))//4,
+                         'prior_statuses':[fact.get('commitment_status') for fact in (value.get('analysis_state', {}).get('previous_result') or {}).get('facts', [])],
+                         'pages':value.get('analysis_state', {}).get('reconciliation_pages', 1), 'output_reserve':body['max_tokens']}
+                with (self.control.parent/'thread-provider.jsonl').open('a') as stream:
+                    stream.write(json.dumps(entry)+'\n')
             result = classify(value)
+            state = json.loads(self.control.read_text())
+            marker = self.control.parent/f"thread-error-{value['target_message_id']}"
+            if state.get('thread_schema_error_per_stage'):
+                suffix = 'later' if value.get('analysis_state', {}).get('previous_result') else 'first'
+                marker = marker.with_name(marker.name + '-' + suffix)
+            errors = int(marker.read_text() or 0) if marker.exists() else 0
+            output_errors = state.get('thread_output_errors', 0)
+            if value['content'].startswith('Полный разбор:') and (state.get('thread_schema_error_once') or state.get('thread_output_error_once') or state.get('thread_schema_error_per_stage') or output_errors) and errors < (output_errors or 1):
+                marker.write_text(str(errors+1))
+                if state.get('thread_schema_error_once') or state.get('thread_schema_error_per_stage'):
+                    result['facts'][0]['confidence'] = 'invalid'
+                else:
+                    stop_reason = 'max_tokens'
             return self.respond(
                 {
                     "id": "fixture-response",
@@ -329,7 +410,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
                     "content": [
                         {"type": "text", "text": json.dumps(result, ensure_ascii=False)}
                     ],
-                    "stop_reason": "end_turn",
+                    "stop_reason": stop_reason,
                     "stop_sequence": None,
                     "usage": {"input_tokens": 100, "output_tokens": 100},
                 }
@@ -389,6 +470,9 @@ def analytical_response(body):
         total = next((key for key, fact in facts.items() if fact['formula'] == 'sum'), None)
         return response(text=f'По выбранным условиям итог — {{{{fact:{total}}}}}. Подробности доступны на графике и в таблице.' if total else 'Данные подготовлены.')
     if last_name == 'read_records' and 'dataset_id' in last:
+        if 'без служебного кода' in prompt:
+            key = next(key for key, value in last['grounded_facts'].items() if value['formula'] == 'sum')
+            return response(text=f'Найдено обязательств — {{{{fact:{key}}}}}.')
         block = {'id': 'overdue', 'kind': 'bar', 'dataset_id': last['dataset_id'], 'encoding': {'category': 'responsible', 'value': 'commitment_count'}} if last['normalized_query'].get('group_by') else {'id': 'overdue', 'kind': 'table', 'dataset_id': last['dataset_id'], 'columns': ['text', 'responsible', 'deadline', 'status']}
         return response(name='build_presentation', arguments={'version': '1.0', 'title': 'Просроченные обещания', 'blocks': [block]})
     if 'обещани' in prompt or prompt.strip() == 'построй график':

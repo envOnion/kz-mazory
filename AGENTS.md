@@ -184,7 +184,7 @@ docker compose logs --tail=50 backend qcluster waha
 
 ## Локальный запуск
 
-Использовать только Docker. Для изолированных E2E: `docker compose -f compose.e2e.yml up -d --build nginx qcluster outbox`, затем `docker compose -f compose.e2e.yml up --build --no-deps --abort-on-container-exit --exit-code-from browser browser`.
+Использовать только Docker. Для изолированных E2E: `docker --context kk-minsk compose -f compose.e2e.yml up -d --build nginx qcluster outbox`, затем `E2E_DOCKER_CONTEXT=kk-minsk bash ops/run_local_e2e.sh`. Скрипт выполняет настоящий перезапуск Q2 между сохранёнными этапами; в CI используется одноразовый Docker Engine runner.
 
 ```bash
 # Сборка и запуск всех сервисов в фоне

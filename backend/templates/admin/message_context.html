@@ -3,13 +3,22 @@
     <h3 class="font-semibold mazory-trace-text">История сообщений, переданная в AI</h3>
     <p class="mazory-trace-meta">Источник: история этого чата / проекта. Попытка {{ trace.attempt_no }}.</p>
     {% if context_prepared %}
-      <p class="font-semibold mazory-trace-text">Включено {{ context_metadata.included_messages_count }} из {{ context_metadata.available_messages_count }} сообщений</p>
+      {% if context_metadata.full_history %}
+      <p class="font-semibold mazory-trace-text" data-testid="history-progress">Прочитано {{ context_metadata.full_history.validated_read }} из {{ context_metadata.full_history.total }} сообщений · Этап {{ context_metadata.full_history.stage }}</p>
+      <p class="mazory-trace-text">{% if context_metadata.full_history.complete and trace.status == "success" %}Полный разбор завершён: все оригиналы прочитаны и итог сверен.{% elif context_metadata.full_history.phase == "reconcile" %}Итоговая сверка прочитанных оригиналов.{% else %}Последовательное чтение истории. Прогресс сохранён, следующие части обрабатываются автоматически.{% endif %}</p>
+      {% if context_metadata.full_history.reconciliation_pages %}<p class="mazory-trace-meta">Страница сведения {{ context_metadata.full_history.reconciliation_page }} из {{ context_metadata.full_history.reconciliation_pages }}.</p>{% endif %}
+      <p class="mazory-trace-meta">Вход {{ context_metadata.input_tokens_preflight }} из {{ context_metadata.effective_input_budget }} токенов. {% if context_metadata.user_input_token_limit %}Пользовательский предел: {{ context_metadata.user_input_token_limit }}.{% else %}Автоматический бюджет окна модели.{% endif %}</p>
+      {% if context_metadata.analysis_chunk_input_limit %}<p class="mazory-trace-meta">Очередная часть уменьшена для размера ответа: {{ context_metadata.analysis_chunk_input_limit }} токенов. Оставшаяся история обрабатывается следующими частями.</p>{% endif %}
+      <p class="mazory-trace-meta">История: {{ context_metadata.token_breakdown.history }} · Инструкции, цель, справочники и состояние: {{ context_metadata.token_breakdown.instructions_target_catalog_state }}.</p>
+      {% else %}<p class="font-semibold mazory-trace-text">Включено {{ context_metadata.included_messages_count }} из {{ context_metadata.available_messages_count }} сообщений</p>{% endif %}
       <p class="mazory-trace-meta">Входной запрос: {{ context_metadata.input_tokens_preflight }} токенов · Резерв ответа: {{ context_metadata.completion_reserve_tokens }} · Технический запас: {{ context_metadata.safety_tokens }} · Окно: {{ context_metadata.window_tokens }}</p>
       <p class="mazory-trace-meta">Фактический вход по данным провайдера: {% if context_metadata.input_tokens_actual != None %}{{ context_metadata.input_tokens_actual }} токенов{% else %}неизвестно{% endif %}.</p>
-      {% if context_metadata.history_complete_in_request %}
+      {% if context_metadata.full_history %}
+        <p class="mazory-trace-meta">Оригиналов в этом запросе: {{ trace.earlier_messages_count }}. Покрытие выше учитывает все сохранённые этапы.</p>
+      {% elif context_metadata.history_complete_in_request %}
         <p class="mazory-trace-text">Вся доступная история вошла в запрос.</p>
       {% else %}
-        <p class="mazory-trace-text" role="status">Старые сообщения не вошли: достигнуто окно модели. Полностью исключено: {{ context_metadata.omitted_messages_count }}. Частично включено: {{ context_metadata.partial_messages_count }}.</p>
+        <p class="mazory-trace-text" role="status">Историческая попытка с ограничением входа {{ context_metadata.effective_input_budget }} токенов. В этот запрос не вошло: {{ context_metadata.omitted_messages_count }}. Частично включено: {{ context_metadata.partial_messages_count }}.</p>
       {% endif %}
       {% if not context_metadata.available_messages_count %}<p class="mazory-trace-meta">В доступной истории этого чата предыдущих сообщений нет.</p>{% endif %}
       <p class="mazory-trace-meta">Период включённой истории: {{ context_metadata.included_period.0|default_if_none:"—" }} — {{ context_metadata.included_period.1|default_if_none:"—" }}.</p>

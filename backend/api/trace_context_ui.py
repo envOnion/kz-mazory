@@ -31,7 +31,7 @@ ERRORS = {
     "context_invalid_budget": "Окно должно превышать резерв ответа и технический запас.",
     "context_model_metadata_unavailable": "Не удалось проверить ограничения провайдера модели.",
     "context_model_window_unavailable": "Провайдер не поддерживает выбранное окно и резерв ответа.",
-    "context_fixed_input_too_large": "Целевое сообщение и обязательные данные не помещаются в окно модели.",
+    "context_fixed_input_too_large": "Обязательные данные превышают входной бюджет этой попытки; размер и пользовательский предел показаны ниже.",
     "context_source_unavailable": "Для сообщения недоступен однозначно определённый чат или проект.",
     "context_processing_in_progress": "Это сообщение уже обрабатывается.",
     "context_configuration_changed": "Настройки модели изменились. Запустите новую попытку анализа.",
@@ -73,6 +73,9 @@ def retry_view(obj):
 
 
 def badge_text(obj):
+    full = obj.context_metadata.get('full_history')
+    if full:
+        return f"Прочитано: {full.get('validated_read', 0)}/{full['total']} · этап {full['stage']}"
     count = len(obj.earlier_messages_context or [])
     return (
         f"Включено: {count}"

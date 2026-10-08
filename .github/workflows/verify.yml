@@ -21,7 +21,7 @@ jobs:
       - name: Build and run browser, API, PostgreSQL and Q2
         run: |
           docker compose -f compose.e2e.yml up -d --build nginx qcluster outbox
-          docker compose -f compose.e2e.yml up --build --no-deps --abort-on-container-exit --exit-code-from browser browser
+          bash ops/run_local_e2e.sh
       - name: Production settings check inside Docker
         run: docker run --rm -v "$PWD/ops:/checks:ro" --entrypoint python mazory-e2e-backend /checks/check_deployment.py /app
       - name: Frontend dependency audit inside Docker

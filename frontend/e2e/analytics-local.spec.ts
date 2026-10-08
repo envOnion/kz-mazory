@@ -73,7 +73,7 @@ function control(patch: Record<string, unknown>) {
 
 test('large overdue records use provider token counts, compact previews and retain the complete chart scope', async ({ page, context, request }) => {
   await authenticate(context); await startDialogue(page)
-  await submit(page, 'Какие обещания просрочены?')
+  await submit(page, 'Какие обещания просрочены? Покажи список без служебного кода.')
   const id = await currentConversationId(page), listed = await waitTurn(request, id, 1)
   const records: Artifact = await (await request.get(`/api/chat/artifacts/${listed.artifacts[0]!.id}/`, { headers })).json()
   expect(Object.values(records.presentation!.datasets)[0]!.rows).toHaveLength(50)

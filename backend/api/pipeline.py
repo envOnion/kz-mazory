@@ -16,7 +16,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from .ai_service import AIService, usage_event_id, outbox_claim
 from .context_tokens import canonical_json, extraction_input, payload_hash
 from .deduplication import normalize_deal_name
-from .facts import FactSchema, fact_identity, json_value, same_commitment_origin
+from .facts import FactSchema, fact_identity, json_value, same_commitment_origin, normalize_fact_fields
 from .message_context import build_context, source_scope
 from .message_time import source_time
 from .models import (
@@ -50,22 +50,7 @@ def _source_quote(quote, content):
 def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False):
     # A missing optional value and an explicit null both mean unknown. Required
     # values, enums and evidence still go through the full serializer validation.
-    fields = FactSchema().fields
-    normalized = [
-        {
-            key: value
-            for key, value in item.items()
-            if not (
-                value is None
-                and key in fields
-                and not fields[key].required
-                and not fields[key].allow_null
-            )
-        }
-        if isinstance(item, dict)
-        else item
-        for item in result["facts"]
-    ]
+    normalized = normalize_fact_fields(result['facts'])
     schema = FactSchema(data=normalized, many=True)
     schema.is_valid(raise_exception=True)
     accepted_facts = []
@@ -145,7 +130,7 @@ def _extraction_user_message(payload):
     return matches[0]
 
 
-def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refresh=False, batch_ids=None, reanalyze=False, trace_ids=None, segment_range=None, defer_result=False, result_override=None):
+def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refresh=False, batch_ids=None, reanalyze=False, trace_ids=None, segment_range=None, defer_result=False, result_override=None, full_state=None):
     preparation_started = time.monotonic()
     explicit = trace_id is not None or reanalyze
     with transaction.atomic():
@@ -195,9 +180,18 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             cfg = copy.copy(cfg)
             limits = trace.context_metadata.get("analysis_limits", {})
             cfg.analysis_policy = "history-packets-v1"
+            cfg.full_history_policy = trace.context_metadata.get('full_history_policy')
+            cfg.analysis_chunk_input_limit = trace.context_metadata.get('analysis_chunk_input_limit')
+            if cfg.full_history_policy == 'thread-context-v2':
+                from .processing_attempts import ANALYSIS_CONFIG_FIELDS
+                changed = [name for name in ANALYSIS_CONFIG_FIELDS if name in limits and limits[name] != getattr(cfg, name)]
+                if changed:
+                    raise ProviderUnavailable('context_configuration_changed', diagnostics={'changed_fields':changed})
             cfg.analysis_repair_reason = trace.context_metadata.get("repair_reason")
             cfg.analysis_input_token_limit = limits.get("analysis_input_token_limit", cfg.analysis_input_token_limit)
             cfg.max_completion_tokens = min(cfg.max_completion_tokens, limits.get("analysis_output_token_limit", cfg.analysis_output_token_limit))
+            if cfg.full_history_policy == 'thread-context-v2' and not defer_result and result_override is None:
+                raise ProviderUnavailable('analysis_claim_expired')
         api_format = getattr(cfg, "chat_api_format", "openai_compatible")
         effective_provider_url = AIService.effective_chat_provider_url(cfg)
         if trace.context_metadata.get("request_state") == "sent":
@@ -229,9 +223,9 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 )
             )
             if cfg.autonomous_enabled and not batch_ids and not requested_by_id:
-                batch_ids = list(source_scope(raw).filter(processed=False, id__gte=raw.id, id__lte=trace.context_metadata["snapshot_max_id"]).exclude(content="").order_by("id").values_list("id", flat=True)[:cfg.autonomous_context_messages])
+                batch_ids = list(source_scope(raw).filter(processed=False, id__gte=raw.id, id__lte=trace.context_metadata["snapshot_max_id"]).exclude(content="").order_by("id").values_list("id", flat=True)[:min(cfg.autonomous_context_messages, cfg.analysis_target_message_limit)])
             context, metadata, payload = build_context(
-                raw, cfg, known, trace.context_metadata["snapshot_max_id"], include_following=True, **({"batch_ids": batch_ids} if batch_ids else {}), **({"target_content":raw.content[segment_range[0]:segment_range[1]]} if segment_range else {})
+                raw, cfg, known, trace.context_metadata["snapshot_max_id"], include_following=True, full_state=full_state, **({"batch_ids": batch_ids} if batch_ids else {}), **({"target_content":raw.content[segment_range[0]:segment_range[1]]} if segment_range else {})
             )
             envelope = copy.deepcopy(payload)
             user_message = _extraction_user_message(envelope)
@@ -246,7 +240,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             )
             if packet:
                 metadata.update(analysis_policy="history-packets-v1", analysis_limits=limits,
-                                retry=trace.context_metadata.get("retry", {}), repair_reason=cfg.analysis_repair_reason)
+                                retry=trace.context_metadata.get("retry", {}), repair_reason=cfg.analysis_repair_reason,
+                                output_retry_generation=trace.context_metadata.get('output_retry_generation', 0))
             metadata.setdefault("snapshot_max_id", trace.context_metadata["snapshot_max_id"])
             if trace.context_metadata.get("replace_unsent"):
                 metadata["replace_unsent"] = True
@@ -287,11 +282,19 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             value if type(value) is int and value >= 0 else None
         )
         from .dialogue_threads import prepare_themes, ready_facts, persist_themes, lock_source
+        if getattr(cfg, 'full_history_policy', None) == 'thread-context-v2':
+            from .full_history import validate_evidence
+            validate_evidence(result, raw, trace)
         themes = prepare_themes(result, raw, trace)
         facts = _facts(ready_facts(result, themes), raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True)
         if defer_result:
-            trace.context_metadata.update(request_state="segment_validated", segment_result=result, segment_range=segment_range)
+            trace.context_metadata.update(request_state="segment_validated", segment_result=result,
+                                          segment_usage=usage, segment_diagnostics=diagnostics, segment_range=segment_range)
             trace.ai_extracted_facts = json_value({"facts":facts})
+            if trace.context_metadata.get('full_history'):
+                progress = trace.context_metadata['full_history']
+                progress['validated_read'] = progress['read']
+                trace.result_summary = f"Прочитано {progress['read']}/{progress['total']}. Промежуточный результат сохранён; публикация после итоговой сверки."
             trace.save()
             return (result, usage, diagnostics)
         from .commitment_resolution import resolve_remaining
@@ -313,7 +316,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         with transaction.atomic():
             if usage_event_id.get() and outbox_claim.get():
                 owner = OutboxEvent.objects.select_for_update().get(pk=usage_event_id.get())
-                if owner.state != "processing" or owner.payload.get("claim_generation") != outbox_claim.get():
+                if owner.state != "processing" or owner.payload.get("claim_generation") != outbox_claim.get() or owner.payload.get('history_cancelled'):
                     raise ProviderUnavailable("analysis_claim_expired")
             lock_source(raw)
             locked = (

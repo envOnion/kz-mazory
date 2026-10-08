@@ -40,10 +40,12 @@ def schedule(run):
         traces = {}
         for item in packet:
             trace = reserve_attempt(item.raw_message, f"{operation}:target:{item.raw_message_id}")
-            trace.context_metadata.update(analysis_policy=POLICY, analysis_limits={
+            from .processing_attempts import ANALYSIS_CONFIG_FIELDS
+            trace.context_metadata.update(analysis_policy=POLICY, analysis_limits={**trace.context_metadata['analysis_limits'], **{
                 name: run.settings_snapshot.get(name, getattr(cfg, name))
-                for name in ("analysis_input_token_limit", "analysis_output_token_limit")
-            })
+                for name in ("analysis_input_token_limit", "analysis_output_token_limit", *ANALYSIS_CONFIG_FIELDS)
+            }})
+            trace.context_metadata['full_history_policy'] = run.settings_snapshot.get('full_history_policy')
             if run.settings_snapshot.get("replace_unsent"):
                 trace.context_metadata.update(replace_unsent=True, snapshot_max_id=run.settings_snapshot["snapshot_max_id"])
             trace.save(update_fields=["context_metadata"])
@@ -143,13 +145,22 @@ def split(event):
             old = item.trace
             trace = reserve_attempt(item.raw_message, f"{operation}:target:{item.raw_message_id}")
             trace.context_metadata.update(analysis_policy=POLICY, analysis_limits=old.context_metadata.get("analysis_limits", {}), parent_trace_id=old.id)
-            for field in ("replace_unsent", "snapshot_max_id"):
+            for field in ("replace_unsent", "snapshot_max_id", "full_history_policy"):
                 if field in old.context_metadata:trace.context_metadata[field]=old.context_metadata[field]
             trace.save(update_fields=["context_metadata"])
             traces[item.raw_message_id] = trace.id
         payload = {**event.payload, "raw_id": raw.id, "trace_id": traces[raw.id],
                    "trace_ids": [{"raw_id":pk,"trace_id":trace_id} for pk,trace_id in traces.items()], "batch_ids": [x.raw_message_id for x in group],
                    "repair_generation": event.payload.get("repair_generation", 0) + 1}
+        if payload.get('full_history_state'):
+            import copy
+            from .full_history import merge_results
+            preserved = copy.deepcopy(payload['full_history_state'])
+            page = preserved.pop('page', None)
+            if page and page.get('results'):
+                preserved['result'] = merge_results([preserved.get('result'), *page['results']])
+                preserved['phase'] = 'reconcile'
+            payload['full_history_state'] = preserved
         child, _ = OutboxEvent.objects.get_or_create(deduplication_key=operation, defaults={
             "event_type": "extract_message", "payload": payload,
             "analysis_source_key": event.analysis_source_key, "analysis_position": analysis_position(raw),

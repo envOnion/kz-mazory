@@ -138,6 +138,9 @@ def extraction_schema(input_data=None):
         threads = input_data.get("known_threads", [])
         thread_ids = [row["id"] for row in threads if type(row.get("id")) is int]
         commitment_ids = [item["id"] for row in threads for item in row.get("commitments", []) if type(item.get("id")) is int]
+        message_ids.update(input_data.get('analysis_state', {}).get('read_source_ids', []))
+        if 'analysis_state' in input_data:
+            message_ids.update(row['raw_message_id'] for row in input_data.get('context', []))
         raw_fields = {"raw_message_id", "evidence_message_id", "promise_message_id", "deadline_message_id", "fulfillment_message_id"}
 
         def bind(node):
