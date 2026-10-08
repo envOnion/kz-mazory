@@ -72,6 +72,9 @@ class SecurityHeadersMiddleware:
             if request.path == "/api/attachments/"
             else settings.DATA_UPLOAD_MAX_MEMORY_SIZE
         )
+        if request.path == "/api/profile/" and request.content_type == "multipart/form-data":
+            from .avatars import MAX_AVATAR_BYTES
+            limit = MAX_AVATAR_BYTES + 65536
         if request.method == "POST" and re.fullmatch(
             r"/admin/api/whatsapphistoryjob/[0-9]+/import-txt/", request.path
         ) and request.content_type == "multipart/form-data":

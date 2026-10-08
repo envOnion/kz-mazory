@@ -122,6 +122,11 @@ export const fieldLabel = (key: string) =>
   (
     {
       reason: "Причина",
+      avatar: "Фото профиля",
+      remove_avatar: "Удаление фото",
+      avatar_url: "Фото профиля",
+      full_name: "ФИО",
+      email: "Email",
       base_version: "Версия данных",
       project_id: "Проект",
       non_field_errors: "Проверка предложения",

@@ -7,7 +7,7 @@ COPY tokenizers/*manifest.json tokenizers/
 COPY fetch_tokenizer.py .
 RUN python fetch_tokenizer.py
 COPY --chown=mazory:mazory . .
-RUN mkdir -p /app/media /app/staticfiles && chown -R mazory:mazory /app/media /app/staticfiles
+RUN mkdir -p /app/media /app/staticfiles /app/avatars && chown -R mazory:mazory /app/media /app/staticfiles /app/avatars
 USER mazory
 EXPOSE 8000
 CMD ["gunicorn", "mazory_backend.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "2", "--timeout", "30"]

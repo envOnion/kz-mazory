@@ -88,6 +88,37 @@ def seed():
     seed_analytics()
     from .thread_history import seed as seed_thread_history
     seed_thread_history()
+    seed_avatars()
+
+
+def seed_avatars():
+    from PIL import Image, ImageDraw
+    directory = Path(settings.E2E_DIR)
+    team = Team.objects.create(name="Фото профиля E2E")
+    for suffix, name in [("200", "Антон E2E"), ("201", "Другой пользователь")]:
+        user = User.objects.create_user(f"79990000{suffix}")
+        profile = UserProfile.objects.create(user=user, full_name=name, phone=user.username)
+        TeamMembership.objects.create(user=user, team=team, role="team_lead", status="active")
+        _, access_token, refresh = create_session(user)
+        (directory / f"avatar-session-{suffix}.json").write_text(json.dumps({
+            "access": access_token, "refresh": refresh,
+            "cookie_name": settings.AUTH_REFRESH_COOKIE, "profile_id": profile.id,
+        }))
+    image = Image.new("RGB", (900, 600), "#172554")
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((345, 90, 555, 300), fill="#a5b4fc")
+    draw.rounded_rectangle((265, 330, 635, 680), radius=120, fill="#a5b4fc")
+    image.save(directory / "avatar.png")
+    exif = Image.Exif()
+    exif[274] = 6
+    exif[315] = "private-avatar-metadata"
+    image.save(directory / "avatar.jpg", exif=exif)
+    image.save(directory / "avatar.webp")
+    Image.effect_noise((2200, 1500), 64).save(directory / "avatar-large-valid.png")
+    image.save(directory / "avatar.gif")
+    image.save(directory / "avatar-animated.png", save_all=True,
+               append_images=[Image.new("RGB", image.size, "green")], duration=100)
+    Image.new("RGB", (5000, 4001), "blue").save(directory / "avatar-too-many-pixels.png")
 
 
 def seed_analytics():

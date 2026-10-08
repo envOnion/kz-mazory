@@ -38,7 +38,7 @@ x-backend: &backend
   init: true
   security_opt: ['no-new-privileges:true']
   cap_drop: [ALL]
-  volumes: [private_media:/app/media, static_files:/app/staticfiles]
+  volumes: [private_media:/app/media, static_files:/app/staticfiles, avatar_media:/app/avatars]
   depends_on:
     postgres: { condition: service_healthy }
     redis: { condition: service_started }
@@ -51,7 +51,7 @@ services:
       dockerfile: nginx/Dockerfile
     restart: unless-stopped
     ports: ['127.0.0.1:18080:80']
-    volumes: [static_files:/staticfiles:ro]
+    volumes: [static_files:/staticfiles:ro, avatar_media:/avatars:ro]
     depends_on: [backend]
     networks: [internal]
   backend:
@@ -140,5 +140,6 @@ volumes:
   waha_sessions:
   private_media:
   static_files:
+  avatar_media:
 networks:
   internal:

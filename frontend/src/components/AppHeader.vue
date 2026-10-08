@@ -67,9 +67,10 @@
         <img
           :src="profile.avatar_url" v-if="profile.avatar_url"
           alt="Профиль"
+          data-testid="header-avatar"
           class="w-8 h-8 rounded-full object-cover ring-1 ring-emerald-400/80 shadow-md"
         />
-        <span v-if="!profile.avatar_url" class="flex w-8 h-8 items-center justify-center text-xs">Я</span>
+        <span v-if="!profile.avatar_url" class="flex w-8 h-8 items-center justify-center rounded-full bg-indigo-500/15 text-xs text-indigo-200">{{ profileInitials(profile.full_name) }}</span>
         <div class="absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-emerald-400 ring-2 ring-[#060912] shadow-[0_0_6px_rgba(52,211,153,0.8)]"></div>
       </button>
     </div>
@@ -83,6 +84,7 @@ import MazoryLogo from './icons/MazoryLogo.vue'
 import NotificationsPopover from './NotificationsPopover.vue'
 import { useAuth } from '../composables/useAuth'
 import { useProfile } from '../composables/useProfile'
+import { profileInitials } from '../composables/profileInitials'
 import { useNotifications } from '../composables/useNotifications'
 
 const emit = defineEmits<{
@@ -92,7 +94,7 @@ const emit = defineEmits<{
 }>()
 
 const { isAuthenticated } = useAuth()
-const { profile } = useProfile()
+const { profile, fetchProfile } = useProfile()
 const {
   notifications,
   unreadCount,
@@ -119,6 +121,7 @@ function handleKeydown(event: KeyboardEvent) {
 
 onMounted(() => {
   if (isAuthenticated.value) {
+    fetchProfile()
     fetchNotifications()
   }
   document.addEventListener('click', handleClickOutside)
@@ -132,6 +135,7 @@ onUnmounted(() => {
 
 watch(isAuthenticated, (authed) => {
   if (authed) {
+    fetchProfile()
     fetchNotifications()
   } else {
     closePopover()

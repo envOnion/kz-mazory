@@ -18,7 +18,7 @@ x-backend: &backend
   image: mazory-e2e-backend
   build: ./backend
   environment: *environment
-  volumes: [fixtures:/e2e, static:/app/staticfiles]
+  volumes: [fixtures:/e2e, static:/app/staticfiles, avatars:/app/avatars]
   networks: [isolated]
 services:
   postgres:
@@ -67,7 +67,7 @@ services:
     build: {context: ., dockerfile: nginx/Dockerfile}
     depends_on: {backend: {condition: service_healthy}}
     networks: [isolated]
-    volumes: [static:/staticfiles:ro]
+    volumes: [static:/staticfiles:ro, avatars:/avatars:ro]
   browser:
     build: {context: ., dockerfile: frontend/e2e/Dockerfile}
     environment: {MAZORY_E2E_DIR: /e2e, MAZORY_E2E_URL: 'http://nginx', MAZORY_E2E_OUTPUT: /e2e/playwright}
@@ -81,3 +81,4 @@ volumes:
   fixtures: {}
   database: {}
   static: {}
+  avatars: {}

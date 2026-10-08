@@ -262,6 +262,10 @@ STATICFILES_DIRS = [BASE_DIR / "static"]
 MEDIA_URL = "/private-media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
+# Only normalized profile photos are public; private attachments use MEDIA_ROOT.
+AVATAR_ROOT = BASE_DIR / "avatars"
+AVATAR_URL = "/avatars/"
+
 # Unfold Admin Settings
 UNFOLD = {
     "SITE_TITLE": "Mazory AI Sales Platform",
