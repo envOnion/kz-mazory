@@ -393,8 +393,10 @@ class ProviderHandler(BaseHTTPRequestHandler):
             if state.get('thread_schema_error_per_stage'):
                 suffix = 'later' if value.get('analysis_state', {}).get('previous_result') else 'first'
                 marker = marker.with_name(marker.name + '-' + suffix)
-            if value['content'].startswith('Полный разбор:') and (state.get('thread_schema_error_once') or state.get('thread_output_error_once') or state.get('thread_schema_error_per_stage')) and not marker.exists():
-                marker.touch()
+            errors = int(marker.read_text() or 0) if marker.exists() else 0
+            output_errors = state.get('thread_output_errors', 0)
+            if value['content'].startswith('Полный разбор:') and (state.get('thread_schema_error_once') or state.get('thread_output_error_once') or state.get('thread_schema_error_per_stage') or output_errors) and errors < (output_errors or 1):
+                marker.write_text(str(errors+1))
                 if state.get('thread_schema_error_once') or state.get('thread_schema_error_per_stage'):
                     result['facts'][0]['confidence'] = 'invalid'
                 else:

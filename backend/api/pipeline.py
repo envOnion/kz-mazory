@@ -181,6 +181,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             limits = trace.context_metadata.get("analysis_limits", {})
             cfg.analysis_policy = "history-packets-v1"
             cfg.full_history_policy = trace.context_metadata.get('full_history_policy')
+            cfg.analysis_chunk_input_limit = trace.context_metadata.get('analysis_chunk_input_limit')
             if cfg.full_history_policy == 'thread-context-v2':
                 from .processing_attempts import ANALYSIS_CONFIG_FIELDS
                 changed = [name for name in ANALYSIS_CONFIG_FIELDS if name in limits and limits[name] != getattr(cfg, name)]
@@ -239,7 +240,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             )
             if packet:
                 metadata.update(analysis_policy="history-packets-v1", analysis_limits=limits,
-                                retry=trace.context_metadata.get("retry", {}), repair_reason=cfg.analysis_repair_reason)
+                                retry=trace.context_metadata.get("retry", {}), repair_reason=cfg.analysis_repair_reason,
+                                output_retry_generation=trace.context_metadata.get('output_retry_generation', 0))
             metadata.setdefault("snapshot_max_id", trace.context_metadata["snapshot_max_id"])
             if trace.context_metadata.get("replace_unsent"):
                 metadata["replace_unsent"] = True

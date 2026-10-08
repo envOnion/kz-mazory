@@ -139,12 +139,14 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
     if state.get('source_hash') and state['source_hash'] != digest:
         raise ProviderUnavailable('context_snapshot_mismatch')
     targets = set(batch_ids or [raw.id])
+    available = budget(cfg)
+    chunk_limit = min(available, getattr(cfg, 'analysis_chunk_input_limit', None) or available)
     by_id = {r['raw_message_id']: r for r in rows}
     if not targets <= by_id.keys():
         raise ProviderUnavailable('context_source_unavailable')
     source = source_metadata(raw)
     page = copy.deepcopy(state.get('page', {}))
-    parts = page.get('parts') or sorted(state_parts(state.get('result'), targets, counter, min(budget(cfg) // 3, cfg.max_completion_tokens // 2)),
+    parts = page.get('parts') or sorted(state_parts(state.get('result'), targets, counter, min(chunk_limit // 3, cfg.max_completion_tokens // 2)),
                                       key=lambda value: counter.count_text(canonical_json(value)), reverse=True)
     part_index = page.get('index', 0)
     prior = parts[part_index]
@@ -175,13 +177,13 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
     target_offset = ranges.get(str(raw.id), 0)
     target_done = target_offset >= len(target_text)
     if final or target_done:
-        if prior and counter.count_text(target_text) > budget(cfg) // 3:
+        if prior and counter.count_text(target_text) > chunk_limit // 3:
             target_text = '\n'.join(ref['quote'] for fact in prior.get('facts', [])
                                     for ref in fact.get('evidence_messages', []) if ref['raw_message_id'] == raw.id)
             target_range = None
-    elif counter.count_text(target_text) > budget(cfg) // 3:
-        end = min(len(target_text), target_offset + max(256, budget(cfg)))
-        while end > target_offset + 1 and counter.count_text(target_text[target_offset:end]) > budget(cfg) // 3:
+    elif counter.count_text(target_text) > chunk_limit // 3:
+        end = min(len(target_text), target_offset + max(256, chunk_limit))
+        while end > target_offset + 1 and counter.count_text(target_text[target_offset:end]) > chunk_limit // 3:
             end = target_offset + (end - target_offset) // 2
         target_text, target_range = target_text[target_offset:end], [target_offset, end]
     if page.get('target_range'):
@@ -217,10 +219,9 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
         message['content'] = extraction_input(value)
         return payload
 
-    available = budget(cfg)
-    chunk_budget = int(available * .9) if len(parts) > 1 else available
+    chunk_budget = int(chunk_limit * .9) if len(parts) > 1 else chunk_limit
     fixed = counter.count_payload(request([]))
-    if fixed > available and carry:
+    if fixed > chunk_budget and carry:
         # Exact evidence excerpts keep identity/date/author provenance without
         # repeatedly spending a window on already read long originals.
         carry = [{**item, 'content': '\n'.join(dict.fromkeys(ref['quote'] for fact in prior.get('facts', [])
@@ -232,6 +233,9 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
             'input_tokens': fixed, 'available_input_tokens': available,
             'user_input_token_limit': cfg.analysis_input_token_limit,
         })
+    # A scheduling cap reduces newly read originals, never the actual model
+    # window or already verified evidence. Leave room for at least a fragment.
+    chunk_budget = min(available, max(chunk_budget, fixed + min(512, available-fixed)))
     selected = []
     empty = sum(not r['content'] for r in rows)
     if target_range:
@@ -298,6 +302,7 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
         'window_tokens': cfg.context_window_tokens, 'completion_reserve_tokens': cfg.max_completion_tokens,
         'safety_tokens': cfg.context_safety_tokens, 'effective_input_budget': available,
         'user_input_token_limit': cfg.analysis_input_token_limit, 'fixed_input_tokens': fixed,
+        'analysis_chunk_input_limit': getattr(cfg, 'analysis_chunk_input_limit', None),
         'history_budget_tokens': available-fixed, 'input_tokens_preflight': input_tokens,
         'payload_sha256': payload_hash(payload), 'request_state': 'prepared',
         'available_messages_count': len(rows), 'included_messages_count': len(request_context),
@@ -439,7 +444,7 @@ def extract(payload):
             raise ProviderUnavailable('analysis_claim_expired')
         raw = RawMessage.objects.select_for_update().get(pk=payload['raw_id'])
         following = reserve_attempt(raw, f'{current.deduplication_key}:full-stage:{len(stages)}')
-        following.context_metadata.update({k: trace.context_metadata[k] for k in ['analysis_policy', 'analysis_limits', 'snapshot_max_id', 'full_history_policy']})
+        following.context_metadata.update({k: trace.context_metadata[k] for k in ['analysis_policy', 'analysis_limits', 'snapshot_max_id', 'full_history_policy', 'analysis_chunk_input_limit']})
         if trace.context_metadata.get('replace_unsent'):
             following.context_metadata['replace_unsent'] = True
         following.context_metadata['full_history'] = {**coverage, 'phase': next_state['phase'], 'complete': False}

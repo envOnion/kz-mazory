@@ -126,7 +126,10 @@ def handle_failure(event, exc):
                 previous = MessageProcessingTrace.objects.get(pk=current.payload['trace_id'])
                 if previous.context_metadata.get('full_history_policy') != 'thread-context-v2' and prepare_segments(current, output_overflow=code == "provider_output_truncated"):
                     return True
-            if not current.payload.get("schema_repaired") and code != "context_fixed_input_too_large":
+            previous = MessageProcessingTrace.objects.get(pk=current.payload['trace_id'])
+            full_output = code == 'provider_output_truncated' and previous.context_metadata.get('full_history_policy') == 'thread-context-v2'
+            output_generation = previous.context_metadata.get('output_retry_generation', 0)
+            if (full_output and output_generation < 4) or (not full_output and not current.payload.get("schema_repaired") and code != "context_fixed_input_too_large"):
                 from .processing_attempts import reserve_attempt
                 raw = RawMessage.objects.select_for_update().get(pk=current.payload["raw_id"])
                 previous = raw.traces.get(pk=current.payload["trace_id"])
@@ -137,18 +140,25 @@ def handle_failure(event, exc):
                 limits = dict(previous.context_metadata.get("analysis_limits", {}))
                 if previous.context_metadata.get('full_history_policy') != 'thread-context-v2':
                     limits["analysis_input_token_limit"] = max(4096, limits.get("analysis_input_token_limit", 16384) // 2)
-                elif code == 'provider_output_truncated':
+                elif full_output:
                     from .models import AISettings
                     cfg = AISettings.get_active()
                     limits['analysis_output_token_limit'] = min(cfg.max_completion_tokens, limits.get('analysis_output_token_limit', cfg.analysis_output_token_limit) * 2)
+                    trace.context_metadata['output_retry_generation'] = output_generation + 1
+                    if limits['analysis_output_token_limit'] == previous.context_metadata['completion_reserve_tokens']:
+                        trace.context_metadata['analysis_chunk_input_limit'] = max(512,
+                            (previous.context_metadata.get('analysis_chunk_input_limit') or previous.context_metadata['input_tokens_preflight']) // 2)
                 trace.context_metadata.update(analysis_policy="history-packets-v1", analysis_limits=limits, repair_reason=code)
-                for field in ('full_history_policy', 'full_history'):
+                for field in ('full_history_policy', 'full_history', 'analysis_chunk_input_limit', 'output_retry_generation'):
                     if field in previous.context_metadata:
-                        trace.context_metadata[field] = previous.context_metadata[field]
+                        if field in ('analysis_chunk_input_limit', 'output_retry_generation'):
+                            trace.context_metadata.setdefault(field, previous.context_metadata[field])
+                        else:
+                            trace.context_metadata[field] = previous.context_metadata[field]
                 for field in ("replace_unsent", "snapshot_max_id"):
                     if field in previous.context_metadata:trace.context_metadata[field]=previous.context_metadata[field]
                 trace.save(update_fields=["context_metadata"])
-                current.payload = {**current.payload, "trace_id": trace.id, "trace_ids": [{"raw_id":raw.id,"trace_id":trace.id}], "schema_repaired":True}
+                current.payload = {**current.payload, "trace_id": trace.id, "trace_ids": [{"raw_id":raw.id,"trace_id":trace.id}], "schema_repaired":current.payload.get('schema_repaired', False) if full_output else True}
                 if current.payload.get("segment_trace_ids"):
                     trace_list = list(current.payload["segment_trace_ids"])
                     trace_list[current.payload["segment_cursor"]] = trace.id

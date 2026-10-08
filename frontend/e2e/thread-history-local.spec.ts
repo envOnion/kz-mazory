@@ -32,7 +32,7 @@ for (const kind of ['whole', 'chunks', 'cancel', 'restart', 'pages', 'repair', '
               ...(kind === 'restart' ? { pause_thread_after_stage: 1 } : {}),
               ...(kind === 'repair' ? { thread_schema_error_once: true } : {}),
               ...(kind === 'chunks' ? { thread_schema_error_per_stage: true } : {}),
-              ...(kind === 'output' ? { thread_output_error_once: true } : {}) })
+              ...(kind === 'output' ? { thread_output_errors: 2 } : {}) })
     await page.goto('/admin/login/?next=/admin/auth/user/')
     await page.getByLabel('Имя пользователя').fill('79990000001')
     await page.getByLabel('Пароль').fill('local-e2e-only')
@@ -74,10 +74,17 @@ for (const kind of ['whole', 'chunks', 'cancel', 'restart', 'pages', 'repair', '
     expect(evidence.some(row => row.quote === 'Полный разбор: сделаешь завтра?' && row.role === 'promise')).toBe(false)
     const provider = calls(fixture.raw_id).slice(initialCalls)
     if (['whole','repair','output'].includes(kind)) {
-      expect(provider).toHaveLength(kind === 'whole' ? 1 : 2)
+      if (kind === 'output') expect(provider.length).toBeGreaterThan(3)
+      else expect(provider).toHaveLength(kind === 'whole' ? 1 : 2)
       expect(new Set(provider[0]!.source_ids).size).toBe(fixture.total)
-      expect(provider.every(row => row.input_tokens > 8192 && new Set(row.source_ids).size === fixture.total)).toBe(true)
-      if (kind === 'output') expect(provider[1]!.output_reserve).toBe(8192)
+      expect(provider.slice(0, kind === 'output' ? 2 : provider.length).every(row => row.input_tokens > 8192 && new Set(row.source_ids).size === fixture.total)).toBe(true)
+      if (kind === 'output') {
+        expect(provider[1]!.output_reserve).toBe(8192)
+        expect(provider[2]!.source_ids.length).toBeLessThan(fixture.total)
+        expect(provider[2]!.input_tokens).toBeLessThan(provider[1]!.input_tokens)
+        expect(new Set(provider.flatMap(row => row.source_ids)).size).toBe(fixture.total)
+        expect(provider.at(-1)!.phase).toBe('reconcile')
+      }
     } else {
       expect(provider.length).toBeGreaterThan(2)
       expect(provider.at(-1)!.phase).toBe('reconcile')
@@ -92,6 +99,7 @@ for (const kind of ['whole', 'chunks', 'cancel', 'restart', 'pages', 'repair', '
     await page.goto(`/admin/api/messageprocessingtrace/${traceId}/context/`)
     await expect(page.getByTestId('history-progress')).toContainText(`Прочитано ${fixture.total} из ${fixture.total}`)
     await expect(page.getByText('Полный разбор завершён: все оригиналы прочитаны и итог сверен.', { exact: true })).toBeVisible()
+    if (kind === 'output') await expect(page.getByText(/Очередная часть уменьшена для размера ответа:/)).toBeVisible()
     expect((await request.get('/static/mazory/css/admin_trace.css')).ok()).toBe(true)
     await page.getByTestId('history-progress').scrollIntoViewIfNeeded()
     await page.screenshot({ path: join(directory, `thread-${kind}.png`) })
