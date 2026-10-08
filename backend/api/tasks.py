@@ -724,6 +724,18 @@ def apply_delivery_ack(payload):
 
 
 def extract_message(payload):
+    from .processing_attempts import reserve_attempt
+    from .models import MessageProcessingTrace
+    if payload.get('trace_id'):
+        trace = MessageProcessingTrace.objects.get(pk=payload['trace_id'])
+    else:
+        raw = RawMessage.objects.get(pk=payload['raw_id'])
+        from .ai_service import usage_event_id
+        trace = reserve_attempt(raw, f'outbox:{usage_event_id.get()}')
+        payload = {**payload, 'trace_id': trace.id}
+    if trace.context_metadata.get('full_history_policy') == 'thread-context-v2':
+        from .full_history import extract
+        return extract(payload)
     if payload.get("analysis_policy") == "history-packets-v1":
         from .history_packets import extract_packet
         return extract_packet(payload)

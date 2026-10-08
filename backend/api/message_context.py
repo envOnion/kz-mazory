@@ -85,7 +85,10 @@ def history_queryset(raw, snapshot_id, include_following=False):
     return qs.order_by(f"-{time_field}", "-id"), time_field
 
 
-def build_context(raw, cfg, known_projects, snapshot_id, include_following=False, batch_ids=None, target_content=None):
+def build_context(raw, cfg, known_projects, snapshot_id, include_following=False, batch_ids=None, target_content=None, full_state=None):
+    if getattr(cfg, 'full_history_policy', None) == 'thread-context-v2':
+        from .full_history import prepare
+        return prepare(raw, cfg, known_projects, snapshot_id, batch_ids, full_state or {})
     from .dialogue_threads import context_threads
     themes = context_threads(raw)
     counter, endpoint = context_runtime(cfg)
@@ -160,7 +163,7 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
     )
     if incremental:
         max_input = min(max_input, max(1, cfg.autonomous_input_tokens))
-    if bounded:
+    if bounded and cfg.analysis_input_token_limit:
         max_input = min(max_input, cfg.analysis_input_token_limit)
     fixed = counter.count_payload(payload([]))
     if fixed > max_input:

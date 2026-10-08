@@ -55,6 +55,7 @@ async def run(context, prompt, mode="detailed", suggest=True, history=None):
 async def _run(context, prompt, mode="detailed", suggest=True, history=None):
     data_server, viz_server = create_servers(context)
     document = None
+    record_dataset_id = None
     seen = set()
     count = 0
     corrections = 0
@@ -150,6 +151,21 @@ async def _run(context, prompt, mode="detailed", suggest=True, history=None):
             if not turn["tool_calls"]:
                 # Numeric facts are rendered by trusted datasets, never invented prose.
                 text = turn["text"]
+                record_datasets = [dataset for dataset in context.registry.values()
+                    if dataset['normalized_query'].get('dataset') == 'commitment_records']
+                dataset = context.registry.get(record_dataset_id) if record_dataset_id else (
+                    record_datasets[0] if len(record_datasets) == 1 else None)
+                if not document and dataset:
+                    group = dataset['normalized_query'].get('group_by')
+                    if group or not needs_chart:
+                        from .presentation import build
+                        block = {'id': 'commitments', 'kind': 'bar' if group else 'table', 'dataset_id': dataset['dataset_id']}
+                        if group:
+                            block['encoding'] = {'category': group, 'value': 'commitment_count'}
+                        else:
+                            block['columns'] = ['text', 'project', 'responsible', 'deadline', 'status']
+                        document = await sync_to_async(build, thread_sensitive=True)(context,
+                            {'version': '1.0', 'title': 'Просроченные обязательства' if dataset['normalized_query'].get('overdue_only', True) else 'Обязательства', 'blocks': [block]})
                 issue = (
                     "Финансовые значения должны быть в dataset и проверенном представлении."
                     if (financial_values(re.sub(r"\{\{fact:[^}]+\}\}", "", text)) or re.search(r"\d[\d\s]*\s*(?:сдел|проект|платеж|сообщени|обязательств)", text.lower())) and not context.registry
@@ -258,6 +274,8 @@ async def _run(context, prompt, mode="detailed", suggest=True, history=None):
                         output = {"presentation_created": True, "grounded_facts": compact_facts(context),
                                   "instruction": "Теперь дай краткий вывод, используя {{fact:KEY}} для каждого числа. График уже готов."}
                     elif call["name"] in ["query_dataset", "combine_datasets", "read_records"]:
+                        if call["name"] == "read_records":
+                            record_dataset_id = output['dataset_id']
                         output = {
                             **output,
                             "rows": output["rows"][:50],

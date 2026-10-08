@@ -202,6 +202,8 @@ def prepare_themes(result, raw, trace):
         for item in trace.earlier_messages_context
         if not item.get("partial")
     }
+    if trace.context_metadata.get('full_history_policy') == 'thread-context-v2':
+        allowed.update(int(pk) for pk in trace.context_metadata.get('full_history', {}).get('ranges', {}))
     ids = {link["raw_message_id"] for theme in themes for link in theme["messages"]}
     valid_ids = set(
         source_scope(raw)

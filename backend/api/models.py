@@ -642,7 +642,8 @@ class WhatsAppConfig(models.Model):
 
 
 class AISettings(models.Model):
-    analysis_input_token_limit = models.PositiveIntegerField("Вход анализа, токены", default=16384)
+    analysis_input_token_limit = models.PositiveIntegerField("Вход анализа, токены", default=0,
+        help_text="0 — всё доступное окно модели за вычетом ответа и технического запаса. Положительное число — отдельный пользовательский предел.")
     analysis_target_message_limit = models.PositiveIntegerField("Сообщений в пакете анализа", default=8)
     analysis_output_token_limit = models.PositiveIntegerField("Ответ анализа, токены", default=4096)
     autonomous_daily_token_limit = models.PositiveBigIntegerField(default=1000000)
@@ -769,8 +770,8 @@ class AISettings(models.Model):
         super().clean()
         if not 1 <= self.analysis_target_message_limit <= 30:
             raise ValidationError({"analysis_target_message_limit": "Допустимо от 1 до 30 сообщений."})
-        if not self.analysis_input_token_limit or not self.analysis_output_token_limit:
-            raise ValidationError("Лимиты анализа должны быть положительными.")
+        if not self.analysis_output_token_limit:
+            raise ValidationError("Резерв ответа анализа должен быть положительным.")
         if self.analysis_output_token_limit > self.max_completion_tokens:
             raise ValidationError({"analysis_output_token_limit": "Ответ анализа не должен превышать резерв ответа модели."})
         if self.analysis_input_token_limit + self.analysis_output_token_limit + self.context_safety_tokens > self.context_window_tokens:

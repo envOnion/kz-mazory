@@ -19,6 +19,8 @@ from api.models import (
 
 
 def seed():
+    if User.objects.filter(username='79990000001').exists():
+        return
     team = Team.objects.create(
         name="Локальная команда",
         history_complete_from=datetime.date(2026, 1, 1),
@@ -84,6 +86,8 @@ def seed():
     target.write_text(json.dumps(data))
     target.chmod(0o644)
     seed_analytics()
+    from .thread_history import seed as seed_thread_history
+    seed_thread_history()
 
 
 def seed_analytics():

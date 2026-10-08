@@ -48,6 +48,13 @@ def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, aut
             "responsible_name", ""
         )
     deadline_id = fact.get("deadline_message_id") or raw.id
+    dated_changes = [rows[item['raw_message_id']] for item in refs if item['role'] == 'deadline']
+    if threaded and dated_changes:
+        # The model has explicitly linked these originals as deadline events.
+        # Use the latest linked event, never an earlier superseded promise date.
+        latest = max(dated_changes, key=lambda message: (message.timestamp if message.sent_at_known else message.received_at, message.id))
+        deadline_id = latest.id
+        fact['deadline_message_id'] = deadline_id
     # Never trust an arbitrary source ID or a model supplied fulfillment timestamp.
     if deadline_id not in rows:
         raise ProviderUnavailable("commitment_deadline_evidence_unavailable")
@@ -110,6 +117,16 @@ def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, aut
             fact["deadline_at"], fact["deadline_precision"] = None, "unknown"
             fact["uncertainties"].append("Срок не подтвержден календарной датой или относительным днем в цитате WhatsApp.")
     fact["fulfilled_at"] = None
+    if fact.get('commitment_status') == 'cancelled':
+        cancellations = [item for item in refs if item['role'] == 'cancellation']
+        promised = source_time(raw)[0]
+        if not cancellations or any(source_time(rows[item['raw_message_id']])[0] is None
+                                    or (promised and source_time(rows[item['raw_message_id']])[0] < promised)
+                                    for item in cancellations):
+            raise ProviderUnavailable('commitment_cancellation_evidence_unavailable')
+        text = ' '.join(item['quote'] for item in cancellations).casefold()
+        if text.strip().rstrip('.! ') in {'принято', 'ок', 'спасибо', 'понял', 'да'} or text.rstrip().endswith('?') or re.fullmatch(r'https?://\S+', text.strip()):
+            raise ProviderUnavailable('commitment_cancellation_ambiguous')
     if fact.get("commitment_status") == "fulfilled":
         fulfilled_id = fact.get("fulfillment_message_id")
         fulfillment = [

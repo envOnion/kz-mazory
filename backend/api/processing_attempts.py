@@ -9,6 +9,8 @@ from .message_context import POLICY, source_scope
 from .models import AISettings, AuditEvent, MessageProcessingTrace, OutboxEvent, RawMessage
 from .providers import ProviderUnavailable
 
+ANALYSIS_CONFIG_FIELDS = ('chat_model_name', 'chat_api_format', 'chat_provider_url', 'context_window_tokens',
+                          'context_safety_tokens', 'max_completion_tokens', 'tokenizer_id', 'tokenizer_revision')
 
 def require_reanalysis(user, raw):
     if not user.is_active or not access.messages_for(user).filter(pk=raw.pk).exists():
@@ -42,8 +44,10 @@ def reserve_attempt(raw, operation_key):
         result_summary="Ожидает обработки с полной историей.",
         context_metadata={
             "analysis_policy": "history-packets-v1",
+            "full_history_policy": "thread-context-v2",
             "analysis_limits": {"analysis_input_token_limit":cfg.analysis_input_token_limit,
-                                "analysis_output_token_limit":cfg.analysis_output_token_limit},
+                                "analysis_output_token_limit":cfg.analysis_output_token_limit,
+                                **{name:getattr(cfg,name) for name in ANALYSIS_CONFIG_FIELDS}},
             "schema_version": 1,
             "policy_version": POLICY,
             "source": "chat_history",

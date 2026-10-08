@@ -408,8 +408,11 @@ def extraction_payload(
     system_prompt = WORKER_PROMPT
     if getattr(cfg, "analysis_policy", None) == "history-packets-v1":
         system_prompt = PACKET_PROMPT
+        if getattr(cfg, 'full_history_policy', None) == 'thread-context-v2':
+            system_prompt += '\nПолный разбор истории по этапам. analysis_state содержит результат предыдущего этапа, прочитанные ID и проверенные цитаты. Сохраняй и актуализируй состояние целевых тем, обещания, изменения сроков, отмены и исполнения. Предыдущий результат не является новым источником факта. Обязательно связывай события по ID, действию, автору и точным цитатам. Не создавай обещание из вопроса. Не считай обработку законченной до этапа reconcile, если весь источник не вошёл в один запрос.'
         if getattr(cfg, "analysis_repair_reason", None):
             system_prompt += f"\nПредыдущий ответ отклонён: {cfg.analysis_repair_reason}. Исправь форму ответа по схеме и классифицируй все цели. Не угадывай факты."
+            system_prompt += '\nДля commitment обязательны promise_message_id и evidence_messages с role=promise, ID исходного обещания и его точной цитатой. fulfilled требует fulfillment_message_id и отдельную цитату с role=fulfillment; cancelled требует отдельную цитату отмены с role=cancellation, позже обещания. Готовый и отправленный результат — исполнение, не отмена. ID события, статусы и роли доказательств должны соответствовать друг другу. Не выдавай отмену без источника отмены.'
     if getattr(cfg, "autonomous_enabled", False):
         system_prompt += "\nАвтономный режим: точное время дедлайна не выдумывай. Только день/утро означает deadline_precision=date; искусственные 09:00/18:00 не являются сообщенным временем. Сервер задает техническую границу дня отдельно от точности источника."
         system_prompt += "\nСвязь с объектом доказывается цитатами, а не наличием ID в known_projects/known_threads. Если название находится в более раннем сообщении, добавь буквальную цитату этого сообщения в evidence_messages с role=identity. Пустое object_name не подтверждает предложенный project. Не выбирай между активным и архивным одноименным объектом только по статусу активности."

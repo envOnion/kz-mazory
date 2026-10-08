@@ -27,7 +27,7 @@ raw_message_id и точной непрерывной цитатой соотв�
 
 def resolve_remaining(facts, raw, cfg, trace):
     drafts = [fact for fact in facts if fact["fact_type"] == "commitment"]
-    if not drafts or getattr(cfg, "autonomous_enabled", False) or trace.context_metadata.get("history_complete_in_request"):
+    if not drafts or getattr(cfg, "autonomous_enabled", False) or trace.context_metadata.get("history_complete_in_request") or trace.context_metadata.get('full_history', {}).get('complete'):
         return facts
     if trace.context_metadata.get("analysis_policy") == "history-packets-v1":
         return resolve_bounded(facts, drafts, raw, cfg, trace)
@@ -166,8 +166,9 @@ def resolve_bounded(facts, drafts, raw, cfg, trace):
     from .pipeline import _source_quote
 
     counter, endpoint = context_runtime(cfg)
-    max_input = min(cfg.analysis_input_token_limit,
-                    cfg.context_window_tokens - cfg.max_completion_tokens - cfg.context_safety_tokens)
+    max_input = cfg.context_window_tokens - cfg.max_completion_tokens - cfg.context_safety_tokens
+    if cfg.analysis_input_token_limit:
+        max_input = min(cfg.analysis_input_token_limit, max_input)
     original = source_metadata(raw)
     covered = {raw.id} | {row["raw_message_id"] for row in trace.earlier_messages_context if not row.get("partial")}
     qs, _ = history_queryset(raw, trace.context_metadata["snapshot_max_id"], include_following=True)

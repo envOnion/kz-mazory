@@ -14,6 +14,13 @@ def dispatch_forever():
     while True:
         close_old_connections()
         control = json.loads((settings.E2E_DIR / "provider-state.json").read_text())
+        from api.models import MessageProcessingTrace
+        completed = dict(MessageProcessingTrace.objects.filter(raw_message__message_id__startswith='full-', status='success').order_by('id').values_list('raw_message_id','id'))
+        temporary = settings.E2E_DIR/'thread-completed.tmp'
+        temporary.write_text(json.dumps(completed)); temporary.replace(settings.E2E_DIR/'thread-completed.json')
+        if control.get('thread_window'):
+            AISettings.objects.update(context_window_tokens=control['thread_window'], analysis_input_token_limit=0,
+                                      autonomous_enabled=False, autonomous_crm_enabled=False)
         if control.get('analytics_role'):
             from api.models import TeamMembership
             TeamMembership.objects.filter(user_id=analytics_owner_id).update(role=control['analytics_role'])
@@ -40,6 +47,9 @@ def dispatch_forever():
             .exclude(event_type="index_message")
             .order_by("id")[:100]
         ):
+            if event.event_type == 'extract_message' and control.get('pause_thread_after_stage') and len(event.payload.get('full_history_state', {}).get('stage_trace_ids', [])) >= control['pause_thread_after_stage']:
+                (settings.E2E_DIR/'thread-paused.json').write_text(json.dumps({'event_id':event.id, 'trace_id':event.payload['trace_id'], 'history_run_id':event.payload.get('history_run_id'), 'state':event.payload['full_history_state']}))
+                continue
             if OutboxEvent.objects.filter(pk=event.id, state="pending").update(
                 state="enqueued"
             ):
