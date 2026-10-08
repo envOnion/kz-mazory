@@ -295,6 +295,13 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 return self.respond({"result": "103"})
             return self.respond({"result": True})
         if self.path.endswith("/messages/count_tokens"):
+            state = json.loads(self.control.read_text())
+            if state.get('analytics_force_compaction') and any(
+                len(json.loads(block['content']).get('rows', [])) > 5
+                for message in body.get('messages', []) if isinstance(message['content'], list)
+                for block in message['content'] if block.get('type') == 'tool_result'
+            ):
+                return self.respond({'input_tokens': 200000})
             return self.respond(
                 {"input_tokens": max(1, len(json.dumps(body, ensure_ascii=False)) // 4)}
             )
@@ -361,6 +368,16 @@ def analytical_response(body):
     if 'истори' in prompt or ('crm' in prompt and 'дат' in prompt):
         return response(text='CRM содержит текущие стадии сделок без истории переходов. Для динамики нужна история изменений; сейчас можно сравнить текущие стадии или ответственных.')
     datasets = [data for name, data in results if name == 'query_dataset' and 'dataset_id' in data]
+    if 'проверь поля crm' in prompt and not datasets:
+        if last_name == 'query_dataset' and last.get('validation_errors'):
+            detail = last['validation_errors'][0]
+            spec = {'dataset': 'crm_projects', 'dimensions': ['status'], 'measures': ['project_count']}
+            if 'dimensions must use' in detail:
+                spec['date_range'] = {'start': '2026-01-01', 'end_exclusive': '2027-01-01'}
+            elif 'current snapshot' not in detail:
+                return response(text='Не удалось проверить запрос.')
+            return response(name='query_dataset', arguments=spec)
+        return response(name='query_dataset', arguments={'dataset': 'crm_projects', 'dimensions': ['external_stage_name'], 'measures': ['deal_count'], 'date_range': {'start': '2026-01-01', 'end_exclusive': '2027-01-01'}})
     if last_name == 'build_presentation':
         if 'fallback' in prompt:
             # Valid model text with invented financial values must trigger the grounded fallback.
@@ -371,6 +388,11 @@ def analytical_response(body):
             return response(text=f'Выполнение плана — {{{{fact:{ratio}}}}}.')
         total = next((key for key, fact in facts.items() if fact['formula'] == 'sum'), None)
         return response(text=f'По выбранным условиям итог — {{{{fact:{total}}}}}. Подробности доступны на графике и в таблице.' if total else 'Данные подготовлены.')
+    if last_name == 'read_records' and 'dataset_id' in last:
+        block = {'id': 'overdue', 'kind': 'bar', 'dataset_id': last['dataset_id'], 'encoding': {'category': 'responsible', 'value': 'commitment_count'}} if last['normalized_query'].get('group_by') else {'id': 'overdue', 'kind': 'table', 'dataset_id': last['dataset_id'], 'columns': ['text', 'responsible', 'deadline', 'status']}
+        return response(name='build_presentation', arguments={'version': '1.0', 'title': 'Просроченные обещания', 'blocks': [block]})
+    if 'обещани' in prompt or prompt.strip() == 'построй график':
+        return response(name='read_records', arguments={'overdue_only': True, **({'group_by': 'responsible'} if 'график' in prompt else {'limit': 50})})
     if last_name == 'derived_facts':
         last = next(data for name, data in reversed(results) if name == 'combine_datasets' and 'dataset_id' in data)
     if last_name in ['query_dataset', 'combine_datasets', 'derived_facts'] and 'dataset_id' in last:

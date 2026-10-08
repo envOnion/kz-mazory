@@ -87,7 +87,7 @@ def seed():
 
 
 def seed_analytics():
-    from api.models import Project, FinancialRecord, CrmProjectSnapshot
+    from api.models import Project, FinancialRecord, CrmProjectSnapshot, Commitment
     team = Team.objects.create(name='Аналитика E2E', history_complete_from=datetime.date(2026, 1, 1))
     user = User.objects.create_user('79990000100', password='local-e2e-only')
     profile = UserProfile.objects.create(user=user, full_name='Аналитик E2E', phone='79990000100')
@@ -104,5 +104,9 @@ def seed_analytics():
             amount=Decimal(amount), is_verified=True, status='received', currency='KZT', source_key=f'analytics-e2e-{i}')
     for month, amount in [(8, '150.00'), (9, '250.00')]:
         SalesTarget.objects.create(team=team, profile=profile, month=datetime.date(2026, month, 1), amount=Decimal(amount), currency='KZT', is_active=True)
+    for index in range(50):
+        Commitment.objects.create(team=team, project=projects[0], manager=profile,
+            commitment_text=(f'Обещание {index}: ' + 'Подготовить документы по согласованному объекту. ' * 60)[:2000],
+            deadline=datetime.date(2026, 1, 1), status='pending', is_verified=True)
     _, access_token, refresh = create_session(user)
     (Path(settings.E2E_DIR) / 'analytics-session.json').write_text(json.dumps({'access': access_token, 'refresh': refresh, 'cookie_name': settings.AUTH_REFRESH_COOKIE, 'user_id': user.id}))

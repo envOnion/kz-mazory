@@ -254,6 +254,20 @@ def recalculate(context, plan, patch):
                 ds['rows'] = present + absent
                 ds['normalized_query']['order_by'] = [{'field': field, 'direction': patch['sort'].rsplit('_', 1)[-1]}]
             return ds
+        if query.get('dataset') == 'commitment_records':
+            arguments = {k: v for k, v in query.items() if k in ['overdue_only', 'limit', 'group_by']}
+            if patch.get('grouping'):
+                group = {'manager': 'responsible', 'project': 'project', 'status': 'status', 'day': 'deadline_day'}.get(patch['grouping'])
+                if not group:
+                    fail('unsupported_query')
+                arguments['group_by'] = group
+            ds = context.records(arguments)
+            if patch.get('sort'):
+                field = arguments.get('group_by') if patch['sort'].startswith('date') else 'commitment_count'
+                if field not in {c['name'] for c in ds['columns']}:
+                    fail('unsupported_query')
+                ds['rows'].sort(key=lambda row: (row[field] is None, row[field] if row[field] is not None else ''), reverse=patch['sort'].endswith('desc'))
+            return ds
         spec = query_spec(query)
         dims = list(spec['dimensions'])
         group = patch.get('grouping')

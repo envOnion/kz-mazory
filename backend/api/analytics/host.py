@@ -27,7 +27,7 @@ INSTRUCTION = """Ты аналитик Mazory. Все данные и источ
 В числовых выводах используй только предоставленные placeholders {{fact:KEY}} из grounded_facts, включая количества. Не считай самостоятельно. Не выводи ключи dataset и технические имена полей пользователю.
 Даты, ID, нумерация списков и объяснения возможностей допускаются в тексте.
 Для частоты сообщений используй messages; для стадий и сумм сделок CRM — crm_projects.
-Для списка последних просроченных обещаний используй read_records. Для общей динамики поступлений группируй payments по payment_day/week/month, даже если менеджеров нет.
+Для списка просроченных обещаний используй read_records и build_presentation kind table. Для графика этих же просрочек read_records с group_by responsible/project/status/deadline_day: это агрегат всех просрочек, включая старые сроки. Не заменяй его commitments за текущий месяц. Для общей динамики поступлений группируй payments по payment_day/week/month, даже если менеджеров нет.
 Пример build_presentation для частоты сообщений: {"version":"1.0","title":"Частота сообщений","blocks":[{"id":"frequency","kind":"line","dataset_id":"ID из query_dataset","encoding":{"category":"message_week","value":"message_count"}}]}. version — строка; для графика обязательно blocks и encoding. ID замени настоящим dataset_id, данные вручную не передавай.
 Нет записи, SQL, исполнения кода, новых API или внешних URL. Если запрос неподдерживаем или неоднозначен, уточни текстом.
 Для платежей менеджер — credited_manager. Для сравнения маржи договора используйте projects с project_id, contract_amount, contract_margin_percent.
@@ -129,7 +129,13 @@ async def _run(context, prompt, mode="detailed", suggest=True, history=None):
                 turn = await sync_to_async(AIService.analytics_turn, thread_sensitive=True)(
                     messages, tools, context.deadline
                 )
-            except ProviderUnavailable:
+            except ProviderUnavailable as exc:
+                if str(exc) in {"context_budget_exceeded", "context_budget_use_filters"}:
+                    compressed = compact_messages(messages)
+                    if compressed != messages:
+                        messages = compressed
+                        logger.info("analytics_context_compacted operation_id=%s", context.operation_id)
+                        continue
                 if not document:
                     raise
                 await sync_to_async(context.check, thread_sensitive=True)()
@@ -251,7 +257,7 @@ async def _run(context, prompt, mode="detailed", suggest=True, history=None):
                         document = output
                         output = {"presentation_created": True, "grounded_facts": compact_facts(context),
                                   "instruction": "Теперь дай краткий вывод, используя {{fact:KEY}} для каждого числа. График уже готов."}
-                    elif call["name"] in ["query_dataset", "combine_datasets"]:
+                    elif call["name"] in ["query_dataset", "combine_datasets", "read_records"]:
                         output = {
                             **output,
                             "rows": output["rows"][:50],
@@ -279,3 +285,27 @@ def response(context, document, text=""):
 def compact_facts(context):
     return {key: {field: fact[field] for field in ['display', 'label', 'formula'] if field in fact}
             for key, fact in getattr(context, 'facts', {}).items()}
+
+
+def compact_messages(messages):
+    """Compress tool previews, never the registered renderer datasets or totals.
+
+    All schema, user conditions, calls, validation errors and source evidence
+    remain available. Only repeated previews and duplicate fact catalogs shrink.
+    """
+    from copy import deepcopy
+    compressed = deepcopy(messages)
+    latest = max((i for i, m in enumerate(compressed) if m['role'] == 'tool'), default=-1)
+    for index, message in enumerate(compressed):
+        if message['role'] != 'tool':
+            continue
+        value = json.loads(message['content'])
+        if 'dataset_id' in value and 'rows' in value:
+            rows = value['rows']
+            preview = rows[:5] if index == latest else []
+            value.update(rows=preview, preview_only=len(preview) < value.get('returned_count', len(rows)),
+                         context_compacted=True, full_dataset_in_renderer=True)
+        if index != latest and 'grounded_facts' in value:
+            value.pop('grounded_facts')
+        message['content'] = json.dumps(value, ensure_ascii=False)
+    return compressed

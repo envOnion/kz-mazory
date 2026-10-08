@@ -50,15 +50,12 @@ def native_request(payload, cfg, *, structured=True):
 
 
 def analytics_request(payload, cfg):
-    from .context_tokens import GEMMA_MANIFEST, context_runtime
+    from .context_tokens import GEMMA_MANIFEST, context_runtime, gemma_counter
 
     if payload.get("model") != cfg.chat_model_name or cfg.chat_model_name not in GEMMA_MANIFEST["models"]:
         raise ProviderUnavailable("context_configuration_changed")
     context_runtime(cfg)
-    # Keep the existing conservative bound for complete tool conversations.
     available = cfg.context_window_tokens - cfg.max_completion_tokens - cfg.context_safety_tokens
-    if len(json.dumps(payload, ensure_ascii=False).encode()) + 4096 > available:
-        raise ProviderUnavailable("context_budget_use_filters")
     messages, names = [], {}
     try:
         for message in payload["messages"]:
@@ -74,7 +71,14 @@ def analytics_request(payload, cfg):
                     calls.append({"name": function["name"], "arguments": arguments})
                 converted["content"] = json.dumps({"text": converted["content"], "tool_calls": calls}, ensure_ascii=False)
             if message["role"] == "tool":
-                converted["tool_name"] = names[message["tool_call_id"]]
+                # Gemma's native renderer ignores tool messages unless paired
+                # with native assistant tool_calls. This transport uses a JSON
+                # envelope instead, so keep results in the visible user stream.
+                converted["role"] = "user"
+                converted["content"] = json.dumps({"tool_result": {
+                    "name": names[message["tool_call_id"]],
+                    "result": json.loads(converted["content"]),
+                }}, ensure_ascii=False)
             messages.append(converted)
     except (KeyError, TypeError, ValueError):
         raise ProviderUnavailable("provider_invalid_request") from None
@@ -106,8 +110,11 @@ def analytics_request(payload, cfg):
         "stream": False, "think": False,
         "options": {"num_ctx": cfg.context_window_tokens, "num_predict": cfg.max_completion_tokens, "temperature": 0},
     }
-    if len(json.dumps(request, ensure_ascii=False).encode()) + 4096 > available:
-        raise ProviderUnavailable("context_budget_use_filters")
+    count = gemma_counter().count_messages(messages)
+    if count > available:
+        raise ProviderUnavailable("context_budget_exceeded", diagnostics={
+            "input_tokens": count, "available_input_tokens": available,
+        })
     return request
 
 

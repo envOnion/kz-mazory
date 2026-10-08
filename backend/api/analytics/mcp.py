@@ -62,7 +62,7 @@ def create_servers(context):
     tools.append(
         Tool(
             name="read_records",
-            description="Read latest authorized confirmed commitments, including old overdue deadlines. overdue_only defaults to true. Returns a dataset for a table; use build_presentation. Latest means registration time. Current access filters apply.",
+            description="Read authorized confirmed commitments including old overdue deadlines. overdue_only defaults to true. Without group_by returns latest records for a table; with group_by aggregates ALL matching records for a chart, preserving overdue scope independently of current month. Use build_presentation. Current access filters apply.",
             inputSchema=RECORDS_SCHEMA,
             outputSchema=OBJECT,
             annotations=ToolAnnotations(readOnlyHint=True),

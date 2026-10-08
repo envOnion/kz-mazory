@@ -54,10 +54,45 @@ async function waitTurn(request: APIRequestContext, id: number, sequence: number
   await expect.poll(async () => (await conversation(request, id)).turns.find(t => t.sequence === sequence)?.state).toBe('succeeded')
   return (await conversation(request, id)).turns.find(t => t.sequence === sequence)!
 }
+test('invalid CRM columns and historical period are repaired before a real chart is published', async ({ page, context, request }) => {
+  await authenticate(context); await startDialogue(page)
+  await submit(page, 'Проверь поля CRM и покажи график сделок по стадиям')
+  const id = await currentConversationId(page), turn = await waitTurn(request, id, 1)
+  expect(turn.artifacts).toHaveLength(1)
+  const artifact: Artifact = await (await request.get(`/api/chat/artifacts/${turn.artifacts[0]!.id}/`, { headers })).json()
+  const dataset = Object.values(artifact.presentation!.datasets)[0]!
+  expect(dataset.rows.reduce((total, row) => total + (typeof row.project_count === 'number' ? row.project_count : 0), 0)).toBe(3)
+  expect(dataset.normalized_query.dimensions).toEqual(['status'])
+  await expect(page.getByTestId('presentation')).toBeVisible()
+  await expect(page.getByTestId('chat-response')).not.toContainText('unsupported_query')
+})
 function control(patch: Record<string, unknown>) {
   const path = join(directory, 'provider-state.json'), temporary = `${path}.${randomUUID()}.tmp`
   writeFileSync(temporary, JSON.stringify({ ...JSON.parse(readFileSync(path, 'utf8')), ...patch })); renameSync(temporary, path)
 }
+
+test('large overdue records use provider token counts, compact previews and retain the complete chart scope', async ({ page, context, request }) => {
+  await authenticate(context); await startDialogue(page)
+  await submit(page, 'Какие обещания просрочены?')
+  const id = await currentConversationId(page), listed = await waitTurn(request, id, 1)
+  const records: Artifact = await (await request.get(`/api/chat/artifacts/${listed.artifacts[0]!.id}/`, { headers })).json()
+  expect(Object.values(records.presentation!.datasets)[0]!.rows).toHaveLength(50)
+  expect(listed.answer_document!.markdown).toContain('50')
+  control({ analytics_force_compaction: true })
+  try {
+    await submit(page, 'Какие обещания просрочены?')
+    const compacted = await waitTurn(request, id, 2)
+    const full: Artifact = await (await request.get(`/api/chat/artifacts/${compacted.artifacts[0]!.id}/`, { headers })).json()
+    expect(Object.values(full.presentation!.datasets)[0]!.rows).toHaveLength(50)
+    expect(compacted.answer_document!.markdown).toContain('50')
+  } finally { control({ analytics_force_compaction: false }) }
+  await submit(page, 'построй график')
+  const chart = await waitTurn(request, id, 3)
+  const aggregated: Artifact = await (await request.get(`/api/chat/artifacts/${chart.artifacts[0]!.id}/`, { headers })).json()
+  expect(Object.values(aggregated.presentation!.datasets)[0]!.rows[0]!.commitment_count).toBe(50)
+  await expect(page.getByTestId('presentation')).toBeVisible()
+  await expect(page.getByTestId('chat-turn-3')).toContainText('50')
+})
 
 test('analytical dialogue: real facts, controls, plan/fact, history, mobile and selectors', async ({ page, context, request }) => {
   await authenticate(context); await page.goto('/'); await page.getByTestId('nav-kpi-dashboard').waitFor()
