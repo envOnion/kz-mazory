@@ -149,7 +149,7 @@ def semantic_scenario(analyst):
     admin=User.objects.get(username='79990000001')
     project.contract_known=True; project.contract_amount=Decimal('100'); project.save()
     companion=Project.objects.create(team=team,name='Private average fixture',identity_confirmed=True,
-        currency='USD',contract_known=True,contract_amount=Decimal('300'))
+        currency='USD',contract_known=True,contract_amount=Decimal('300'),archived=True)
     validation=AsyncOperation.objects.create(requested_by=admin,operation_type='temporal_e2e',status='running',
         expires_at=timezone.now()+timedelta(minutes=10),access_fingerprint=access.fingerprint(admin),
         idempotency_key=f'temporal-averages:{time.monotonic_ns()}')
