@@ -16,7 +16,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from .ai_service import AIService, usage_event_id, outbox_claim
 from .context_tokens import canonical_json, extraction_input, payload_hash
 from .deduplication import normalize_deal_name
-from .facts import FactSchema, fact_identity, json_value, same_commitment_origin
+from .facts import FactSchema, fact_identity, json_value, same_commitment_origin, normalize_fact_fields
 from .message_context import build_context, source_scope
 from .message_time import source_time
 from .models import (
@@ -50,22 +50,7 @@ def _source_quote(quote, content):
 def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False):
     # A missing optional value and an explicit null both mean unknown. Required
     # values, enums and evidence still go through the full serializer validation.
-    fields = FactSchema().fields
-    normalized = [
-        {
-            key: value
-            for key, value in item.items()
-            if not (
-                value is None
-                and key in fields
-                and not fields[key].required
-                and not fields[key].allow_null
-            )
-        }
-        if isinstance(item, dict)
-        else item
-        for item in result["facts"]
-    ]
+    normalized = normalize_fact_fields(result['facts'])
     schema = FactSchema(data=normalized, many=True)
     schema.is_valid(raise_exception=True)
     accepted_facts = []

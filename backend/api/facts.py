@@ -116,6 +116,17 @@ class FactSchema(serializers.Serializer):
         return data
 
 
+def normalize_fact_fields(items):
+    """Optional null means unknown; required values retain strict validation."""
+    if not isinstance(items, list):
+        return items
+    fields = FactSchema().fields
+    return [{key: value for key, value in item.items()
+             if not (value is None and key in fields and not fields[key].required
+                     and not fields[key].allow_null)}
+            if isinstance(item, dict) else item for item in items]
+
+
 def json_value(value):
     if isinstance(value, dict):
         return {k: json_value(v) for k, v in value.items()}

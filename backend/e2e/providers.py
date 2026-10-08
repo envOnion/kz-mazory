@@ -226,6 +226,7 @@ def classify_full_history(value):
         if closed:
             refs.append({'raw_message_id':closed['raw_message_id'], 'quote':closed['content'], 'role':'cancellation' if cancelled else 'fulfillment'})
         facts.append({'thread_key':'full', 'fact_type':'commitment', 'object_name':'', 'commitment_text':'Подготовить смету Альфа',
+                      'currency':None, 'contract_amount':None,
                       'responsible_name':'Боб', 'promise_message_id':promise['raw_message_id'], 'evidence_message_id':promise['raw_message_id'],
                       'evidence':'Пересказ: Боб обещал подготовить смету Альфа.', 'evidence_messages':refs, 'deadline_message_id':promise['raw_message_id'],
                       'deadline_at':value['sent_at'], 'deadline_precision':'date', 'confidence':.98,

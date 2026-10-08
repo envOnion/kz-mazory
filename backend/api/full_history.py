@@ -328,7 +328,8 @@ def validate_evidence(result, raw, trace):
     coverage = trace.context_metadata.get('full_history', {}).get('ranges', {})
     if not coverage:
         return
-    from .facts import FactSchema
+    from .facts import FactSchema, normalize_fact_fields
+    result['facts'] = normalize_fact_fields(result.get('facts'))
     FactSchema(data=result.get('facts'), many=True).is_valid(raise_exception=True)
     from .pipeline import _source_quote
     references = [ref for fact in result.get('facts', []) for ref in fact.get('evidence_messages', [])]
