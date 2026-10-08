@@ -83,11 +83,14 @@ def analytics_request(payload, cfg):
         "type": "object", "additionalProperties": False, "required": ["text", "tool_calls"],
         "properties": {
             "text": {"type": "string"},
-            "tool_calls": {"type": "array", "maxItems": 4, "items": {"oneOf": [
-                {"type": "object", "additionalProperties": False, "required": ["name", "arguments"],
-                 "properties": {"name": {"const": tool["name"]}, "arguments": tool["parameters"]}}
-                for tool in definitions
-            ]}},
+            # Ollama's grammar compiler cannot handle the combined nested MCP
+            # schemas. Bound the envelope here; MCP validates full arguments
+            # against each unchanged tool schema before executing any call.
+            "tool_calls": {"type": "array", "maxItems": 4, "items": {
+                "type": "object", "additionalProperties": False, "required": ["name", "arguments"],
+                "properties": {"name": {"type": "string", "enum": [tool["name"] for tool in definitions]},
+                               "arguments": {"type": "object"}},
+            }},
         },
     }
     messages[0]["content"] += (
