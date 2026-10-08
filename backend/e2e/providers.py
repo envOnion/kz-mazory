@@ -350,6 +350,10 @@ def analytical_response(body):
         content = [{'type': 'text', 'text': text}] if text is not None else [{'type': 'tool_use', 'id': 'fixture-' + uuid.uuid4().hex, 'name': name, 'input': arguments}]
         return {'id': 'fixture-response', 'type': 'message', 'role': 'assistant', 'model': 'local-fixture', 'content': content,
                 'stop_reason': 'end_turn' if text is not None else 'tool_use', 'usage': {'input_tokens': 100, 'output_tokens': 100}}
+    if 'придумай сам' in prompt and not any(name == 'query_dataset' for name, _ in results):
+        return response(text='Вот график: {"version":"1.0","blocks":[{"id":"status_distribution","kind":"bar","dataset_id":"crm_projects","encoding":{"category":"status","value":"project_count"}}]}')
+    if prompt.startswith('json графика') and last_name == 'describe_schema':
+        return response(name='query_dataset', arguments={'dataset': 'crm_projects', 'dimensions': ['status'], 'measures': ['project_count']})
     if 'форматирование' in prompt:
         return response(text='**Проверено** <img src=x onerror=window.__xss=1><script>window.__xss=1</script> [ссылка](javascript:alert(1))')
     if prompt.strip() in ['йо', 'привет']:
