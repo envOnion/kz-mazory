@@ -50,7 +50,8 @@ export function useChat() {
     // Revoked or expired numerical snapshots must disappear from the workspace as well.
     if (selectedTurnId.value !== null) {
       const selected = turns.value.find(t => t.id === selectedTurnId.value)
-      if (selected && selected.state === 'expired') { activePresentation.value = null; selectedArtifact.value = null; chatResponseText.value = '' }
+      const displayed = selectedArtifact.value && turns.value.flatMap(t => t.artifacts).find(a => a.id === selectedArtifact.value?.id)
+      if (selected?.state === 'expired' || (selectedArtifact.value && !displayed?.available)) { activePresentation.value = null; selectedArtifact.value = null; chatResponseText.value = '' }
     }
   }
   async function selectTurn(id: number, artifactId?: number, automatically = false) {
