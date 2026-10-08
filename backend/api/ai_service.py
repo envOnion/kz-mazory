@@ -673,6 +673,8 @@ class AIService:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ProviderUnavailable("analytics_timeout")
+        def normalized(data):
+            return normalize_response(data, allow_tools=True, response_schema=payload["format"]) if gemma else data
         try:
             result = AIService._post(
                 (AIService.effective_chat_provider_url(cfg)[:-3] + "/api/chat") if gemma else f"{AIService.effective_chat_provider_url(cfg)}"
@@ -683,10 +685,10 @@ class AIService:
                 operation="analytics",
                 headers=anthropic_headers(key) if native else None,
                 api_key=None if native else key,
-                response_validator=lambda data: analytics_turn(normalize_response(data, allow_tools=True) if gemma else data, api_format),
+                response_validator=lambda data: analytics_turn(normalized(data), api_format),
             )
         except ProviderUnavailable as exc:
             if str(exc) in ["provider_invalid_request", "provider_request_rejected"]:
                 raise ProviderUnavailable("provider_tools_unsupported") from None
             raise
-        return analytics_turn(normalize_response(result, allow_tools=True) if gemma else result, api_format)
+        return analytics_turn(normalized(result), api_format)

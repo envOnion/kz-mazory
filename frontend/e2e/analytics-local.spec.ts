@@ -37,6 +37,19 @@ async function currentConversationId(page: Page): Promise<number> {
   await expect.poll(() => page.evaluate((userId: number) => typeof JSON.parse(localStorage.getItem(`mazory-conversation-${userId}`) || 'null') === 'number', session.user_id)).toBe(true)
   return page.evaluate((userId: number) => { const value: unknown = JSON.parse(localStorage.getItem(`mazory-conversation-${userId}`) || 'null'); if (typeof value !== 'number') throw new Error('Conversation ID missing'); return value }, session.user_id)
 }
+
+test('chart descriptor in model prose is corrected through real tools before a workspace result is shown', async ({ page, context, request }) => {
+  await authenticate(context); await startDialogue(page)
+  await submit(page, 'Придумай сам, чтобы красивый график вывести')
+  const id = await currentConversationId(page), turn = await waitTurn(request, id, 1)
+  expect(turn.artifacts).toHaveLength(1)
+  await expect(page.getByTestId('presentation')).toBeVisible()
+  await expect(page.getByTestId('chat-response')).not.toContainText('"blocks"')
+  await expect(page.getByTestId('chat-response')).not.toContainText('dataset_id')
+  const artifact: Artifact = await (await request.get(`/api/chat/artifacts/${turn.artifacts[0]!.id}/`, { headers })).json()
+  expect(Object.values(artifact.presentation!.datasets)[0]!.rows.reduce((total, row) => total + (typeof row.project_count === 'number' ? row.project_count : 0), 0)).toBe(3)
+  await page.screenshot({ path: join(directory, 'playwright/chart-prose-corrected.png'), fullPage: true })
+})
 async function waitTurn(request: APIRequestContext, id: number, sequence: number) {
   await expect.poll(async () => (await conversation(request, id)).turns.find(t => t.sequence === sequence)?.state).toBe('succeeded')
   return (await conversation(request, id)).turns.find(t => t.sequence === sequence)!
