@@ -215,9 +215,9 @@ def query(context, arguments):
         sql, params = dimension(ds, dataset, name, zone)
         select.append(f'{sql} AS {quote(name)}'); select_params.extend(params)
     aggregation = arguments.get('aggregation', 'default')
-    # Counting entities is additive; "sum" on a count metric requests its
-    # registered COUNT expression, never SUM of an absent physical column.
-    if aggregation == 'sum' and all(ds.measures[name][1] == 'count' for name in measures):
+    # Additive metrics retain their registered COUNT/SUM expressions and
+    # unknown-component guards rather than losing those rules to raw SUM.
+    if aggregation == 'sum' and all(ds.measures[name][1] in ('count', 'money') for name in measures):
         aggregation = 'default'
         normalized['aggregation'] = aggregation
     expressions = []
@@ -303,7 +303,7 @@ def query(context, arguments):
         'label': TIME_LABELS.get(FIELDS[dataset][d][0],column_label(d,dataset)) if FIELDS[dataset][d][1]=='date' else column_label(d,dataset),
         'source': dataset,'semantic_role':'dimension'} for d in dims]
     columns += [{'name': m,'type': ds.measures[m][1],'unit': currency if ds.measures[m][1]=='money' else '%' if ds.measures[m][1]=='percent' else 'дней' if m.endswith('_days') else None,
-        'label':column_label(m,dataset),'source':dataset,'semantic_role':'measure'} for m in measures]
+        'label':{'avg':'Среднее: ', 'min':'Минимум: ', 'max':'Максимум: '}.get(aggregation,'') + column_label(m,dataset),'source':dataset,'semantic_role':'measure'} for m in measures]
     rows = [{c['name']:numeric('',c['type'],value) for c,value in zip(columns,row)} for row in raw_rows]
     if len(dims)==1 and FIELDS[dataset][dims[0]][1]=='date' and not arguments.get('top_n'):
         dimension_name=dims[0]; existing={row[dimension_name]:row for row in rows}; calendar=[]; day=start
@@ -312,7 +312,7 @@ def query(context, arguments):
             if bucket not in calendar: calendar.append(bucket)
             day+=timedelta(days=1)
         if len(calendar)>1000: failure('dataset_limit_use_filters')
-        rows=[existing.get(bucket,{dimension_name:bucket,**{m:('0.00' if ds.measures[m][1]=='money' else 0) if complete and date.fromisoformat(bucket)<=today and ds.measures[m][1] in ('count','money') and dataset not in ('targets','plan_fact_monthly') else None for m in measures}}) for bucket in calendar]
+        rows=[existing.get(bucket,{dimension_name:bucket,**{m:('0.00' if ds.measures[m][1]=='money' else 0) if aggregation=='default' and complete and date.fromisoformat(bucket)<=today and ds.measures[m][1] in ('count','money') and dataset not in ('targets','plan_fact_monthly') else None for m in measures}}) for bucket in calendar]
         if orders and orders[0]['direction']=='desc': rows.reverse()
         total_groups=len(rows)
     normalized['order_by']=orders

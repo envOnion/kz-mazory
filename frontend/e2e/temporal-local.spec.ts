@@ -17,7 +17,7 @@ test('projects over the full explicit year reject payments and allow date-axis r
   const semantics: Record<string, boolean | number> = JSON.parse(readFileSync(join(dir, 'temporal-semantic.json'), 'utf8'))
   expect(semantics).toMatchObject({crm_repeat_no_event:true,crm_stage_source_time:true,commitment_postponed:true,commitment_fulfilled:true,
     financial_correction:true,archived_history:true,append_only:true,foreign_scope_hidden:true,source_timezone_boundary:true,
-    backfill_replayed:true,legacy_import_count:1})
+    backfill_replayed:true,legacy_import_count:1,average_no_false_sum:true,average_category_guard:true,average_empty_unknown:true})
   await context.addCookies([{ name: session.cookie_name, value: session.refresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
   await page.goto('/')
   await page.getByTestId('nav-kpi-dashboard').waitFor()

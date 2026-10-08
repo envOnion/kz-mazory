@@ -101,7 +101,7 @@ def semantic_scenario(analyst):
     from decimal import Decimal
     from api.models import (Team, CrmProjectSnapshot, Commitment, FinancialRecord, ProjectRevision, StageTransition)
     from api.temporal import enqueue
-    team=Team.objects.create(name='Private temporal worker scenario')
+    team=Team.objects.create(name=f'Private temporal worker scenario {timezone.now().isoformat()}')
     project=Project.objects.create(team=team,name='Private temporal history',identity_confirmed=True,currency='USD',
         source_created_at=datetime.fromisoformat('2019-12-31T23:30:00+03:00'))
     crm=CrmProjectSnapshot.objects.create(project=project,external_stage_id='NEW',currency='USD',
@@ -139,6 +139,37 @@ def semantic_scenario(analyst):
     report={'crm_repeat_no_event':noop,'crm_stage_source_time':stage.event_kind=='stage_changed' and stage.effective_at==crm.source_stage_changed_at,
         'commitment_postponed':postponed,'commitment_fulfilled':fulfilled,'financial_correction':correction,
         'archived_history':archived,'append_only':immutable,'foreign_scope_hidden':hidden,'source_timezone_boundary':boundary}
+    # Aggregation semantics use real SQL in this worker, then browser readback.
+    import time
+    from datetime import timedelta
+    from api.models import AsyncOperation
+    from api.analytics.data import OperationContext
+    from api.analytics.combine import combine
+    from api.providers import ProviderUnavailable
+    admin=User.objects.get(username='79990000001')
+    project.contract_known=True; project.contract_amount=Decimal('100'); project.save()
+    companion=Project.objects.create(team=team,name='Private average fixture',identity_confirmed=True,
+        currency='USD',contract_known=True,contract_amount=Decimal('300'))
+    validation=AsyncOperation.objects.create(requested_by=admin,operation_type='temporal_e2e',status='running',
+        expires_at=timezone.now()+timedelta(minutes=10),access_fingerprint=access.fingerprint(admin),
+        idempotency_key=f'temporal-averages:{time.monotonic_ns()}')
+    context=OperationContext(validation.id,admin.id,validation.access_fingerprint,validation.expires_at,time.monotonic()+30,{'period':'year','currency':'USD'})
+    filters=[{'field':'project_id','op':'in','value':[project.id,companion.id]}]
+    averaged=context.query({'dataset':'projects','dimensions':['status'],'measures':['contract_amount'],
+        'aggregation':'avg','filters':filters,'date_axis':'created_at',
+        'date_range':{'start':'2026-01-01','end_exclusive':'2027-01-01'}})
+    report['average_no_false_sum']=not any(v['formula']=='sum' for v in context.facts.values())
+    report['average_category_guard']=False
+    try:
+        combine(context,{'mode':'categories','dataset_ids':[averaged['dataset_id']],'category':'status',
+            'groups':{r['status']:'Все стадии' for r in averaged['rows']}})
+    except ProviderUnavailable as exc:
+        report['average_category_guard']=str(exc)=='combine_requires_aggregation'
+    calendar=context.query({'dataset':'projects','dimensions':['created_at_month'],'date_axis':'created_at',
+        'measures':['contract_amount'],'aggregation':'avg','filters':filters,
+        'date_range':{'start':'2026-01-01','end_exclusive':'2026-03-01'}})
+    report['average_empty_unknown']=len(calendar['rows'])==2 and all(r['contract_amount'] is None for r in calendar['rows'])
+    validation.status='succeeded'; validation.save(update_fields=['status'])
     op=enqueue(User.objects.get(username='79990000001'))
     report.update(backfill_operation_id=op.id,legacy_revision_id=revision.id)
     (Path(settings.E2E_DIR)/'temporal-semantic.json').write_text(json.dumps(report))

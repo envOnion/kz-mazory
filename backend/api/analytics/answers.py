@@ -44,7 +44,12 @@ def formatted(value, kind, unit=None):
 def collect_facts(dataset, rows=None):
     rows = dataset['rows'] if rows is None else rows
     facts = {}
+    query = dataset['normalized_query']
+    additive = all(q.get('aggregation', 'default') in ('default', 'sum')
+                   for q in [query, *query.get('sources', [])])
     if dataset['normalized_query'].get('mode') == 'series':
+        if not additive:
+            return facts
         labels = list(dict.fromkeys(r['series'] for r in rows))
         totals = []
         col = next(c for c in dataset['columns'] if c['name'] == 'value')
@@ -84,7 +89,7 @@ def collect_facts(dataset, rows=None):
         if not values:
             continue
         # Unknown components are never turned into a complete total; ratios aren't additive.
-        if col['type'] not in ('percent', 'number') and len(values) == len(rows):
+        if additive and col['type'] not in ('percent', 'number') and len(values) == len(rows):
             total = sum((Decimal(str(v)) for _, v in values), Decimal(0))
             value = int(total) if col['type'] == 'count' else str(total.quantize(Decimal('.01')))
             facts[f'{dataset["dataset_id"]}:{name}:total'] = {
