@@ -14,10 +14,16 @@ test('projects over the full explicit year reject payments and allow date-axis r
   const benchmark: Record<string, number> = JSON.parse(readFileSync(join(dir, 'temporal-benchmark.json'), 'utf8'))
   for (const ms of Object.values(benchmark)) expect(ms).toBeLessThan(2000)
   await expect.poll(() => JSON.parse(readFileSync(join(dir, 'temporal-semantic.json'), 'utf8')).backfill_succeeded, { timeout:60000 }).toBe(true)
+  await expect.poll(() => JSON.parse(readFileSync(join(dir, 'temporal-semantic.json'), 'utf8')).concurrent_succeeded, { timeout:60000 }).toBe(true)
   const semantics: Record<string, boolean | number> = JSON.parse(readFileSync(join(dir, 'temporal-semantic.json'), 'utf8'))
   expect(semantics).toMatchObject({crm_repeat_no_event:true,crm_stage_source_time:true,commitment_postponed:true,commitment_fulfilled:true,
     financial_correction:true,archived_history:true,append_only:true,foreign_scope_hidden:true,source_timezone_boundary:true,
-    backfill_replayed:true,legacy_import_count:1,average_no_false_sum:true,average_category_guard:true,average_empty_unknown:true})
+    backfill_replayed:true,legacy_import_count:1,average_no_false_sum:true,average_category_guard:true,average_empty_unknown:true,
+    concurrent_succeeded:true,concurrent_update_preserved:true,concurrent_revision_count:1,concurrent_snapshot_current:true})
+  const observer: { access: string } = JSON.parse(readFileSync(join(dir, 'temporal-concurrent-session.json'), 'utf8'))
+  const operation = await request.get(`/api/operations/${semantics.concurrent_operation_id}/`, { headers: { Authorization: `Bearer ${observer.access}` } })
+  expect(operation.ok()).toBe(true)
+  expect(await operation.json()).toMatchObject({ status: 'succeeded', error_code: '' })
   await context.addCookies([{ name: session.cookie_name, value: session.refresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
   await page.goto('/')
   await page.getByTestId('nav-kpi-dashboard').waitFor()
