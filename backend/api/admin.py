@@ -2333,3 +2333,24 @@ for model in (FactDecision, FactEvent, FieldAssertion, SourceCheckpoint,
               ProviderReservation, ParticipantIdentity,
               ProjectParty, ProjectAlias, CompanyAlias):
     admin.site.register(model, ScopedReadOnlyAdmin)
+
+
+from .models import TemporalEntityRevision, AsyncOperation
+
+@admin.register(TemporalEntityRevision)
+class TemporalRevisionAdmin(SuperuserAdmin):
+    list_display = ('id', 'entity_type', 'entity_id', 'revision', 'event_kind', 'effective_at', 'recorded_at', 'time_precision')
+    list_filter = ('entity_type', 'event_kind', 'time_precision')
+    search_fields = ('source_key',)
+    def has_add_permission(self,request): return False
+    def has_change_permission(self,request,obj=None): return False
+    def has_delete_permission(self,request,obj=None): return False
+
+if not admin.site.is_registered(AsyncOperation):
+    @admin.register(AsyncOperation)
+    class AsyncOperationAdmin(SuperuserAdmin):
+        list_display = ('id','operation_type','status','created_at','updated_at')
+        list_filter = ('operation_type','status')
+        readonly_fields = tuple(field.name for field in AsyncOperation._meta.fields)
+        def has_add_permission(self,request): return False
+        def has_delete_permission(self,request,obj=None): return False

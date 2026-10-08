@@ -8,5 +8,5 @@ export interface AnalyticsTurn { id: number; sequence: number; parent_turn_id: n
 export interface ConversationRef { id: number; title: string; updated_at?: string }
 export interface Conversation extends ConversationRef { default_scope: KpiFilters & { period: Period }; turns: AnalyticsTurn[] }
 export interface Artifact { id: number; available: boolean; presentation?: PresentationDocument; query_plan?: { title: string; blocks: { query: Record<string, unknown>; block: Record<string, unknown> }[] }; parent_artifact_id?: number | null; message?: string; expires_at?: string }
-export interface QueryPatch { grouping?: 'day' | 'week' | 'month' | 'quarter' | 'year' | 'manager' | 'status' | 'project'; sort?: 'date_asc' | 'date_desc' | 'value_asc' | 'value_desc' }
+export interface QueryPatch { date_axis?: string; grouping?: 'day' | 'week' | 'month' | 'quarter' | 'year' | 'manager' | 'status' | 'project'; sort?: 'date_asc' | 'date_desc' | 'value_asc' | 'value_desc' }
 export interface TurnReceipt { turn_id: number; operation_id: number; status: string }

@@ -19,6 +19,8 @@ TABLES = [
     "api_userprofile",
     "api_chataccess",
     "api_crmprojectsnapshot",
+    "api_company", "api_paymentscheduleitem", "api_paymentallocation",
+    "api_factcandidate", "api_businessevent", "api_temporalentityrevision", "api_sourcecheckpoint",
 ]
 
 
@@ -94,6 +96,8 @@ class Command(BaseCommand):
                             sql.Identifier(role)
                         )
                     )
+                    c.execute(sql.SQL("GRANT USAGE ON SCHEMA analytics TO {}").format(sql.Identifier(role)))
+                    c.execute(sql.SQL("GRANT SELECT ON ALL TABLES IN SCHEMA analytics TO {}").format(sql.Identifier(role)))
                     for table in TABLES:
                         c.execute(
                             sql.SQL("GRANT SELECT ON {} TO {}").format(
@@ -107,7 +111,7 @@ class Command(BaseCommand):
                     )
                     c.execute(
                         sql.SQL(
-                            "GRANT SELECT (id, config_id, source, project_id, team_id, timestamp, sender_name, content, session_name, chat_id, message_id, source_revision, sent_at_known, processing_state) ON api_rawmessage TO {}"
+                            "GRANT SELECT (id, config_id, source, project_id, team_id, timestamp, received_at, created_at, updated_at, sender_name, content, session_name, chat_id, message_id, source_revision, sent_at_known, processing_state) ON api_rawmessage TO {}"
                         ).format(sql.Identifier(role))
                     )
                     c.execute(
@@ -115,6 +119,7 @@ class Command(BaseCommand):
                             "GRANT SELECT (id, is_active, team_id) ON api_whatsappconfig TO {}"
                         ).format(sql.Identifier(role))
                     )
+                    c.execute(sql.SQL('GRANT SELECT (id,raw_message_id) ON api_messageprocessingtrace TO {}').format(sql.Identifier(role)))
                     c.execute(
                         sql.SQL(
                             "ALTER ROLE {} SET default_transaction_read_only=on"

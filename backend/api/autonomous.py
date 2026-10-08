@@ -357,12 +357,20 @@ def _participant(candidate, data, raw):
     return participant
 
 
-def _publish(candidate, decision, data, raw, mode):
-    event = FactEvent.objects.create(
+def _source_event(candidate, decision, data, raw, mode):
+    return FactEvent.objects.create(
         decision=decision, team=candidate.team, project=candidate.project,
         event_key=f"decision:{decision.id}", event_type="payment_schedule" if mode == "schedule" else f"reported_{data['payment_kind']}" if mode == "observation" else candidate.fact_type,
         occurred_at=source_time(raw)[0], payload=json_value(data),
     )
+
+
+def _publish(candidate, decision, data, raw, mode, event=None):
+    event = event or _source_event(candidate, decision, data, raw, mode)
+    if event.project_id != candidate.project_id or event.payload != json_value(data):
+        event.project=candidate.project
+        event.payload=json_value(data)
+        event.save(update_fields=['project','payload'])
     if mode == "observation":
         return event
     if mode == "schedule":
@@ -434,14 +442,18 @@ def decide(candidate_id, *, preview=False):
             with transaction.atomic():
                 decision = FactDecision.objects.create(candidate=candidate, supersedes=previous, outcome=outcome, policy_version=cfg.autonomous_policy_version, input_fingerprint=fingerprint, reason_code=code, explanation=explanation, validation={"trace_id": candidate.trace_id, "model": candidate.trace.model_version, "coverage": candidate.trace.context_metadata.get("history_complete_in_request", False), "mode": mode, "discarded_fields": getattr(candidate, "_discarded_fields", {})})
                 if outcome == "accepted":
+                    event=None
                     if mode == "apply":
-                        candidate = _apply_candidate(candidate.id, None, "approve", explanation, changes=json_value(data), base_version=candidate.project.version if candidate.project_id else 0, system=True)
+                        from .temporal import provenance
+                        event=_source_event(candidate, decision, data, primary, mode)
+                        with provenance(raw_message_id=primary.id,fact_event_id=event.id):
+                            candidate = _apply_candidate(candidate.id, None, "approve", explanation, changes=json_value(data), base_version=candidate.project.version if candidate.project_id else 0, system=True)
                     else:
                         candidate.status, candidate.review_reason, candidate.reviewed_at = "approved", explanation, timezone.now()
                         candidate.save(update_fields=["status", "review_reason", "reviewed_at"])
                     if mode == "apply":
                         data = candidate.proposed_changes
-                    event = _publish(candidate, decision, data, primary, mode)
+                    event = _publish(candidate, decision, data, primary, mode,event=event)
                     from .autonomous_crm import enqueue_effects, enqueue_project
                     if not preview:
                         if candidate.project_id:

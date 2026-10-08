@@ -84,6 +84,7 @@ class ConversationDetail(APIView):
 
 
 class QueryPatch(serializers.Serializer):
+    date_axis = serializers.CharField(max_length=64, required=False)
     grouping = serializers.ChoiceField(choices=['day', 'week', 'month', 'quarter', 'year', 'manager', 'status', 'project'], required=False)
     sort = serializers.ChoiceField(choices=['date_asc', 'date_desc', 'value_asc', 'value_desc'], required=False)
 
@@ -156,7 +157,8 @@ class TurnList(APIView):
             if not parent or parent.state == 'succeeded' or parent.operation.status == 'succeeded':
                 enqueue(op)
             conversation.title = conversation.title if sequence > 1 else values['prompt'][:200]
-            conversation.save(update_fields=['title', 'updated_at'])
+            conversation.last_activity_at = timezone.now()
+            conversation.save(update_fields=['title', 'last_activity_at'])
         return Response({'turn_id': turn.id, 'operation_id': op.id, 'status': op.status}, status=202)
 
 
@@ -272,25 +274,35 @@ def recalculate(context, plan, patch):
         dims = list(spec['dimensions'])
         group = patch.get('grouping')
         source = spec['dataset']
+        from .catalog import FIELDS, CATALOG
+        dated = lambda d: FIELDS[source].get(d, ('', ''))[1] == 'date'
+        if patch.get('date_axis'):
+            if patch['date_axis'] not in CATALOG[source].dates: fail('unsupported_query')
+            spec['date_axis'] = patch['date_axis']
+            grain = next((d.rsplit('_',1)[-1] for d in dims if dated(d) and d.rsplit('_',1)[-1] in ['day','week','month','quarter','year']), 'month')
+            dims = [d for d in dims if not dated(d)]
+            dims.insert(0, f"{spec['date_axis']}_{grain}")
+            spec['order_by'] = [{**order, 'field':dims[0]} if dated(order['field']) else order
+                                for order in spec.get('order_by',[])]
         if group in ['day', 'week', 'month', 'quarter', 'year']:
-            prefix = {'payments': 'payment', 'messages': 'message', 'commitments': 'effective_deadline'}.get(source)
-            if source == 'targets' and group != 'month':
-                fail('plan_requires_months')
-            if not prefix and source != 'targets':
-                fail('crm_history_unavailable')
-            replacement = f'{prefix}_{group}' if prefix else 'month'
-            dims = [d for d in dims if not d.startswith(('payment_', 'message_', 'effective_deadline_')) and d != 'month']
-            dims.insert(0, replacement)
+            if source in ['targets', 'plan_fact_monthly'] and group != 'month': fail('plan_requires_months')
+            axis = spec.get('date_axis') or CATALOG[source].default_date or 'source_created_at'
+            if axis not in CATALOG[source].dates: fail('unsupported_query')
+            spec['date_axis'] = axis
+            if 'grain' in spec: spec['grain'] = group
+            dims = [d for d in dims if not dated(d)]
+            dims.insert(0, 'month' if axis == 'month' and group == 'month' else f'{axis}_{group}')
         elif group:
             mapping = {'manager': {'payments': 'credited_manager', 'projects': 'project_manager', 'crm_projects': 'crm_manager', 'commitments': 'responsible_manager', 'targets': 'manager'}, 'status': {'crm_projects': 'status', 'projects': 'status', 'commitments': 'status'}, 'project': {'payments': 'project_id', 'projects': 'project_id', 'crm_projects': 'project_id', 'commitments': 'project_id'}}
             replacement = mapping.get(group, {}).get(source)
             if not replacement:
                 fail('unsupported_query')
-            dims = [d for d in dims if d.startswith(('payment_', 'message_', 'effective_deadline_')) or d == 'month'] + [replacement]
+            dims = [replacement]
+            spec.pop('grain',None)
         spec['dimensions'] = dims
         sort = patch.get('sort')
         if sort:
-            field = next((d for d in dims if d.startswith(('payment_', 'message_', 'effective_deadline_')) or d == 'month'), None) if sort.startswith('date') else spec['measures'][0]
+            field = next((d for d in dims if dated(d)), None) if sort.startswith('date') else spec['measures'][0]
             if not field:
                 fail('unsupported_query')
             spec['order_by'] = [{'field': field, 'direction': sort.rsplit('_', 1)[-1]}]
@@ -314,9 +326,17 @@ def recalculate(context, plan, patch):
             if patch.get('grouping') == 'manager' or patch.get('sort') == 'date_desc':
                 block['kind'] = 'bar'
         blocks.append(block)
-    document = build(context, {'version': '1.0', 'title': plan['title'], 'blocks': blocks})
+    title=plan['title']
+    if title.startswith('Количество') and len(blocks)==1:
+        from .answers import column_label
+        title=' / '.join(column_label(m,ds['normalized_query']['dataset']) for m in ds['normalized_query'].get('measures',[]))
+        dated_column=next((c['name'] for c in ds['columns'] if c['type']=='date'),None)
+        if dated_column: title += {'month':' по месяцам','week':' по неделям','day':' по дням','quarter':' по кварталам','year':' по годам'}.get(dated_column.rsplit('_',1)[-1],'')
+        interval=ds['normalized_query'].get('date_range')
+        if interval and interval['start'].endswith('-01-01') and interval['end_exclusive'].endswith('-01-01'): title += ' за '+interval['start'][:4]+' год'
+    document = build(context, {'version': '1.0', 'title': title, 'blocks': blocks})
     grounded = answer(context, document)
-    return {'text': grounded['markdown'], 'answer_document': grounded, 'presentation': document, 'widget': None, 'quotes': []}
+    return {'text': grounded['markdown'], 'answer_document': grounded, 'presentation': document, 'widget': None, 'quotes': [], 'analytics_trace':context.trace, 'resolved_intent':context.intent}
 
 
 def persist(operation, result, parent_artifact=None):

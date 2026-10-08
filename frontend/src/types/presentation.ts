@@ -12,9 +12,9 @@ const decimal = /^-?\d+(?:\.\d+)?$/
 const value = z.union([z.string().max(2000), z.number().finite(), z.null()])
 const dataset = z.object({
   dataset_id: z.string().max(64),
-  columns: z.array(z.object({ name: z.string().max(64), label: z.string().max(200).optional(), source: z.string().max(64).optional(), semantic_role: z.string().max(64).optional(), type: z.enum(['id', 'text', 'date', 'money', 'count', 'percent']), unit: z.string().max(10).nullable() }).strict()).max(10),
+  columns: z.array(z.object({ name: z.string().max(64), label: z.string().max(200).optional(), source: z.string().max(64).optional(), semantic_role: z.string().max(64).optional(), type: z.enum(['id', 'text', 'date', 'money', 'count', 'percent', 'number']), unit: z.string().max(10).nullable() }).strict()).max(10),
   rows: z.array(z.record(z.string(), value)).max(1000), normalized_query: z.record(z.string(), z.unknown()), timezone: z.string().max(64), effective_end_exclusive: z.string().max(10).nullable().optional(),
-  coverage: z.object({ status: z.enum(['complete', 'partial']), message: text }).strict(),
+  coverage: z.object({ status: z.enum(['complete', 'partial']), message: text, date_axes: z.record(z.string(), z.string()).optional(), date_axis: z.string().nullable().optional(), unknown_dates: z.number().int().nonnegative().optional(), future_values: z.string().optional() }).strict(),
   returned_count: z.number().int().nonnegative(), total_groups: z.number().int().nonnegative(), truncated: z.boolean(), definition: text,
   evidence: z.array(z.object({ id: z.number().int().positive(), sender_name: text }).strict()).max(20),
 }).strict()
@@ -37,9 +37,9 @@ export function validatePresentation(input: unknown): PresentationDocument {
         if (cell === null) continue
         if (['text', 'date'].includes(col.type) && typeof cell !== 'string') throw new Error('Неверная подпись')
         if (col.type === 'money' && (typeof cell !== 'string' || !decimal.test(cell))) throw new Error('Неверная сумма')
-        if (['id', 'count', 'percent'].includes(col.type) && typeof cell !== 'number') throw new Error('Неверное число')
+        if (['id', 'count', 'percent', 'number'].includes(col.type) && typeof cell !== 'number') throw new Error('Неверное число')
         if (['id', 'count'].includes(col.type) && (!Number.isSafeInteger(cell) || (col.type === 'id' && (typeof cell !== 'number' || cell <= 0)))) throw new Error('Неверный целочисленный ключ')
-        if (['money', 'count', 'percent', 'id'].includes(col.type) && (!Number.isFinite(Number(cell)) || Math.abs(Number(cell)) > Number.MAX_SAFE_INTEGER)) throw new Error('Число вне диапазона графика')
+        if (['money', 'count', 'percent', 'number', 'id'].includes(col.type) && (!Number.isFinite(Number(cell)) || Math.abs(Number(cell)) > Number.MAX_SAFE_INTEGER)) throw new Error('Число вне диапазона графика')
       }
     }
   }
@@ -52,7 +52,7 @@ export function validatePresentation(input: unknown): PresentationDocument {
     const channels = Object.keys(b.encoding)
     const allowed = [...required[b.kind], ...(['bar', 'line', 'area'].includes(b.kind) ? ['series'] : b.kind === 'scatter' ? ['label'] : [])]
     if (required[b.kind].some(k => !channels.includes(k)) || channels.some(k => !allowed.includes(k)) || Object.values(b.encoding).some(c => !cols.has(c))) throw new Error('Неверные оси')
-    for (const key of ['value', 'x', 'y'] as const) { const name = b.encoding[key]; if (name && !['money', 'count', 'percent'].includes(cols.get(name)?.type || '')) throw new Error('Ось должна быть числовой') }
+    for (const key of ['value', 'x', 'y'] as const) { const name = b.encoding[key]; if (name && !['money', 'count', 'percent', 'number'].includes(cols.get(name)?.type || '')) throw new Error('Ось должна быть числовой') }
     if (b.kind === 'table' && (!b.columns?.length || b.columns.some(c => !cols.has(c)))) throw new Error('Неверная таблица')
     if (b.kind !== 'table' && b.columns) throw new Error('Неверные параметры блока')
     if (b.kind === 'kpi' && ds.rows.length !== 1) throw new Error('Неверный KPI')

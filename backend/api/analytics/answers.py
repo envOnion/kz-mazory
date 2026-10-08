@@ -3,6 +3,10 @@ import re
 from decimal import Decimal
 
 LABELS = {
+    'event_count': 'Количество событий', 'revision_count': 'Количество версий', 'company_count': 'Количество компаний',
+    'duration_days': 'Средний срок исполнения', 'overdue_days': 'Средняя просрочка', 'on_time_percent': 'Исполнено в срок',
+    'schedule_count': 'Количество пунктов графика', 'scheduled_amount': 'По графику', 'outstanding_amount': 'Остаток оплаты',
+    'target_count': 'Количество планов', 'candidate_count': 'Количество предложений', 'gap_count': 'Пробелы истории', 'scope_count': 'Количество источников',
     'project_count': 'Количество проектов', 'payment_count': 'Количество платежей',
     'received_amount': 'Поступления', 'target_amount': 'План', 'crm_amount': 'Сумма сделок CRM',
     'contract_amount': 'Сумма договоров', 'confirmed_cost': 'Подтверждённая стоимость',
@@ -29,7 +33,7 @@ def column_label(name, source):
 def formatted(value, kind, unit=None):
     if value is None:
         return 'нет данных'
-    if kind in ['money', 'percent', 'count']:
+    if kind in ['money', 'percent', 'count', 'number']:
         d = Decimal(str(value))
         text = format(d, ',.0f' if kind == 'count' else ',.2f').replace(',', '\u202f').replace('.', ',')
     else:
@@ -66,7 +70,7 @@ def collect_facts(dataset, rows=None):
         return facts
     dims = [c['name'] for c in dataset['columns'] if c['type'] in ['text', 'date', 'id']]
     for col in dataset['columns']:
-        if col['type'] not in ['count', 'money', 'percent']:
+        if col['type'] not in ['count', 'money', 'percent', 'number']:
             continue
         values = [(i, r[col['name']]) for i, r in enumerate(rows) if r[col['name']] is not None]
         name = col['name']
@@ -80,7 +84,7 @@ def collect_facts(dataset, rows=None):
         if not values:
             continue
         # Unknown components are never turned into a complete total; ratios aren't additive.
-        if col['type'] != 'percent' and len(values) == len(rows):
+        if col['type'] not in ('percent', 'number') and len(values) == len(rows):
             total = sum((Decimal(str(v)) for _, v in values), Decimal(0))
             value = int(total) if col['type'] == 'count' else str(total.quantize(Decimal('.01')))
             facts[f'{dataset["dataset_id"]}:{name}:total'] = {
@@ -133,7 +137,8 @@ def answer(context, document=None, model_text=''):
             if maxima:
                 k, v = maxima[0]
                 category = ', '.join(escape(value if value is not None else 'Не назначен') for value in v['row_key'].values())
-                parts.append(f'Наибольшее значение: {category} — {{{{fact:{k}}}}}.')
+                prefix = 'Наибольшее из известных значений' if ds['coverage']['status'] == 'partial' else 'Наибольшее значение'
+                parts.append(f'{prefix}: {category} — {{{{fact:{k}}}}}.')
             if ds['truncated']:
                 parts.append('График показывает выбранный рейтинг; итоги рассчитаны по всей выборке.')
             if not ds['rows']:

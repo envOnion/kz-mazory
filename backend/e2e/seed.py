@@ -1,3 +1,4 @@
+import os
 import datetime
 from decimal import Decimal
 import json
@@ -65,10 +66,20 @@ def seed():
         context_window_tokens=131072,
         max_completion_tokens=8192,
         context_safety_tokens=512,
+        autonomous_daily_token_limit=0,
         chat_api_key_encrypted=encrypt_credential(
             "fixture-key", purpose="chat", api_format="anthropic_messages"
         ),
     )
+    if os.getenv('MAZORY_E2E_REAL_MODEL') == '1':
+        from api.context_tokens import GEMMA_MANIFEST
+        cfg=AISettings.objects.first()
+        cfg.chat_api_format='openai_compatible'
+        cfg.chat_provider_url='https://localhost/v1'
+        cfg.chat_model_name='gemma4:e4b'
+        cfg.tokenizer_id=GEMMA_MANIFEST['repo']; cfg.tokenizer_revision=GEMMA_MANIFEST['revision']
+        cfg.context_window_tokens=32768; cfg.max_completion_tokens=2048
+        cfg.set_chat_api_key('synthetic-e2e-only'); cfg.save()
     BitrixSettings.objects.create(
         webhook_url="https://localhost/rest/1/fixture/",
         is_active=True,
@@ -86,6 +97,8 @@ def seed():
     target.write_text(json.dumps(data))
     target.chmod(0o644)
     seed_analytics()
+    from .temporal import seed as seed_temporal
+    seed_temporal()
     from .thread_history import seed as seed_thread_history
     seed_thread_history()
     seed_avatars()

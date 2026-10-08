@@ -45,6 +45,7 @@ CLUSTERS = {
     "history_import": "history",
     "whatsapp_artifact": "history",
     "thread_backfill": "history",
+    "temporal_backfill": "history",
     "whatsapp_participants": "history",
 }
 NON_IDEMPOTENT = {"otp", "notification", "waha_control"}
@@ -340,6 +341,7 @@ def run_outbox(pk):
     claim_token = outbox_claim.set(event.payload.get("claim_generation"))
     deadline_token = extraction_deadline.set(time.monotonic() + 240 if event.event_type == "extract_message" else None)
     try:
+        from .temporal import backfill as temporal_backfill
         handlers = {
             "extract_message": extract_message,
             "decide_fact": decide_fact,
@@ -359,6 +361,7 @@ def run_outbox(pk):
             "waha_control": waha_control,
             "history_import": import_history_step,
             "thread_backfill": backfill_threads,
+            "temporal_backfill": temporal_backfill,
             "whatsapp_participants": sync_whatsapp_participants,
         }
         result = handlers[event.event_type](event.payload)

@@ -11,6 +11,8 @@ x-environment: &environment
   POSTGRES_DB: mazory_e2e
   POSTGRES_USER: mazory_e2e
   POSTGRES_PASSWORD: isolated-writer-fixture
+  ANALYTICS_ADMIN_USER: mazory_e2e
+  ANALYTICS_ADMIN_PASSWORD: isolated-writer-fixture
   ANALYTICS_DB_USER: e2e_analytics
   ANALYTICS_DB_PASSWORD: isolated-readonly-fixture
   AI_CREDENTIAL_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
@@ -42,7 +44,7 @@ services:
       retries: 30
   seed:
     <<: *backend
-    command: [sh, -c, 'python manage.py migrate --noinput && python manage.py check && python manage.py makemigrations --check && python manage.py collectstatic --noinput && python manage.py shell -c "from e2e.seed import seed; seed()"']
+    command: [sh, -c, 'python manage.py migrate --noinput && python manage.py check && python manage.py makemigrations --check && python manage.py provision_analytics_role && python manage.py collectstatic --noinput && python manage.py shell -c "from e2e.seed import seed; seed()"']
     depends_on:
       postgres: {condition: service_healthy}
       provider: {condition: service_healthy}

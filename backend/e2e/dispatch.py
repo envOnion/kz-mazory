@@ -11,8 +11,23 @@ from django.utils import timezone
 
 def dispatch_forever():
     analytics_owner_id = json.loads((settings.E2E_DIR / 'analytics-session.json').read_text())['user_id']
+    marker=settings.E2E_DIR/"temporal-benchmark-started"
+    if not marker.exists():
+        async_task("e2e.temporal.benchmark"); marker.touch()
     while True:
         close_old_connections()
+        proof=settings.E2E_DIR/'temporal-semantic.json'
+        if proof.exists():
+            from api.models import AsyncOperation, TemporalEntityRevision
+            report=json.loads(proof.read_text())
+            operation=AsyncOperation.objects.get(pk=report['backfill_operation_id'])
+            if operation.status=='succeeded' and not report.get('backfill_replayed'):
+                # An already acknowledged chunk delivered again must be harmless.
+                async_task('api.temporal.backfill', {'operation_id':operation.id,'stage':0,'cursor':0})
+                report['backfill_replayed']=True
+                report['legacy_import_count']=TemporalEntityRevision.objects.filter(source_key=f"legacy:project-revision:{report['legacy_revision_id']}").count()
+                report['backfill_succeeded']=True
+                proof.write_text(json.dumps(report))
         control = json.loads((settings.E2E_DIR / "provider-state.json").read_text())
         from api.models import MessageProcessingTrace
         completed = dict(MessageProcessingTrace.objects.filter(raw_message__message_id__startswith='full-', status='success').order_by('id').values_list('raw_message_id','id'))

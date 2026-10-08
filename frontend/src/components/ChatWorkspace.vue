@@ -36,7 +36,7 @@
         <template v-if="presentation">
           <h3 class="result-title">{{ presentation.title }}</h3>
           <div class="result-toolbar"><button class="chat-button" :aria-pressed="!table" @click="table = false"><ChartNoAxesCombined :size="16" /> График</button><button class="chat-button" :aria-pressed="table" @click="table = true"><Table2 :size="16" /> Таблица</button><label v-if="!table && canChangeType" class="select-wrap type-select"><select aria-label="Тип графика" v-model="chartKind"><option value="bar">Столбцы</option><option value="line">Линия</option><option value="area">Область</option></select><ChevronDown :size="16" /></label></div>
-          <div class="result-controls"><label v-if="groupOptions.length">Группировка<span class="select-wrap"><select aria-label="Группировка" :value="groupValue" @change="group"><option v-for="o in groupOptions" :key="o.value" :value="o.value">{{ o.label }}</option></select><ChevronDown :size="16" /></span></label><label v-if="canSort">Сортировка<span class="select-wrap"><select aria-label="Сортировка" :value="sortValue" @change="sort"><option v-if="hasDates" value="date_asc">От ранних к поздним</option><option v-if="hasDates" value="date_desc">От поздних к ранним</option><option value="value_desc">По убыванию значения</option><option value="value_asc">По возрастанию значения</option></select><ChevronDown :size="16" /></span></label></div>
+          <div class="result-controls"><label v-if="dateAxes.length">Ось времени<span class="select-wrap"><select aria-label="Ось времени" :value="dataset?.normalized_query.date_axis" @change="changeDateAxis"><option v-for="o in dateAxes" :key="o.value" :value="o.value">{{ o.label }}</option></select><ChevronDown :size="16" /></span></label><label v-if="groupOptions.length">Группировка<span class="select-wrap"><select aria-label="Группировка" :value="groupValue" @change="group"><option v-for="o in groupOptions" :key="o.value" :value="o.value">{{ o.label }}</option></select><ChevronDown :size="16" /></span></label><label v-if="canSort">Сортировка<span class="select-wrap"><select aria-label="Сортировка" :value="sortValue" @change="sort"><option v-if="hasDates" value="date_asc">От ранних к поздним</option><option v-if="hasDates" value="date_desc">От поздних к ранним</option><option value="value_desc">По убыванию значения</option><option value="value_asc">По возрастанию значения</option></select><ChevronDown :size="16" /></span></label></div>
           <PresentationRenderer :document="displayDocument!" @open-source="$emit('openSource', $event)" />
           <div class="suggestions"><button class="chat-button" @click="focusComposer('Добавь ')" ><Plus :size="16" /> Добавить показатель</button><button v-if="hasDates" class="chat-button" @click="$emit('submit', 'Добавь месячный план к этому графику')">Добавить план <ArrowUpRight :size="14" /></button><button class="chat-button" @click="$emit('submit', 'Объясни этот результат')">Объяснить результат</button></div>
         </template>
@@ -74,12 +74,13 @@ const source = computed(() => dataset.value?.normalized_query.dataset)
 const canChangeType = computed(() => props.presentation?.blocks.every(b => ['bar', 'line', 'area'].includes(b.kind)))
 const hasDates = computed(() => dataset.value?.columns.some(c => c.type === 'date'))
 const canSort = computed(() => source.value !== 'commitment_records')
+const dateAxes = computed(() => Object.entries(dataset.value?.coverage.date_axes || {}).map(([value, label]) => ({ value, label })))
 const groupOptions = computed(() => {
   if (source.value === 'commitment_records') return []
   if (source.value === 'combined') return hasDates.value ? [{ value: 'month', label: 'По месяцам' }] : []
-  const dated = ['payments', 'messages', 'commitments'].includes(String(source.value))
+  const dated = dateAxes.value.length > 0
   return [...(dated ? [{ value: 'day', label: 'По дням' }, { value: 'week', label: 'По неделям' }, { value: 'month', label: 'По месяцам' }, { value: 'quarter', label: 'По кварталам' }, { value: 'year', label: 'По годам' }] : []),
-    ...(source.value !== 'messages' ? [{ value: 'manager', label: source.value === 'crm_projects' ? 'По ответственным CRM' : 'По менеджерам' }] : []),
+    ...(['payments', 'projects', 'crm_projects', 'commitments', 'targets'].includes(String(source.value)) ? [{ value: 'manager', label: source.value === 'crm_projects' ? 'По ответственным CRM' : 'По менеджерам' }] : []),
     ...(['crm_projects', 'projects', 'commitments'].includes(String(source.value)) ? [{ value: 'status', label: 'По стадиям / статусам' }] : [])]
 })
 const groupValue = computed(() => { const dims = dataset.value?.normalized_query.dimensions as string[] | undefined; const date = dims?.find(d => d.includes('_day') || d.includes('_week') || d.includes('_month') || d.includes('_quarter') || d.includes('_year')); return date?.split('_').at(-1) || (dims?.includes('status') ? 'status' : 'manager') })
@@ -88,6 +89,7 @@ const displayDocument = computed<PresentationDocument | null>(() => props.presen
 function submit() { const text = prompt.value.trim(); if (!text) return; prompt.value = ''; emit('submit', text) }
 function focusComposer(text: string) { prompt.value = text; composer.value?.focus() }
 function group(event: Event) { const value = (event.target as HTMLSelectElement).value as QueryPatch['grouping']; emit('submit', `Измени группировку: ${groupOptions.value.find(o => o.value === value)?.label}`, { grouping: value }) }
+function changeDateAxis(event: Event) { const select = event.target as HTMLSelectElement; emit('submit', `Ось времени: ${select.selectedOptions[0]?.text}`, { date_axis: select.value }) }
 function sort(event: Event) { const select = event.target as HTMLSelectElement; emit('submit', `Сортировка: ${select.selectedOptions[0]?.text}`, { sort: select.value as QueryPatch['sort'] }) }
 function chooseConversation(event: Event) { const select = event.target as HTMLSelectElement; const c = props.conversations.find(c => String(c.id) === select.value); if (c) emit('loadConversation', c.id) }
 </script>

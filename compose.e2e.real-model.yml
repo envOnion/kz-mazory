@@ -1,0 +1,20 @@
+# Run only on kk-minsk, against synthetic E2E volumes. No CRM/WhatsApp account calls.
+services:
+  llm-relay:
+    image: mazory-e2e-backend
+    network_mode: host
+    environment:
+      MAZORY_E2E_REAL_MODEL: '1'
+      MAZORY_E2E_RELAY_BIND: ${MAZORY_E2E_RELAY_BIND:?Set the kk-minsk Docker bridge gateway}
+    command: [python, -m, e2e.real_llm_proxy]
+  provider:
+    environment: {MAZORY_E2E_REAL_MODEL: '1'}
+    extra_hosts: ['llm-host:host-gateway']
+    depends_on: [llm-relay]
+  seed:
+    environment: {MAZORY_E2E_REAL_MODEL: '1'}
+  qcluster:
+    environment: {MAZORY_E2E_REAL_MODEL: '1'}
+  browser:
+    environment: {MAZORY_E2E_REAL_MODEL: '1'}
+    command: [node, node_modules/@playwright/test/cli.js, test, --config=playwright.local.config.ts, temporal-local.spec.ts]

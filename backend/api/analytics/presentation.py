@@ -67,9 +67,42 @@ def invalid(message):
     )
 
 
+def requested_chart(context):
+    """Complete an explicit single-metric chart from already verified data."""
+    intent = context.intent
+    if not (intent.get('chart') and intent.get('dataset') and intent.get('measure') and intent.get('grain')):
+        return None
+    candidates = [dataset for dataset in context.registry.values()
+                  if dataset['normalized_query'].get('dataset') == intent['dataset']]
+    if len(candidates) != 1:
+        return None
+    dataset = candidates[0]
+    from .intent import validate_query
+    validate_query(intent, dataset['normalized_query'])
+    dimensions = dataset['normalized_query'].get('dimensions', [])
+    if len(dimensions) != 1 or not any(c['name'] == dimensions[0] and c['type'] == 'date' for c in dataset['columns']):
+        return None
+    return build(context, {'version':'1.0', 'title':'Динамика', 'blocks':[
+        {'id':'requested_chart', 'kind':'line', 'dataset_id':dataset['dataset_id'],
+         'encoding':{'category':dimensions[0], 'value':intent['measure']}}]})
+
+
 def build(context, arguments):
     context.check()
     validate(PRESENTATION_SCHEMA, arguments)
+    if context.intent.get("dataset") and context.intent.get("measure"):
+        from .answers import column_label
+        label = column_label(context.intent["measure"],context.intent["dataset"])
+        grain = context.intent.get("grain")
+        label += {"month":" по месяцам", "week":" по неделям", "day":" по дням", "quarter":" по кварталам", "year":" по годам"}.get(grain, "")
+        interval = context.intent.get("date_range")
+        if interval:
+            year = int(interval['start'][:4])
+            if interval == {'start':f'{year}-01-01', 'end_exclusive':f'{year+1}-01-01'}:
+                label += f' за {year} год'
+            else:
+                label += f" за период {interval['start']} — {interval['end_exclusive']} (не включая)"
+        arguments = {**arguments, "title": label}
     used = {}
     blocks = []
     ids = set()
@@ -83,9 +116,13 @@ def build(context, arguments):
             )
         ids.add(block["id"])
         dataset = context.registry[block["dataset_id"]]
+        from .intent import validate_query
+        validate_query(context.intent, dataset["normalized_query"])
         columns = {c["name"]: c for c in dataset["columns"]}
         encoding = dict(block.get("encoding", {}))
         kind = block["kind"]
+        if context.intent.get("measure") and kind != "table" and encoding.get("value", encoding.get("y")) != context.intent["measure"]:
+            invalid("График должен отображать запрошенный показатель " + context.intent["measure"])
         # Cartesian x/y are common native-model output and already part of the
         # tool schema. Normalize only explicit, nonconflicting column references.
         if kind in ["bar", "line", "area"]:
@@ -128,6 +165,7 @@ def build(context, arguments):
                 "money",
                 "count",
                 "percent",
+                "number",
             ]:
                 invalid(
                     f"Encoding {channel} must reference a money, count or percent column."
@@ -170,6 +208,8 @@ def build(context, arguments):
                 "Block titles cannot contain financial claims. Render amounts from the dataset."
             )
         normalized = {**block, "size": block.get("size", "wide"), "encoding": encoding}
+        if context.intent.get('dataset') and context.intent.get('measure'):
+            normalized['title'] = arguments['title']
         if kind == "waterfall":
             if (
                 dataset["normalized_query"]["dataset"] != "projects"
