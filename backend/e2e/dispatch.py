@@ -27,7 +27,19 @@ def dispatch_forever():
                 report['backfill_replayed']=True
                 report['legacy_import_count']=TemporalEntityRevision.objects.filter(source_key=f"legacy:project-revision:{report['legacy_revision_id']}").count()
                 report['backfill_succeeded']=True
+                async_task('e2e.temporal.concurrent_backfill_scenario')
                 proof.write_text(json.dumps(report))
+            concurrent=settings.E2E_DIR/'temporal-concurrent.json'
+            if concurrent.exists() and not report.get('concurrent_succeeded'):
+                overlap=json.loads(concurrent.read_text())
+                current=AsyncOperation.objects.get(pk=overlap['operation_id'])
+                if current.status=='succeeded':
+                    from api.models import Project
+                    revisions=TemporalEntityRevision.objects.filter(entity_type='project',entity_id=overlap['project_id'])
+                    report.update(concurrent_succeeded=overlap['overlap_observed'] and overlap['update_committed'],
+                        concurrent_operation_id=current.id,concurrent_update_preserved=Project.objects.get(pk=overlap['project_id']).source_time_precision=='exact',
+                        concurrent_revision_count=revisions.count(),concurrent_snapshot_current=revisions.get().snapshot.get('source_time_precision')=='exact')
+                    proof.write_text(json.dumps(report))
         control = json.loads((settings.E2E_DIR / "provider-state.json").read_text())
         from api.models import MessageProcessingTrace
         completed = dict(MessageProcessingTrace.objects.filter(raw_message__message_id__startswith='full-', status='success').order_by('id').values_list('raw_message_id','id'))

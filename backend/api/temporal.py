@@ -3,11 +3,15 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import json
+import logging
+import time
 from django.apps import apps
-from django.db import connection, transaction
+from django.db import connection, transaction, OperationalError
 from django.utils import timezone
 from .models import (AsyncOperation, OutboxEvent, TemporalEntityRevision, ProjectRevision,
-                     StageTransition, FactCandidate, FactEvent)
+                     StageTransition, FactCandidate, FactEvent, Project)
+
+logger = logging.getLogger(__name__)
 
 DOMAIN = ('company','project','crmprojectsnapshot','commitment','financialrecord','paymentscheduleitem','paymentallocation','salestarget')
 
@@ -58,6 +62,9 @@ def _backfill(payload):
         if stage==0:
             records=list(ProjectRevision.objects.filter(id__gt=cursor,approved_at__lte=op.request['legacy_cutoff']).select_related('project').order_by('id')[:200])
             for revision in records:
+                # UPDATE obtains its row lock before the journal trigger's advisory
+                # lock. Match that order; deferred project FKs otherwise deadlock.
+                project=Project.objects.select_for_update(no_key=True).get(pk=revision.project_id)
                 transition=StageTransition.objects.filter(project_revision=revision).first()
                 snapshot={k:v for k,v in revision.snapshot.items() if k in HISTORY_FIELDS['project']}
                 candidates=list(FactCandidate.objects.filter(project_id=revision.project_id,status='approved',
@@ -86,7 +93,7 @@ def _backfill(payload):
                 seq=(TemporalEntityRevision.objects.filter(entity_type='project',entity_id=revision.project_id).aggregate(value=Max('revision'))['value'] or 0)+1
                 TemporalEntityRevision.objects.get_or_create(source_key=f'legacy:project-revision:{revision.id}',defaults={
                     'entity_type':'project','entity_id':revision.project_id,'project_id':revision.project_id,
-                    'team_id':revision.project.team_id,'actor_id':revision.approved_by_id,'revision':seq,
+                    'team_id':project.team_id,'actor_id':revision.approved_by_id,'revision':seq,
                     'raw_message':raw,'fact_event':event,
                     'recorded_at':revision.approved_at,'effective_at':effective,
                     'event_kind':'stage_changed' if transition else 'changed' if changes else 'baseline',
@@ -94,8 +101,10 @@ def _backfill(payload):
                     'snapshot':snapshot,'changes':changes})
         else:
             kind=DOMAIN[stage-1]; model=apps.get_model('api',kind)
-            records=list(model.objects.filter(id__gt=cursor).order_by('id')[:200])
-            for row in records:
+            records=list(model.objects.filter(id__gt=cursor).order_by('id').values_list('id',flat=True)[:200])
+            for pk in records:
+                row=model.objects.select_for_update(no_key=True).filter(pk=pk).first()
+                if row is None: continue  # A concurrent deletion has its own journal event.
                 with connection.cursor() as lock:
                     lock.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",[f"{kind}:{row.id}"])
                 if TemporalEntityRevision.objects.filter(entity_type=kind,entity_id=row.id).exists(): continue
@@ -114,7 +123,7 @@ def _backfill(payload):
                     'team_id':getattr(row,'team_id',None) or (project.team_id if project else None),
                     'effective_at':effective,'event_kind':event_kind,'time_precision':precision,
                     'raw_message_id':getattr(row,'source_message_id',None),'snapshot':snapshot,'changes':{}})
-        next_cursor=records[-1].id if records else 0
+        next_cursor=(records[-1].id if stage==0 else records[-1]) if records else 0
         next_stage=stage if len(records)==200 else stage+1
         if next_stage!=stage: next_cursor=0
         op.result={'stage':next_stage,'cursor':next_cursor,'processed':op.result.get('processed',0)+len(records)}
@@ -126,7 +135,18 @@ def _backfill(payload):
 
 def backfill(payload):
     try:
-        return _backfill(payload)
+        for attempt in range(3):
+            try:
+                return _backfill(payload)
+            except OperationalError as exc:
+                cause=exc.__cause__
+                code=getattr(cause,'sqlstate',None) or getattr(cause,'pgcode',None)
+                if code not in ('40P01','40001') or attempt==2: raise
+                # The whole atomic chunk has rolled back, including its cursor
+                # and next outbox event. Retrying preserves exactly-once keys.
+                logger.warning('temporal_backfill_retry operation=%s sqlstate=%s attempt=%s',
+                               payload['operation_id'],code,attempt+1)
+                time.sleep(0.1*(2**attempt))
     except Exception:
-        AsyncOperation.objects.filter(pk=payload['operation_id']).update(status='failed',error_code='temporal_backfill_failed')
+        AsyncOperation.objects.filter(pk=payload['operation_id'],status__in=['queued','running']).update(status='failed',error_code='temporal_backfill_failed')
         raise

@@ -173,3 +173,71 @@ def semantic_scenario(analyst):
     op=enqueue(User.objects.get(username='79990000001'))
     report.update(backfill_operation_id=op.id,legacy_revision_id=revision.id)
     (Path(settings.E2E_DIR)/'temporal-semantic.json').write_text(json.dumps(report))
+
+
+def concurrent_backfill_scenario():
+    """A real Q2 chunk races a separate PostgreSQL CRM-like transaction."""
+    import threading
+    import time
+    from datetime import timedelta
+    from django.db import close_old_connections, connections
+    from django.contrib.auth.models import User
+    from django.utils import timezone
+    from api.models import Team, AsyncOperation, OutboxEvent, UserProfile, TeamMembership
+    from api.authentication import create_session
+    from api import access
+    from api.temporal import queue
+    team=Team.objects.create(name=f'Concurrent temporal E2E {time.monotonic_ns()}')
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT set_config('mazory.temporal_backfill','on',true)")
+        project=Project.objects.create(team=team,name='Legacy concurrent source fixture',archived=True,currency='USD')
+    owner=User.objects.create_user(f'concurrent-{time.monotonic_ns()}')
+    UserProfile.objects.create(user=owner,phone=f'fixture-{owner.id}',full_name='Concurrent history observer')
+    TeamMembership.objects.create(user=owner,team=team,role='team_lead',status='active')
+    _,token,_=create_session(owner)
+    (Path(settings.E2E_DIR)/'temporal-concurrent-session.json').write_text(json.dumps({'access':token}))
+    op=AsyncOperation.objects.create(requested_by=owner,operation_type='temporal_backfill',
+        request={},result={'stage':2,'cursor':project.id-1},
+        access_fingerprint=access.fingerprint(owner),expires_at=timezone.now()+timedelta(minutes=10),
+        idempotency_key=f'temporal-concurrent:{time.monotonic_ns()}')
+    locked=threading.Event()
+    def crm_update():
+        close_old_connections()
+        report={'operation_id':op.id,'project_id':project.id,'overlap_observed':False,'update_committed':False}
+        try:
+            with transaction.atomic():
+                current=Project.objects.select_for_update().get(pk=project.id)
+                locked.set()
+                deadline=time.monotonic()+10
+                while time.monotonic()<deadline:
+                    with connection.cursor() as cursor:
+                        cursor.execute('SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE pid<>pg_backend_pid() AND pg_backend_pid()=ANY(pg_blocking_pids(pid)))')
+                        if cursor.fetchone()[0]:
+                            report['overlap_observed']=True
+                            break
+                    time.sleep(0.05)
+                if not report['overlap_observed']: raise RuntimeError('Backfill never overlapped the locked CRM row')
+                current.source_created_at=datetime(2026,2,1,tzinfo=utc.utc)
+                current.source_time_precision='exact'
+                current.save(update_fields=['source_created_at','source_time_precision'])
+            report['update_committed']=True
+        except Exception as exc:
+            report['error']=type(exc).__name__
+        finally:
+            connections.close_all()
+            target=Path(settings.E2E_DIR)/'temporal-concurrent.json'
+            temporary=target.with_suffix('.tmp')
+            temporary.write_text(json.dumps(report)); temporary.replace(target)
+    writer=threading.Thread(target=crm_update,daemon=True)
+    writer.start()
+    if not locked.wait(5): raise RuntimeError('CRM row lock unavailable')
+    queue(op.id,2,project.id-1)
+    # This function itself runs in Q2. Consume the genuine outbox event here so
+    # unrelated browser jobs cannot delay the controlled overlap. Later chunks
+    # and duplicate delivery still go through the normal publisher and worker.
+    from api.tasks import run_outbox
+    event=OutboxEvent.objects.get(deduplication_key=f'temporal:{op.id}:2:{project.id-1}')
+    run_outbox(event.id)
+    writer.join(5)
+    if writer.is_alive(): raise RuntimeError('Concurrent writer did not finish')
