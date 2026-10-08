@@ -29,21 +29,28 @@ export function chartOptions(b: PresentationBlock, ds: AnalyticsDataset, width =
   const label = (value: AnalyticsCell | undefined) => value === null || value === undefined ? 'Не назначен' : String(value)
   const numeric = (row: Record<string, AnalyticsCell>, field?: string) => plot(field ? row[field] ?? null : null)
   const unit = ds.columns.find(c => c.name === (e.value || e.y))?.unit
+  const countInterval = ds.columns.find(c => c.name === (e.value || e.y))?.type === 'count' ? 1 : undefined
   const base: EChartsOption = { color: palette, backgroundColor: 'transparent', textStyle: { color: '#cbd5e1' }, animation: !window.matchMedia('(prefers-reduced-motion: reduce)').matches,
     tooltip: { trigger: 'item', renderMode: 'richText' }, legend: { type: 'scroll', textStyle: { color: '#cbd5e1' }, bottom: 0 },
     grid: { left: 60, right: 20, top: 30, bottom: 65 },
   }
-  const axes: EChartsOption = { xAxis: { type: 'category', axisLabel: { color: '#94a3b8', hideOverlap: true } }, yAxis: { type: 'value', name: unit || '', axisLabel: { color: '#94a3b8' }, splitLine: { lineStyle: { color: '#25304a' } } } }
+  const axes: EChartsOption = { xAxis: { type: 'category', axisLabel: { color: '#94a3b8', hideOverlap: true } }, yAxis: { type: 'value', minInterval: countInterval, name: unit || '', axisLabel: { color: '#94a3b8' }, splitLine: { lineStyle: { color: '#25304a' } } } }
   if (['bar', 'line', 'area'].includes(b.kind)) {
     const categories = [...new Set(ds.rows.map(row => label(row[e.category!])))]
     const horizontal = b.kind === 'bar' && (ds.normalized_query.dataset === 'crm_projects' || categories.some(c => c.length > 24))
     const labelWidth = Math.max(75, Math.min(170, width * .38))
     const series = e.series ? [...new Set(ds.rows.map(row => label(row[e.series!])))] : [e.value!]
+    const dated = ds.columns.some(c => c.name === e.category && c.type === 'date')
+    const monthly = e.category === 'month' || e.category?.endsWith('_month')
+    const oneYear = new Set(categories.map(c => c.slice(0, 4))).size === 1
+    const calendarLabel = (value: string) => dated && /^\d{4}-\d{2}-\d{2}$/.test(value)
+      ? new Intl.DateTimeFormat('ru-RU', { timeZone:'UTC', month:'short', ...(monthly ? {} : { day:'2-digit' }), ...(oneYear ? {} : { year:'numeric' }) }).format(new Date(`${value}T00:00:00Z`))
+      : value
     return { ...base, ...axes, legend: series.length > 1 ? base.legend : { show: false },
-      grid: { ...base.grid, left: horizontal ? labelWidth + 20 : 55, bottom: series.length > 1 ? 65 : 40 },
-      xAxis: horizontal ? { type: 'value', name: unit || '', axisLabel: { color: '#a0acc1' }, splitLine: { lineStyle: { color: '#25304a' } } } : { ...axes.xAxis, data: categories },
+      grid: { ...base.grid, left: horizontal ? labelWidth + 20 : 55, bottom: b.kind === 'bar' ? (series.length > 1 ? 65 : 40) : (series.length > 1 ? 100 : 70) },
+      xAxis: horizontal ? { type: 'value', minInterval: countInterval, name: unit || '', axisLabel: { color: '#a0acc1' }, splitLine: { lineStyle: { color: '#25304a' } } } : { type:'category', data: categories, axisLabel: { color:'#94a3b8', hideOverlap:true, formatter:calendarLabel } },
       yAxis: horizontal ? { type: 'category', inverse: true, data: categories, axisLabel: { color: '#a0acc1', width: labelWidth, overflow: 'break', interval: 0 } } : axes.yAxis,
-      dataZoom: b.kind === 'bar' ? undefined : [{ type: 'inside' }, { type: 'slider', bottom: 25, height: 15 }],
+      dataZoom: b.kind === 'bar' ? undefined : [{ type: 'inside' }, { type: 'slider', bottom: series.length > 1 ? 30 : 10, height: 15 }],
       series: series.map(name => ({ name: e.series ? name : datasetLabel(ds, name), type: b.kind === 'bar' ? 'bar' : 'line', areaStyle: b.kind === 'area' ? {} : undefined,
         data: categories.map(category => { const row = ds.rows.find(r => label(r[e.category!]) === category && (!e.series || label(r[e.series]) === name)); return { value: row ? numeric(row, e.value) : null, exact: row ? display(row[e.value!] ?? null, unit) : 'Нет данных' } }),
       })),

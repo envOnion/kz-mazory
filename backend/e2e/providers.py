@@ -2,6 +2,8 @@
 
 import datetime
 import json
+import os
+from urllib.request import Request, urlopen
 import uuid
 from urllib.parse import parse_qs, urlsplit
 from http.server import BaseHTTPRequestHandler
@@ -278,6 +280,10 @@ class ProviderHandler(BaseHTTPRequestHandler):
         self.handle_request(body)
 
     def handle_request(self, body):
+        if os.getenv("MAZORY_E2E_REAL_MODEL") == "1" and self.path in ("/api/chat","/api/version","/api/show"):
+            data = json.dumps(body).encode() if self.command == "POST" else None
+            with urlopen(Request("http://llm-host:11435" + self.path, data=data, headers={"Content-Type":"application/json"}, method=self.command), timeout=180) as result:
+                return self.respond(json.loads(result.read()))
         if self.path == "/health":
             return self.respond({"status": "ok"})
         if self.path.endswith('/participants/v2'):
@@ -323,6 +329,10 @@ class ProviderHandler(BaseHTTPRequestHandler):
                         "COMPANY_ID": "201",
                         "ASSIGNED_BY_ID": "7",
                         "CURRENCY_ID": "KZT",
+                        "DATE_CREATE": "2019-12-31T23:30:00+03:00",
+                        "DATE_MODIFY": "2026-10-08T10:00:00+03:00",
+                        "MOVED_TIME": "2026-10-07T10:00:00+03:00",
+                        "BEGINDATE": "2019-12-31", "CLOSEDATE": "2027-01-01", "CLOSED": "N",
                     },
                     {
                         "ID": "102",
@@ -330,6 +340,10 @@ class ProviderHandler(BaseHTTPRequestHandler):
                         "COMPANY_ID": "202",
                         "ASSIGNED_BY_ID": "7",
                         "CURRENCY_ID": "KZT",
+                        "DATE_CREATE": "2019-12-31T23:30:00+03:00",
+                        "DATE_MODIFY": "2026-10-08T10:00:00+03:00",
+                        "MOVED_TIME": "2026-10-07T10:00:00+03:00",
+                        "BEGINDATE": "2019-12-31", "CLOSEDATE": "2027-01-01", "CLOSED": "N",
                     },
                 ]
                 filters = body.get("filter", {})
@@ -449,13 +463,21 @@ def analytical_response(body):
     if 'истори' in prompt or ('crm' in prompt and 'дат' in prompt):
         return response(text='CRM содержит текущие стадии сделок без истории переходов. Для динамики нужна история изменений; сейчас можно сравнить текущие стадии или ответственных.')
     datasets = [data for name, data in results if name == 'query_dataset' and 'dataset_id' in data]
+    if 'количество проектов' in prompt or 'temporal_e2e' in prompt:
+        if not datasets:
+            if not any(name == 'query_dataset' for name, _ in results):
+                return response(name='query_dataset', arguments={'dataset':'payments','dimensions':['payment_month'],'measures':['payment_count']})
+            return response(name='query_dataset', arguments={'dataset':'projects','dimensions':['source_created_at_month'],'measures':['project_count'],'date_axis':'source_created_at','date_range':{'start':'2026-01-01','end_exclusive':'2027-01-01'}})
+        if last_name != 'build_presentation':
+            ds=datasets[-1]
+            return response(name='build_presentation',arguments={'version':'1.0','title':'Количество платежей','blocks':[{'id':'projects','kind':'line','dataset_id':ds['dataset_id'],'encoding':{'category':'source_created_at_month','value':'project_count'}}]})
     if 'проверь поля crm' in prompt and not datasets:
         if last_name == 'query_dataset' and last.get('validation_errors'):
             detail = last['validation_errors'][0]
             spec = {'dataset': 'crm_projects', 'dimensions': ['status'], 'measures': ['project_count']}
-            if 'dimensions must use' in detail:
+            if 'dimensions must use' in detail or 'dimensions=' in detail:
                 spec['date_range'] = {'start': '2026-01-01', 'end_exclusive': '2027-01-01'}
-            elif 'current snapshot' not in detail:
+            elif 'current snapshot' not in detail and 'требуется date_axis' not in detail:
                 return response(text='Не удалось проверить запрос.')
             return response(name='query_dataset', arguments=spec)
         return response(name='query_dataset', arguments={'dataset': 'crm_projects', 'dimensions': ['external_stage_name'], 'measures': ['deal_count'], 'date_range': {'start': '2026-01-01', 'end_exclusive': '2027-01-01'}})
@@ -484,7 +506,7 @@ def analytical_response(body):
             return response(name='combine_datasets', arguments={'mode': 'categories', 'dataset_ids': [last['dataset_id']], 'category': 'status', 'groups': {row['status']: 'Общая группа' for row in last['rows']}})
         if 'объедини август и сентябрь' in prompt and last_name == 'query_dataset':
             if len(datasets) == 1:
-                return response(name='query_dataset', arguments={**last['normalized_query'], 'date_range': {'start': '2026-09-01', 'end_exclusive': '2026-10-01'}})
+                return response(name='query_dataset', arguments={**{k:v for k,v in last['normalized_query'].items() if k in ('dataset','dimensions','measures','date_axis','grain','aggregation','filters','currency','order_by','limit','top_n') and v is not None}, 'date_range': {'start': '2026-09-01', 'end_exclusive': '2026-10-01'}})
             return response(name='combine_datasets', arguments={'mode': 'append', 'dataset_ids': [ds['dataset_id'] for ds in datasets]})
         if 'процент выполнения' in prompt and last_name == 'combine_datasets':
             return response(name='derived_facts', arguments={'operation': 'ratio_percent', 'left': f'{last["dataset_id"]}:series0:total', 'right': f'{last["dataset_id"]}:series1:total', 'label': 'Выполнение плана'})

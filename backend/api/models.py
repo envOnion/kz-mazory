@@ -8,7 +8,28 @@ from django.views.decorators.debug import sensitive_variables
 from .deduplication import normalize_deal_name
 
 
-class UserProfile(models.Model):
+class TimestampedModel(models.Model):
+    """Local record times; PostgreSQL also maintains bulk/SQL writes atomically.
+
+    NULL represents an unknown legacy timestamp, never the migration date.
+    """
+
+    created_at = models.DateTimeField(null=True, blank=True, editable=False)
+    updated_at = models.DateTimeField(null=True, blank=True, editable=False)
+
+    class Meta:
+        abstract = True
+
+    def save(self, *args, **kwargs):
+        if self._state.adding:
+            self.created_at = self.created_at or timezone.now()
+            self.updated_at = self.updated_at or self.created_at
+        super().save(*args, **kwargs)
+        if not kwargs.get("force_insert"):
+            self.refresh_from_db(fields=["created_at", "updated_at"])
+
+
+class UserProfile(TimestampedModel):
     user = models.OneToOneField(User, on_delete=models.PROTECT, related_name="profile")
     full_name = models.CharField(max_length=255, default="")
     role = models.CharField(max_length=255, default="")
@@ -47,7 +68,6 @@ class UserProfile(models.Model):
     )
     ai_auto_suggest_next_actions = models.BooleanField(default=True)
 
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = "Профиль пользователя"
@@ -65,7 +85,7 @@ class UserProfile(models.Model):
         return 0.0
 
 
-class Company(models.Model):
+class Company(TimestampedModel):
     """
     Контрагенты: застройщики, девелоперы, генподрядчики, проектные институты.
     """
@@ -89,7 +109,6 @@ class Company(models.Model):
     contact_person = models.CharField(max_length=255, blank=True, default="")
     phone = models.CharField(max_length=64, blank=True, default="")
     notes = models.TextField(blank=True, default="")
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         verbose_name = "Компания"
@@ -108,7 +127,7 @@ class Company(models.Model):
         return self.name
 
 
-class Project(models.Model):
+class Project(TimestampedModel):
     """
     Объекты / сделки компании Aqua Kip (соответствуют crm_deal).
     """
@@ -163,6 +182,9 @@ class Project(models.Model):
     deal_period = models.CharField(
         "Период сделки", max_length=128, blank=True, default=""
     )
+    source_created_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    source_updated_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    source_time_precision = models.CharField(max_length=16, default="unknown")
 
     company = models.ForeignKey(
         Company,
@@ -256,8 +278,6 @@ class Project(models.Model):
     blocker = models.TextField("Блокер / Проблема", blank=True, default="")
     notes = models.TextField("Заметки / История", blank=True, default="")
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = "Проект / Объект"
@@ -293,7 +313,7 @@ class Project(models.Model):
         super().save(*args, **kwargs)
 
 
-class CrmProjectSnapshot(models.Model):
+class CrmProjectSnapshot(TimestampedModel):
     """Current CRM metadata, separate from accepted business facts."""
 
     project = models.OneToOneField(Project, on_delete=models.CASCADE, related_name="crm_snapshot")
@@ -304,9 +324,15 @@ class CrmProjectSnapshot(models.Model):
     opportunity = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
     currency = models.CharField(max_length=3, default="KZT")
     synced_at = models.DateTimeField(default=timezone.now)
+    source_created_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    source_updated_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    source_stage_changed_at = models.DateTimeField(null=True, blank=True)
+    source_begin_date = models.DateField(null=True, blank=True)
+    source_close_date = models.DateField(null=True, blank=True)
+    source_closed = models.BooleanField(default=False)
 
 
-class RawMessage(models.Model):
+class RawMessage(TimestampedModel):
     project = models.ForeignKey(
         "Project", null=True, blank=True, on_delete=models.PROTECT
     )
@@ -334,7 +360,6 @@ class RawMessage(models.Model):
     raw_payload = models.JSONField(default=dict, blank=True)
     qdrant_point_id = models.CharField(max_length=64, blank=True, default="")
     processed = models.BooleanField(default=False, db_index=True)
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [
@@ -360,7 +385,7 @@ class RawMessage(models.Model):
         return f"{self.sender_name} [{self.timestamp}]: {self.content[:40]}..."
 
 
-class Commitment(models.Model):
+class Commitment(TimestampedModel):
     """
     Обещания, дедлайны и поручения, зафиксированные в коммуникациях.
     """
@@ -421,7 +446,7 @@ class Commitment(models.Model):
     )
     responsible_name = models.CharField("Исполнитель по переписке", max_length=255, blank=True, default="")
     commitment_text = models.TextField("Суть обещания")
-    promised_at = models.DateTimeField(auto_now_add=True)
+    promised_at = models.DateTimeField(null=True, blank=True, db_index=True)
     deadline = models.DateField("Дедлайн", null=True, blank=True)
     status = models.CharField(
         "Статус", max_length=32, choices=STATUS_CHOICES, default="pending"
@@ -449,7 +474,7 @@ class Commitment(models.Model):
         return f"[{self.status}] {self.commitment_text[:50]} (до {self.deadline})"
 
 
-class FinancialRecord(models.Model):
+class FinancialRecord(TimestampedModel):
     """
     Факты оплат и финансовые движения по объектам.
     """
@@ -510,7 +535,6 @@ class FinancialRecord(models.Model):
         db_index=True,
         help_text="Подтвержден ли факт оплаты. Непроверенные оплаты не учитываются в сборе денег и выполнении планов.",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         verbose_name = "Финансовая запись"
@@ -521,7 +545,7 @@ class FinancialRecord(models.Model):
         return f"{self.project.name}: {self.amount:,.2f} ₸ ({self.status})"
 
 
-class BusinessEvent(models.Model):
+class BusinessEvent(TimestampedModel):
     """
     Бизнес-события: изменение цены, срыв сроков, критические инциденты.
     """
@@ -573,7 +597,7 @@ class BusinessEvent(models.Model):
 # ============================================================================
 
 
-class WhatsAppConfig(models.Model):
+class WhatsAppConfig(TimestampedModel):
     """
     Настройки интеграции с WAHA и отслеживаемой группы WhatsApp.
     """
@@ -601,7 +625,6 @@ class WhatsAppConfig(models.Model):
     is_active = models.BooleanField("Мониторинг активен", default=True)
     status = models.CharField("Статус подключения", max_length=32, default="WORKING")
     last_qr_code = models.TextField("QR-код (base64)", blank=True, default="")
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = "Настройка WhatsApp (WAHA)"
@@ -641,7 +664,7 @@ class WhatsAppConfig(models.Model):
         return cls.objects.filter(is_active=True).first() or cls(is_active=False)
 
 
-class AISettings(models.Model):
+class AISettings(TimestampedModel):
     analysis_input_token_limit = models.PositiveIntegerField("Вход анализа, токены", default=0,
         help_text="0 — всё доступное окно модели за вычетом ответа и технического запаса. Положительное число — отдельный пользовательский предел.")
     analysis_target_message_limit = models.PositiveIntegerField("Сообщений в пакете анализа", default=8)
@@ -839,7 +862,6 @@ class AISettings(models.Model):
     )
 
     is_active = models.BooleanField("Активная конфигурация", default=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = "Настройки моделей AI"
@@ -909,7 +931,7 @@ class AISettings(models.Model):
         return cls.objects.filter(is_active=True).first() or cls(is_active=False)
 
 
-class BitrixSettings(models.Model):
+class BitrixSettings(TimestampedModel):
     """
     Настройки интеграции с Bitrix24 REST API.
     """
@@ -960,7 +982,6 @@ class BitrixSettings(models.Model):
     last_sync_status = models.TextField(
         "Статус последней операции", blank=True, default=""
     )
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         verbose_name = "Настройки Bitrix24"
@@ -990,7 +1011,7 @@ class BitrixSettings(models.Model):
         return cls.objects.filter(is_active=True).first() or cls(is_active=False)
 
 
-class BitrixDealChangeLog(models.Model):
+class BitrixDealChangeLog(TimestampedModel):
     """
     Журнал аудита всех изменений по сделкам, отправленных в Bitrix24 CRM.
     """
@@ -1035,9 +1056,6 @@ class BitrixDealChangeLog(models.Model):
     triggered_by = models.CharField(
         "Инициатор / Источник", max_length=128, default="system", blank=True
     )
-    created_at = models.DateTimeField(
-        "Дата и время отправки", auto_now_add=True, db_index=True
-    )
 
     class Meta:
         verbose_name = "Лог изменения сделки Bitrix24"
@@ -1051,7 +1069,7 @@ class BitrixDealChangeLog(models.Model):
         return f"[{self.get_action_display()}] Сделка #{self.bitrix_deal_id} — {self.get_status_display()} ({created_str})"
 
 
-class MessageProcessingTrace(models.Model):
+class MessageProcessingTrace(TimestampedModel):
     """
     Сквозная трассировка пайплайна обработки сообщений:
     «Входные данные WhatsApp» -> «Зависимые данные из сообщений ранее» -> «Зависимые данные из Bitrix24» -> «Итоговая запись»
@@ -1196,9 +1214,6 @@ class MessageProcessingTrace(models.Model):
         db_index=True,
     )
     result_summary = models.TextField("Резюме итоговой записи", blank=True, default="")
-    created_at = models.DateTimeField(
-        "Время создания трассировки", auto_now_add=True, db_index=True
-    )
 
     class Meta:
         verbose_name = "Трассировка пайплайна"
@@ -1219,7 +1234,7 @@ class MessageProcessingTrace(models.Model):
         return f"[{self.get_pipeline_action_display()}] {self.whatsapp_sender_name} ({created_str})"
 
 
-class Team(models.Model):
+class Team(TimestampedModel):
     name = models.CharField(max_length=128, unique=True)
     is_active = models.BooleanField(default=True)
     history_complete_from = models.DateField(null=True, blank=True)
@@ -1231,7 +1246,7 @@ class Team(models.Model):
         return self.name
 
 
-class TeamMembership(models.Model):
+class TeamMembership(TimestampedModel):
     ROLES = [
         (role, label)
         for role, label in (
@@ -1258,7 +1273,7 @@ class TeamMembership(models.Model):
         ]
 
 
-class ClientProjectAccess(models.Model):
+class ClientProjectAccess(TimestampedModel):
     user = models.ForeignKey(
         User, on_delete=models.PROTECT, related_name="client_access"
     )
@@ -1279,7 +1294,7 @@ class ClientProjectAccess(models.Model):
         ]
 
 
-class ChatAccess(models.Model):
+class ChatAccess(TimestampedModel):
     user = models.ForeignKey(User, on_delete=models.PROTECT)
     config = models.ForeignKey(
         WhatsAppConfig, on_delete=models.PROTECT, related_name="access_grants"
@@ -1294,12 +1309,11 @@ class ChatAccess(models.Model):
         ]
 
 
-class AuthSession(models.Model):
+class AuthSession(TimestampedModel):
     user = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name="access_sessions"
     )
     refresh_jti_hash = models.CharField(max_length=64)
-    created_at = models.DateTimeField(auto_now_add=True)
     last_used_at = models.DateTimeField(default=timezone.now)
     expires_at = models.DateTimeField()
     revoked_at = models.DateTimeField(null=True, blank=True)
@@ -1307,14 +1321,14 @@ class AuthSession(models.Model):
     ip_address = models.GenericIPAddressField(null=True, blank=True)
 
 
-class AdminMFA(models.Model):
+class AdminMFA(TimestampedModel):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     encrypted_secret = models.TextField()
     confirmed_at = models.DateTimeField(null=True, blank=True)
     last_counter = models.BigIntegerField(default=-1)
 
 
-class DialogueThread(models.Model):
+class DialogueThread(TimestampedModel):
     team = models.ForeignKey(Team, on_delete=models.PROTECT)
     config = models.ForeignKey(WhatsAppConfig, null=True, blank=True, on_delete=models.PROTECT)
     source_key = models.CharField(max_length=64, db_index=True)
@@ -1326,10 +1340,9 @@ class DialogueThread(models.Model):
     state = models.CharField(max_length=16, choices=[(s, s) for s in ("open", "ready", "unknown", "superseded")], default="open", db_index=True)
     version = models.PositiveIntegerField(default=0)
     snapshot_max_id = models.PositiveBigIntegerField(default=0)
-    updated_at = models.DateTimeField(auto_now=True)
 
 
-class ThreadMessage(models.Model):
+class ThreadMessage(TimestampedModel):
     thread = models.ForeignKey(DialogueThread, on_delete=models.PROTECT, related_name="message_links")
     raw_message = models.ForeignKey(RawMessage, on_delete=models.PROTECT, related_name="thread_links")
     thought_state = models.CharField(max_length=16, choices=[(s, s) for s in ("intermediate", "final", "unknown")])
@@ -1340,7 +1353,7 @@ class ThreadMessage(models.Model):
         constraints = [models.UniqueConstraint(fields=["thread", "raw_message"], name="thread_message_unique")]
 
 
-class ThreadRevision(models.Model):
+class ThreadRevision(TimestampedModel):
     thread = models.ForeignKey(DialogueThread, on_delete=models.PROTECT, related_name="revisions")
     version = models.PositiveIntegerField()
     state = models.CharField(max_length=16)
@@ -1349,16 +1362,14 @@ class ThreadRevision(models.Model):
     message_snapshot = models.JSONField(default=list)
     extraction = models.JSONField(default=list)
     completion_reason = models.CharField(max_length=1000, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["thread", "version"], name="thread_revision_unique")]
 
 
-class ThreadSubscription(models.Model):
+class ThreadSubscription(TimestampedModel):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="thread_subscriptions")
     thread = models.ForeignKey(DialogueThread, on_delete=models.CASCADE, related_name="subscriptions")
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [
@@ -1366,7 +1377,7 @@ class ThreadSubscription(models.Model):
         ]
 
 
-class CrmCatalogSync(models.Model):
+class CrmCatalogSync(TimestampedModel):
     team = models.OneToOneField(Team, on_delete=models.PROTECT)
     generation = models.PositiveIntegerField(default=0)
     state = models.CharField(max_length=16, default="idle")
@@ -1374,10 +1385,9 @@ class CrmCatalogSync(models.Model):
     imported_count = models.PositiveIntegerField(default=0)
     last_success_at = models.DateTimeField(null=True, blank=True)
     error_code = models.CharField(max_length=64, blank=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
 
-class FactCandidate(models.Model):
+class FactCandidate(TimestampedModel):
     materialization_snapshot = models.JSONField(default=dict, blank=True)
     thread_revision = models.ForeignKey(ThreadRevision, null=True, blank=True, on_delete=models.PROTECT, related_name="candidates")
     CRM_MATCH_STATE_CHOICES = [
@@ -1433,10 +1443,9 @@ class FactCandidate(models.Model):
     )
     reviewed_at = models.DateTimeField(null=True, blank=True)
     review_reason = models.TextField(blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
 
 
-class CandidateCrmMatch(models.Model):
+class CandidateCrmMatch(TimestampedModel):
     SELECTION_STATE_CHOICES = [
         ("suggested", "Предложено"),
         ("selected", "Выбрано"),
@@ -1499,7 +1508,7 @@ class CandidateCrmMatch(models.Model):
         ]
 
 
-class FactEvidence(models.Model):
+class FactEvidence(TimestampedModel):
     candidate = models.ForeignKey(
         FactCandidate, on_delete=models.PROTECT, related_name="evidence"
     )
@@ -1508,7 +1517,7 @@ class FactEvidence(models.Model):
     field_name = models.CharField(max_length=64, blank=True)
 
 
-class ProjectRevision(models.Model):
+class ProjectRevision(TimestampedModel):
     project = models.ForeignKey(
         Project, on_delete=models.PROTECT, related_name="revisions"
     )
@@ -1528,7 +1537,7 @@ class ProjectRevision(models.Model):
         ]
 
 
-class PaymentScheduleItem(models.Model):
+class PaymentScheduleItem(TimestampedModel):
     fact_event = models.ForeignKey("FactEvent", null=True, blank=True, on_delete=models.PROTECT)
     version = models.PositiveIntegerField(default=1)
     state = models.CharField(max_length=16, default="active")
@@ -1550,7 +1559,7 @@ class PaymentScheduleItem(models.Model):
         ]
 
 
-class PaymentAllocation(models.Model):
+class PaymentAllocation(TimestampedModel):
     financial_record = models.ForeignKey(
         FinancialRecord, on_delete=models.PROTECT, related_name="allocations"
     )
@@ -1570,7 +1579,7 @@ class PaymentAllocation(models.Model):
         ]
 
 
-class SalesTarget(models.Model):
+class SalesTarget(TimestampedModel):
     team = models.ForeignKey(Team, null=True, blank=True, on_delete=models.PROTECT)
     profile = models.ForeignKey(
         UserProfile, on_delete=models.PROTECT, related_name="targets"
@@ -1600,7 +1609,7 @@ class SalesTarget(models.Model):
         ]
 
 
-class StageTransition(models.Model):
+class StageTransition(TimestampedModel):
     project = models.ForeignKey(
         Project, on_delete=models.PROTECT, related_name="stage_history"
     )
@@ -1610,7 +1619,7 @@ class StageTransition(models.Model):
     effective_at = models.DateTimeField(default=timezone.now)
 
 
-class Notification(models.Model):
+class Notification(TimestampedModel):
     recipient = models.ForeignKey(
         User, on_delete=models.PROTECT, related_name="notifications"
     )
@@ -1627,12 +1636,11 @@ class Notification(models.Model):
     category = models.CharField(max_length=32, default="info")
     title = models.CharField(max_length=255)
     message = models.TextField()
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
     read_at = models.DateTimeField(null=True, blank=True)
     acknowledged_at = models.DateTimeField(null=True, blank=True)
 
 
-class NotificationDelivery(models.Model):
+class NotificationDelivery(TimestampedModel):
     notification = models.ForeignKey(
         Notification, on_delete=models.PROTECT, related_name="deliveries"
     )
@@ -1642,7 +1650,6 @@ class NotificationDelivery(models.Model):
     provider_message_id = models.CharField(max_length=255, blank=True)
     error_code = models.CharField(max_length=64, blank=True)
     next_attempt_at = models.DateTimeField(default=timezone.now)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [
@@ -1653,7 +1660,7 @@ class NotificationDelivery(models.Model):
         ]
 
 
-class ReminderOccurrence(models.Model):
+class ReminderOccurrence(TimestampedModel):
     commitment = models.ForeignKey(Commitment, on_delete=models.PROTECT)
     notification = models.ForeignKey(
         Notification, null=True, blank=True, on_delete=models.PROTECT
@@ -1681,7 +1688,7 @@ class ReminderOccurrence(models.Model):
         ]
 
 
-class OutboxEvent(models.Model):
+class OutboxEvent(TimestampedModel):
     analysis_source_key = models.CharField(max_length=64, null=True, blank=True, db_index=True)
     analysis_position = models.PositiveBigIntegerField(null=True, blank=True)
     business_event = models.ForeignKey(
@@ -1695,13 +1702,12 @@ class OutboxEvent(models.Model):
     next_attempt_at = models.DateTimeField(default=timezone.now, db_index=True)
     lease_until = models.DateTimeField(null=True, blank=True)
     error_code = models.CharField(max_length=64, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         indexes = [models.Index(fields=["analysis_source_key", "state", "next_attempt_at", "analysis_position"], name="analysis_dispatch_idx")]
 
 
-class AsyncOperation(models.Model):
+class AsyncOperation(TimestampedModel):
     requested_by = models.ForeignKey(User, on_delete=models.PROTECT)
     operation_type = models.CharField(max_length=32, default="chat")
     status = models.CharField(max_length=16, default="queued", db_index=True)
@@ -1709,7 +1715,6 @@ class AsyncOperation(models.Model):
     result = models.JSONField(default=dict)
     error_code = models.CharField(max_length=64, blank=True)
     idempotency_key = models.CharField(max_length=64)
-    created_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField()
     access_fingerprint = models.CharField(max_length=64, blank=True)
 
@@ -1722,20 +1727,19 @@ class AsyncOperation(models.Model):
         ]
 
 
-class AuditEvent(models.Model):
+class AuditEvent(TimestampedModel):
     actor = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL)
     target_id = models.BigIntegerField(null=True, blank=True)
     target_type = models.CharField(max_length=64)
     action = models.CharField(max_length=64)
     before_after = models.JSONField(default=dict)
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["-created_at"]
         default_permissions = ("view",)
 
 
-class PrivateAttachment(models.Model):
+class PrivateAttachment(TimestampedModel):
     uploaded_by = models.ForeignKey(User, on_delete=models.PROTECT)
     project = models.ForeignKey(Project, on_delete=models.PROTECT)
     file = models.FileField(upload_to="private/%Y/%m/")
@@ -1744,10 +1748,9 @@ class PrivateAttachment(models.Model):
     published_to_client = models.BooleanField(default=False)
     transcript = models.TextField(blank=True)
     state = models.CharField(max_length=16, default="queued")
-    created_at = models.DateTimeField(auto_now_add=True)
 
 
-class ProviderUsage(models.Model):
+class ProviderUsage(TimestampedModel):
     outbox_event = models.ForeignKey(
         OutboxEvent, null=True, on_delete=models.PROTECT, related_name="provider_usage"
     )
@@ -1764,7 +1767,6 @@ class ProviderUsage(models.Model):
     output_tokens = models.PositiveIntegerField(null=True)
     cost_usd = models.DecimalField(max_digits=14, decimal_places=8, null=True)
     error_code = models.CharField(max_length=64, blank=True)
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
 
 HISTORY_ACTIVE_STATES = (
@@ -1792,7 +1794,7 @@ HISTORY_STATE_CHOICES = (
 )
 
 
-class WhatsAppHistoryJob(models.Model):
+class WhatsAppHistoryJob(TimestampedModel):
     config = models.OneToOneField(
         WhatsAppConfig,
         on_delete=models.PROTECT,
@@ -1845,7 +1847,6 @@ class WhatsAppHistoryJob(models.Model):
     next_run_at = models.DateTimeField(
         "Следующий автоматический запуск", null=True, blank=True
     )
-    updated_at = models.DateTimeField("Изменено", auto_now=True)
 
     class Meta:
         verbose_name = "настройка импорта WhatsApp"
@@ -1906,7 +1907,7 @@ class WhatsAppHistoryJob(models.Model):
             raise ValidationError(errors)
 
 
-class WhatsAppHistoryRun(models.Model):
+class WhatsAppHistoryRun(TimestampedModel):
     job = models.ForeignKey(
         WhatsAppHistoryJob,
         on_delete=models.PROTECT,
@@ -1945,11 +1946,9 @@ class WhatsAppHistoryRun(models.Model):
     scheduled_count = models.PositiveIntegerField("Направлено на анализ", default=0)
     error_code = models.CharField("Код ошибки", max_length=64, blank=True)
     status_message = models.TextField("Подробности", blank=True)
-    created_at = models.DateTimeField("Создано", auto_now_add=True)
-    updated_at = models.DateTimeField("Последнее обновление", auto_now=True)
     finished_at = models.DateTimeField("Завершено", null=True, blank=True)
     messages = models.ManyToManyField(
-        RawMessage, related_name="history_import_runs", blank=True
+        RawMessage, related_name="history_import_runs", blank=True, through="WhatsAppHistoryRunMessage"
     )
 
     class Meta:
@@ -1968,7 +1967,7 @@ class WhatsAppHistoryRun(models.Model):
         return f"Импорт #{self.pk}: {self.get_state_display()}"
 
 
-class HistoryAnalysisItem(models.Model):
+class HistoryAnalysisItem(TimestampedModel):
     run = models.ForeignKey(WhatsAppHistoryRun, on_delete=models.PROTECT, related_name="analysis_items")
     raw_message = models.ForeignKey(RawMessage, on_delete=models.PROTECT)
     outbox_event = models.ForeignKey(OutboxEvent, null=True, blank=True, on_delete=models.PROTECT)
@@ -1977,7 +1976,6 @@ class HistoryAnalysisItem(models.Model):
     disposition = models.CharField(max_length=32, blank=True)
     reason_code = models.CharField(max_length=64, blank=True)
     reason_description = models.TextField(blank=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["run", "raw_message"], name="history_analysis_coverage_unique")]
@@ -1985,7 +1983,7 @@ class HistoryAnalysisItem(models.Model):
         verbose_name_plural = "Результаты анализа сообщений"
 
 
-class WhatsAppHistoryItem(models.Model):
+class WhatsAppHistoryItem(TimestampedModel):
     run = models.ForeignKey(
         WhatsAppHistoryRun, on_delete=models.CASCADE, related_name="items"
     )
@@ -2007,7 +2005,7 @@ class WhatsAppHistoryItem(models.Model):
         ]
 
 
-class WhatsAppExportUpload(models.Model):
+class WhatsAppExportUpload(TimestampedModel):
     job = models.ForeignKey(WhatsAppHistoryJob, on_delete=models.PROTECT, related_name="exports")
     uploaded_by = models.ForeignKey(User, on_delete=models.PROTECT)
     file = models.FileField(upload_to="whatsapp_exports/%Y/%m/")
@@ -2019,7 +2017,6 @@ class WhatsAppExportUpload(models.Model):
     source_snapshot = models.JSONField(default=dict)
     state = models.CharField(max_length=16, default="queued")
     diagnostics = models.JSONField(default=dict)
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["job", "source_key", "sha256", "timezone", "date_order"], name="whatsapp_export_upload_unique")]
@@ -2027,7 +2024,7 @@ class WhatsAppExportUpload(models.Model):
         verbose_name_plural = "Экспорты WhatsApp"
 
 
-class WhatsAppExportEntry(models.Model):
+class WhatsAppExportEntry(TimestampedModel):
     upload = models.ForeignKey(WhatsAppExportUpload, on_delete=models.PROTECT, related_name="entries")
     raw_message = models.ForeignKey(RawMessage, null=True, blank=True, on_delete=models.PROTECT)
     ordinal = models.PositiveIntegerField()
@@ -2047,7 +2044,7 @@ class WhatsAppExportEntry(models.Model):
         verbose_name_plural = "Записи TXT-экспорта и причины"
 
 
-class WhatsAppMessageAlias(models.Model):
+class WhatsAppMessageAlias(TimestampedModel):
     config = models.ForeignKey(WhatsAppConfig, on_delete=models.PROTECT)
     raw_message = models.ForeignKey(RawMessage, on_delete=models.PROTECT, related_name="transport_aliases")
     session_name = models.CharField(max_length=64)
@@ -2060,11 +2057,10 @@ class WhatsAppMessageAlias(models.Model):
         constraints = [models.UniqueConstraint(fields=["config", "session_name", "chat_id", "namespace", "external_id", "source_revision"], name="whatsapp_transport_alias_unique")]
 
 
-class McpToken(models.Model):
+class McpToken(TimestampedModel):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="mcp_tokens")
     name = models.CharField(max_length=128, default="default")
     token_hash = models.CharField(max_length=64, unique=True, db_index=True)
-    created_at = models.DateTimeField(auto_now_add=True)
     last_used_at = models.DateTimeField(null=True, blank=True)
     expires_at = models.DateTimeField(null=True, blank=True)
     is_active = models.BooleanField(default=True)
@@ -2077,7 +2073,7 @@ class McpToken(models.Model):
 
 
 
-class Participant(models.Model):
+class Participant(TimestampedModel):
     team = models.ForeignKey(Team, on_delete=models.PROTECT)
     user_profile = models.ForeignKey(UserProfile, null=True, blank=True, on_delete=models.PROTECT)
     display_name = models.CharField(max_length=255)
@@ -2086,7 +2082,7 @@ class Participant(models.Model):
         return self.display_name
 
 
-class ParticipantIdentity(models.Model):
+class ParticipantIdentity(TimestampedModel):
     participant = models.ForeignKey(Participant, on_delete=models.PROTECT, related_name="identities")
     namespace = models.CharField(max_length=255)
     value = models.CharField(max_length=255)
@@ -2096,7 +2092,7 @@ class ParticipantIdentity(models.Model):
         constraints = [models.UniqueConstraint(fields=["namespace", "value"], name="participant_identity_unique")]
 
 
-class CompanyAlias(models.Model):
+class CompanyAlias(TimestampedModel):
     company = models.ForeignKey(Company, on_delete=models.PROTECT, related_name="aliases")
     normalized_name = models.CharField(max_length=255, db_index=True)
     decision = models.ForeignKey("FactDecision", null=True, on_delete=models.PROTECT)
@@ -2105,7 +2101,7 @@ class CompanyAlias(models.Model):
         constraints = [models.UniqueConstraint(fields=["company", "normalized_name"], name="company_alias_unique")]
 
 
-class ProjectAlias(models.Model):
+class ProjectAlias(TimestampedModel):
     project = models.ForeignKey(Project, on_delete=models.PROTECT, related_name="aliases")
     normalized_name = models.CharField(max_length=255, db_index=True)
     decision = models.ForeignKey("FactDecision", null=True, on_delete=models.PROTECT)
@@ -2114,7 +2110,7 @@ class ProjectAlias(models.Model):
         constraints = [models.UniqueConstraint(fields=["project", "normalized_name"], name="project_alias_unique")]
 
 
-class ProjectParty(models.Model):
+class ProjectParty(TimestampedModel):
     project = models.ForeignKey(Project, on_delete=models.PROTECT, related_name="parties")
     company = models.ForeignKey(Company, on_delete=models.PROTECT)
     role = models.CharField(max_length=32)
@@ -2124,7 +2120,7 @@ class ProjectParty(models.Model):
         constraints = [models.UniqueConstraint(fields=["project", "company", "role"], name="project_party_unique")]
 
 
-class FactDecision(models.Model):
+class FactDecision(TimestampedModel):
     candidate = models.ForeignKey(FactCandidate, on_delete=models.PROTECT, related_name="decisions")
     supersedes = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT)
     outcome = models.CharField(max_length=16, choices=[(x, x) for x in ("accepted", "deferred", "rejected", "superseded")])
@@ -2134,13 +2130,12 @@ class FactDecision(models.Model):
     reason_code = models.CharField(max_length=64)
     explanation = models.TextField()
     validation = models.JSONField(default=dict)
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["candidate", "policy_version", "input_fingerprint"], name="fact_decision_input_unique")]
 
 
-class FactEvent(models.Model):
+class FactEvent(TimestampedModel):
     is_superseded = models.BooleanField(default=False, db_index=True)
     decision = models.ForeignKey(FactDecision, null=True, blank=True, on_delete=models.PROTECT, related_name="events")
     team = models.ForeignKey(Team, on_delete=models.PROTECT)
@@ -2149,13 +2144,12 @@ class FactEvent(models.Model):
     event_type = models.CharField(max_length=64)
     occurred_at = models.DateTimeField(null=True, blank=True)
     payload = models.JSONField(default=dict)
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         default_permissions = ("view",)
 
 
-class FieldAssertion(models.Model):
+class FieldAssertion(TimestampedModel):
     fact_event = models.ForeignKey(FactEvent, on_delete=models.PROTECT)
     project = models.ForeignKey(Project, null=True, blank=True, on_delete=models.PROTECT, related_name="assertions")
     commitment = models.ForeignKey(Commitment, null=True, blank=True, on_delete=models.PROTECT)
@@ -2168,31 +2162,29 @@ class FieldAssertion(models.Model):
         constraints = [models.CheckConstraint(condition=(models.Q(project__isnull=False, commitment__isnull=True, financial_record__isnull=True) | models.Q(project__isnull=True, commitment__isnull=False, financial_record__isnull=True) | models.Q(project__isnull=True, commitment__isnull=True, financial_record__isnull=False)), name="assertion_one_target")]
 
 
-class SourceWorkItem(models.Model):
+class SourceWorkItem(TimestampedModel):
     raw_message = models.ForeignKey(RawMessage, on_delete=models.PROTECT, related_name="work_items")
     processing_version = models.CharField(max_length=64)
     state = models.CharField(max_length=32, default="pending", db_index=True)
     lease_until = models.DateTimeField(null=True, blank=True)
     error_code = models.CharField(max_length=64, blank=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["raw_message", "processing_version"], name="source_work_version_unique")]
 
 
-class SourceCheckpoint(models.Model):
+class SourceCheckpoint(TimestampedModel):
     team = models.ForeignKey(Team, on_delete=models.PROTECT)
     source_scope = models.CharField(max_length=64)
     complete_through = models.DateTimeField(null=True, blank=True)
     gaps = models.JSONField(default=list)
     counts = models.JSONField(default=dict)
-    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["team", "source_scope"], name="source_checkpoint_unique")]
 
 
-class MessageArtifact(models.Model):
+class MessageArtifact(TimestampedModel):
     raw_message = models.OneToOneField(RawMessage, on_delete=models.PROTECT, related_name="artifacts")
     checksum = models.CharField(max_length=64, blank=True)
     state = models.CharField(max_length=32, default="unavailable")
@@ -2200,7 +2192,7 @@ class MessageArtifact(models.Model):
     error_code = models.CharField(max_length=64, blank=True)
 
 
-class ExternalObjectLink(models.Model):
+class ExternalObjectLink(TimestampedModel):
     team = models.ForeignKey(Team, on_delete=models.PROTECT)
     integration_key = models.CharField(max_length=64)
     object_type = models.CharField(max_length=32)
@@ -2213,7 +2205,7 @@ class ExternalObjectLink(models.Model):
         constraints = [models.UniqueConstraint(fields=["team", "integration_key", "object_type", "external_id"], condition=models.Q(external_id__isnull=False), name="external_object_namespace_unique")]
 
 
-class CrmDelivery(models.Model):
+class CrmDelivery(TimestampedModel):
     outbox_event = models.OneToOneField(OutboxEvent, on_delete=models.PROTECT)
     external_object_link = models.ForeignKey(ExternalObjectLink, on_delete=models.PROTECT)
     fact_event = models.ForeignKey(FactEvent, null=True, blank=True, on_delete=models.PROTECT)
@@ -2221,10 +2213,9 @@ class CrmDelivery(models.Model):
     state = models.CharField(max_length=32, default="pending")
     patch = models.JSONField(default=dict)
     error_code = models.CharField(max_length=64, blank=True)
-    updated_at = models.DateTimeField(auto_now=True)
 
 
-class ProviderReservation(models.Model):
+class ProviderReservation(TimestampedModel):
     purpose = models.CharField(max_length=16, default="live")
     config = models.ForeignKey(AISettings, on_delete=models.PROTECT)
     usage = models.OneToOneField(ProviderUsage, null=True, blank=True, on_delete=models.PROTECT)
@@ -2232,18 +2223,16 @@ class ProviderReservation(models.Model):
     reserved_tokens = models.PositiveBigIntegerField()
     state = models.CharField(max_length=16, default="reserved")
     lease_until = models.DateTimeField()
-    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
 
 
-class AnalyticsConversation(models.Model):
+class AnalyticsConversation(TimestampedModel):
+    last_activity_at = models.DateTimeField(null=True, blank=True)
     owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name="analytics_conversations")
     title = models.CharField(max_length=200, default="Новый диалог")
     default_scope = models.JSONField(default=dict)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True, db_index=True)
 
 
-class AnalyticsTurn(models.Model):
+class AnalyticsTurn(TimestampedModel):
     conversation = models.ForeignKey(AnalyticsConversation, on_delete=models.CASCADE, related_name="turns")
     parent_turn = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL)
     operation = models.OneToOneField(AsyncOperation, null=True, on_delete=models.SET_NULL, related_name="analytics_turn")
@@ -2253,14 +2242,13 @@ class AnalyticsTurn(models.Model):
     resolved_intent = models.JSONField(default=dict)
     effective_scope = models.JSONField(default=dict)
     state = models.CharField(max_length=16, default="queued")
-    created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ["sequence"]
         constraints = [models.UniqueConstraint(fields=["conversation", "sequence"], name="analytics_turn_sequence_unique")]
 
 
-class AnalyticsArtifact(models.Model):
+class AnalyticsArtifact(TimestampedModel):
     turn = models.ForeignKey(AnalyticsTurn, on_delete=models.CASCADE, related_name="artifacts")
     parent_artifact = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL)
     query_plan = models.JSONField(default=dict)
@@ -2269,3 +2257,38 @@ class AnalyticsArtifact(models.Model):
     access_fingerprint = models.CharField(max_length=64)
     generated_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(db_index=True)
+
+
+class TemporalEntityRevision(TimestampedModel):
+    """Append-only, whitelisted business history captured in the write transaction."""
+
+    entity_type = models.CharField(max_length=48)
+    entity_id = models.PositiveBigIntegerField()
+    team = models.ForeignKey(Team, null=True, on_delete=models.PROTECT)
+    project = models.ForeignKey(Project, null=True, on_delete=models.PROTECT)
+    raw_message = models.ForeignKey(RawMessage, null=True, on_delete=models.PROTECT)
+    fact_event = models.ForeignKey(FactEvent, null=True, on_delete=models.PROTECT)
+    actor = models.ForeignKey(User, null=True, on_delete=models.SET_NULL)
+    revision = models.PositiveIntegerField()
+    effective_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    recorded_at = models.DateTimeField(default=timezone.now, db_index=True)
+    event_kind = models.CharField(max_length=32)
+    time_precision = models.CharField(max_length=16, default="unknown")
+    source_key = models.CharField(max_length=255, unique=True)
+    changes = models.JSONField(default=dict)
+    snapshot = models.JSONField(default=dict)
+
+    class Meta:
+        default_permissions = ("view",)
+        constraints = [models.UniqueConstraint(fields=["entity_type", "entity_id", "revision"], name="temporal_entity_revision_unique")]
+        indexes = [models.Index(fields=["team", "project", "recorded_at"], name="temporal_scope_time_idx")]
+
+
+class WhatsAppHistoryRunMessage(TimestampedModel):
+    whatsapphistoryrun = models.ForeignKey(WhatsAppHistoryRun, on_delete=models.CASCADE)
+    rawmessage = models.ForeignKey(RawMessage, on_delete=models.CASCADE)
+
+    class Meta:
+        db_table = 'api_whatsapphistoryrun_messages'
+        unique_together = [('whatsapphistoryrun', 'rawmessage')]
+        default_permissions = ('view',)

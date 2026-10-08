@@ -145,17 +145,25 @@ def _execute_operation(pk):
                     if values.get("dialogue"):
                         from .analytics.dialogue import prepare, recalculate
                         turn, parent_artifact, history = prepare(context, op)
+                        if parent_artifact and "period" not in values.get("input", {}):
+                            parent_query=parent_artifact.query_plan["blocks"][0]["query"]
+                            if parent_query.get("date_range"): context.intent["date_range"]=parent_query["date_range"]
                         patch = turn.resolved_intent.get("patch", {})
                         if patch and parent_artifact:
                             try:
                                 dynamic = recalculate(context, parent_artifact.query_plan, patch)
                             except ProviderUnavailable as exc:
+                                context.trace.append({'tool':'recalculate','patch':patch,'error':str(exc),
+                                                      'validation_errors':exc.diagnostics.get('validation_errors',[])})
                                 if str(exc) not in ["plan_requires_months", "crm_history_unavailable"]:
                                     raise
                                 message = "План утверждён по месяцам. Перейти к месяцам для сравнения плана и факта?" if str(exc) == "plan_requires_months" else "CRM содержит текущие стадии сделок. Для динамики по датам нужна история изменений; сейчас можно сравнить текущие стадии или ответственных."
                                 dynamic = {"text": message, "presentation": None, "quotes": [], "answer_document": {"version": "1.0", "kind": "clarification", "markdown": message, "facts": {}, "artifact_ids": [], "suggested_actions": []}}
                     if dynamic is None:
                         dynamic = async_to_sync(run)(context, prompt, mode, suggest, history)
+                    if values.get("dialogue"):
+                        turn.resolved_intent = {**turn.resolved_intent, **context.intent}
+                        turn.save(update_fields=["resolved_intent"])
                     text, widget = dynamic["text"], None
                     presentation = dynamic["presentation"]
                     quotes = dynamic.get("quotes", [])
@@ -169,6 +177,8 @@ def _execute_operation(pk):
                 data = widget["data"]
                 text = f"Поступления: {data['fact']} {data['currency']}. План: {data['target'] or 'не задан'}. {data['coverage']['message']}"
             result = {
+                "resolved_intent": dynamic.get("resolved_intent", {}) if dynamic else {},
+                "analytics_trace": dynamic.get("analytics_trace", []) if dynamic else [],
                 "prompt": prompt,
                 "text": text,
                 "widget": widget,
@@ -217,7 +227,7 @@ def _execute_operation(pk):
         )
         AsyncOperation.objects.filter(pk=pk, status="running").update(
             status="expired" if code == "access_or_lifetime_changed" else "failed",
-            result={},
+            result={"resolved_intent": context.intent, "analytics_trace": context.trace} if "context" in locals() else {},
             error_code=code,
         )
 

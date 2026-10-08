@@ -4,7 +4,7 @@ from decimal import Decimal
 from datetime import datetime
 import math
 from zoneinfo import ZoneInfo
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, transaction, connection
 from django.shortcuts import get_object_or_404
 from django.db.models import Sum, Q
 from django.utils import timezone
@@ -793,6 +793,9 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
         if candidate.status != "pending":
             raise Conflict("Предложение заменено новой версией.")
 
+        with connection.cursor() as cursor:
+            for key,value in [("mazory.actor_id", user.id if user else None), ("mazory.raw_message_id", candidate.trace.raw_message_id)]:
+                cursor.execute("SELECT set_config(%s,%s,true)",[key,str(value) if value else ""])
         crm_match = None
         project = None
         if action == "approve" and candidate.fact_type == "project":
@@ -1072,6 +1075,7 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                     team=candidate.team,
                     manager=candidate.manager,
                     source_message=raw,
+                    promised_at=raw.timestamp if raw.sent_at_known else None,
                     candidate=candidate,
                     commitment_text=data["commitment_text"],
                     responsible_name=data["responsible_name"],
@@ -1180,6 +1184,8 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
 
 def allocate_payment(user, payment_id, schedule_id, amount):
     with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT set_config('mazory.actor_id',%s,true)", [str(user.id)])
         payment = (
             FinancialRecord.objects.select_for_update(of=("self",))
             .select_related("project")

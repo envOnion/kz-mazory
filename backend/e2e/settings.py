@@ -25,6 +25,9 @@ Q_CLUSTER = {
     "ack_failures": True,
     "max_attempts": 1,
 }
+if os.getenv('MAZORY_E2E_REAL_MODEL') == '1':
+    Q_CLUSTER.update(timeout=240,retry=270)
+    AI_WORKER_TIMEOUT=300
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "backend", "nginx"]
 BITRIX_TEAM_ID = 1
 WAHA_WEBHOOK_SECRET = "isolated-local-webhook-secret"
@@ -38,6 +41,8 @@ AI_DAILY_REQUEST_LIMIT = 10000
 # Serial browser scenarios share one fixture user and poll Q2 faster than a person.
 # Production rate limits remain in mazory_backend.settings.
 REST_FRAMEWORK = {**REST_FRAMEWORK, "DEFAULT_THROTTLE_RATES": {"user": "1000/min"}}
+# Static API fixtures live through builds and the entire serial browser suite.
+SIMPLE_JWT = {**SIMPLE_JWT, 'ACCESS_TOKEN_LIFETIME': timedelta(hours=4)}
 MEDIA_ROOT = E2E_DIR / "media"
 QDRANT_URL = "https://localhost"
 

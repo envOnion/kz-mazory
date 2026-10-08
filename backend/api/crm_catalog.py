@@ -1,6 +1,8 @@
 """Paginated CRM identities. Imported catalog entries do not approve finances."""
 
 from decimal import Decimal, InvalidOperation
+from datetime import date
+from django.utils.dateparse import parse_datetime
 from django.conf import settings
 from django.db import transaction
 from django.db.models import Q
@@ -17,6 +19,25 @@ from .models import (
     CrmProjectSnapshot,
 )
 from .providers import ProviderUnavailable
+
+
+def source_datetime(value):
+    if value in (None, ""): return None
+    if not isinstance(value, str): raise ProviderUnavailable("crm_invalid_source_date")
+    try: parsed = parse_datetime(value)
+    except ValueError: parsed = None
+    if parsed is None or timezone.is_naive(parsed):
+        raise ProviderUnavailable("crm_source_timezone_required")
+    return parsed
+
+
+def source_date(value):
+    if value in (None, ""): return None
+    if not isinstance(value, str): raise ProviderUnavailable("crm_invalid_source_date")
+    try:
+        if len(value)==10: return date.fromisoformat(value)
+        return source_datetime(value).date()
+    except ValueError: raise ProviderUnavailable("crm_invalid_source_date") from None
 
 
 def available_projects(queryset):
@@ -148,6 +169,7 @@ def _sync_deals_page(sync, config, cfg, payload):
                 "CURRENCY_ID",
                 "OPPORTUNITY",
                 "STAGE_ID",
+                "DATE_CREATE", "DATE_MODIFY", "MOVED_TIME", "BEGINDATE", "CLOSEDATE", "CLOSED",
             ],
         },
         config=config,
@@ -265,6 +287,12 @@ def _sync_deals_page(sync, config, cfg, payload):
             elif company and not project.company:
                 project.company = company
 
+            source_created = source_datetime(row.get("DATE_CREATE"))
+            source_updated = source_datetime(row.get("DATE_MODIFY"))
+            if source_created:
+                project.source_created_at = source_created
+                project.source_time_precision = "exact"
+            if source_updated: project.source_updated_at = source_updated
             project.last_bitrix_synced_at = timezone.now()
             project.identity_confirmed = True
             project.save()
@@ -282,6 +310,14 @@ def _sync_deals_page(sync, config, cfg, payload):
                     raise ProviderUnavailable("crm_invalid_amount") from None
             stage_id = str(row.get("STAGE_ID") or "")[:128]
             manager_id = str(row.get("ASSIGNED_BY_ID") or "")[:64]
+            source_fields = {
+                'DATE_CREATE': ('source_created_at', source_created),
+                'DATE_MODIFY': ('source_updated_at', source_updated),
+                'MOVED_TIME': ('source_stage_changed_at', source_datetime(row.get('MOVED_TIME'))),
+                'BEGINDATE': ('source_begin_date', source_date(row.get('BEGINDATE'))),
+                'CLOSEDATE': ('source_close_date', source_date(row.get('CLOSEDATE'))),
+                'CLOSED': ('source_closed', row.get('CLOSED') == 'Y'),
+            }
             CrmProjectSnapshot.objects.update_or_create(
                 project=project,
                 defaults={
@@ -293,6 +329,7 @@ def _sync_deals_page(sync, config, cfg, payload):
                     "opportunity": opportunity,
                     "currency": str(row.get("CURRENCY_ID") or project.currency)[:3],
                     "synced_at": timezone.now(),
+                    **{field: value for key, (field, value) in source_fields.items() if key in row},
                 },
             )
         locked.imported_count += len(rows)

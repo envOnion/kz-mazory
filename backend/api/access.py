@@ -65,8 +65,10 @@ def team_ids(user, roles=None):
     return qs.values_list("team_id", flat=True)
 
 
-def projects_for(user, include_client=False):
-    qs = Project.objects.filter(archived=False)
+def projects_for(user, include_client=False, include_archived=False):
+    qs = Project.objects.all()
+    if not include_archived:
+        qs = qs.filter(archived=False)
     if not user or not user.is_authenticated or not user.is_active:
         return qs.none()
     if user.is_superuser:
@@ -134,10 +136,10 @@ def candidates_for(user):
     )
 
 
-def commitments_for(user):
+def commitments_for(user, include_archived=False):
     if user.is_superuser:
         return Commitment.objects.all()
-    condition = Q(project__in=projects_for(user))
+    condition = Q(project__in=projects_for(user, include_archived=include_archived))
     if memberships(user).exists():
         condition |= Q(project__isnull=True, team_id__in=team_ids(user, ["team_lead", "finance"]))
         condition |= Q(project__isnull=True, team_id__in=team_ids(user, ["manager"]), manager__user=user)
@@ -190,7 +192,7 @@ def fingerprint(user):
         ),
         "chats": list(configs_for(user).order_by("id").values_list("id", flat=True)),
         "projects": list(
-            projects_for(user, include_client=True)
+            projects_for(user, include_client=True, include_archived=True)
             .order_by("id")
             .values_list("id", "manager_id", "team_id")
         ),

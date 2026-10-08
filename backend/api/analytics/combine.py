@@ -36,6 +36,8 @@ def combine(context, arguments):
     if len(currencies) != 1 or len(zones) != 1:
         fail('combine_incompatible_units')
     if mode == 'categories':
+        if first['normalized_query'].get('aggregation', 'default') not in ('default', 'sum'):
+            fail('combine_requires_aggregation')
         if len(sources) != 1 or not arguments.get('groups') or not arguments.get('category'):
             fail('invalid_tool_arguments')
         category = arguments['category']

@@ -8,6 +8,7 @@ from mcp.types import CallToolResult, TextContent, Tool, ToolAnnotations
 
 from .. import access
 from ..providers import ProviderUnavailable
+from .catalog import CATALOG, describe
 from .data import ALIAS, QUERY_SCHEMA, RECORDS_SCHEMA, fail, validate
 from .presentation import PRESENTATION_SCHEMA, build
 from .combine import COMBINE_SCHEMA, combine
@@ -57,6 +58,7 @@ def create_servers(context):
             annotations=ToolAnnotations(readOnlyHint=True),
         ),
     ]
+    tools.append(Tool(name="describe_dataset", description="Detailed columns, date axes and grain for one registered dataset. Use before a temporal query.", inputSchema={"type":"object","properties":{"dataset":{"enum":list(CATALOG)}},"required":["dataset"],"additionalProperties":False}, outputSchema=OBJECT, annotations=ToolAnnotations(readOnlyHint=True)))
     tools.append(Tool(name="combine_datasets", description="Combine authorized aggregates. mode series aligns same-grain dates (payment_month and month for plan/fact); join left/full requires unique project_id after aggregation; categories uses explicit groups mapping and optional other; append requires disjoint date ranges. Never join manager names or raw payments to contracts. NULL stays unknown. Returns dataset for build_presentation.", inputSchema=COMBINE_SCHEMA, outputSchema=OBJECT, annotations=ToolAnnotations(readOnlyHint=True)))
     tools.append(Tool(name="derived_facts", description="Compute a difference, ratio_percent (left/right*100), or change_percent over registered sum fact keys with compatible units. Decimal arithmetic, full results before top-N; zero denominator is rejected. No manual numbers. Use the returned fact_key placeholder in prose.", inputSchema=DERIVED_SCHEMA, outputSchema=OBJECT, annotations=ToolAnnotations(readOnlyHint=True)))
     tools.append(
@@ -142,6 +144,7 @@ def create_servers(context):
         try:
             schema = {
                 "describe_schema": EMPTY,
+                "describe_dataset": next(t.inputSchema for t in tools if t.name == "describe_dataset"),
                 "query_dataset": QUERY_SCHEMA,
                 "combine_datasets": COMBINE_SCHEMA,
                 "derived_facts": DERIVED_SCHEMA,
@@ -154,6 +157,7 @@ def create_servers(context):
             validate(schema, arguments)
             fn = {
                 "describe_schema": lambda a: context.schema(),
+                "describe_dataset": lambda a: describe(a["dataset"], detailed=True),
                 "query_dataset": context.query,
                 "combine_datasets": lambda a: combine(context, a),
                 "derived_facts": lambda a: derive(context, a),
@@ -175,6 +179,7 @@ def create_servers(context):
                 structuredContent=output,
             )
         except ProviderUnavailable as exc:
+            context.trace.append({"tool": name, "arguments": arguments, "error": str(exc), "validation_errors": exc.diagnostics.get("validation_errors", [])})
             return CallToolResult(
                 isError=True,
                 content=[
