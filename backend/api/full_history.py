@@ -149,6 +149,7 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
     part_index = page.get('index', 0)
     prior = parts[part_index]
     ranges = copy.deepcopy(state.get('ranges', {}))
+    previous_source_ids = [int(pk) for pk in ranges]
     validated_read = sum(not item['content'] or ranges.get(str(item['raw_message_id']), 0) >= len(item['content']) for item in rows)
     cursor = state.get('cursor', 0)
     offset = state.get('offset', 0)
@@ -205,7 +206,7 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
         message = payload['messages'][-1]
         import json
         value = json.loads(message['content'])
-        value['analysis_state'] = {'previous_result': prior, 'read_source_ids': [int(pk) for pk in ranges],
+        value['analysis_state'] = {'previous_result': prior, 'read_source_ids': previous_source_ids,
                 'reconciliation_page': part_index + 1, 'reconciliation_pages': len(parts),
                 'phase': 'reconcile' if final else 'read',
                 'instruction': 'Это промежуточный результат, не новые доказательства. Сверь его с очередными оригиналами. Обнови связи, переносы сроков, отмены и исполнения; не сохраняй противоречащий прежний статус. Верни единый актуальный результат для целей. Факты требуют точных цитат ранее прочитанных или текущих оригиналов. Не теряй существующие факты без объяснения в теме.'}
