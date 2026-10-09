@@ -13,7 +13,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from . import access
-from .models import AISettings, Commitment, FactCandidate, FactDecision, FactEvent, FinancialRecord, OutboxEvent, PaymentScheduleItem, Project, RawMessage, SourceCheckpoint, Team
+from .bitrix_config import autonomous_crm_status
+from .models import AISettings, BitrixSettings, Commitment, FactCandidate, FactDecision, FactEvent, FinancialRecord, OutboxEvent, PaymentScheduleItem, Project, RawMessage, SourceCheckpoint, Team
 
 
 def financial_summary(projects, days=30):
@@ -59,6 +60,7 @@ class AutonomousOverviewView(APIView):
         if access.is_client(request.user):
             raise PermissionDenied("Финансовый отчет доступен сотрудникам с доступом к соответствующим проектам.")
         cfg = AISettings.get_active()
+        integration = BitrixSettings.objects.first() or BitrixSettings(is_active=False)
         projects = access.projects_for(request.user, include_client=True)
         candidates = access.candidates_for(request.user)
         team_ids = access.team_ids(request.user, ["team_lead", "finance"])
@@ -74,6 +76,7 @@ class AutonomousOverviewView(APIView):
                 waiting.append({"candidate_id": candidate.id, "project_id": candidate.project_id, "outcome": decision.outcome, "reason_code": decision.reason_code, "explanation": decision.explanation})
         return Response(json_value({
             "enabled": cfg.autonomous_enabled, "crm_enabled": cfg.autonomous_crm_enabled,
+            "crm_status": autonomous_crm_status(cfg, integration),
             "policy_version": cfg.autonomous_policy_version, "as_of": timezone.now(),
             "source": "WhatsApp", **financial_summary(projects),
             "decisions": list(decisions.values("outcome").annotate(count=Count("id"))),

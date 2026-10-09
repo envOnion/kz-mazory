@@ -19,9 +19,18 @@ export interface ReportPayload {
   missing_deadline: number
   cutoff: string
 }
+export type CrmDisabledReason = 'integration_disabled' | 'webhook_missing' | 'autonomous_crm_disabled'
+export interface CrmStatus {
+  integration_enabled: boolean
+  webhook_configured: boolean
+  autonomous_write_allowed: boolean
+  effective_autonomous_write_enabled: boolean
+  disabled_reason: CrmDisabledReason | null
+}
 export interface AutonomousOverview {
   enabled: boolean
   crm_enabled: boolean
+  crm_status: CrmStatus
   policy_version: string
   source: string
   as_of: string

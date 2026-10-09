@@ -365,7 +365,7 @@ test('autonomous WhatsApp receipt reaches CRM and reports without a review click
   await page.goto('/')
   await page.getByRole('button', { name: 'Рабочий кабинет', exact: true }).click()
   await page.getByRole('button', { name: 'Отчеты по WhatsApp', exact: true }).click()
-  await expect(page.getByText('Автоматическая обработка включена', { exact: false })).toBeVisible()
+  await expect(page.getByText('Автоматическая обработка WhatsApp включена', { exact: true })).toBeVisible()
   await expect(page.getByText('70 000 290', { exact: true }).first()).toBeVisible()
   await expect(page.getByRole('button', { name: 'Подтвердить факт', exact: true })).toHaveCount(0)
 })

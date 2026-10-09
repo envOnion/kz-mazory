@@ -96,6 +96,11 @@ def seed():
     target = Path(settings.E2E_DIR) / "session.json"
     target.write_text(json.dumps(data))
     target.chmod(0o644)
+    _, crm_access, crm_refresh = create_session(user)
+    (target.parent / "crm-status-session.json").write_text(json.dumps({
+        "access": crm_access, "refresh": crm_refresh,
+        "cookie_name": settings.AUTH_REFRESH_COOKIE,
+    }))
     seed_analytics()
     from .temporal import seed as seed_temporal
     seed_temporal()
