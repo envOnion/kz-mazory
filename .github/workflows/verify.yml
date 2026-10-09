@@ -17,7 +17,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Scan committed sources for secrets
-        run: docker run --rm -v "$PWD:/repo:ro" zricethezav/gitleaks:v8.24.3 dir /repo --config /repo/.gitleaks.toml --redact --no-banner
+        run: docker run --rm -v "$PWD:/repo:ro" ghcr.io/gitleaks/gitleaks:v8.24.3 dir /repo --config /repo/.gitleaks.toml --redact --no-banner
       - name: Build and run browser, API, PostgreSQL and Q2
         run: |
           docker compose -f compose.e2e.yml up -d --build nginx qcluster outbox
