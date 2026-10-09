@@ -18,13 +18,20 @@ x-environment: &environment
   AI_CREDENTIAL_ENCRYPTION_KEY: MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA=
 x-backend: &backend
   image: mazory-e2e-backend
-  build: ./backend
+  build:
+    context: ./backend
+    args:
+      PYTHON_BASE_IMAGE: ${E2E_PYTHON_BASE_IMAGE:-python:3.12-slim}
   environment: *environment
   volumes: [fixtures:/e2e, static:/app/staticfiles, avatars:/app/avatars]
   networks: [isolated]
 services:
   postgres:
-    build: {context: ./backend, dockerfile: e2e/postgres.Dockerfile}
+    build:
+      context: ./backend
+      dockerfile: e2e/postgres.Dockerfile
+      args:
+        POSTGRES_BASE_IMAGE: ${E2E_POSTGRES_BASE_IMAGE:-postgres:16-alpine}
     environment: {POSTGRES_DB: mazory_e2e, POSTGRES_USER: mazory_e2e, POSTGRES_PASSWORD: isolated-writer-fixture}
     volumes: [database:/var/lib/postgresql/data]
     healthcheck:
@@ -66,12 +73,21 @@ services:
     command: [python, manage.py, shell, -c, 'from e2e.dispatch import dispatch_forever; dispatch_forever()']
     depends_on: {seed: {condition: service_completed_successfully}}
   nginx:
-    build: {context: ., dockerfile: nginx/Dockerfile}
+    build:
+      context: .
+      dockerfile: nginx/Dockerfile
+      args:
+        NODE_BASE_IMAGE: ${E2E_NODE_BASE_IMAGE:-node:22-alpine}
+        NGINX_BASE_IMAGE: ${E2E_NGINX_BASE_IMAGE:-nginx:1.27-alpine}
     depends_on: {backend: {condition: service_healthy}}
     networks: [isolated]
     volumes: [static:/staticfiles:ro, avatars:/avatars:ro]
   browser:
-    build: {context: ., dockerfile: frontend/e2e/Dockerfile}
+    build:
+      context: .
+      dockerfile: frontend/e2e/Dockerfile
+      args:
+        NODE_BASE_IMAGE: ${E2E_NODE_BASE_IMAGE:-node:22-alpine}
     environment: {MAZORY_E2E_DIR: /e2e, MAZORY_E2E_URL: 'http://nginx', MAZORY_E2E_OUTPUT: /e2e/playwright}
     volumes: [fixtures:/e2e]
     depends_on: {nginx: {condition: service_started}, qcluster: {condition: service_started}, outbox: {condition: service_started}}

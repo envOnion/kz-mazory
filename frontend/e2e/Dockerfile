@@ -1,4 +1,5 @@
-FROM node:22-alpine AS dependencies
+ARG NODE_BASE_IMAGE=node:22-alpine
+FROM ${NODE_BASE_IMAGE} AS dependencies
 WORKDIR /app
 COPY frontend/package.json frontend/package-lock.json ./
 COPY frontend/scripts ./scripts
