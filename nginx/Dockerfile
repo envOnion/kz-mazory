@@ -1,4 +1,6 @@
-FROM node:22-alpine AS frontend-build
+ARG NODE_BASE_IMAGE=node:22-alpine
+ARG NGINX_BASE_IMAGE=nginx:1.27-alpine
+FROM ${NODE_BASE_IMAGE} AS frontend-build
 
 WORKDIR /app
 
@@ -13,7 +15,7 @@ COPY frontend/src ./src
 
 RUN npm run build
 
-FROM nginx:1.27-alpine
+FROM ${NGINX_BASE_IMAGE}
 
 RUN rm -f /etc/nginx/conf.d/default.conf
 

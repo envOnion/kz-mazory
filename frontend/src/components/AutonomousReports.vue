@@ -5,7 +5,12 @@
     <template v-if="data">
       <header class="panel space-y-2">
         <h2 class="text-xl font-semibold">Учет по WhatsApp</h2>
-        <p>{{ data.enabled ? 'Автоматическая обработка включена' : 'Автоматическая обработка выключена' }} · {{ data.crm_enabled ? 'Запись в CRM включена' : 'Запись в CRM выключена' }}</p>
+        <div class="space-y-1" role="region" aria-label="Режимы обработки и интеграции">
+          <p>{{ data.enabled ? 'Автоматическая обработка WhatsApp включена' : 'Автоматическая обработка WhatsApp выключена' }}</p>
+          <p>{{ data.crm_status.integration_enabled ? 'Интеграция Bitrix включена' : 'Интеграция Bitrix выключена' }}</p>
+          <p>{{ data.crm_status.effective_autonomous_write_enabled ? 'Автоматическая запись из WhatsApp в CRM включена' : 'Автоматическая запись из WhatsApp в CRM выключена' }}</p>
+          <p v-if="data.crm_status.disabled_reason" class="text-sm text-slate-400">{{ crmDisabledReason(data.crm_status.disabled_reason) }}</p>
+        </div>
         <p class="text-sm text-slate-400">Сведения на {{ date(data.as_of) }}. Здесь показаны зарегистрированные сообщения о движениях; полнота доступной переписки указана ниже.</p>
         <button class="btn" :disabled="loading" @click="load">Обновить</button>
       </header>
@@ -57,11 +62,19 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api } from '../composables/api'
-import type { AutonomousOverview } from '../types/autonomous'
+import type { AutonomousOverview, CrmDisabledReason } from '../types/autonomous'
 const data = ref<AutonomousOverview | null>(null), error = ref(''), loading = ref(false)
 const currencies = computed(() => [...new Set(data.value?.series.map(item => item.currency) || [])])
 const date = (value: string) => new Date(value).toLocaleString('ru-RU')
 const amount = (value: string) => new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(Number(value))
+function crmDisabledReason(reason: CrmDisabledReason): string {
+  const labels: Record<CrmDisabledReason, string> = {
+    integration_disabled: 'Интеграция Bitrix выключена.',
+    webhook_missing: 'Не задан Webhook для подключения к Bitrix.',
+    autonomous_crm_disabled: 'Автоматическая запись результатов WhatsApp в CRM выключена в настройках ИИ.',
+  }
+  return labels[reason]
+}
 function width(value: string, currency: string) {
   const max = Math.max(1, ...(data.value?.series.filter(item => item.currency === currency).map(item => Math.abs(Number(item.amount))) || []))
   return Math.max(1, Math.abs(Number(value)) / max * 100)

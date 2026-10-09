@@ -10,6 +10,8 @@ from django.utils import timezone
 
 
 def dispatch_forever():
+    crm_status_case = None
+    crm_status_original = None
     analytics_owner_id = json.loads((settings.E2E_DIR / 'analytics-session.json').read_text())['user_id']
     marker=settings.E2E_DIR/"temporal-benchmark-started"
     if not marker.exists():
@@ -63,6 +65,18 @@ def dispatch_forever():
         if control.get("autonomous"):
             AISettings.objects.update(autonomous_enabled=True, autonomous_crm_enabled=True)
             OutboxEvent.objects.get_or_create(deduplication_key="e2e-autonomous-reports", defaults={"event_type": "autonomous_reconcile", "payload": {}})
+        if control.get("crm_status_case"):
+            from .crm_status import original_settings, apply_case, write_proof
+            if crm_status_original is None:
+                crm_status_original = original_settings()
+            if crm_status_case != control["crm_status_case"]:
+                apply_case(control["crm_status_case"], crm_status_original)
+                crm_status_case = control["crm_status_case"]
+            write_proof(crm_status_case, crm_status_original)
+        elif crm_status_original is not None:
+            from .crm_status import apply_case
+            apply_case("restore", crm_status_original)
+            crm_status_case = crm_status_original = None
         # Indexing is outside this scenario (no vector database in portable e2e).
         OutboxEvent.objects.filter(event_type="index_message", state="pending").update(
             state="done"

@@ -13,7 +13,12 @@ from django.utils.decorators import method_decorator
 from django.views.decorators.debug import sensitive_post_parameters
 from .admin_forms import AISettingsForm, BitrixSettingsForm
 from .user_admin import ProfileIdentityForm
-from .bitrix_config import effective_webhook_url, masked_webhook_url
+from .bitrix_config import (
+    AUTONOMOUS_CRM_DISABLED_REASONS,
+    autonomous_crm_status,
+    effective_webhook_url,
+    masked_webhook_url,
+)
 from .trace_context_ui import badge_text, render_context, context_view_data, retry_view, ERRORS
 from django.utils.safestring import mark_safe
 from django.contrib import messages
@@ -1103,15 +1108,55 @@ class BitrixSettingsAdmin(IntegrationAdmin):
             reverse("admin:api_bitrixsettings_change", args=[obj.pk]),
         )
 
+    def get_list_display(self, request):
+        ai_config = AISettings.get_active()
+        ai_admin = self.admin_site.get_model_admin(AISettings)
+        config_url = (
+            reverse("admin:api_aisettings_change", args=[ai_config.pk])
+            if ai_config.pk and ai_admin.has_view_or_change_permission(request, ai_config)
+            else None
+        )
+
+        @admin.display(description="Синхронизация")
+        def sync_summary(obj):
+            return self.sync_summary(obj, ai_config, config_url)
+
+        return tuple(
+            sync_summary if field == "sync_summary" else field
+            for field in super().get_list_display(request)
+        )
+
     @admin.display(description="Синхронизация")
-    def sync_summary(self, obj):
+    def sync_summary(self, obj, ai_config=None, config_url=None):
+        status = autonomous_crm_status(ai_config or AISettings.get_active(), obj)
+        write_enabled = status["effective_autonomous_write_enabled"]
+        reason = (
+            format_html(
+                '<span class="mazory-list-meta">{}</span>',
+                AUTONOMOUS_CRM_DISABLED_REASONS[status["disabled_reason"]],
+            )
+            if status["disabled_reason"] else ""
+        )
+        config_link = (
+            format_html(
+                '<a class="mazory-list-link" href="{}">Настройки записи WhatsApp →</a>',
+                config_url,
+            )
+            if config_url else ""
+        )
         return format_html(
             '<div class="mazory-list-stack">'
-            '<span class="mazory-admin-badge mazory-admin-badge--{}">Запись: {}</span>'
+            '<span class="mazory-admin-badge mazory-admin-badge--{}">Интеграция: {}</span>'
+            '<span class="mazory-admin-badge mazory-admin-badge--{}">Автоматическая запись WhatsApp: {}</span>'
+            "{}{}"
             '<span class="mazory-admin-badge mazory-admin-badge--{}">Read-only поиск: {}</span>'
             "{}</div>",
             "good" if obj.is_active else "neutral",
             "включена" if obj.is_active else "выключена",
+            "good" if write_enabled else "neutral",
+            "включена" if write_enabled else "выключена",
+            reason,
+            config_link,
             "info" if obj.crm_matching_enabled else "neutral",
             "включён" if obj.crm_matching_enabled else "выключен",
             format_html_join(
@@ -1121,6 +1166,7 @@ class BitrixSettingsAdmin(IntegrationAdmin):
                     (label, "вкл." if enabled else "выкл.")
                     for label, enabled in (
                         ("Каждый час", obj.hourly_sync_enabled),
+                        ("Создание сделок", obj.auto_create_deals),
                         ("Импорт сделок", obj.auto_import_deals),
                         ("Задачи по дедлайнам", obj.auto_create_tasks),
                     )

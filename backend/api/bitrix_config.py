@@ -16,6 +16,35 @@ def effective_webhook_url(config):
     return config.webhook_url.strip()
 
 
+AUTONOMOUS_CRM_DISABLED_REASONS = {
+    "integration_disabled": "Интеграция Bitrix выключена.",
+    "webhook_missing": "Не задан Webhook для подключения к Bitrix.",
+    "autonomous_crm_disabled": "Автоматическая запись результатов WhatsApp в CRM выключена в настройках ИИ.",
+}
+
+
+def autonomous_crm_status(ai_config, integration):
+    """Describe configured delivery permissions without contacting Bitrix."""
+    integration_enabled = integration.is_active
+    webhook_configured = bool(effective_webhook_url(integration))
+    autonomous_write_allowed = ai_config.autonomous_crm_enabled
+    if not integration_enabled:
+        reason = "integration_disabled"
+    elif not webhook_configured:
+        reason = "webhook_missing"
+    elif not autonomous_write_allowed:
+        reason = "autonomous_crm_disabled"
+    else:
+        reason = None
+    return {
+        "integration_enabled": integration_enabled,
+        "webhook_configured": webhook_configured,
+        "autonomous_write_allowed": autonomous_write_allowed,
+        "effective_autonomous_write_enabled": reason is None,
+        "disabled_reason": reason,
+    }
+
+
 def checked_bitrix_webhook_base(value):
     """Return a canonical webhook base that is safe to append fixed methods to."""
     if not isinstance(value, str) or not value.strip():

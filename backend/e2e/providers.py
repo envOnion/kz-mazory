@@ -299,6 +299,8 @@ class ProviderHandler(BaseHTTPRequestHandler):
             names = {'10001@lid': 'Проверяющий', '10002@lid': 'Боб', '10003@lid': 'Тихий участник', '79990000002@c.us': 'Боб'}
             return self.respond({'id': jid, 'pushname': names.get(jid, '')})
         if "/rest/" in self.path:
+            with (self.control.parent / "crm-requests.jsonl").open("a") as stream:
+                stream.write(json.dumps({"method": self.path.rsplit("/", 1)[-1]}) + "\n")
             state = json.loads(self.control.read_text())
             if state.get("crm_error"):
                 return self.respond({"error": "CRM temporarily unavailable"}, 503)
