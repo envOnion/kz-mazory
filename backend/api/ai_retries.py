@@ -14,7 +14,7 @@ EVIDENCE_ERRORS = {'evidence_not_in_source', 'commitment_evidence_unavailable', 
                    'commitment_deadline_evidence_unavailable', 'commitment_fulfillment_evidence_unavailable',
                    'commitment_fulfillment_date_invalid', 'commitment_fulfillment_ambiguous',
                    'commitment_cancellation_evidence_unavailable', 'commitment_cancellation_ambiguous'}
-EVENT_TYPES = {"extract_message", "index_message"}
+EVENT_TYPES = {"extract_message", "route_message", "extract_thread", "index_message"}
 RETRYABLE = {
     "provider_rate_limited",
     "provider_overloaded",
@@ -33,13 +33,16 @@ RETRYABLE = {
     "fact_thread_missing",
     "batch_classification_missing",
     "thread_classification_invalid",
+    "thread_parent_invalid",
     "invalid_embedding",
+    "routing_snapshot_changed",
+    'pipeline_internal_error',
 }
 
 
 @transaction.atomic
 def record_attempt(event, state, code="", next_at=None):
-    if event.event_type != "extract_message":
+    if event.event_type not in {"extract_message", "route_message", "extract_thread"}:
         return
     traces = MessageProcessingTrace.objects.select_for_update()
     trace = (
@@ -149,6 +152,15 @@ def handle_failure(event, exc):
                         trace.context_metadata['analysis_chunk_input_limit'] = max(512,
                             (previous.context_metadata.get('analysis_chunk_input_limit') or previous.context_metadata['input_tokens_preflight']) // 2)
                 trace.context_metadata.update(analysis_policy="history-packets-v1", analysis_limits=limits, repair_reason=code)
+                if code in {'target_classification_invalid', 'fact_thread_missing'}:
+                    result = previous.context_metadata.get('provider_result') or {}
+                    classifications = result.get('target_classifications', {})
+                    references = list(classifications.values()) if isinstance(classifications, dict) else classifications if isinstance(classifications, list) else []
+                    facts = result.get('facts', [])
+                    references += [result.get('target_classification', {})] + (facts if isinstance(facts, list) else [])
+                    allowed = {f't{i}' for i in range(16)}
+                    trace.context_metadata['required_thread_keys'] = sorted({row.get('thread_key') for row in references
+                        if isinstance(row, dict) and isinstance(row.get('thread_key'), str) and row['thread_key'] in allowed})
                 for field in ('full_history_policy', 'full_history', 'analysis_chunk_input_limit', 'output_retry_generation'):
                     if field in previous.context_metadata:
                         if field in ('analysis_chunk_input_limit', 'output_retry_generation'):
@@ -171,7 +183,7 @@ def handle_failure(event, exc):
                     HistoryAnalysisItem.objects.filter(outbox_event=current).update(trace=trace)
                 record_attempt(current, "pending", code, current.next_attempt_at)
                 return True
-        transport = {"provider_timeout", "provider_connection_failed", "provider_server_error", "provider_rate_limited", "provider_overloaded", "provider_in_flight_budget", "provider_circuit_open", "context_model_metadata_unavailable"}
+        transport = {"provider_timeout", "provider_connection_failed", "provider_server_error", "provider_rate_limited", "provider_overloaded", "provider_in_flight_budget", "provider_circuit_open", "context_model_metadata_unavailable", "routing_snapshot_changed"}
         pending = code in transport and current.attempt_count < 3
         delay = max((15 if current.attempt_count == 1 else 45) + random.randint(0, 5), exc.retry_after or 0)
         current.state, current.lease_until = "pending" if pending else "failed", None

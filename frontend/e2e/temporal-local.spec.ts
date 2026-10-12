@@ -9,7 +9,7 @@ const headers = { Authorization: `Bearer ${session.access}` }
 test('projects over the full explicit year reject payments and allow date-axis recalculation', async ({ page, context, request }) => {
   const readback: Record<string, boolean | number> = JSON.parse(readFileSync(join(dir, 'temporal-readback.json'), 'utf8'))
   expect(readback).toMatchObject({ all_models_timestamped: true, views: 20, created_immutable: true, real_update: true, noop_unchanged: true, rollback_atomic: true, bulk_timestamps: true })
-  expect(readback.triggers).toBe(67)
+  expect(readback.triggers).toBe(68)
   await expect.poll(() => { try { const result: Record<string, number> = JSON.parse(readFileSync(join(dir, 'temporal-benchmark.json'), 'utf8')); return Object.keys(result).length } catch { return 0 } }, { timeout: 60000 }).toBe(20)
   const benchmark: Record<string, number> = JSON.parse(readFileSync(join(dir, 'temporal-benchmark.json'), 'utf8'))
   for (const ms of Object.values(benchmark)) expect(ms).toBeLessThan(2000)

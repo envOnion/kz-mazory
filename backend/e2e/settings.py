@@ -45,6 +45,12 @@ REST_FRAMEWORK = {**REST_FRAMEWORK, "DEFAULT_THROTTLE_RATES": {"user": "1000/min
 SIMPLE_JWT = {**SIMPLE_JWT, 'ACCESS_TOKEN_LIFETIME': timedelta(hours=4)}
 MEDIA_ROOT = E2E_DIR / "media"
 QDRANT_URL = "https://localhost"
+if os.getenv('MAZORY_E2E_LAYA') == '1':
+    LAYA_API_URL = 'https://localhost'
+    LAYA_API_KEY = 'isolated-relay-token'
+    LAYA_MODEL = 'whatsapp-v1'
+    LAYA_ROUTING_VALIDATED_POLICY = os.getenv('LAYA_ROUTING_VALIDATED_POLICY', '')
+    BITRIX_READ_ONLY = True
 
 # Retain the production URL validation (HTTPS, port 443). Only the
 # local test transport maps the validated loopback URL to an unprivileged port.

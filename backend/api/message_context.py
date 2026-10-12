@@ -86,6 +86,9 @@ def history_queryset(raw, snapshot_id, include_following=False):
 
 
 def build_context(raw, cfg, known_projects, snapshot_id, include_following=False, batch_ids=None, target_content=None, full_state=None):
+    if full_state and full_state.get("routing_thread_id"):
+        from .thread_routing import build_thread_context
+        return build_thread_context(raw, cfg, known_projects, snapshot_id, full_state)
     if getattr(cfg, 'full_history_policy', None) == 'thread-context-v2':
         from .full_history import prepare
         return prepare(raw, cfg, known_projects, snapshot_id, batch_ids, full_state or {})

@@ -70,6 +70,9 @@ def candidate_data(candidate, user, source_map=None, project_ids=None):
             "next_action": project.next_action,
         }
     source = source_map.get(candidate.trace.raw_message_id)
+    if 'evidence_message_id' in values:
+        anchor = values['evidence_message_id']
+        source = source_map.get(anchor) if type(anchor) is int else None
     crm_matches = [
         match
         for match in candidate.crm_matches.all()

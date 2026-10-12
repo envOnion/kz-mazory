@@ -1,6 +1,7 @@
 """Versioned themes. Only a ready thought with literal sources may publish facts."""
 
 import hashlib
+import copy
 import json
 import re
 from datetime import datetime, timezone as datetime_timezone
@@ -161,14 +162,22 @@ def prepare_themes(result, raw, trace):
         # classifies only nearby originals in threads. The model, not the server,
         # supplies its theme and thought state; no inferred classification.
         if not isinstance(classification, dict) or type(classification.get("raw_message_id")) is not int or classification["raw_message_id"] != target_id or not isinstance(classification.get("thread_key"), str):
-            raise ProviderUnavailable("target_classification_invalid")
+            raise ProviderUnavailable("target_classification_invalid",diagnostics={'classification_target':target_id,'classification_source':classification.get('raw_message_id') if isinstance(classification,dict) else None})
         selected = [row for row in rows if isinstance(row, dict) and row.get("key") == classification["thread_key"]]
         schema = LinkSchema(data=classification)
-        if len(selected) != 1 or not schema.is_valid() or not isinstance(selected[0].get("messages"), list):
-            raise ProviderUnavailable("target_classification_invalid")
+        valid = schema.is_valid()
+        if len(selected) != 1 or not valid or not isinstance(selected[0].get("messages"), list):
+            raise ProviderUnavailable("target_classification_invalid",diagnostics={'classification_target':target_id,'classification_theme':classification['thread_key'],'matching_themes':len(selected),'classification_errors':schema.errors})
         existing = [link for link in selected[0]["messages"] if isinstance(link, dict) and link.get("raw_message_id") == target_id]
         if existing and any(link.get("thought_state") != schema.validated_data["thought_state"] for link in existing):
-            raise ProviderUnavailable("target_classification_conflict")
+            from .extraction_schema import WIRE_VERSION
+            if not (raw.config_id and raw.config.thread_routing_enabled) and trace.context_metadata.get('wire_schema_version') != WIRE_VERSION:
+                raise ProviderUnavailable("target_classification_conflict")
+            # The dedicated LLM target classification is authoritative over its
+            # redundant historical link; preserve both values in the audit.
+            trace.context_metadata.setdefault('classification_reconciliations',[]).append({'raw_message_id':target_id,'previous':copy.deepcopy(existing),'selected':dict(schema.validated_data)})
+            for link in existing:
+                link.update(schema.validated_data)
         if not existing:
             selected[0]["messages"].append(schema.validated_data)
     if not rows:
@@ -355,6 +364,8 @@ def persist_themes(themes, raw, trace, facts):
                 and latest.message_snapshot == theme["messages"]
                 and latest.extraction == theme_facts
             ):
+                from .thread_routing import update_descriptor
+                update_descriptor(thread, theme)
                 persisted[theme_key] = latest
                 del pending[theme_key]
                 continue
@@ -368,6 +379,8 @@ def persist_themes(themes, raw, trace, facts):
             thread.version += 1
             thread.snapshot_max_id = trace.context_metadata["snapshot_max_id"]
             thread.save()
+            from .thread_routing import update_descriptor
+            update_descriptor(thread, theme)
             if old_state != thread.state:
                 from .notifications import notify_thread_subscribers
 

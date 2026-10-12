@@ -18,9 +18,13 @@ services:
       LAYA_PORT: 8000
       LAYA_DEVICE: cuda
       LAYA_CUDA_AMP: bf16
-      LAYA_MODELS: multilingual
+      LAYA_MODELS: ${LAYA_MODELS:-multilingual}
+      LAYA_EXTRA_MODELS: ${LAYA_EXTRA_MODELS:-{}}
+      LAYA_DOMAIN_WEIGHT_SHA256: ${LAYA_DOMAIN_WEIGHT_SHA256:-}
+      LAYA_DOMAIN_CONFIG_SHA256: ${LAYA_DOMAIN_CONFIG_SHA256:-}
+      LAYA_DOMAIN_MODEL_DIR: ${LAYA_DOMAIN_MODEL_DIR:-/home/laya/.cache/huggingface/whatsapp-v1}
       LAYA_PRELOAD: 1
-      LAYA_MAX_LOADED: 1
+      LAYA_MAX_LOADED: 2
       LAYA_DEFAULT_MODEL: multilingual
       LAYA_MAX_CONCURRENT: 2
       LAYA_MAX_TOKEN_BUDGET: 2048
@@ -36,7 +40,7 @@ services:
       - /dev/nvidia-uvm:/dev/nvidia-uvm
       - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
     volumes:
-      - model-cache:/home/laya/.cache/huggingface
+      - model-cache:/home/laya/.cache/huggingface:ro
       - ${LAYA_API_KEY_PATH:?Set the protected key file path}:/run/secrets/laya_api_key:ro
       - /usr/lib/x86_64-linux-gnu/libcuda.so.595.104.02:/usr/local/nvidia/lib64/libcuda.so.1:ro
       - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.595.104.02:/usr/local/nvidia/lib64/libnvidia-ml.so.1:ro

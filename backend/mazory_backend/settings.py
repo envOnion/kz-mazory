@@ -555,6 +555,19 @@ TRUSTED_PROXY_CIDRS = [
     value for value in os.getenv("TRUSTED_PROXY_CIDRS", "").split(",") if value
 ]
 
+LAYA_API_URL = os.getenv("LAYA_API_URL", "")
+LAYA_API_KEY = os.getenv("LAYA_API_KEY", "")
+LAYA_MODEL = os.getenv("LAYA_MODEL", "multilingual")
+LAYA_MODEL_REVISION = os.getenv("LAYA_MODEL_REVISION", "")
+LAYA_CALIBRATION_REVISION = os.getenv('LAYA_CALIBRATION_REVISION','')
+LAYA_ROUTING_VALIDATED_POLICY = os.getenv("LAYA_ROUTING_VALIDATED_POLICY", "")
+LAYA_VALIDATED_MODEL = os.getenv("LAYA_VALIDATED_MODEL", "")
+LAYA_VALIDATED_REVISION = os.getenv("LAYA_VALIDATED_REVISION", "")
+LAYA_VALIDATED_CALIBRATION = os.getenv('LAYA_VALIDATED_CALIBRATION','')
+LAYA_VALIDATED_THRESHOLD = os.getenv("LAYA_VALIDATED_THRESHOLD", "0.90")
+LAYA_VALIDATED_MARGIN = os.getenv("LAYA_VALIDATED_MARGIN", "0.15")
+BITRIX_READ_ONLY = os.getenv("BITRIX_READ_ONLY", "0") == "1"
+
 # Exact local-stage -> provider-stage IDs; each CRM pipeline supplies its own map.
 import json
 

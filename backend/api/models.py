@@ -601,6 +601,7 @@ class WhatsAppConfig(TimestampedModel):
     """
     Настройки интеграции с WAHA и отслеживаемой группы WhatsApp.
     """
+    thread_routing_enabled = models.BooleanField("Распределение новых сообщений по темам", default=False)
 
     team = models.ForeignKey("Team", on_delete=models.PROTECT, null=True, blank=True)
     snapshot = models.JSONField(default=dict, blank=True)
@@ -665,6 +666,13 @@ class WhatsAppConfig(TimestampedModel):
 
 
 class AISettings(TimestampedModel):
+    thread_routing_mode = models.CharField("Распределение по темам", max_length=8, choices=[("llm", "LLM"), ("shadow", "LAYA: проверка"), ("laya", "LAYA")], default="llm")
+    laya_match_threshold = models.DecimalField("Порог принадлежности", max_digits=5, decimal_places=4, default=Decimal("0.90"))
+    laya_match_margin = models.DecimalField("Разрыв между темами", max_digits=5, decimal_places=4, default=Decimal("0.15"))
+    routing_policy_version = models.CharField(max_length=64, default="laya-whatsapp-v1")
+    thread_extract_idle_seconds = models.PositiveIntegerField(default=30)
+    thread_extract_max_wait_seconds = models.PositiveIntegerField(default=120)
+    thread_extract_batch_size = models.PositiveIntegerField(default=8)
     analysis_input_token_limit = models.PositiveIntegerField("Вход анализа, токены", default=0,
         help_text="0 — всё доступное окно модели за вычетом ответа и технического запаса. Положительное число — отдельный пользовательский предел.")
     analysis_target_message_limit = models.PositiveIntegerField("Сообщений в пакете анализа", default=8)
@@ -791,6 +799,10 @@ class AISettings(TimestampedModel):
         from django.core.exceptions import ValidationError
 
         super().clean()
+        if not Decimal("0") < self.laya_match_threshold <= Decimal("1") or not Decimal("0") <= self.laya_match_margin <= Decimal("1"):
+            raise ValidationError("Порог и разница вероятностей LAYA должны лежать в пределах 0–1.")
+        if not 1 <= self.thread_extract_idle_seconds <= self.thread_extract_max_wait_seconds or not 1 <= self.thread_extract_batch_size <= 30:
+            raise ValidationError("Ожидание извлечения должно быть положительным; пакет — от 1 до 30 сообщений.")
         if not 1 <= self.analysis_target_message_limit <= 30:
             raise ValidationError({"analysis_target_message_limit": "Допустимо от 1 до 30 сообщений."})
         if not self.analysis_output_token_limit:
@@ -1329,6 +1341,11 @@ class AdminMFA(TimestampedModel):
 
 
 class DialogueThread(TimestampedModel):
+    routing_state = models.CharField(max_length=16, choices=[(s, s) for s in ("needs_context", "prepared", "disabled")], default="needs_context")
+    routing_descriptor_version = models.PositiveIntegerField(default=0)
+    routing_descriptor = models.JSONField(default=dict)
+    routing_generation = models.PositiveIntegerField(default=0)
+    last_extracted_routing_generation = models.PositiveIntegerField(default=0)
     team = models.ForeignKey(Team, on_delete=models.PROTECT)
     config = models.ForeignKey(WhatsAppConfig, null=True, blank=True, on_delete=models.PROTECT)
     source_key = models.CharField(max_length=64, db_index=True)
@@ -1343,6 +1360,8 @@ class DialogueThread(TimestampedModel):
 
 
 class ThreadMessage(TimestampedModel):
+    assignment_method = models.CharField(max_length=8, choices=[("llm", "LLM"), ("laya", "LAYA")], default="llm")
+    routing_attempt = models.ForeignKey("ThreadRoutingAttempt", null=True, blank=True, on_delete=models.PROTECT, related_name="message_links")
     thread = models.ForeignKey(DialogueThread, on_delete=models.PROTECT, related_name="message_links")
     raw_message = models.ForeignKey(RawMessage, on_delete=models.PROTECT, related_name="thread_links")
     thought_state = models.CharField(max_length=16, choices=[(s, s) for s in ("intermediate", "final", "unknown")])
@@ -1365,6 +1384,21 @@ class ThreadRevision(TimestampedModel):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["thread", "version"], name="thread_revision_unique")]
+
+
+class ThreadRoutingAttempt(TimestampedModel):
+    raw_message = models.ForeignKey(RawMessage, on_delete=models.PROTECT, related_name="routing_attempts")
+    selected_thread = models.ForeignKey(DialogueThread, null=True, blank=True, on_delete=models.PROTECT, related_name="routing_attempts")
+    operation_key = models.CharField(max_length=255, unique=True)
+    source_revision = models.CharField(max_length=64)
+    input_hash = models.CharField(max_length=64)
+    candidate_snapshot = models.JSONField(default=list)
+    scores = models.JSONField(default=list)
+    outcome = models.CharField(max_length=32, default="pending")
+    reason_code = models.CharField(max_length=64, blank=True)
+    model_revision = models.CharField(max_length=128, blank=True)
+    policy_version = models.CharField(max_length=64)
+    latency_ms = models.PositiveIntegerField(default=0)
 
 
 class ThreadSubscription(TimestampedModel):

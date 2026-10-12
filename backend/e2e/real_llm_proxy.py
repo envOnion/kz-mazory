@@ -23,7 +23,11 @@ class Handler(BaseHTTPRequestHandler):
                 content=response.read(); self.send_response(response.status)
                 self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(content)))
                 self.end_headers(); self.wfile.write(content)
-        except HTTPError as exc: self.send_error(exc.code)
+        except HTTPError as exc:
+            content=exc.read()
+            self.send_response(exc.code)
+            self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(content)))
+            self.end_headers(); self.wfile.write(content)
 
 if __name__=='__main__':
     if os.environ.get('MAZORY_E2E_REAL_MODEL')!='1': raise RuntimeError('Explicit real model profile required')

@@ -65,7 +65,7 @@ export interface Candidate {
   manager_id: number | null
   fact_type: CandidateFactType
   proposed_changes: Record<string, unknown>
-  source_metadata?: { sent_at: string | null; received_at: string; time_basis: string; timezone: string } | null
+  source_metadata?: { sender?: string; sent_at: string | null; received_at: string; time_basis: string; timezone: string } | null
   source_available?: boolean
   current_values?: Record<string, unknown>
   chat_name?: string

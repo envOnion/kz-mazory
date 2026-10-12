@@ -10,6 +10,10 @@ from django.utils import timezone
 
 
 def dispatch_forever():
+    import os
+    if os.getenv('MAZORY_E2E_LAYA') == '1':
+        from .laya_file import dispatch_forever as dispatch_laya
+        return dispatch_laya()
     crm_status_case = None
     crm_status_original = None
     analytics_owner_id = json.loads((settings.E2E_DIR / 'analytics-session.json').read_text())['user_id']

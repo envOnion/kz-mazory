@@ -10,7 +10,7 @@ from .providers import ProviderUnavailable
 def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, autonomous=None):
     from .models import AISettings
     if autonomous is None:
-        autonomous = AISettings.get_active().autonomous_enabled
+        autonomous = AISettings.get_active().autonomous_enabled or bool(raw.config_id and raw.config.thread_routing_enabled)
     scope = source_scope(raw).filter(id__lte=snapshot_id)
     refs = fact.get("evidence_messages") or [
         {"raw_message_id": raw.id, "quote": fact["evidence"], "role": "promise"}
@@ -57,13 +57,24 @@ def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, aut
         fact['deadline_message_id'] = deadline_id
     # Never trust an arbitrary source ID or a model supplied fulfillment timestamp.
     if deadline_id not in rows:
-        raise ProviderUnavailable("commitment_deadline_evidence_unavailable")
+        primary_text = ' '.join(item['quote'] for item in refs if item['raw_message_id']==raw.id and item['role']=='promise')
+        if autonomous and grounded_dates(primary_text, raw):
+            deadline_id = raw.id
+            fact['deadline_message_id'] = raw.id
+        else:
+            raise ProviderUnavailable("commitment_deadline_evidence_unavailable")
     date_message = rows[deadline_id]
     sent, _, _ = source_time(date_message)
     deadline_text = " ".join(
         item["quote"] for item in refs if item["raw_message_id"] == deadline_id
     )
     deadline_text = EXPORT_HEADER.sub("", deadline_text)
+    if autonomous and deadline_id != raw.id and not grounded_dates(deadline_text, date_message):
+        initial_text = ' '.join(item['quote'] for item in refs if item['raw_message_id']==raw.id and item['role']=='promise')
+        if grounded_dates(initial_text, raw):
+            deadline_id, date_message, deadline_text = raw.id, raw, initial_text
+            sent, _, _ = source_time(raw)
+            fact['deadline_message_id'] = raw.id
     relative = re.search(r"\b(завтра|сегодня|послезавтра)\b", deadline_text, re.I)
     morning = bool(re.search(r"\b(утром|с\s+утра)\b", deadline_text, re.I))
     explicit_clock = re.search(r"\b(?:[01]?\d|2[0-3])[:.][0-5]\d\b|\b(?:к|в|до)\s+(?:[01]?\d|2[0-3])\s*(?:час|ч\b)", deadline_text, re.I)

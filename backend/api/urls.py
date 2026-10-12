@@ -1,7 +1,7 @@
 from django.urls import path
 from .health import health
 from .analytics.dialogue import ConversationList, ConversationDetail, TurnList, ArtifactDetail
-from .thread_views import ThreadListView, ThreadDetailView, ThreadBackfillView, ThreadSubscribeView
+from .thread_views import ThreadListView, ThreadDetailView, ThreadBackfillView, ThreadSubscribeView, ThreadFlushView
 from .platform_views import CrmCatalogSyncView, ParticipantsSyncView
 from .candidate_context import CandidateContextView, CandidatePaymentsView
 from .views import (
@@ -110,6 +110,7 @@ urlpatterns = [
     path("threads/", ThreadListView.as_view()),
     path("threads/backfill/", ThreadBackfillView.as_view()),
     path("threads/<int:pk>/", ThreadDetailView.as_view()),
+    path("threads/<int:pk>/flush/", ThreadFlushView.as_view()),
     path("threads/<int:pk>/subscribe/", ThreadSubscribeView.as_view()),
     path("directory/", DirectoryView.as_view()),
     path("directory/crm-sync/", CrmCatalogSyncView.as_view()),

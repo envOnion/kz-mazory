@@ -145,7 +145,11 @@ def same_commitment_origin(left, right):
         return {(item.get("raw_message_id"), " ".join(item.get("quote", "").split())) for item in data.get("evidence_messages", []) if item.get("role") == "promise"}
     a, b = promises(left), promises(right)
     if a and b:
-        return a == b
+        if a == b:
+            return True
+        same_actor = normalize_deal_name(left.get('responsible_name','')) == normalize_deal_name(right.get('responsible_name',''))
+        same_object = not left.get('object_name') or not right.get('object_name') or normalize_deal_name(left['object_name']) == normalize_deal_name(right['object_name'])
+        return same_actor and same_object and any(xid==yid and min(len(xquote),len(yquote))>=12 and (xquote in yquote or yquote in xquote) for xid,xquote in a for yid,yquote in b)
     return bool(left.get("evidence") and " ".join(left["evidence"].split()) == " ".join(right.get("evidence", "").split()))
 
 
