@@ -84,7 +84,9 @@ def dispatch_forever():
                 async_task('api.tasks.run_outbox', event.id)
         report = {'messages': list(RawMessage.objects.filter(chat_id__startswith='laya-').values('id','chat_id','message_id','content','processed','processing_state')),
                   'routing': list(ThreadRoutingAttempt.objects.values('raw_message_id','outcome','reason_code','scores','latency_ms','model_revision')),
-                  'traces': list(MessageProcessingTrace.objects.filter(raw_message__chat_id__startswith='laya-').values('id','raw_message_id','status','error_code','ai_extracted_facts','context_metadata')),
+                  # Full request envelopes remain in PostgreSQL and the API.
+                  # Polling proof needs results, not repeated native JSON schemas.
+                  'traces': list(MessageProcessingTrace.objects.filter(raw_message__chat_id__startswith='laya-').values('id','raw_message_id','status','error_code','ai_extracted_facts')),
                   'events': list(OutboxEvent.objects.values('id','event_type','state','error_code','payload'))}
         from api.models import ProviderUsage
         report['usage'] = list(ProviderUsage.objects.values('outbox_event_id','operation','input_tokens','output_tokens'))
