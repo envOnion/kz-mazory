@@ -134,7 +134,14 @@ def normalize_themes(rows):
     if isinstance(rows, dict):
         if "t0" not in rows or any(key not in {f"t{i}" for i in range(16)} or not isinstance(value,dict) or "key" in value for key,value in rows.items()):
             raise ProviderUnavailable("thread_classification_invalid")
-        return [{**value,"key":key} for key,value in rows.items()]
+        rows = [{**value,"key":key} for key,value in rows.items()]
+    if isinstance(rows,list):
+        rows = [dict(row) if isinstance(row,dict) else row for row in rows]
+        for row in rows:
+            if isinstance(row,dict) and isinstance(row.get('messages'),dict):
+                if any(not isinstance(value,dict) or type(value.get('raw_message_id')) is not int or key!=f"m{value['raw_message_id']}" for key,value in row['messages'].items()):
+                    raise ProviderUnavailable('thread_classification_invalid')
+                row['messages'] = list(row['messages'].values())
     return rows
 
 

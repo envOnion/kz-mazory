@@ -41,7 +41,7 @@ def seed(user, team):
     cfg.autonomous_daily_token_limit = 0
     cfg.autonomous_context_messages = 8
     cfg.analysis_target_message_limit = 8
-    cfg.context_window_tokens = 32768
+    cfg.context_window_tokens = 65536
     cfg.max_completion_tokens = cfg.analysis_output_token_limit = 8192
     cfg.thread_extract_idle_seconds = 30
     cfg.save()

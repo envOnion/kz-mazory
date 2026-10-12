@@ -5,7 +5,7 @@ from rest_framework import serializers
 from .facts import FactSchema
 from .dialogue_threads import ThemeSchema, LinkSchema
 
-WIRE_VERSION = 'facts-v6-laya-typed-sources'
+WIRE_VERSION = 'facts-v7-laya-unique-sources'
 
 
 def resolution_schema(input_data):
@@ -209,6 +209,22 @@ def extraction_schema(input_data=None):
         bind(shape)
         for item, pk in pinned:
             item["properties"]["raw_message_id"]["enum"] = [pk]
+        if len(message_ids) <= 200:
+            # Fixed source slots cannot repeat a message with another rationale.
+            # Keep the public and saved-response representation as a list.
+            for key, theme_slot in shape['properties']['threads']['properties'].items():
+                link = theme_slot['properties']['messages']['items']
+                sources = {}
+                for pk in sorted(message_ids):
+                    item = copy.deepcopy(link)
+                    item['properties']['raw_message_id'] = {'type':'integer','enum':[pk]}
+                    sources[f'm{pk}'] = item
+                theme_slot['properties']['messages'] = {'type':'object','additionalProperties':False,
+                    'minProperties':1,'properties':sources,'required':[f'm{targets[0]}'] if key=='t0' else []}
+        properties = shape['properties']
+        classification_key = 'target_classifications' if len(targets)>1 else 'target_classification'
+        shape['properties'] = {classification_key:properties[classification_key],
+            'threads':properties['threads'],'facts':properties['facts']}
         if input_data.get('analysis_operation') == 'focused_fact_extraction':
             if input_data.get('analysis_payment_dates'):
                 for variant in variants:
@@ -232,6 +248,10 @@ def extraction_schema(input_data=None):
                 variants[:] = constrained
             for variant in variants:
                 variant['properties']['thread_key']['enum'] = input_data['known_extraction_theme_keys']
+                if input_data.get('analysis_fact_types') in (['project'], ['payment']):
+                    variant['properties']['evidence_message_id'] = {'type':'integer','enum':[input_data['target_message_id']]}
+                    target_quotes = sorted({text for text in [input_data['content'],*input_data['content'].splitlines()] if text.strip()})
+                    variant['properties']['evidence'] = {'type':'string','enum':target_quotes}
             update = {'type':'object', 'additionalProperties':False, 'required':['thread_key','topic','summary','state'], 'properties':{
                 'thread_key':{'type':'string','enum':input_data['known_extraction_theme_keys']}, 'topic':{'type':'string'},
                 'summary':{'type':'string'}, 'state':{'type':'string','enum':['open','unknown']}}}

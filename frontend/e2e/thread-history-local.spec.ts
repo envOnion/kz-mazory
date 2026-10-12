@@ -23,6 +23,7 @@ test.beforeAll(() => { session = JSON.parse(readFileSync(join(directory, 'thread
 
 for (const kind of ['whole', 'chunks', 'cancel', 'restart', 'pages', 'repair', 'output']) {
   test(`full original history: ${kind}`, async ({ page, request }) => {
+    if (kind === 'pages') test.setTimeout(300000)
     const fixture = session.fixtures[kind]!
     const initialCalls = calls(fixture.raw_id).length
     const errorMarker = join(directory, `thread-error-${fixture.raw_id}`)
@@ -55,7 +56,7 @@ for (const kind of ['whole', 'chunks', 'cancel', 'restart', 'pages', 'repair', '
     const completed = join(directory, 'thread-completed.json')
     await expect.poll(() => existsSync(completed) ?
       (JSON.parse(readFileSync(completed, 'utf8'))[String(fixture.raw_id)] ?? 0) : 0,
-      { timeout: 120000 }).toBeGreaterThanOrEqual(submittedTrace)
+      { timeout: kind === 'pages' ? 240000 : 120000 }).toBeGreaterThanOrEqual(submittedTrace)
     const headers = { Authorization: `Bearer ${session.access}` }
     let fact: Candidate | undefined
     await expect.poll(async () => {

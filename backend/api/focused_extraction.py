@@ -11,7 +11,7 @@ from .providers import ProviderUnavailable
 
 # This selects work for the LLM, and never supplies an action, actor or deadline.
 EXPLICIT_FUTURE = re.compile(r"\b(?:скину|отправлю|подготовлю|сделаю|закончу|вышлю|предоставлю|обещаю|жіберемін|дайындаймын)\b|\b(?:завтра|послезавтра)\s+будет\b", re.I)
-PROJECT_SUBJECT = re.compile(r"договор|контракт|мощност|МВт|коммерческ|\bКП\b|шарт", re.I)
+PROJECT_SUBJECT = re.compile(r"договор|контракт|мощност|МВт|коммерческ|\bКП\b|шарт|постав\w*|монтаж", re.I)
 PAYMENT_SUBJECT = re.compile(r"оплат|плат[её]ж|перечисл|выстав\w*\s+сч[её]т|сч[её]т\s+выстав|төлем|шот", re.I)
 INVOICE_ISSUED = re.compile(r'выстав\w*\s+сч[её]т|сч[её]т\s+выстав', re.I)
 RECEIPT_REPORTED = re.compile(r'поступил|поступлен|получил|оплачен|оплатил|перечисл|зачислен|перев[её]л|түсті|төленді', re.I)
@@ -67,7 +67,9 @@ def read_content(message, trace):
 
 
 def recover(result, raw, trace, cfg):
-    if not raw.config_id or not raw.config.thread_routing_enabled:
+    from .extraction_schema import WIRE_VERSION
+    native_autonomous = cfg.autonomous_enabled and trace.context_metadata.get('wire_schema_version')==WIRE_VERSION
+    if not raw.config_id or not (raw.config.thread_routing_enabled or native_autonomous):
         return
     targets = trace.context_metadata.get('batch_message_ids') or [raw.id]
     originals = read_originals(raw, trace)
@@ -78,6 +80,22 @@ def recover(result, raw, trace, cfg):
         return
     original_result = normalize_themes(result['threads'])
     result['threads'] = original_result
+    # Repeated updates of one LLM topic need one recovery pass per packet.
+    # Select its latest target; the LLM receives the already-read originals.
+    grouped = {}
+    other = []
+    for target, kind in selected:
+        if kind == 'project':
+            if any(fact.get('fact_type')=='project' and fact.get('evidence_message_id')==target.id for fact in result['facts']):
+                other.append((target,kind))
+                continue
+            keys = tuple(theme['key'] for theme in original_result if any(link['raw_message_id']==target.id for link in theme['messages']))
+            if any(fact.get('fact_type')=='project' and fact.get('thread_key') in keys and fact.get('evidence_message_id') in targets for fact in result['facts']):
+                continue
+            grouped[keys or (target.id,)] = (target, kind)
+        else:
+            other.append((target,kind))
+    selected = other + list(grouped.values())
     prepared = copy.copy(cfg)
     prepared.analysis_policy = 'history-packets-v1'
     prepared.full_history_policy = 'focused-facts-v1'
@@ -137,6 +155,15 @@ def recover(result, raw, trace, cfg):
         facts = supplemental.get('facts')
         if not isinstance(facts,list) or any(not isinstance(fact,dict) or fact.get('fact_type')!=kind or fact.get('thread_key') not in inputs['known_extraction_theme_keys'] for fact in facts):
             raise ProviderUnavailable('invalid_extraction_schema')
+        if kind in ('project','payment'):
+            for fact in facts:
+                quotes = {ref['quote'] for ref in fact.get('evidence_messages',[]) if ref.get('raw_message_id')==target.id}
+                if len(quotes)==1:
+                    quote = quotes.pop()
+                    if fact.get('evidence')!=quote:
+                        trace.context_metadata.setdefault('focused_anchor_reconciliations',[]).append({
+                            'raw_message_id':target.id,'kind':kind,'previous_quote':fact.get('evidence'),'selected_quote':quote})
+                        fact['evidence'] = quote
         updates = supplemental.get('topic_updates')
         if not isinstance(updates,list) or any(not isinstance(update,dict) or update.get('thread_key') not in inputs['known_extraction_theme_keys'] or update.get('state') not in ('open','unknown') or not isinstance(update.get('topic'),str) or not 1<=len(update['topic'])<=255 or not isinstance(update.get('summary'),str) or not 1<=len(update['summary'])<=2000 for update in updates):
             raise ProviderUnavailable('thread_classification_invalid')

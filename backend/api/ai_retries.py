@@ -34,6 +34,7 @@ RETRYABLE = {
     "batch_classification_missing",
     "thread_classification_invalid",
     "thread_parent_invalid",
+    "thread_sources_duplicate",
     "invalid_embedding",
     "routing_snapshot_changed",
     'pipeline_internal_error',

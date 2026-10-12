@@ -107,6 +107,12 @@ def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False, targ
         if quote != fact["evidence"] and diagnostics is not None:
             diagnostics.setdefault("source_whitespace_restored", []).append(index)
         fact["evidence"] = quote
+        if fact['fact_type'] in ('project','payment') and not any(ref['raw_message_id']==fact['evidence_message_id'] and ref['quote']==quote for ref in fact['evidence_messages']):
+            # The separately supplied primary quote has just passed the same
+            # source-scope and literal checks. Retain it in the evidence ledger.
+            fact['evidence_messages'].append({'raw_message_id':fact['evidence_message_id'],'quote':quote,'role':'identity'})
+            if diagnostics is not None:
+                diagnostics.setdefault('primary_quote_retained',[]).append(index)
         if fact["fact_type"] == "commitment":
             from .commitment_evidence import validate_commitment
             promise_raw = source_scope(raw).filter(pk=fact.get("promise_message_id"), id__lte=snapshot_id).first() if threaded else raw
