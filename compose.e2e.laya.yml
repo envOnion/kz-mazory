@@ -1,0 +1,46 @@
+# Authorized real file + live CRM reads only; separate Compose project and volumes.
+services:
+  read-relay:
+    image: mazory-e2e-backend
+    user: '1000:1000'
+    network_mode: host
+    environment:
+      MAZORY_E2E_READ_ONLY_BITRIX: '1'
+      MAZORY_E2E_RELAY_BIND: ${MAZORY_E2E_RELAY_BIND:?Docker bridge gateway}
+    volumes:
+      - ${MAZORY_E2E_PRIVATE_DIR:?Protected remote verification directory}:/verification
+      - /home/a_belianskii/.local/share/mazory-laya/api.key:/run/secrets/laya.key:ro
+    command: [python, -m, e2e.read_only_relay]
+    healthcheck:
+      test: [CMD, python, -c, 'import socket,os; socket.create_connection((os.environ["MAZORY_E2E_RELAY_BIND"],11436),timeout=2).close()']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  provider:
+    environment: {MAZORY_E2E_READ_ONLY_BITRIX: '1'}
+    volumes:
+      - fixtures:/e2e
+      - static:/app/staticfiles
+      - avatars:/app/avatars
+      - ${MAZORY_E2E_PRIVATE_DIR:?Protected remote verification directory}/relay.key:/run/secrets/read_relay_key:ro
+    depends_on: {read-relay: {condition: service_healthy}, llm-relay: {condition: service_healthy}}
+  seed:
+    environment: {MAZORY_E2E_REAL_MODEL: '1', MAZORY_E2E_LAYA: '1'}
+  backend:
+    environment: &laya-worker-env
+      MAZORY_E2E_REAL_MODEL: '1'
+      MAZORY_E2E_LAYA: '1'
+      BITRIX_READ_ONLY: '1'
+      LAYA_MODEL_REVISION: f5252e332072ff175e5fc7e31b8e3c3ca29a0c6a46cb22b8489b902e9a2ead49
+      LAYA_ROUTING_VALIDATED_POLICY: laya-whatsapp-v1
+      LAYA_VALIDATED_MODEL: whatsapp-v1
+      LAYA_VALIDATED_REVISION: f5252e332072ff175e5fc7e31b8e3c3ca29a0c6a46cb22b8489b902e9a2ead49
+      LAYA_CALIBRATION_REVISION: 0294bbc940d063bfa646805df25131450c80d7ffd32df6f7c0e0fb544b3695d2
+      LAYA_VALIDATED_CALIBRATION: 0294bbc940d063bfa646805df25131450c80d7ffd32df6f7c0e0fb544b3695d2
+  qcluster:
+    environment: *laya-worker-env
+  outbox:
+    environment: *laya-worker-env
+  browser:
+    environment: {MAZORY_E2E_REAL_MODEL: '1', MAZORY_E2E_LAYA: '1'}
+    command: [node, node_modules/@playwright/test/cli.js, test, --config=playwright.local.config.ts, laya-file-local.spec.ts]

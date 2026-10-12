@@ -21,6 +21,10 @@ from api.models import (
 
 def seed():
     if User.objects.filter(username='79990000001').exists():
+        if os.getenv('MAZORY_E2E_LAYA') == '1' and not (settings.E2E_DIR / 'laya-session.json').exists():
+            from .laya_file import seed as seed_laya
+            user = User.objects.get(username='79990000001')
+            seed_laya(user, TeamMembership.objects.get(user=user, role='team_lead').team)
         return
     team = Team.objects.create(
         name="Локальная команда",
@@ -101,6 +105,10 @@ def seed():
         "access": crm_access, "refresh": crm_refresh,
         "cookie_name": settings.AUTH_REFRESH_COOKIE,
     }))
+    if os.getenv('MAZORY_E2E_LAYA') == '1':
+        from .laya_file import seed as seed_laya
+        seed_laya(user, team)
+        return
     seed_analytics()
     from .temporal import seed as seed_temporal
     seed_temporal()

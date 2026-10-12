@@ -215,6 +215,8 @@ class BitrixService:
     @staticmethod
     def call(method, params=None):
         """Outbound-capable path. The legacy name remains fail-closed for callers."""
+        if getattr(settings, "BITRIX_READ_ONLY", False) and method not in READ_ONLY_METHODS:
+            raise ProviderUnavailable("crm_write_forbidden")
         cfg = BitrixSettings.get_active()
         webhook_url = effective_webhook_url(cfg)
         if not cfg.is_active or not webhook_url:

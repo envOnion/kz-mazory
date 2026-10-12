@@ -895,6 +895,8 @@ class AISettingsAdmin(IntegrationAdmin):
     )
     fieldsets = (
         ("Конфигурация", {"fields": ("name", "is_active")}),
+        ("Маршрутизация тем WhatsApp", {"fields": ("thread_routing_mode", "laya_match_threshold", "laya_match_margin", "routing_policy_version", "thread_extract_idle_seconds", "thread_extract_max_wait_seconds", "thread_extract_batch_size"),
+            "description": "LAYA назначает сообщения только при подтверждённой политике качества. Тему и факты определяет LLM. Включение отдельно для каждого чата."}),
         ("Автономный учет WhatsApp", {"fields": ("autonomous_enabled", "autonomous_crm_enabled", "autonomous_policy_version", "autonomous_context_messages", "autonomous_input_tokens", "autonomous_daily_token_limit", "autonomous_max_in_flight")}),
         (
             "Chat / Reasoning",
@@ -2334,6 +2336,7 @@ from .models import (
     ProjectRevision,
     OutboxEvent,
     NotificationDelivery,
+    ThreadRoutingAttempt,
 )
 
 for model in (Team, TeamMembership, ChatAccess, ClientProjectAccess):
@@ -2343,6 +2346,7 @@ for model in (
     ProjectRevision,
     FactCandidate,
     NotificationDelivery,
+    ThreadRoutingAttempt,
 ):
     admin.site.register(model, ScopedReadOnlyAdmin)
 

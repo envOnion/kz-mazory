@@ -35,7 +35,7 @@ class ScopedReadOnlyAdmin(ModelAdmin):
             return qs.filter(projects__in=access.projects_for(user)).distinct()
         if name == "RawMessage":
             return qs.filter(pk__in=access.messages_for(user))
-        if name == "MessageProcessingTrace":
+        if name in ("MessageProcessingTrace", "ThreadRoutingAttempt"):
             return qs.filter(raw_message__in=access.messages_for(user))
         if name == "Commitment":
             return qs.filter(pk__in=access.commitments_for(user))

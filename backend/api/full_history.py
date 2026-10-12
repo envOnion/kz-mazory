@@ -331,18 +331,44 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
 
 def validate_evidence(result, raw, trace):
     """Summaries cannot authorize a quote outside the already read originals."""
-    coverage = trace.context_metadata.get('full_history', {}).get('ranges', {})
+    coverage = trace.context_metadata.get('full_history', {}).get('ranges', {}) or trace.context_metadata.get('evidence_ranges', {})
     if not coverage:
         return
     from .facts import FactSchema, normalize_fact_fields
     result['facts'] = normalize_fact_fields(result.get('facts'))
     FactSchema(data=result.get('facts'), many=True).is_valid(raise_exception=True)
     from .pipeline import _source_quote
+    if raw.config_id and raw.config.thread_routing_enabled:
+        # Native decoding restricts quotes to the supplied originals, but a
+        # model can still pair a literal quote with another supplied numeric ID.
+        # Repair only a unique exact match inside this already-read snapshot.
+        available = {m.id:m for m in source_scope(raw).filter(pk__in=[int(pk) for pk in coverage])}
+        for fact in result.get('facts',[]):
+            refs = fact.get('evidence_messages',[])
+            for ref in refs + [{'raw_message_id':fact.get('evidence_message_id'),'quote':fact.get('evidence'),'anchor':True}]:
+                message = available.get(ref['raw_message_id'])
+                quote = ref.get('quote')
+                if not isinstance(quote,str) or not quote.strip():
+                    continue
+                if message and quote in plain_text(message.content)[:coverage.get(str(message.id),0)]:
+                    continue
+                matches = [m.id for m in available.values() if quote in plain_text(m.content)[:coverage.get(str(m.id),0)]]
+                if len(matches)!=1:
+                    continue
+                previous_id, verified_id = ref['raw_message_id'],matches[0]
+                trace.context_metadata.setdefault('source_id_reconciliations',[]).append({'previous_id':previous_id,'verified_id':verified_id,'quote_sha256':hashlib.sha256(quote.encode()).hexdigest()})
+                ref['raw_message_id'] = verified_id
+                if ref.get('anchor'):
+                    fact['evidence_message_id'] = verified_id
+                elif ref.get('role')=='promise':
+                    fact['promise_message_id'] = verified_id
+                elif ref.get('role')=='fulfillment':
+                    fact['fulfillment_message_id'] = verified_id
     references = [ref for fact in result.get('facts', []) for ref in fact.get('evidence_messages', [])]
     anchors = []
     for fact in result.get('facts', []):
         matched = [ref for ref in fact.get('evidence_messages', [])
-                   if ref['raw_message_id'] == fact.get('evidence_message_id') == fact.get('promise_message_id')
+                   if ref['raw_message_id'] == fact.get('promise_message_id')
                    and ref['role'] == 'promise'] if fact['fact_type'] == 'commitment' else []
         if len(matched) == 1:
             # Some models put a narrative summary in the redundant evidence
@@ -351,6 +377,7 @@ def validate_evidence(result, raw, trace):
             if fact.get('evidence') != matched[0]['quote']:
                 trace.context_metadata.setdefault('schema_repairs', []).append('literal_promise_anchor_from_reference')
             fact['evidence'] = matched[0]['quote']
+            fact['evidence_message_id'] = fact['promise_message_id']
         if fact.get('evidence_message_id') and fact.get('evidence'):
             anchors.append({'raw_message_id':fact['evidence_message_id'], 'quote':fact['evidence']})
     references.extend(anchors)
@@ -388,7 +415,7 @@ def validate_evidence(result, raw, trace):
                 trace.context_metadata.setdefault('schema_repairs', []).append('fact_source_role_alignment')
             for item in classified:
                 if isinstance(item, dict) and item.get('raw_message_id') == pk and item.get('thread_key') == fact.get('thread_key'):
-                    item['relation'] = links[pk]['relation']
+                    item['relation'] = links[pk].get('relation','discusses')
         theme['messages'] = list(links.values())
 
 
@@ -445,6 +472,8 @@ def extract(payload):
         raw = RawMessage.objects.select_for_update().get(pk=payload['raw_id'])
         following = reserve_attempt(raw, f'{current.deduplication_key}:full-stage:{len(stages)}')
         following.context_metadata.update({k: trace.context_metadata[k] for k in ['analysis_policy', 'analysis_limits', 'snapshot_max_id', 'full_history_policy', 'analysis_chunk_input_limit']})
+        if trace.context_metadata.get('required_thread_keys'):
+            following.context_metadata['required_thread_keys'] = trace.context_metadata['required_thread_keys']
         if trace.context_metadata.get('replace_unsent'):
             following.context_metadata['replace_unsent'] = True
         following.context_metadata['full_history'] = {**coverage, 'phase': next_state['phase'], 'complete': False}

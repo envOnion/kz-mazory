@@ -156,6 +156,7 @@ def thread_data(thread, user, revision=None):
             .order_by("timestamp", "id")
         )
         return {
+            **routing_data(thread),
             "id": thread.id,
             "topic": revision.topic or thread.topic,
             "summary": revision.summary,
@@ -185,10 +186,11 @@ def thread_data(thread, user, revision=None):
         }
     links = (
         thread.message_links.filter(raw_message__in=access.messages_for(user))
-        .select_related("raw_message__config")
+        .select_related("raw_message__config", "routing_attempt")
         .order_by("raw_message__timestamp", "raw_message_id")
     )
     return {
+        **routing_data(thread),
         "id": thread.id,
         "topic": thread.topic,
         "state": thread.state,
@@ -210,10 +212,37 @@ def thread_data(thread, user, revision=None):
                 "thought_state": link.thought_state,
                 "relation": link.relation,
                 "rationale": link.rationale,
+                "assignment_method": link.assignment_method,
+                "routing_reason": link.routing_attempt.reason_code if link.routing_attempt_id else "",
+                "routing_latency_ms": link.routing_attempt.latency_ms if link.routing_attempt_id else None,
             }
             for link in links
         ],
     }
+
+
+def routing_data(thread):
+    return {'routing_enabled':bool(thread.config_id and thread.config.thread_routing_enabled),"routing_state": thread.routing_state, "routing_descriptor_version": thread.routing_descriptor_version,
+            "routing_generation": thread.routing_generation, "last_extracted_routing_generation": thread.last_extracted_routing_generation,
+            "extraction_pending": thread.routing_generation > thread.last_extracted_routing_generation}
+
+
+class ThreadFlushView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        from django.db import transaction
+        from .dialogue_threads import lock_source
+        from .processing_attempts import require_reanalysis
+        from .thread_routing import schedule_extraction
+        thread = get_object_or_404(visible_threads(request.user), pk=pk)
+        raw = thread.message_links.select_related("raw_message__config__team").order_by("raw_message_id").first().raw_message
+        require_reanalysis(request.user, raw)
+        with transaction.atomic():
+            lock_source(raw)
+            thread = DialogueThread.objects.select_for_update().get(pk=pk)
+            event = schedule_extraction(thread, flush=True)
+        return Response({"event_id": event.id if event else None, "state": event.state if event else "complete"}, status=202 if event else 200)
 
 
 class ThreadPagination(PageNumberPagination):
@@ -433,6 +462,7 @@ class ThreadListView(APIView):
                     "messages_count": item.messages_count,
                     "commitments_count": commitments_count,
                     "total_amount": total_amount_val,
+                    **routing_data(item),
                 }
             )
 

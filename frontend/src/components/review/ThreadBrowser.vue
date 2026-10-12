@@ -282,6 +282,11 @@
             </div>
 
             <!-- Краткая суть диалога -->
+            <div v-if="detail.routing_enabled" class="text-xs text-slate-400 space-y-2" data-testid="thread-routing-status">
+              <p>{{ detail.routing_state === 'prepared' ? 'Тема определена' : 'Тема требует контекста' }} ·
+                {{ detail.extraction_pending ? 'Новые сообщения ожидают извлечения фактов' : 'Ожидающих разбора сообщений нет' }}</p>
+              <button v-if="lead && detail.extraction_pending" class="btn text-xs" :disabled="flushing" @click="flushThread">Извлечь факты сейчас</button>
+            </div>
             <div v-if="detail.summary" class="p-3 rounded-xl bg-slate-900/80 border border-slate-800 text-sm space-y-1">
               <span class="text-xs font-semibold text-slate-400 uppercase tracking-wider block">Краткая суть:</span>
               <p class="text-slate-200 whitespace-pre-wrap">{{ detail.summary }}</p>
@@ -399,6 +404,7 @@
                   <p v-if="message.rationale" class="text-[11px] text-slate-400 italic pt-0.5">
                     Обоснование: {{ message.rationale }}
                   </p>
+                  <p v-if="message.assignment_method" class="text-[11px] text-slate-500">Принадлежность к теме: {{ message.assignment_method === 'laya' ? 'LAYA' : 'LLM' }}</p>
                 </article>
               </div>
             </section>
@@ -450,6 +456,7 @@ const serverStats = ref<{ total: number; open: number; ready: number; commitment
   commitments: 0,
 })
 const subscribing = ref(false)
+const flushing = ref(false)
 
 const items = ref<ThreadSummary[]>([])
 const detail = ref<DialogueThread | null>(null)
@@ -673,6 +680,20 @@ async function toggleSubscription() {
     error.value = e instanceof Error ? e.message : 'Не удалось изменить подписку'
   } finally {
     subscribing.value = false
+  }
+}
+
+async function flushThread() {
+  if (!detail.value) return
+  flushing.value = true
+  try {
+    await post(`/threads/${detail.value.id}/flush/`, {})
+    notice.value = 'Извлечение фактов поставлено в очередь.'
+    await open(detail.value.id)
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'Не удалось запустить извлечение'
+  } finally {
+    flushing.value = false
   }
 }
 

@@ -1,0 +1,79 @@
+name: mazory-laya
+
+services:
+  laya:
+    image: mazory-laya:0.4.4-cu129
+    build:
+      context: .
+    init: true
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 256
+    mem_limit: 8g
+    cpus: 4
+    environment:
+      LAYA_HOST: 0.0.0.0
+      LAYA_PORT: 8000
+      LAYA_DEVICE: cuda
+      LAYA_CUDA_AMP: bf16
+      LAYA_MODELS: ${LAYA_MODELS:-multilingual}
+      LAYA_EXTRA_MODELS: ${LAYA_EXTRA_MODELS:-{}}
+      LAYA_DOMAIN_WEIGHT_SHA256: ${LAYA_DOMAIN_WEIGHT_SHA256:-}
+      LAYA_DOMAIN_CONFIG_SHA256: ${LAYA_DOMAIN_CONFIG_SHA256:-}
+      LAYA_DOMAIN_MODEL_DIR: ${LAYA_DOMAIN_MODEL_DIR:-/home/laya/.cache/huggingface/whatsapp-v1}
+      LAYA_PRELOAD: 1
+      LAYA_MAX_LOADED: 2
+      LAYA_DEFAULT_MODEL: multilingual
+      LAYA_MAX_CONCURRENT: 2
+      LAYA_MAX_TOKEN_BUDGET: 2048
+      LAYA_MAX_BATCH_TOKENS: 32768
+      LAYA_REVISION: 7b928d828b7b0e022f929d9bd2e44165aa270148
+      LAYA_API_KEY_FILE: /run/secrets/laya_api_key
+      LAYA_LOG_LEVEL: warning
+      HF_HUB_OFFLINE: ${LAYA_HF_OFFLINE:-0}
+      OMP_NUM_THREADS: 4
+    devices:
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+    volumes:
+      - model-cache:/home/laya/.cache/huggingface:ro
+      - ${LAYA_API_KEY_PATH:?Set the protected key file path}:/run/secrets/laya_api_key:ro
+      - /usr/lib/x86_64-linux-gnu/libcuda.so.595.104.02:/usr/local/nvidia/lib64/libcuda.so.1:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.595.104.02:/usr/local/nvidia/lib64/libnvidia-ml.so.1:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.595.104.02:/usr/local/nvidia/lib64/libnvidia-ptxjitcompiler.so.1:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.595.104.02:/usr/local/nvidia/lib64/libnvidia-nvvm.so.4:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-gpucomp.so.595.104.02:/usr/local/nvidia/lib64/libnvidia-gpucomp.so.595.104.02:ro
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    networks: [coolify]
+    labels:
+      traefik.enable: true
+      traefik.docker.network: coolify
+      traefik.http.routers.mazory-laya-http.rule: Host(`laya.kk-minsk.by`)
+      traefik.http.routers.mazory-laya-http.entrypoints: http
+      traefik.http.routers.mazory-laya-http.middlewares: mazory-laya-https
+      traefik.http.middlewares.mazory-laya-https.redirectscheme.scheme: https
+      traefik.http.routers.mazory-laya-https.rule: Host(`laya.kk-minsk.by`)
+      traefik.http.routers.mazory-laya-https.entrypoints: https
+      traefik.http.routers.mazory-laya-https.tls: true
+      traefik.http.routers.mazory-laya-https.tls.certresolver: letsencrypt
+      traefik.http.routers.mazory-laya-https.service: mazory-laya
+      traefik.http.services.mazory-laya.loadbalancer.server.port: 8000
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 10m
+      start_interval: 2s
+
+volumes:
+  model-cache:
+
+networks:
+  coolify:
+    external: true

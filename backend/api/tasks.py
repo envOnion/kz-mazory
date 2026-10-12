@@ -32,6 +32,7 @@ class WahaOutcomeUnknown(Exception):
 
 
 logger = logging.getLogger(__name__)
+from .thread_routing import ANALYSIS_EVENTS
 CLUSTERS = {
     "otp": "delivery",
     "notification": "delivery",
@@ -167,7 +168,7 @@ def dispatch_outbox(limit=100):
     else:
         pending = pending.order_by("id")
     cfg = AISettings.get_active()
-    expensive = {"extract_message", "index_message", "operation", "whatsapp_artifact"}
+    expensive = set(ANALYSIS_EVENTS) | {"index_message", "operation", "whatsapp_artifact"}
     in_flight = OutboxEvent.objects.filter(event_type__in=expensive, state__in=("enqueued", "processing")).count()
     ids = list(pending.values_list("id", flat=True)[:limit])
     dispatched = 0
@@ -180,7 +181,7 @@ def dispatch_outbox(limit=100):
             event = OutboxEvent.objects.select_for_update().get(pk=pk)
             if event.state != "pending":
                 continue
-            if event.event_type == "extract_message" and not event.analysis_source_key and event.payload.get("raw_id"):
+            if event.event_type in ANALYSIS_EVENTS and not event.analysis_source_key and event.payload.get("raw_id"):
                 from .dialogue_threads import source_key, analysis_position
                 raw = RawMessage.objects.select_related("config__team", "team", "project").get(pk=event.payload["raw_id"])
                 event.analysis_source_key, event.analysis_position = source_key(raw), analysis_position(raw)
@@ -288,7 +289,7 @@ def run_outbox(pk):
             event.state, event.lease_until = "pending", None
             event.save(update_fields=["state", "lease_until"])
             return
-        if event.event_type == "extract_message":
+        if event.event_type in ANALYSIS_EVENTS:
             # Lock the message while claiming work so two workers cannot claim
             # different attempts for the same message concurrently.
             from .message_context import source_scope
@@ -305,13 +306,13 @@ def run_outbox(pk):
             earlier = OutboxEvent.objects.alias(
                 source_raw_id=Cast(KeyTextTransform("raw_id", "payload"), BigIntegerField())
             ).filter(
-                event_type="extract_message", source_raw_id__in=source_scope(raw).values_list("id", flat=True),
+                event_type__in=ANALYSIS_EVENTS, source_raw_id__in=source_scope(raw).values_list("id", flat=True),
             ).exclude(pk=event.pk).filter(
                 Q(state="processing") | Q(pk__lt=event.pk, state__in=["pending", "enqueued"])
             ).exists()
             if event.analysis_source_key:
                 earlier = OutboxEvent.objects.filter(analysis_source_key=event.analysis_source_key, state="processing").exclude(pk=event.pk).exists()
-            if earlier and not AISettings.get_active().autonomous_enabled:
+            if earlier and (event.event_type != "extract_message" or not AISettings.get_active().autonomous_enabled):
                 event.state, event.lease_until = "pending", None
                 event.next_attempt_at = timezone.now() + timedelta(seconds=10)
                 event.save(update_fields=["state", "lease_until", "next_attempt_at"])
@@ -339,11 +340,13 @@ def run_outbox(pk):
         SourceWorkItem.objects.filter(pk=item.pk).update(state="processing", lease_until=event.lease_until, error_code="")
     context_token = usage_event_id.set(event.id)
     claim_token = outbox_claim.set(event.payload.get("claim_generation"))
-    deadline_token = extraction_deadline.set(time.monotonic() + 240 if event.event_type == "extract_message" else None)
+    deadline_token = extraction_deadline.set(time.monotonic() + 240 if event.event_type in ANALYSIS_EVENTS else None)
     try:
         from .temporal import backfill as temporal_backfill
         handlers = {
             "extract_message": extract_message,
+            "route_message": route_message,
+            "extract_thread": extract_thread,
             "decide_fact": decide_fact,
             "autonomous_reconcile": autonomous_reconcile,
             "whatsapp_artifact": process_message_artifact,
@@ -727,6 +730,17 @@ def apply_delivery_ack(payload):
 
 
 def extract_message(payload):
+    raw = RawMessage.objects.select_related('config').get(pk=payload['raw_id'])
+    manual = any(payload.get(key) for key in ('history_run_id','requested_by_id','reanalyze','commitment_refresh'))
+    remaining = RawMessage.objects.filter(pk__in=payload.get('batch_ids') or [],processed=False).exists()
+    # Another successful packet may already cover an incoming event. Reserving
+    # an automatic trace must not turn that event into explicit reanalysis.
+    if raw.processed and not manual and not remaining:
+        return
+    if not payload.get("routing_bypass") and not payload.get("history_run_id") and not payload.get("requested_by_id") and not payload.get("reanalyze"):
+        from .thread_routing import enabled, route_message as route
+        if enabled(raw.config):
+            return route(payload)
     from .processing_attempts import reserve_attempt
     from .models import MessageProcessingTrace
     if payload.get('trace_id'):
@@ -755,6 +769,16 @@ def extract_message(payload):
         reanalyze=payload.get("reanalyze", False),
         **({"trace_ids": payload["trace_ids"]} if "trace_ids" in payload else {}),
     )
+
+
+def route_message(payload):
+    from .thread_routing import route_message as route
+    return route(payload)
+
+
+def extract_thread(payload):
+    from .thread_routing import extract_thread as extract
+    return extract(payload)
 
 
 def backfill_threads(payload):

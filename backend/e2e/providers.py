@@ -3,9 +3,12 @@
 import datetime
 import json
 import os
+from pathlib import Path
 from urllib.request import Request, urlopen
+from urllib.error import HTTPError, URLError
 import uuid
-from urllib.parse import parse_qs, urlsplit
+import time as fixture_time
+from urllib.parse import parse_qs, urlsplit, unquote
 from http.server import BaseHTTPRequestHandler
 from django.utils import timezone
 
@@ -280,10 +283,43 @@ class ProviderHandler(BaseHTTPRequestHandler):
         self.handle_request(body)
 
     def handle_request(self, body):
+        control_path = self.control.parent/'laya-control.json'
+        laya_control = json.loads(control_path.read_text()) if control_path.exists() else {}
+        live_crm = bool(laya_control.get('live_crm'))
+        if os.getenv("MAZORY_E2E_READ_ONLY_BITRIX") == "1" and (self.path.startswith("/rest/") and live_crm or self.path.startswith("/v1/systemone")):
+            if self.path.startswith('/v1/systemone'):
+                control = laya_control
+                if control.get('laya_outage'):
+                    return self.respond({'error':'isolated outage scenario'},503)
+                if control.get('laya_delay'):
+                    (self.control.parent/'laya-provider-started.json').write_text(json.dumps({'nonce':control.get('nonce')}))
+                    fixture_time.sleep(2)
+                if control.get('laya_fault') == 'timeout':
+                    fixture_time.sleep(11)
+            key = Path('/run/secrets/read_relay_key').read_text().strip()
+            try:
+                with urlopen(Request("http://llm-host:11436" + self.path, data=json.dumps(body).encode(), headers={"Content-Type": "application/json", "Authorization":'Bearer '+key}), timeout=40) as result:
+                    response = json.loads(result.read())
+                    if self.path.startswith('/v1/systemone'):
+                        fault = laya_control.get('laya_fault')
+                        if fault == 'probabilities':
+                            response['answers']['q0']['probabilities'] = {'A':1.2,'B':-0.2}
+                        elif fault == 'revision':
+                            response['routing']['revision'] = 'wrong-checkpoint'
+                        elif fault == 'truncation':
+                            response['usage']['truncated'] = True
+                    return self.respond(response)
+            except HTTPError as exc:
+                return self.respond({'error':'read-only relay refused request'},exc.code)
+            except URLError:
+                return self.respond({'error':'read-only relay unavailable'},502)
         if os.getenv("MAZORY_E2E_REAL_MODEL") == "1" and self.path in ("/api/chat","/api/version","/api/show"):
             data = json.dumps(body).encode() if self.command == "POST" else None
-            with urlopen(Request("http://llm-host:11435" + self.path, data=data, headers={"Content-Type":"application/json"}, method=self.command), timeout=180) as result:
-                return self.respond(json.loads(result.read()))
+            try:
+                with urlopen(Request("http://llm-host:11435" + self.path, data=data, headers={"Content-Type":"application/json"}, method=self.command), timeout=180) as result:
+                    return self.respond(json.loads(result.read()))
+            except HTTPError as exc:
+                return self.respond(json.loads(exc.read()), exc.code)
         if self.path == "/health":
             return self.respond({"status": "ok"})
         if self.path.endswith('/participants/v2'):
@@ -294,6 +330,8 @@ class ProviderHandler(BaseHTTPRequestHandler):
             ])
         if self.path.startswith('/api/sessions/'):
             return self.respond({'me': {'id': '79990000001@c.us', 'lid': '10001@lid', 'pushName': 'Проверяющий'}})
+        if self.path.startswith('/api/') and '/lids/' in self.path:
+            return self.respond({'lid':unquote(urlsplit(self.path).path.rsplit('/',1)[-1]),'pn':None})
         if self.path.startswith('/api/contacts?'):
             jid = parse_qs(urlsplit(self.path).query)['contactId'][0]
             names = {'10001@lid': 'Проверяющий', '10002@lid': 'Боб', '10003@lid': 'Тихий участник', '79990000002@c.us': 'Боб'}

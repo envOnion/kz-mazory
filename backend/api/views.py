@@ -395,8 +395,9 @@ class MessageIngestView(APIView):
                 raise Conflict("Идентификатор источника уже связан с другим чатом.")
             analyze = not job or not job.only_new or job.analyze_after_import
             if created and analyze and raw.processing_state != "deduplication_ambiguous":
+                from .thread_routing import incoming_event_type
                 OutboxEvent.objects.create(
-                    event_type="extract_message",
+                    event_type=incoming_event_type(cfg),
                     deduplication_key=f"extract:{raw.id}",
                     payload={"raw_id": raw.id},
                 )

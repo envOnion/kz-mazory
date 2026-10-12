@@ -6,6 +6,7 @@ import re
 import uuid
 import hashlib
 import time
+import logging
 
 from django.contrib.auth.models import User
 from django.db import transaction
@@ -31,6 +32,8 @@ from .models import (
 from .processing_attempts import require_reanalysis, reserve_attempt
 from .providers import ProviderUnavailable
 
+logger = logging.getLogger(__name__)
+
 
 def _source_quote(quote, content):
     if quote in content:
@@ -47,7 +50,7 @@ def _source_quote(quote, content):
     return match.group()
 
 
-def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False):
+def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False, target_ids=None):
     # A missing optional value and an explicit null both mean unknown. Required
     # values, enums and evidence still go through the full serializer validation.
     normalized = normalize_fact_fields(result['facts'])
@@ -55,7 +58,33 @@ def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False):
     schema.is_valid(raise_exception=True)
     accepted_facts = []
     for index, fact in enumerate(schema.validated_data):
+        if target_ids and fact.get('evidence_message_id') not in target_ids and not (fact['fact_type']=='commitment' and any(ref['raw_message_id'] in target_ids for ref in fact['evidence_messages'])):
+            if diagnostics is not None:
+                diagnostics.setdefault('excluded_context_facts', []).append(index)
+            continue
+        if fact['fact_type']=='project' and (re.search(r"^(?:общий\s+итог|(?:все\s+)?действующие\s+проекты|все\s+проекты|проекты$|портфель|таблица|отч[её]т)", fact['object_name'].strip(), re.I) or (not fact['object_name'].strip() and re.search(r"таблиц|портфел|общий\s+итог", fact['current_action'], re.I))):
+            if diagnostics is not None:
+                diagnostics.setdefault('excluded_aggregate_subjects', []).append(index)
+            continue
+        if fact['fact_type']=='commitment':
+            promise_text = ' '.join(ref['quote'] for ref in fact['evidence_messages'] if ref['role']=='promise') or fact['evidence']
+            completed = re.search(r"подписан|выставил|отправил|поступил|получил|завершил|перенесл|согласован", promise_text, re.I)
+            future = re.search(r"завтра|сегодня\s+\w*(?:чу|лю|ю)|обещ|будет|скину|отправлю|подготовлю|сделаю|закончу|вышлю|предоставлю|планирую", promise_text, re.I)
+            expectation = fact['commitment_status']=='pending' and (fact['assignment_kind']=='reported_promise' or bool(re.search(r"должен\s+вернуться", promise_text, re.I))) and not re.search(r"обещ|пообещ|сказал.*(?:сдела|отправ|подготов)|уәде", promise_text, re.I)
+            if (completed and not future and not fact.get('commitment_id')) or expectation:
+                if diagnostics is not None:
+                    diagnostics.setdefault('excluded_unproven_promises', []).append(index)
+                continue
+        if fact['fact_type']=='project' and re.search(r"(?:оплат|средств|деньг).*(?:поступ|получ)|(?:поступ|получ).*(?:оплат|средств|деньг)", fact['current_action'], re.I) and not re.search(r"договор|контракт|\bКП\b|мощност|оборудован|МВт", fact['current_action'], re.I):
+            if diagnostics is not None:
+                diagnostics.setdefault('excluded_financial_project_duplicates', []).append(index)
+            continue
         if fact["fact_type"] == "payment" and fact["payment_kind"] == "increment":
+            from .focused_extraction import INVOICE_ISSUED, RECEIPT_REPORTED
+            if INVOICE_ISSUED.search(fact['evidence']) and not RECEIPT_REPORTED.search(fact['evidence']):
+                if diagnostics is not None:
+                    diagnostics.setdefault('excluded_invoice_as_receipt', []).append(index)
+                continue
             if re.search(
                 r"не\s+оплат|оплатим|төленбеді|төлейміз",
                 fact["evidence"],
@@ -78,12 +107,31 @@ def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False):
         if quote != fact["evidence"] and diagnostics is not None:
             diagnostics.setdefault("source_whitespace_restored", []).append(index)
         fact["evidence"] = quote
+        if fact['fact_type'] in ('project','payment') and not any(ref['raw_message_id']==fact['evidence_message_id'] and ref['quote']==quote for ref in fact['evidence_messages']):
+            # The separately supplied primary quote has just passed the same
+            # source-scope and literal checks. Retain it in the evidence ledger.
+            fact['evidence_messages'].append({'raw_message_id':fact['evidence_message_id'],'quote':quote,'role':'identity'})
+            if diagnostics is not None:
+                diagnostics.setdefault('primary_quote_retained',[]).append(index)
         if fact["fact_type"] == "commitment":
             from .commitment_evidence import validate_commitment
             promise_raw = source_scope(raw).filter(pk=fact.get("promise_message_id"), id__lte=snapshot_id).first() if threaded else raw
             if not promise_raw:
                 raise ProviderUnavailable("commitment_promise_evidence_unavailable")
             if not validate_commitment(fact, promise_raw, snapshot_id or raw.id, _source_quote, threaded=threaded):
+                continue
+        is_receipt_ack = lambda message: bool(re.search(r"\b(?:принято|принял|подтверждаю|верно)\b", message.content[:120], re.I)) and not re.search(r"\b(?:нов\w+|ещ[её]|втор\w+|дополнительн\w+)\b", message.content[:120], re.I)
+        duplicate = next((previous for previous in accepted_facts if previous['fact_type']==fact['fact_type'] and (
+            previous['thread_key']==fact['thread_key'] and same_commitment_origin(previous,fact) if fact['fact_type']=='commitment' else
+            fact_identity(previous)==fact_identity(fact) and (previous['evidence_message_id']==fact['evidence_message_id'] or
+                (fact['fact_type']=='payment' and (is_receipt_ack(evidence_raw) or is_receipt_ack(source_scope(raw).get(pk=previous['evidence_message_id'])))))
+        )),None)
+        if duplicate is not None:
+            if fact['fact_type']=='commitment' and fact.get('commitment_status') in ('fulfilled','cancelled'):
+                accepted_facts.remove(duplicate)
+            elif fact['fact_type']=='payment' and not is_receipt_ack(evidence_raw) and duplicate['evidence_message_id']!=fact['evidence_message_id']:
+                accepted_facts.remove(duplicate)
+            else:
                 continue
         accepted_facts.append(fact)
     return accepted_facts
@@ -223,10 +271,21 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 )
             )
             if cfg.autonomous_enabled and not batch_ids and not requested_by_id:
-                batch_ids = list(source_scope(raw).filter(processed=False, id__gte=raw.id, id__lte=trace.context_metadata["snapshot_max_id"]).exclude(content="").order_by("id").values_list("id", flat=True)[:min(cfg.autonomous_context_messages, cfg.analysis_target_message_limit)])
+                limit = min(cfg.autonomous_context_messages, cfg.analysis_target_message_limit)
+                batch_ids = [raw.id] + list(source_scope(raw).filter(processed=False, id__gte=raw.id, id__lte=trace.context_metadata["snapshot_max_id"]).exclude(pk=raw.id).exclude(content="").order_by("id").values_list("id", flat=True)[:max(0,limit-1)])
             context, metadata, payload = build_context(
                 raw, cfg, known, trace.context_metadata["snapshot_max_id"], include_following=True, full_state=full_state, **({"batch_ids": batch_ids} if batch_ids else {}), **({"target_content":raw.content[segment_range[0]:segment_range[1]]} if segment_range else {})
             )
+            if '_ollama_num_ctx' in payload:
+                from .extraction_schema import extraction_schema, WIRE_VERSION
+                user = _extraction_user_message(payload)
+                inputs = json.loads(user['content'])
+                if trace.context_metadata.get('required_thread_keys'):
+                    inputs['required_thread_keys'] = trace.context_metadata['required_thread_keys']
+                    metadata['required_thread_keys'] = inputs['required_thread_keys']
+                payload['_ollama_format'] = extraction_schema(inputs)
+                metadata['payload_sha256'] = payload_hash(payload)
+                metadata['wire_schema_version'] = WIRE_VERSION
             envelope = copy.deepcopy(payload)
             user_message = _extraction_user_message(envelope)
             fixed = json.loads(user_message["content"])
@@ -273,6 +332,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         trace.context_metadata["timings_ms"]["provider"] = round((time.monotonic()-provider_started)*1000)
         validation_started = time.monotonic()
         trace.context_metadata["response_diagnostics"] = diagnostics
+        trace.context_metadata['provider_result'] = copy.deepcopy(result)
+        trace.save(update_fields=['context_metadata'])
         value = (
             usage.get("prompt_tokens", usage.get("input_tokens"))
             if isinstance(usage, dict)
@@ -282,11 +343,18 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             value if type(value) is int and value >= 0 else None
         )
         from .dialogue_threads import prepare_themes, ready_facts, persist_themes, lock_source
-        if getattr(cfg, 'full_history_policy', None) == 'thread-context-v2':
+        from .focused_extraction import recover
+        recover(result, raw, trace, cfg)
+        if getattr(cfg, 'full_history_policy', None) in {'thread-context-v2', 'thread-routed-context-v1'}:
             from .full_history import validate_evidence
             validate_evidence(result, raw, trace)
         themes = prepare_themes(result, raw, trace)
-        facts = _facts(ready_facts(result, themes), raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True)
+        targets = set(trace.context_metadata.get('batch_message_ids') or [raw.id])
+        facts = _facts(ready_facts(result, themes), raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True, target_ids=targets)
+        if not defer_result:
+            from .focused_extraction import reconcile_promises
+            facts = reconcile_promises(facts,raw,trace,cfg)
+            facts = _facts({'facts':json_value(facts)},raw,diagnostics,trace.context_metadata['snapshot_max_id'],threaded=True,target_ids=targets)
         if defer_result:
             trace.context_metadata.update(request_state="segment_validated", segment_result=result,
                                           segment_usage=usage, segment_diagnostics=diagnostics, segment_range=segment_range)
@@ -299,7 +367,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             return (result, usage, diagnostics)
         from .commitment_resolution import resolve_remaining
         resolved = resolve_remaining(facts, raw, cfg, trace)
-        facts = _facts({"facts": json_value(resolved)}, raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True)
+        facts = _facts({"facts": json_value(resolved)}, raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True, target_ids=targets)
         if packet:
             # Only add closing sources after their quote, source and chronology
             # have passed the same commitment validation as the main request.
@@ -325,6 +393,12 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 .get(pk=raw_id)
             )
             source_scope(locked)
+            if full_state and full_state.get("routing_thread_id"):
+                from .models import DialogueThread
+                routing_thread = DialogueThread.objects.select_for_update().get(pk=full_state["routing_thread_id"])
+                if (routing_thread.routing_generation != full_state["routing_generation"] or
+                    routing_thread.routing_descriptor_version != trace.context_metadata["routing_descriptor_version"]):
+                    raise ProviderUnavailable("routing_snapshot_changed")
             if requested_by_id:
                 require_reanalysis(User.objects.get(pk=requested_by_id), locked)
             if RawMessage.objects.filter(
@@ -354,6 +428,14 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 from .replay_replacement import replace_unsent
                 replace_unsent(batch_ids or [raw.id],trace)
             revisions = persist_themes(themes, locked, trace, json_value(facts))
+            if full_state and full_state.get('routing_thread_id'):
+                from .models import ThreadMessage, ThreadRoutingAttempt
+                for target_id in targets:
+                    assigned = [revisions[key].thread_id for key,theme in themes.items() if any(link['raw_message_id']==target_id for link in theme['messages'])]
+                    moved = ThreadMessage.objects.filter(raw_message_id=target_id,assignment_method='laya').exclude(thread_id__in=assigned)
+                    attempt_ids = list(moved.values_list('routing_attempt_id',flat=True))
+                    moved.delete()
+                    ThreadRoutingAttempt.objects.filter(pk__in=attempt_ids).update(outcome='llm_corrected',reason_code='llm_reassigned')
             origin = RawMessage.objects.filter(
                 source=raw.source,
                 session_name=raw.session_name,
@@ -364,6 +446,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             ).exclude(trace=trace)
             if replacing:previous=FactCandidate.objects.filter(trace__raw_message_id__in=batch_ids or [raw.id]).exclude(trace=trace)
             accepted = list(previous.filter(status="approved"))
+            pending_candidates = list(previous.filter(status="pending"))
             sender = (
                 UserProfile.objects.filter(
                     phone=raw.sender_phone,
@@ -378,6 +461,9 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             proposed, duplicates, retained = 0, [], []
             for index, fact in enumerate(facts):
                 revision = revisions[fact["thread_key"]]
+                replaced_promises = []
+                if fact['fact_type']=='commitment':
+                    replaced_promises = [item.id for item in pending_candidates if item.fact_type=='commitment' and item.thread_revision_id and item.thread_revision.thread_id==revision.thread_id and same_commitment_origin(item.proposed_changes,fact)]
                 related_approved = [item for item in accepted if not item.thread_revision_id or item.thread_revision.thread_id == revision.thread_id]
                 approved_obligation = next((item for item in related_approved if item.fact_type == "commitment" and same_commitment_origin(item.proposed_changes, fact) and hasattr(item, "accepted_commitment")), None) if fact["fact_type"] == "commitment" else None
                 fulfillment_update = bool(approved_obligation and (fact.get("commitment_status") in ("fulfilled", "cancelled") or fact.get("commitment_id")) and approved_obligation.accepted_commitment.status not in ("fulfilled", "cancelled"))
@@ -431,6 +517,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                         "uncertainties": fact["uncertainties"],
                     },
                 )
+                FactCandidate.objects.filter(pk__in=replaced_promises).exclude(pk=candidate.pk).update(status='superseded')
                 revision = revisions[fact["thread_key"]]
                 if project and revision.thread.project_id != project.id:
                     revision.thread.project = project
@@ -566,3 +653,12 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             if isinstance(exc, ProviderUnavailable)
             else None,
         ) from None
+    except Exception as exc:
+        logger.exception('extraction_internal_error trace_id=%s',trace.id)
+        trace.status,trace.error_code = 'error','pipeline_internal_error'
+        trace.context_metadata['request_state'] = 'failed'
+        trace.context_metadata['internal_error_type'] = type(exc).__name__
+        trace.result_summary = 'Внутренняя ошибка обработки. Требуется повторный разбор; результат не подтверждён.'
+        trace.save(update_fields=['status','error_code','context_metadata','result_summary'])
+        RawMessage.objects.filter(pk=raw_id,processed=False).update(processing_state='failed')
+        raise ProviderUnavailable('pipeline_internal_error') from None

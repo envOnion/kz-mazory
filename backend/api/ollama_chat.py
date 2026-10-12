@@ -45,7 +45,7 @@ def native_request(payload, cfg, *, structured=True):
         bound = isinstance(input_data, dict) and "analysis_instructions" in input_data
         if bound and type(input_data.get("target_message_id")) is not int:
             raise ProviderUnavailable("provider_invalid_request")
-        request["format"] = resolution_schema(input_data) if bound and input_data.get("analysis_operation") == "commitment_resolution" else extraction_schema(input_data if bound else None)
+        request["format"] = payload.get('_ollama_format') or (resolution_schema(input_data) if bound and input_data.get("analysis_operation") == "commitment_resolution" else extraction_schema(input_data if bound else None))
     return request
 
 
