@@ -345,7 +345,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         from .dialogue_threads import prepare_themes, ready_facts, persist_themes, lock_source
         from .focused_extraction import recover
         recover(result, raw, trace, cfg)
-        if getattr(cfg, 'full_history_policy', None) == 'thread-context-v2':
+        if getattr(cfg, 'full_history_policy', None) in {'thread-context-v2', 'thread-routed-context-v1'}:
             from .full_history import validate_evidence
             validate_evidence(result, raw, trace)
         themes = prepare_themes(result, raw, trace)

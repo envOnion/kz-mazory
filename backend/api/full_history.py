@@ -331,7 +331,7 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
 
 def validate_evidence(result, raw, trace):
     """Summaries cannot authorize a quote outside the already read originals."""
-    coverage = trace.context_metadata.get('full_history', {}).get('ranges', {})
+    coverage = trace.context_metadata.get('full_history', {}).get('ranges', {}) or trace.context_metadata.get('evidence_ranges', {})
     if not coverage:
         return
     from .facts import FactSchema, normalize_fact_fields

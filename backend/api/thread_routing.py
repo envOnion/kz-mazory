@@ -265,6 +265,7 @@ def build_thread_context(raw, cfg, known_projects, maximum, state):
                 "target_source_metadata": source, "available_messages_count": len(rows) - 1, "included_messages_count": len(context),
                 "fully_included_messages_count": len(context), "partial_messages_count": 0, "omitted_messages_count": 0,
                 "history_complete_in_request": False, "omission_reason": "selected_thread", "request_state": "prepared",
+                "evidence_ranges": {str(item.id): len(item.content) for item in rows},
                 "routing_thread_id": thread.id, "routing_generation": state["routing_generation"], "routing_descriptor_version": thread.routing_descriptor_version}
     return context, metadata, request
 
