@@ -82,7 +82,7 @@ def dispatch_forever():
                     continue
             if OutboxEvent.objects.filter(pk=event.id, state='pending').update(state='enqueued'):
                 async_task('api.tasks.run_outbox', event.id)
-        report = {'messages': list(RawMessage.objects.filter(chat_id__startswith='laya-').values('id','chat_id','message_id','processed','processing_state')),
+        report = {'messages': list(RawMessage.objects.filter(chat_id__startswith='laya-').values('id','chat_id','message_id','content','processed','processing_state')),
                   'routing': list(ThreadRoutingAttempt.objects.values('raw_message_id','outcome','reason_code','scores','latency_ms','model_revision')),
                   'traces': list(MessageProcessingTrace.objects.filter(raw_message__chat_id__startswith='laya-').values('id','raw_message_id','status','error_code','ai_extracted_facts','context_metadata')),
                   'events': list(OutboxEvent.objects.values('id','event_type','state','error_code','payload'))}

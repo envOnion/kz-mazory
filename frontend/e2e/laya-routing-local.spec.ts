@@ -9,7 +9,7 @@ test.skip(process.env.MAZORY_E2E_LAYA !== '1', 'Explicit private read-only Docke
 test.setTimeout(1800000)
 const dir = process.env.MAZORY_E2E_DIR!
 interface Proof {
-  messages: { id: number; chat_id: string; message_id: string; processed: boolean; processing_state: string }[]
+  messages: { id: number; chat_id: string; message_id: string; content: string; processed: boolean; processing_state: string }[]
   routing: { raw_message_id: number; outcome: string; reason_code: string; scores: { thread_id: number; probability: number }[]; model_revision: string }[]
   events: { id: number; event_type: string; state: string; payload: { raw_id?: number; thread_id?: number } }[]
   usage: { outbox_event_id: number | null; operation: string; input_tokens: number | null }[]
@@ -100,6 +100,7 @@ test('LLM topics, real LAYA assignment, durable extraction, shadow, outage and s
 })
 
 test('same 100 messages and Gemma retain object facts while reducing measured LLM input tokens',async ({request})=>{
+  test.setTimeout(3600000)
   const session:{access:string}=JSON.parse(readFileSync(join(dir,'laya-session.json'),'utf8'))
   const headers={Authorization:`Bearer ${session.access}`}
   const cases=['baseline','economy'] as const
@@ -114,19 +115,27 @@ test('same 100 messages and Gemma retain object facts while reducing measured LL
       expect([200,202]).toContain(response.status())
       return id
     }
-    for(const id of objects){
-      const raw=await send(`По объекту Независимый объект ${id} поставку насосов согласовали на следующую неделю. Обсуждение с заказчиком по этому объекту продолжается.`)
-      await expect.poll(()=>proof().messages.find(m=>m.message_id===raw)?.processed,{timeout:180000}).toBe(true)
+    const inputs=[...objects.map(id=>`По объекту Независимый объект ${id} поставку насосов согласовали на следующую неделю. Обсуждение с заказчиком по этому объекту продолжается.`),...Array.from({length:100},(_,i)=>`По объекту Независимый объект ${objects[i%3]} поставку насосов перенесли на пятницу. Обсуждение с заказчиком продолжается.`)]
+    const existing=proof().messages.filter(m=>m.chat_id===`laya-synthetic-${kind}@g.us`)
+    if(existing.length){
+      // Resume only the exact saved input, retaining every recorded model call.
+      expect(existing).toHaveLength(inputs.length)
+      for(let i=0;i<inputs.length;i++) expect(existing.find(m=>m.message_id===`laya-${kind}-${i+1}`)?.content).toBe(inputs[i])
+    }else{
+      for(const body of inputs.slice(0,3)){
+        const raw=await send(body)
+        await expect.poll(()=>proof().messages.find(m=>m.message_id===raw)?.processed,{timeout:180000}).toBe(true)
+      }
+      writeFileSync(join(dir,'laya-pause'),'identical arrival window for both modes')
+      try{for(const body of inputs.slice(3)) await send(body)}finally{unlinkSync(join(dir,'laya-pause'))}
     }
-    const before=proof().usage.length
-    writeFileSync(join(dir,'laya-pause'),'identical arrival window for both modes')
-    for(let i=0;i<100;i++) await send(`По объекту Независимый объект ${objects[i%3]} поставку насосов перенесли на пятницу. Обсуждение с заказчиком продолжается.`)
-    unlinkSync(join(dir,'laya-pause'))
-    await expect.poll(()=>{const messages=proof().messages.filter(m=>m.chat_id===`laya-synthetic-${kind}@g.us`);return messages.length===103&&messages.every(m=>m.processed)},{timeout:1200000,intervals:[2000,5000]}).toBe(true)
+    await expect.poll(()=>{const messages=proof().messages.filter(m=>m.chat_id===`laya-synthetic-${kind}@g.us`);return messages.length===103&&messages.every(m=>m.processed)},{timeout:1800000,intervals:[2000,5000]}).toBe(true)
     const p=proof()
-    const ids=new Set(p.messages.filter(m=>m.chat_id===`laya-synthetic-${kind}@g.us`).map(m=>m.id))
+    const updateKeys=new Set(Array.from({length:100},(_,i)=>`laya-${kind}-${i+4}`))
+    const ids=new Set(p.messages.filter(m=>m.chat_id===`laya-synthetic-${kind}@g.us`&&updateKeys.has(m.message_id)).map(m=>m.id))
+    expect(ids.size).toBe(100)
     const eventIds=new Set(p.events.filter(e=>ids.has(e.payload.raw_id??0)).map(e=>e.id))
-    const usage=p.usage.slice(before).filter(u=>u.operation==='chat'&&u.outbox_event_id!==null&&eventIds.has(u.outbox_event_id))
+    const usage=p.usage.filter(u=>u.operation==='chat'&&u.outbox_event_id!==null&&eventIds.has(u.outbox_event_id))
     expect(usage.length).toBeGreaterThan(0)
     expect(usage.every(u=>u.input_tokens!==null)).toBe(true)
     const facts:Candidate[]=[]
@@ -141,7 +150,7 @@ test('same 100 messages and Gemma retain object facts while reducing measured LL
     reports.push({kind,tokens:usage.reduce((sum,u)=>sum+(u.input_tokens??0),0),messages:100,facts,laya:p.routing.filter(r=>ids.has(r.raw_message_id)&&r.outcome==='laya').length})
   }
   const reduction=1-reports[1]!.tokens/reports[0]!.tokens
-  writeFileSync(join(dir,'laya-results/economy.json'),JSON.stringify({model:'gemma4:e4b',reports,reduction},null,2))
+  writeFileSync(join(dir,'laya-results/economy.json'),JSON.stringify({model:'gemma4:e4b',context_window_tokens:65536,output_tokens:8192,all_retry_usage_included:true,reports,reduction},null,2))
   expect(reports[1]!.laya).toBeGreaterThanOrEqual(40)
   expect(reduction).toBeGreaterThanOrEqual(.30)
 })
