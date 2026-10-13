@@ -20,6 +20,7 @@ TOPICS = {
 }
 ASSIGNMENTS = {
     "Новый объект БЦ Восток": ("east", "project"),
+    "От компании Меридиан поступила оплата 117 млн тенге, объект не указан": ("meridian", "project"),
     "БЦ Восток: договор подписан на 25 млн тенге": ("east", "project"),
     "БЦ Север: подготовь смету": ("north", "request"),
     "Сделаешь завтра?": ("north", "request"),
@@ -61,7 +62,7 @@ def classify(value):
             None,
         )
         has_payment = any(role == "payment" for _, role in members)
-        ready = bool(promise and request) or key == "east" or has_payment
+        ready = bool(promise and request) or key in ("east", "meridian") or has_payment
         topic = TOPICS.get(key, "Тема требует уточнения")
         themes.append(
             {
@@ -109,14 +110,14 @@ def classify(value):
                     facts[-1].update(amount='15.00', payment_kind='invoice')
                 if '60 000 000' in row['content']:
                     facts[-1].update(amount='60000000.00', amount_precision='exact')
-        if ready and key == "east":
+        if ready and key in ("east", "meridian"):
             row = members[-1][0]
             facts.append(
                 {
                     "thread_key": key,
                     "evidence_message_id": row["raw_message_id"],
                     "fact_type": "project",
-                    "object_name": "БЦ Восток",
+                    "object_name": "Меридиан" if key == 'meridian' else "БЦ Восток",
                     "evidence": row["content"],
                     "confidence": 0.95,
                 }

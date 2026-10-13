@@ -87,6 +87,12 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   await expect.poll(() => proof().bounded_traces.some(trace => trace.status === 'success')).toBe(true)
   expect(proof().bounded_traces.length).toBeGreaterThan(1)
   expect(proof().bounded_traces.every(trace => trace.full_history_policy === null)).toBe(true)
+  await message(request, group, 'continuous-company-only', 'От компании Меридиан поступила оплата 117 млн тенге, объект не указан')
+  await expect.poll(async () => {
+    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=pending', { headers })).json()
+    return rows.results.find(row => row.proposed_changes.object_name === 'Меридиан')?.automatic_decision?.reason_code
+  }).toBe('company_not_object')
+  expect(Object.values(provider().deals || {}).some(row => row.TITLE === 'Меридиан')).toBe(false)
   await context.addCookies([{ name: session.cookie_name, value: session.refresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
   await page.goto('/')
   await page.getByRole('button', { name: 'Рабочий кабинет', exact: true }).click()

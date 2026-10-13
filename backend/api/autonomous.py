@@ -170,6 +170,14 @@ def _resolve_project(candidate, data):
 
 
 def _validate(candidate, data, primary, text):
+    label = data.get('object_name', '').strip()
+    if label:
+        quoted = re.escape(label)
+        company_only = (normalize_deal_name(data.get('company_name', '')) == normalize_deal_name(label)
+                        or re.search(r'(?:компани[яиюй]|ТОО)\s+[«"“]?\s*' + quoted + r'(?!\w)', text, re.I))
+        explicit_object = re.search(r'(?:объект\w*|проект\w*)\s+[«"“]?\s*' + quoted + r'(?!\w)', text, re.I)
+        if company_only and not explicit_object:
+            raise Deferred('company_not_object', 'Указана компания, но она не доказывает идентичность конкретного бизнес-объекта.')
     company = normalize_deal_name(data.get("company_name", ""))
     if company and not re.search(r"(?<!\w)" + re.escape(company) + r"(?!\w)", normalize_deal_name(text, max_length=None)):
         data["company_name"], data["party_role"] = "", "unknown"
