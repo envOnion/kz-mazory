@@ -26,6 +26,11 @@ def update():
                 WhatsAppConfig.objects.get_or_create(group_jid=control['group'], defaults={'team_id': source.team_id, 'name': 'Continuous E2E', 'thread_routing_enabled': control['action']=='routing', 'snapshot': {'timezone':'UTC+03:00'}})
                 cfg.autonomous_enabled = cfg.autonomous_crm_enabled = True
                 cfg.thread_routing_mode = 'laya' if control['action']=='routing' else 'llm'
+                # Previous full-history cases deliberately leave a 12k window.
+                # This scenario needs the seeded 131k provider window to test
+                # a 9k fixed prompt independently of that overflow fixture.
+                cfg.context_window_tokens = 131072
+                cfg.analysis_input_token_limit = 16384
                 cfg.thread_extract_idle_seconds = 120
                 cfg.thread_extract_max_wait_seconds = 120
                 cfg.save()
