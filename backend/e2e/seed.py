@@ -114,6 +114,8 @@ def seed():
     if os.getenv('MAZORY_E2E_LAYA') == '1':
         from .laya_file import seed as seed_laya
         seed_laya(user, team)
+        if os.getenv('MAZORY_E2E_MODEL') == 'qwen3.8-27b':
+            seed_analytics()
         return
     seed_analytics()
     from .temporal import seed as seed_temporal

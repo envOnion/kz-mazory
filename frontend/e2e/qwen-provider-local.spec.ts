@@ -80,8 +80,11 @@ test('real reasoning and tool token counts survive provider restart, and the bro
   const headers = { Authorization: `Bearer ${session.access}` }
   await context.addCookies([{ name: session.cookie_name, value: session.refresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
   await page.goto('/')
-  await page.getByRole('button', { name: 'Новый диалог', exact: true }).click()
-  const input = page.getByPlaceholder('Спросите Mazory...')
+  await page.getByTestId('nav-kpi-dashboard').waitFor()
+  const newDialogue = page.getByRole('button', { name: 'Новый диалог', exact: true })
+  if (await newDialogue.count()) await newDialogue.click()
+  const analyticalPrompt = page.locator('#analytical-prompt')
+  const input = await analyticalPrompt.count() ? analyticalPrompt : page.getByPlaceholder('Спросите Mazory...')
   await input.fill('Покажи график количества сделок CRM по текущим стадиям за всё доступное время.')
   await input.press('Enter')
   await expect.poll(() => page.evaluate((id: number) => typeof JSON.parse(localStorage.getItem(`mazory-conversation-${id}`) || 'null') === 'number', session.user_id)).toBe(true)
