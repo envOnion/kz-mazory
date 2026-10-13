@@ -20,10 +20,13 @@ TOPICS = {
 }
 ASSIGNMENTS = {
     "Новый объект БЦ Восток": ("east", "project"),
+    "БЦ Восток: договор подписан на 25 млн тенге": ("east", "project"),
     "БЦ Север: подготовь смету": ("north", "request"),
     "Сделаешь завтра?": ("north", "request"),
     "БЦ Север: да, подготовлю смету завтра": ("north", "promise"),
     "БЦ Север: оплата 50 000 000 ₸ поступила сегодня": ("north", "payment"),
+    "БЦ Север: цена предложения на 15% ниже первоначальной стоимости": ("north", "payment"),
+    "БЦ Север: оплата 60 000 000 ₸ поступила сегодня. По БЦ Южный выставлен счет примерно на 30 000 000 ₸, оплату ожидаем завтра.": ("north", "payment"),
     "БЦ Южный: оплата 20 000 000 ₸ поступила сегодня": ("south", "payment"),
     "БЦ Южный: проверь доставку": ("south", "request"),
     "БЦ Южный: проверю доставку в пятницу": ("south", "promise"),
@@ -102,8 +105,12 @@ def classify(value):
                         "confidence": 0.98,
                     }
                 )
+                if '15%' in row['content']:
+                    facts[-1].update(amount='15.00', payment_kind='invoice')
+                if '60 000 000' in row['content']:
+                    facts[-1].update(amount='60000000.00', amount_precision='exact')
         if ready and key == "east":
-            row = members[0][0]
+            row = members[-1][0]
             facts.append(
                 {
                     "thread_key": key,
@@ -114,6 +121,8 @@ def classify(value):
                     "confidence": 0.95,
                 }
             )
+            if 'договор подписан на 25 млн' in row['content']:
+                facts[-1].update(contract_amount='25000000.00', currency='KZT')
         elif ready and promise and request:
             if key == "south" and "30 000 000" in promise["content"]:
                 facts.append(
@@ -323,6 +332,11 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 return self.respond(json.loads(exc.read()), exc.code)
         if self.path == "/health":
             return self.respond({"status": "ok"})
+        if self.path == '/v1/systemone' and body.get('model') == 'e2e-whatsapp-v1':
+            answers = {name: {'probabilities': {'A': .99 if 'БЦ Север' in question['criteria']['A'] and 'БЦ Север' in body['state']['message'] else .01,
+                                                 'B': .01 if 'БЦ Север' in question['criteria']['A'] and 'БЦ Север' in body['state']['message'] else .99}}
+                       for name, question in body['questions'].items()}
+            return self.respond({'answers': answers, 'usage': {}, 'routing': {'model': 'e2e-whatsapp-v1', 'revision': 'e2e-model-v1', 'calibration_revision': 'e2e-calibration-v1'}})
         if self.path.endswith('/participants/v2'):
             return self.respond([
                 {'id': '10001@lid', 'pn': '79990000001@c.us'},
@@ -344,7 +358,8 @@ class ProviderHandler(BaseHTTPRequestHandler):
             if state.get("crm_error"):
                 return self.respond({"error": "CRM temporarily unavailable"}, 503)
             if self.path.endswith("crm.deal.get.json"):
-                return self.respond({"result": {"ID": body["id"], "TITLE": "БЦ Север" if str(body["id"]) == "101" else "БЦ Южный"}})
+                ident = str(body['id'])
+                return self.respond({"result": state.get('deals', {}).get(ident, {"ID": ident, "TITLE": "БЦ Север" if ident == "101" else "БЦ Южный"})})
             if self.path.endswith("crm.timeline.comment.list.json"):
                 return self.respond({"result": [row for row in state.get("comments", []) if str(row["ENTITY_ID"]) == str(body["filter"]["ENTITY_ID"])]})
             if self.path.endswith("crm.timeline.comment.add.json"):
@@ -353,9 +368,16 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 self.save_control(state)
                 return self.respond({"result": comment["ID"]})
             if self.path.endswith("tasks.task.list.json"):
-                return self.respond({"result": {"tasks": []}})
+                prefix = body.get('filter', {}).get('TITLE', '').rstrip('%')
+                return self.respond({"result": {"tasks": [task for task in state.get('tasks', {}).values() if task['title'].startswith(prefix)]}})
             if self.path.endswith("tasks.task.add.json"):
-                return self.respond({"result": {"task": {"id": "2000"}}})
+                ident = str(2000 + len(state.get('tasks', {})))
+                fields = body['fields']
+                state.setdefault('tasks', {})[ident] = {'id': ident, 'title': fields['TITLE'], 'responsibleId': str(fields['RESPONSIBLE_ID']), 'ufCrmTask': fields.get('UF_CRM_TASK', []), 'status': '2'}
+                self.save_control(state)
+                return self.respond({"result": {"task": {"id": ident}}})
+            if self.path.endswith('tasks.task.get.json'):
+                return self.respond({'result': {'task': state.get('tasks', {}).get(str(body['taskId']), {})}})
             if self.path.endswith("crm.company.list.json"):
                 rows = [
                     {"ID": "201", "TITLE": "ТОО Север Холдинг"},
@@ -389,7 +411,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 ]
                 filters = body.get("filter", {})
                 if "=ORIGINATOR_ID" in filters:
-                    rows = []
+                    rows = [row for row in state.get('deals', {}).values() if row.get('ORIGINATOR_ID') == filters['=ORIGINATOR_ID'] and row.get('ORIGIN_ID') == filters.get('=ORIGIN_ID')]
                 for name, value in filters.items():
                     if "TITLE" in name:
                         rows = [
@@ -406,8 +428,18 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 )
             if self.path.endswith("crm.deal.add.json"):
                 state.setdefault("writes", []).append(body["fields"])
+                ident = str(103 + len(state.get('deals', {})))
+                state.setdefault('deals', {})[ident] = {**body['fields'], 'ID': ident}
                 self.save_control(state)
-                return self.respond({"result": "103"})
+                return self.respond({"result": ident})
+            if self.path.endswith('crm.deal.update.json'):
+                if state.get('crm_discard_write'):
+                    return self.respond({'result': True})
+                ident = str(body['id'])
+                current = state.setdefault('deals', {}).setdefault(ident, {'ID': ident, 'TITLE': 'БЦ Север' if ident == '101' else 'БЦ Южный'})
+                current.update(body['fields'])
+                self.save_control(state)
+                return self.respond({'result': True})
             return self.respond({"result": True})
         if self.path.endswith("/messages/count_tokens"):
             state = json.loads(self.control.read_text())
@@ -444,6 +476,11 @@ class ProviderHandler(BaseHTTPRequestHandler):
                     stream.write(json.dumps(entry)+'\n')
             result = classify(value)
             state = json.loads(self.control.read_text())
+            if state.get('bounded_schema_error_once') and value['target_message_id'] == state.get('bounded_target_id'):
+                state['bounded_schema_error_once'] = False
+                state['bounded_failed_target_id'] = value['target_message_id']
+                self.save_control(state)
+                result['facts'][0]['confidence'] = 'invalid'
             marker = self.control.parent/f"thread-error-{value['target_message_id']}"
             if state.get('thread_schema_error_per_stage'):
                 suffix = 'later' if value.get('analysis_state', {}).get('previous_result') else 'first'

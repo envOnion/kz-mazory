@@ -34,6 +34,7 @@ if os.getenv('MAZORY_E2E_REAL_MODEL') == '1':
         Q_CLUSTER.update(timeout=AI_WORKER_TIMEOUT,retry=AI_TASK_LEASE+60)
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "backend", "nginx"]
 BITRIX_TEAM_ID = 1
+BITRIX_ASSIGNEE_MAP = {'1': {'боб': '7'}}
 WAHA_WEBHOOK_SECRET = "isolated-local-webhook-secret"
 WAHA_API_URL = "https://localhost"
 WAHA_API_KEY = "isolated-local-waha-key"
@@ -55,6 +56,14 @@ if os.getenv('MAZORY_E2E_LAYA') == '1':
     LAYA_MODEL = 'whatsapp-v1'
     LAYA_ROUTING_VALIDATED_POLICY = os.getenv('LAYA_ROUTING_VALIDATED_POLICY', '')
     BITRIX_READ_ONLY = True
+else:
+    LAYA_API_URL = 'https://localhost'
+    LAYA_API_KEY = 'isolated-laya-fixture'
+    LAYA_MODEL = 'e2e-whatsapp-v1'
+    LAYA_MODEL_REVISION = LAYA_VALIDATED_REVISION = 'e2e-model-v1'
+    LAYA_CALIBRATION_REVISION = LAYA_VALIDATED_CALIBRATION = 'e2e-calibration-v1'
+    LAYA_VALIDATED_MODEL = LAYA_MODEL
+    LAYA_ROUTING_VALIDATED_POLICY = 'laya-whatsapp-v1'
 
 # Retain the production URL validation (HTTPS, port 443). Only the
 # local test transport maps the validated loopback URL to an unprivileged port.

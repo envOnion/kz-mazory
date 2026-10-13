@@ -22,6 +22,8 @@ def dispatch_forever():
         async_task("e2e.temporal.benchmark"); marker.touch()
     while True:
         close_old_connections()
+        from .continuous import update
+        update()
         proof=settings.E2E_DIR/'temporal-semantic.json'
         if proof.exists():
             from api.models import AsyncOperation, TemporalEntityRevision
