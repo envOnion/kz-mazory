@@ -109,7 +109,7 @@ def dispatch_forever():
             from django_q.models import Task
             task=Task.objects.filter(pk=json.loads(canary.read_text())['id']).first()
             if task:
-                (settings.E2E_DIR/'qwen-canary-result.json').write_text(json.dumps({'success':task.success,'result':task.result}, default=str))
+                (settings.E2E_DIR/'qwen-canary-result.json').write_text(json.dumps({'task_id':task.id,'success':task.success,'result':task.result}, default=str))
         temporary = settings.E2E_DIR / 'laya-proof.tmp'
         temporary.write_text(json.dumps(report, default=str, ensure_ascii=False))
         temporary.replace(settings.E2E_DIR / 'laya-proof.json')

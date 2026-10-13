@@ -3,7 +3,7 @@ import re
 
 
 def statements(text):
-    return re.split(r'(?<=[.!?])\s+|\n+|,\s+(?:а|но|и)\s+', text)
+    return re.split(r'(?<=[.!?])\s+|\n+|,\s+(?:а|но|и)\s+|,\s+(?=(?:сегодня|завтра|послезавтра)\b)', text, flags=re.I)
 
 
 def delivery_action(text, action):

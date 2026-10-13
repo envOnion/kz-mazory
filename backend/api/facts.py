@@ -190,10 +190,12 @@ def same_commitment_origin(left, right):
         return {(item.get("raw_message_id"), " ".join(item.get("quote", "").split())) for item in data.get("evidence_messages", []) if item.get("role") == "promise"}
     a, b = promises(left), promises(right)
     same_actor = bool(left.get('responsible_name')) and normalize_deal_name(left['responsible_name']) == normalize_deal_name(right.get('responsible_name',''))
+    def artifact(value):
+        return artifact_subject(value) or bool(re.fullmatch(r'кп|коммерческ\w*\s+предлож\w*', value.casefold().strip()))
     same_object = (
         not left.get('object_name') or not right.get('object_name')
         or normalize_deal_name(left['object_name']).replace('-', ' ') == normalize_deal_name(right['object_name']).replace('-', ' ')
-        or (artifact_subject(left['object_name']) and artifact_subject(right['object_name']))
+        or artifact(left['object_name']) or artifact(right['object_name'])
     )
     if not (same_actor and same_object and _same_promise_action(left, right)):
         return False

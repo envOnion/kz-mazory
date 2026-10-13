@@ -463,6 +463,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             )
             previous = FactCandidate.objects.filter(
                 Q(trace__raw_message__in=origin) | Q(thread_revision__thread_id__in=[revision.thread_id for revision in revisions.values()])
+                | Q(team=team, fact_type='commitment', proposed_changes__promise_message_id__in=[fact['promise_message_id'] for fact in facts if fact['fact_type']=='commitment'])
             ).exclude(trace=trace)
             if replacing:previous=FactCandidate.objects.filter(trace__raw_message_id__in=batch_ids or [raw.id]).exclude(trace=trace)
             accepted = list(previous.filter(status="approved"))
@@ -483,14 +484,14 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 revision = revisions[fact["thread_key"]]
                 replaced_promises = []
                 if fact['fact_type']=='commitment':
-                    replaced_promises = [item.id for item in pending_candidates if item.fact_type=='commitment' and item.thread_revision_id and item.thread_revision.thread_id==revision.thread_id and same_commitment_origin(item.proposed_changes,fact)]
-                related_approved = [item for item in accepted if not item.thread_revision_id or item.thread_revision.thread_id == revision.thread_id]
+                    replaced_promises = [item.id for item in pending_candidates if item.fact_type=='commitment' and same_commitment_origin(item.proposed_changes,fact)]
+                related_approved = [item for item in accepted if fact['fact_type']=='commitment' or not item.thread_revision_id or item.thread_revision.thread_id == revision.thread_id]
                 approved_obligation = next((item for item in related_approved if item.fact_type == "commitment" and same_commitment_origin(item.proposed_changes, fact) and hasattr(item, "accepted_commitment")), None) if fact["fact_type"] == "commitment" else None
                 fulfillment_update = bool(approved_obligation and (fact.get("commitment_status") in ("fulfilled", "cancelled") or fact.get("commitment_id")) and approved_obligation.accepted_commitment.status not in ("fulfilled", "cancelled"))
                 if approved_obligation and fulfillment_update:
                     fact["commitment_id"] = approved_obligation.accepted_commitment.id
                     fact["base_commitment_version"] = approved_obligation.accepted_commitment.version
-                if any(fact_identity(item.proposed_changes) == fact_identity(fact) for item in related_approved) and not fulfillment_update:
+                if fact['fact_type'] != 'commitment' and any(fact_identity(item.proposed_changes) == fact_identity(fact) for item in related_approved) and not fulfillment_update:
                     duplicates.append(index)
                     continue
                 if approved_obligation and not fulfillment_update:

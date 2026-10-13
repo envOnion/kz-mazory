@@ -63,9 +63,15 @@ test('two actions in one original stay distinct, repetition is deduplicated and 
 })
 
 test('real reasoning and tool token counts survive provider restart, and the browser receives a grounded CRM chart', async ({ request, page, context }) => {
+  let previousTask: string | undefined
+  try { previousTask = JSON.parse(readFileSync(join(dir, 'qwen-canary-task.json'), 'utf8')).id } catch { /* No earlier probe. */ }
   control({ verify_qwen: true })
   await expect.poll(() => {
-    try { return JSON.parse(readFileSync(join(dir, 'qwen-canary-result.json'), 'utf8')).success } catch { return false }
+    try {
+      const task: { id: string } = JSON.parse(readFileSync(join(dir, 'qwen-canary-task.json'), 'utf8'))
+      const result: { task_id: string; success: boolean } = JSON.parse(readFileSync(join(dir, 'qwen-canary-result.json'), 'utf8'))
+      return task.id !== previousTask && result.task_id === task.id && result.success
+    } catch { return false }
   }, { timeout: 300000 }).toBe(true)
   const canary = JSON.parse(readFileSync(join(dir, 'qwen-canary-result.json'), 'utf8'))
   expect(canary.result).toMatchObject({ model: 'qwen3.8-27b', native_count_matches: true, native_tool_count_matches: true, answer: 391 })
