@@ -140,7 +140,7 @@ def enqueue_effects(candidate, fact_event, cfg):
     if candidate.project_id:
         for party in candidate.project.parties.filter(decision=fact_event.decision).select_related("company"):
             company = party.company
-            if company.team_id == candidate.team_id and not company.bitrix_company_id:
+            if party.role != "unknown" and company.team_id == candidate.team_id and not company.bitrix_company_id:
                 queue("company", company, 1, {"TITLE": company.name})
 
 

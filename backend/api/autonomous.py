@@ -437,13 +437,19 @@ def decide(candidate_id, *, preview=False):
         candidate = FactCandidate.objects.select_for_update(of=("self",)).select_related("project", "team", "trace__raw_message__config", "thread_revision__thread__project").get(pk=candidate_id)
         if candidate.status != "pending":
             return None
-        fingerprint = hashlib.sha256(json.dumps([candidate.proposed_changes, candidate.project.version if candidate.project_id else None, candidate.crm_match_revision, candidate.crm_match_state, candidate.trace.model_version, cfg.chat_model_name, list(candidate.evidence.values_list("raw_message_id", "quote"))], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        fingerprint_input = [candidate.proposed_changes, candidate.project.version if candidate.project_id else None, candidate.crm_match_revision, candidate.crm_match_state, candidate.trace.model_version, cfg.chat_model_name, list(candidate.evidence.values_list("raw_message_id", "quote"))]
+        review_required = candidate.trace.context_metadata.get('analysis_limits', {}).get('review_before_delivery', False)
+        if review_required:
+            fingerprint_input.append('review_before_delivery')
+        fingerprint = hashlib.sha256(json.dumps(fingerprint_input, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         if not preview:
             existing = candidate.decisions.filter(policy_version=cfg.autonomous_policy_version, input_fingerprint=fingerprint).first()
             if existing:
                 return existing
         outcome, code, explanation, mode, data = "accepted", "source_validated", "Проверены цитаты WhatsApp, связь объекта, тип события и повторность.", "apply", {}
         try:
+            if review_required:
+                raise Deferred('maintenance_review_required', 'Исторический результат ожидает сверки с источником перед автоматической записью.')
             if candidate.trace.model_version != cfg.chat_model_name:
                 raise Deferred("extraction_model_changed", "Кандидат создан прежней моделью; перед автоматической записью нужен повторный разбор или проверка человеком.")
             raw, primary, refs, text = _evidence(candidate)
