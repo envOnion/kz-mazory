@@ -56,6 +56,21 @@ def update():
                 BitrixSettings.objects.update(last_hourly_sync_at=None)
                 enqueue_hourly_bitrix_sync_task()
                 enqueue_hourly_bitrix_sync_task()
+            if control['action'] == 'coalesce':
+                from api.autonomous import enqueue_periodic_reconcile
+                from django.db import transaction
+                from datetime import timedelta
+                with transaction.atomic():
+                    source=WhatsAppConfig.objects.first()
+                    benchmark=WhatsAppConfig.objects.create(team_id=source.team_id,group_jid='continuous-checkpoint-benchmark@g.us',name='Checkpoint benchmark',snapshot={'timezone':'UTC+03:00'})
+                    RawMessage.objects.bulk_create([RawMessage(config=benchmark,team_id=source.team_id,source='waha',session_name='default',chat_id=benchmark.group_jid,message_id=f'continuous-benchmark-{i}',content=f'Обсуждение помещения {i}. '+ 'Записали размеры стен и помещения. '*30,timestamp=timezone.now()-timedelta(days=30,seconds=i),sent_at_known=True,processed=True,processing_state='no_facts') for i in range(735)])
+                    ident=enqueue_periodic_reconcile()
+                    OutboxEvent.objects.filter(pk=ident).update(next_attempt_at=timezone.now()+timedelta(minutes=30))
+                    duplicate=enqueue_periodic_reconcile()
+                (settings.E2E_DIR/'continuous-periodic.json').write_text(json.dumps({'id':ident,'duplicate_id':duplicate}))
+            if control['action'] == 'release_coalesce':
+                marker=json.loads((settings.E2E_DIR/'continuous-periodic.json').read_text())
+                OutboxEvent.objects.filter(pk=marker['id']).update(next_attempt_at=timezone.now())
             if control['action'] == 'assignee':
                 from api.models import UserProfile
                 UserProfile.objects.filter(phone='79990000002').update(bitrix_user_id=None)
@@ -108,6 +123,8 @@ def update():
     from api.models import CrmCatalogSync, BitrixSettings
     proof['catalog'] = list(CrmCatalogSync.objects.values('generation','state'))
     proof['hourly_at'] = BitrixSettings.objects.first().last_hourly_sync_at
+    periodic=settings.E2E_DIR/'continuous-periodic.json'
+    proof['periodic']=json.loads(periodic.read_text()) if periodic.exists() else None
     from api.models import MessageProcessingTrace
     proof['bounded_traces'] = [{'id':t.id,'status':t.status,'error_code':t.error_code,
                                'full_history_policy':t.context_metadata.get('full_history_policy','missing')}
