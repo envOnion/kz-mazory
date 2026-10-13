@@ -36,11 +36,8 @@ class Command(BaseCommand):
             dispatch_outbox()
             if time.monotonic() - planned >= 60:
                 enqueue_hourly_bitrix_sync_task()
-                from api.models import AISettings, OutboxEvent
-                if AISettings.get_active().autonomous_enabled:
-                    from django.utils import timezone
-                    minute = timezone.now().strftime("%Y%m%d%H%M")
-                    OutboxEvent.objects.get_or_create(deduplication_key=f"autonomous-reconcile:{minute}", defaults={"event_type": "autonomous_reconcile", "payload": {}})
+                from api.autonomous import enqueue_periodic_reconcile
+                enqueue_periodic_reconcile()
                 monitor_kpi_risks_and_anomalies_task()
                 planned = time.monotonic()
             if options["once"]:

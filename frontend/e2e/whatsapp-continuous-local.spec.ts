@@ -14,6 +14,7 @@ interface Proof {
   routing: { raw_message_id: number; outcome: string; selected_thread_id: number | null }[]
   catalog: { generation: number; state: string }[]
   hourly_at: string | null
+  periodic: { id: number | null; duplicate_id: number | null } | null
   bounded_traces: { id: number; status: string; error_code: string; full_history_policy: string | null }[]
 }
 interface Provider { deals?: Record<string, Record<string, unknown>>; writes?: Record<string, unknown>[]; tasks?: Record<string, { id: string; title: string; responsibleId: string }>; [key: string]: unknown }
@@ -38,6 +39,13 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   await control({ action: 'start', group })
   const session: { access: string; refresh: string; cookie_name: string } = JSON.parse(readFileSync(join(dir, 'continuous-session.json'), 'utf8'))
   const headers = { Authorization: `Bearer ${session.access}` }
+  await control({ action: 'coalesce' })
+  const periodicId = proof().periodic!.id
+  expect(periodicId).not.toBeNull()
+  expect(proof().periodic!.duplicate_id).toBeNull()
+  expect(proof().events.filter(row => row.event_type === 'autonomous_reconcile' && ['pending', 'enqueued', 'processing'].includes(row.state))).toHaveLength(1)
+  await control({ action: 'release_coalesce' })
+  await expect.poll(() => proof().events.find(row => row.id === periodicId)?.state).toBe('done')
   expect((await request.post('/api/directory/crm-sync/', { headers, data: { team_id: 1 } })).ok()).toBe(true)
   await expect.poll(() => proof().catalog[0]?.state).toBe('succeeded')
   await message(request, group, 'continuous-east', 'Новый объект БЦ Восток')

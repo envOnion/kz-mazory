@@ -534,6 +534,25 @@ def refresh_checkpoint(raw):
     SourceCheckpoint.objects.update_or_create(team_id=raw.config.team_id if raw.config_id else raw.team_id, source_scope=source_key(raw), defaults={"complete_through": complete, "gaps": gaps, "counts": counts})
 
 
+@transaction.atomic
+def enqueue_periodic_reconcile():
+    """Coalesce periodic repair while a prior pass is queued or running."""
+    cfg = AISettings.get_active()
+    if not cfg.pk:
+        return None
+    cfg = AISettings.objects.select_for_update().get(pk=cfg.pk)
+    if not cfg.autonomous_enabled or OutboxEvent.objects.filter(
+        event_type='autonomous_reconcile', state__in=['pending', 'enqueued', 'processing']
+    ).exists():
+        return None
+    minute = timezone.now().strftime('%Y%m%d%H%M')
+    event, created = OutboxEvent.objects.get_or_create(
+        deduplication_key=f'autonomous-reconcile:{minute}',
+        defaults={'event_type':'autonomous_reconcile', 'payload':{}}
+    )
+    return event.id if created else None
+
+
 def reconcile(limit=100):
     """Bounded periodic repair. Identical inputs never re-run model calls."""
     cfg = AISettings.get_active()
