@@ -61,6 +61,9 @@ def update():
                 from django.db import transaction
                 from datetime import timedelta
                 with transaction.atomic():
+                    source=WhatsAppConfig.objects.first()
+                    benchmark=WhatsAppConfig.objects.create(team_id=source.team_id,group_jid='continuous-checkpoint-benchmark@g.us',name='Checkpoint benchmark',snapshot={'timezone':'UTC+03:00'})
+                    RawMessage.objects.bulk_create([RawMessage(config=benchmark,team_id=source.team_id,source='waha',session_name='default',chat_id=benchmark.group_jid,message_id=f'continuous-benchmark-{i}',content=f'Обсуждение помещения {i}. '+ 'Записали размеры стен и помещения. '*30,timestamp=timezone.now()-timedelta(days=30,seconds=i),sent_at_known=True,processed=True,processing_state='no_facts') for i in range(735)])
                     ident=enqueue_periodic_reconcile()
                     OutboxEvent.objects.filter(pk=ident).update(next_attempt_at=timezone.now()+timedelta(minutes=30))
                     duplicate=enqueue_periodic_reconcile()

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { createHmac, randomUUID } from 'node:crypto'
 import type { Candidate, Page as ApiPage } from '../src/types/platform'
 import type { DialogueThread } from '../src/types/factReview'
+import type { AutonomousOverview } from '../src/types/autonomous'
 
 const dir = process.env.MAZORY_E2E_DIR!
 test.skip(process.env.MAZORY_E2E_REAL_MODEL === '1', 'Portable isolated external provider profile required')
@@ -46,6 +47,10 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   expect(proof().events.filter(row => row.event_type === 'autonomous_reconcile' && ['pending', 'enqueued', 'processing'].includes(row.state))).toHaveLength(1)
   await control({ action: 'release_coalesce' })
   await expect.poll(() => proof().events.find(row => row.id === periodicId)?.state).toBe('done')
+  const overviewResponse = await request.get('/api/autonomous/overview/', { headers })
+  expect(overviewResponse.ok()).toBe(true)
+  const overview: AutonomousOverview = await overviewResponse.json()
+  expect(overview.coverage.some(scope => scope.counts.no_facts === 735 && scope.gaps.length === 0)).toBe(true)
   expect((await request.post('/api/directory/crm-sync/', { headers, data: { team_id: 1 } })).ok()).toBe(true)
   await expect.poll(() => proof().catalog[0]?.state).toBe('succeeded')
   await message(request, group, 'continuous-east', 'Новый объект БЦ Восток')

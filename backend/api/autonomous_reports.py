@@ -32,7 +32,7 @@ def refresh_reports():
         return
     for team in Team.objects.filter(is_active=True):
         projects = Project.objects.filter(team=team, archived=False)
-        config_ids = list(RawMessage.objects.filter(config__team=team).values_list("config_id", flat=True).distinct())
+        config_ids = list(RawMessage.objects.filter(config__team=team).order_by().values_list("config_id", flat=True).distinct())
         for config_id in config_ids:
             raw = RawMessage.objects.filter(config_id=config_id).select_related("config__team").order_by("-id").first()
             if raw:
