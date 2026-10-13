@@ -4,6 +4,7 @@ Django settings for mazory_backend project with Unfold Admin Theme.
 
 from pathlib import Path
 import os
+import json
 import sys
 from datetime import timedelta
 from django.templatetags.static import static
@@ -533,6 +534,7 @@ if TESTING and os.getenv("TEST_CACHE", "memory") == "memory":
 
 WAHA_WEBHOOK_SECRET = os.getenv("WAHA_WEBHOOK_SECRET", "")
 BITRIX_TEAM_ID = int(os.getenv("BITRIX_TEAM_ID", "0"))
+BITRIX_ASSIGNEE_MAP = json.loads(os.getenv("BITRIX_ASSIGNEE_MAP", "") or "{}")
 
 MEDIA_PROVIDER_KEY = os.getenv("MEDIA_PROVIDER_KEY", "")
 if TESTING:

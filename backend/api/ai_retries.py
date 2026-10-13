@@ -153,6 +153,9 @@ def handle_failure(event, exc):
                         trace.context_metadata['analysis_chunk_input_limit'] = max(512,
                             (previous.context_metadata.get('analysis_chunk_input_limit') or previous.context_metadata['input_tokens_preflight']) // 2)
                 trace.context_metadata.update(analysis_policy="history-packets-v1", analysis_limits=limits, repair_reason=code)
+                # None deliberately selects a bounded packet. reserve_attempt
+                # defaults to full history, so absence must not widen a retry.
+                trace.context_metadata['full_history_policy'] = previous.context_metadata.get('full_history_policy')
                 if code in {'target_classification_invalid', 'fact_thread_missing'}:
                     result = previous.context_metadata.get('provider_result') or {}
                     classifications = result.get('target_classifications', {})

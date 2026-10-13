@@ -319,6 +319,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             )
             if packet:
                 metadata.update(analysis_policy="history-packets-v1", analysis_limits=limits,
+                                full_history_policy=cfg.full_history_policy,
                                 retry=trace.context_metadata.get("retry", {}), repair_reason=cfg.analysis_repair_reason,
                                 output_retry_generation=trace.context_metadata.get('output_retry_generation', 0))
             metadata.setdefault("snapshot_max_id", trace.context_metadata["snapshot_max_id"])
@@ -557,7 +558,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                     enqueue_crm_match(candidate.id)
                 from .autonomous import enqueue_decision
                 enqueue_decision(candidate.id)
-                if created and not cfg.autonomous_enabled:
+                if created and not cfg.autonomous_enabled and not trace.context_metadata.get("analysis_limits", {}).get("maintenance_quiet"):
                     from .notifications import notify_on_new_candidate
 
                     notify_on_new_candidate(candidate)

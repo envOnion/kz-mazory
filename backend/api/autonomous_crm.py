@@ -3,9 +3,28 @@
 from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
+from decimal import Decimal, InvalidOperation
 
 from .models import AISettings, BitrixSettings, Commitment, Company, CrmDelivery, ExternalObjectLink, OutboxEvent, Project
 from .providers import ProviderUnavailable
+
+
+def verify_deal(external, patch):
+    from .bitrix_service import BitrixService
+    current = BitrixService.call("crm.deal.get", {"id": external}).get("result")
+    if not isinstance(current, dict) or str(current.get("ID")) != external:
+        raise ProviderUnavailable("crm_readback_failed")
+    for field, expected in patch.items():
+        actual = current.get(field)
+        if field == "OPPORTUNITY":
+            try:
+                matches = Decimal(str(actual)) == Decimal(str(expected))
+            except InvalidOperation:
+                matches = False
+        else:
+            matches = str(actual) == str(expected)
+        if not matches:
+            raise ProviderUnavailable("crm_readback_mismatch")
 
 
 def enqueue_project(project, fact_event, cfg=None):
@@ -88,6 +107,7 @@ def deliver(payload):
             external = str(BitrixService.call("crm.deal.add", {"fields": fields})["result"])
         if not external or not external.isdigit():
             raise ProviderUnavailable("crm_invalid_response")
+        verify_deal(external, delivery.patch)
         link.external_id = external
         link.save(update_fields=["external_id"])
         Project.objects.filter(pk=project.id).update(bitrix_id=external, last_bitrix_synced_at=timezone.now(), needs_bitrix_sync=False)
@@ -229,9 +249,14 @@ def deliver_effect(payload):
                 fields["DESCRIPTION"] += f"\nСрок по переписке: {task.deadline.isoformat()} (дата, время не указано)."
             if not external:
                 profile = task.participant.user_profile if task.participant_id else None
-                if not profile or not profile.bitrix_user_id:
+                assigned = profile.bitrix_user_id if profile else None
+                if not assigned:
+                    # Explicit, team-scoped operator mappings do not create
+                    # phone accounts or grant access to WhatsApp participants.
+                    assigned = settings.BITRIX_ASSIGNEE_MAP.get(str(task.team_id), {}).get(task.responsible_name.strip().casefold())
+                if not assigned:
                     raise ProviderUnavailable("blocked_missing_external_assignee")
-                fields["RESPONSIBLE_ID"] = int(_result_id(profile.bitrix_user_id))
+                fields["RESPONSIBLE_ID"] = int(_result_id(assigned))
                 external = _result_id(BitrixService.call("tasks.task.add", {"fields": fields}).get("result", {}).get("task", {}).get("id"))
             else:
                 BitrixService.call("tasks.task.update", {"taskId": int(external), "fields": fields})
@@ -242,6 +267,13 @@ def deliver_effect(payload):
                     # Bitrix has no cancelled status: mark cancellation in the
                     # description and defer; never falsely complete the task.
                     BitrixService.call("tasks.task.defer", {"taskId": int(external)})
+            current = BitrixService.call("tasks.task.get", {"taskId": int(external), "select": ["ID", "TITLE", "RESPONSIBLE_ID", "UF_CRM_TASK", "STATUS"]}).get("result", {}).get("task", {})
+            if str(current.get("id")) != external or current.get("title") != title:
+                raise ProviderUnavailable("crm_readback_mismatch")
+            if "RESPONSIBLE_ID" in fields and str(current.get("responsibleId")) != str(fields["RESPONSIBLE_ID"]):
+                raise ProviderUnavailable("crm_readback_mismatch")
+            if "UF_CRM_TASK" in fields and current.get("ufCrmTask") != fields["UF_CRM_TASK"]:
+                raise ProviderUnavailable("crm_readback_mismatch")
             Commitment.objects.filter(pk=task.pk).update(bitrix_task_id=external)
         else:
             raise ProviderUnavailable("crm_command_invalid")

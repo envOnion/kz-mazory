@@ -477,6 +477,9 @@ def run_outbox(pk):
             next_attempt_at=timezone.now()
             + timedelta(seconds=30 * 2**event.attempt_count + random.randint(0, 15)),
         )
+        if event.event_type == "autonomous_crm" and code in ("crm_readback_failed", "crm_readback_mismatch"):
+            from .models import CrmDelivery
+            CrmDelivery.objects.filter(outbox_event_id=pk).update(state="failed" if state == "failed" else "pending", error_code=code)
         if event.event_type == "notification":
             NotificationDelivery.objects.filter(pk=event.payload["delivery_id"]).update(
                 state="failed", error_code=code
@@ -754,6 +757,11 @@ def extract_message(payload):
         raw = RawMessage.objects.get(pk=payload['raw_id'])
         from .ai_service import usage_event_id
         trace = reserve_attempt(raw, f'outbox:{usage_event_id.get()}')
+        if payload.get('routing_bypass') and not manual and trace.context_metadata.get('request_state') == 'not_sent':
+            # Topic bootstrap uses a bounded window of complete originals.
+            # An explicit full-history run retains its own chosen policy.
+            trace.context_metadata['full_history_policy'] = None
+            trace.save(update_fields=['context_metadata'])
         payload = {**payload, 'trace_id': trace.id}
     if trace.context_metadata.get('full_history_policy') == 'thread-context-v2':
         from .full_history import extract
@@ -1090,10 +1098,15 @@ def enqueue_hourly_bitrix_sync_task():
 
     from .models import BitrixSettings, CrmCatalogSync, Team
     from .crm_catalog import enqueue_catalog
-    cfg = BitrixSettings.get_active()
+    with transaction.atomic():
+        cfg = BitrixSettings.objects.select_for_update().filter(is_active=True, hourly_sync_enabled=True).first()
+        if not cfg or (cfg.last_hourly_sync_at and cfg.last_hourly_sync_at > timezone.now() - timedelta(hours=1)):
+            return
+        cfg.last_hourly_sync_at = timezone.now()
+        cfg.save(update_fields=["last_hourly_sync_at"])
     if cfg.is_active and cfg.auto_import_deals and cfg.hourly_sync_enabled and Team.objects.filter(pk=settings.BITRIX_TEAM_ID, is_active=True).exists():
         state = CrmCatalogSync.objects.filter(team_id=settings.BITRIX_TEAM_ID).first()
-        if not state or (state.state == "succeeded" and state.last_success_at and state.last_success_at <= timezone.now() - timedelta(hours=1)):
+        if not state or state.state in ("failed", "idle") or (state.state == "succeeded" and state.last_success_at and state.last_success_at <= timezone.now() - timedelta(hours=1)):
             enqueue_catalog(settings.BITRIX_TEAM_ID, refresh=True)
     for p in Project.objects.filter(
         Q(is_verified=True) | Q(identity_confirmed=True), needs_bitrix_sync=True, team__isnull=False

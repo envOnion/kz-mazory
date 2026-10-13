@@ -50,13 +50,19 @@ def enqueue_decision(candidate_id, trigger="extracted"):
     )
 
 
-def _money_matches(value, text):
+def _money_matches(value, text, *, monetary_unit=False):
     for match in MONEY.finditer(text):
         number = match["number"].replace(" ", "").replace("\u00a0", "")
         if number.count(".") >= 2:
             number = number.replace(".", "")
         amount = Decimal(number.replace(",", "."))
         scale = (match["scale"] or "").casefold()
+        suffix = text[match.end():].lstrip('*_` \t\n')
+        if suffix.startswith('%'):
+            continue
+        prefix = text[max(0, match.start()-5):match.start()].rstrip('*_` \t')
+        if monetary_unit and not scale and not prefix.endswith(('$', '€', '₽', '₸')) and not re.match(r"(?:тенге\b|тг\b|₸|KZT\b|USD\b|EUR\b|RUB\b|доллар|евро\b|рубл|\$|€|₽)", suffix, re.I):
+            continue
         multiplier = 1_000_000_000 if scale.startswith(("млрд", "миллиард")) else 1_000_000 if scale.startswith(("млн", "миллион")) else 1000 if scale.startswith("тыс") else 1
         if amount * multiplier == abs(value):
             return True
@@ -208,13 +214,15 @@ def _validate(candidate, data, primary, text):
             if not re.search(words[data["stage"]], text, re.I):
                 raise Deferred("unsupported_stage", "Стадия не имеет основания в цитатах.")
     elif candidate.fact_type == "payment":
+        amount_statements = [part for part in statements(text) if data.get("amount") and _money_matches(data["amount"], part, monetary_unit=True)]
+        amount_text = "\n".join(amount_statements) or text
         currencies = {code for code, pattern in {"KZT": r"тенге|\bтг\b|₸|\bKZT\b", "USD": r"доллар|\bUSD\b|\$", "EUR": r"евро|\bEUR\b|€", "RUB": r"рубл|\bRUB\b|₽"}.items() if re.search(pattern, data["evidence"], re.I)}
         chosen = data.get("currency", candidate.project.currency if candidate.project_id else "KZT")
         if len(currencies) == 1 and chosen not in currencies:
             raise Deferred("currency_conflict", "Валюта извлеченного значения противоречит источнику.")
-        if data.get("amount") and not _money_matches(data["amount"], text):
+        if data.get("amount") and not _money_matches(data["amount"], text, monetary_unit=True):
             raise Deferred("unknown_amount", "Сумма финансового показателя не подтверждена цитатой.")
-        if APPROXIMATE.search(text) or primary.raw_payload.get("artifact_id"):
+        if APPROXIMATE.search(amount_text) or primary.raw_payload.get("artifact_id"):
             data["amount_precision"] = "approximate"
         if data["payment_kind"] in ("cumulative", "balance", "debt", "invoice", "transfer"):
             return "observation"
@@ -233,10 +241,14 @@ def _validate(candidate, data, primary, text):
             if APPROXIMATE.search(text):
                 data["amount_precision"] = "approximate"
             return "schedule"
-        if re.search(r"всего\s+(?:оплачено|поступило)|итого\s+оплачено|накопительн", text, re.I):
+        if re.search(r"всего\s+(?:оплачено|поступило)|итого\s+оплачено|накопительн", amount_text, re.I):
             data["payment_kind"] = "cumulative"
             return "observation"
-        if re.search(r"(?:получ\w*|выстав\w*)\s+(?:сч[её]т|кп|коммерческ\w*\s+предложени\w*|смету)|игнорируй\s+правила|создай\s+(?:фиктивн|плат[её]ж)", text, re.I):
+        receipt_statements = [statement for statement in amount_statements
+            if ACTUAL.search(statement) and not FUTURE.search(statement)
+            and not statement.rstrip().endswith('?')]
+        receipt_text = "\n".join(receipt_statements)
+        if re.search(r"игнорируй\s+правила|создай\s+(?:фиктивн|плат[её]ж)", text, re.I) or (not receipt_statements and re.search(r"(?:получ\w*|выстав\w*)\s+(?:сч[её]т|кп|коммерческ\w*\s+предложени\w*|смету)", text, re.I)):
             raise Deferred("not_actual_payment", "Счет или инструкция системе не доказывают движение.", True)
         if data["payment_kind"] == "reversal":
             original = FinancialRecord.objects.filter(pk=data.get("reverses_id"), project_id=candidate.project_id, is_verified=True).select_related("candidate__trace__raw_message").first()
@@ -247,22 +259,18 @@ def _validate(candidate, data, primary, text):
                 raise Deferred("reversal_unproven", "Исправление не связано доказательствами с исходным движением.")
             data["direction"], data["amount_precision"], data["currency"] = original.direction, original.amount_precision, original.currency
             return "apply"
-        if data["direction"] == "income" and re.search(r"(?:оплатили|перечислили|перевели|оплатил)\s+(?:поставщик|подрядчик)", text, re.I):
+        if data["direction"] == "income" and re.search(r"(?:оплатили|перечислили|перевели|оплатил)\s+(?:поставщик|подрядчик)", receipt_text, re.I):
             raise Deferred("direction_conflict", "Перечисление поставщику не является поступлением от клиента.")
         # Full original evidence may also discuss a different future payment.
         # Require a completed monetary assertion for this amount in one sentence,
         # rather than rejecting a receipt because another sentence has a plan.
-        receipt_statements = [statement for statement in statements(text)
-            if ACTUAL.search(statement) and not FUTURE.search(statement)
-            and not statement.rstrip().endswith('?')
-            and ('amount' not in data or _money_matches(data['amount'], statement))]
         if not receipt_statements:
             raise Deferred("plan_not_actual", "Нет сообщения о фактически выполненном движении.", True)
-        if re.search(r"на\s+сч[её]т[еу]|остаток|задолжен|план\s+сбор", text, re.I) and not re.search(r"поступил|зачислен|перечислил", text, re.I):
+        if re.search(r"на\s+сч[её]т[еу]|остаток|задолжен|план\s+сбор", receipt_text, re.I) and not re.search(r"поступил|зачислен|перечислил", receipt_text, re.I):
             raise Deferred("balance_not_payment", "Остаток/долг/план не является новым платежом.", True)
         if "amount" not in data or not _money_matches(data["amount"], text):
             raise Deferred("unknown_amount", "Сумма движения не установлена по источнику.")
-        if APPROXIMATE.search(text) or primary.raw_payload.get("artifact_id"):
+        if APPROXIMATE.search(receipt_text) or primary.raw_payload.get("artifact_id"):
             data["amount_precision"] = "approximate"
         if data["amount_precision"] in ("range", "unknown"):
             raise Deferred("unknown_amount", "Нельзя учесть диапазон/неизвестное значение как точную сумму.")
@@ -421,13 +429,15 @@ def decide(candidate_id, *, preview=False):
         candidate = FactCandidate.objects.select_for_update(of=("self",)).select_related("project", "team", "trace__raw_message__config", "thread_revision__thread__project").get(pk=candidate_id)
         if candidate.status != "pending":
             return None
-        fingerprint = hashlib.sha256(json.dumps([candidate.proposed_changes, candidate.project.version if candidate.project_id else None, candidate.crm_match_revision, candidate.crm_match_state, list(candidate.evidence.values_list("raw_message_id", "quote"))], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        fingerprint = hashlib.sha256(json.dumps([candidate.proposed_changes, candidate.project.version if candidate.project_id else None, candidate.crm_match_revision, candidate.crm_match_state, candidate.trace.model_version, cfg.chat_model_name, list(candidate.evidence.values_list("raw_message_id", "quote"))], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         if not preview:
             existing = candidate.decisions.filter(policy_version=cfg.autonomous_policy_version, input_fingerprint=fingerprint).first()
             if existing:
                 return existing
         outcome, code, explanation, mode, data = "accepted", "source_validated", "Проверены цитаты WhatsApp, связь объекта, тип события и повторность.", "apply", {}
         try:
+            if candidate.trace.model_version != cfg.chat_model_name:
+                raise Deferred("extraction_model_changed", "Кандидат создан прежней моделью; перед автоматической записью нужен повторный разбор или проверка человеком.")
             raw, primary, refs, text = _evidence(candidate)
             schema = FactSchema(data=candidate.proposed_changes)
             schema.is_valid(raise_exception=True)
@@ -523,17 +533,22 @@ def reconcile(limit=100):
         decide(candidate.id)
     if candidates:
         AISettings.objects.filter(pk=cfg.pk).update(autonomous_reconcile_cursor=candidates[-1].pk)
-    for raw in RawMessage.objects.filter(processed=False, team__is_active=True).exclude(processing_state__in=["export_staged", "deduplication_ambiguous", "superseded", "deleted"]).order_by("id")[:limit]:
-        active = OutboxEvent.objects.filter(event_type="extract_message", payload__raw_id=raw.id, state__in=("pending", "enqueued", "processing")).exists()
-        if not active and not OutboxEvent.objects.filter(event_type="extract_message", payload__raw_id=raw.id, state="failed").exists():
-            OutboxEvent.objects.get_or_create(deduplication_key=f"recover:{raw.id}:{cfg.autonomous_policy_version}", defaults={"event_type": "extract_message", "payload": {"raw_id": raw.id}})
-
+    from .thread_routing import ANALYSIS_EVENTS, incoming_event_type, schedule_extraction
+    from .models import DialogueThread
     active_ids = set()
-    for payload in OutboxEvent.objects.filter(event_type="extract_message", state__in=("pending", "enqueued", "processing")).values_list("payload", flat=True):
+    for payload in OutboxEvent.objects.filter(event_type__in=ANALYSIS_EVENTS, state__in=("pending", "enqueued", "processing")).values_list("payload", flat=True):
         active_ids.add(payload.get("raw_id"))
         active_ids.update(payload.get("batch_ids", []))
+    # A routed message belongs to durable thread extraction. Recover that job,
+    # without creating a competing full-history extraction for the same source.
+    for thread in DialogueThread.objects.filter(config__is_active=True, team__is_active=True, message_links__raw_message__processed=False, message_links__raw_message__processing_state="routed").exclude(state="superseded").distinct().order_by("id")[:limit]:
+        schedule_extraction(thread)
+    for raw in RawMessage.objects.select_related("config").filter(processed=False, team__is_active=True).exclude(processing_state__in=["export_staged", "deduplication_ambiguous", "superseded", "deleted", "routed"]).order_by("id")[:limit]:
+        if raw.id not in active_ids and not OutboxEvent.objects.filter(event_type__in=ANALYSIS_EVENTS, payload__raw_id=raw.id, state="failed").exists():
+            OutboxEvent.objects.get_or_create(deduplication_key=f"recover:{raw.id}:{cfg.autonomous_policy_version}", defaults={"event_type": incoming_event_type(raw.config), "payload": {"raw_id": raw.id}})
+            active_ids.add(raw.id)
     for item in SourceWorkItem.objects.filter(processing_version=cfg.autonomous_policy_version, state="pending").order_by("id")[:limit]:
-        if item.raw_message_id in active_ids:
+        if item.raw_message_id in active_ids or item.raw_message.processing_state == "routed":
             continue
         OutboxEvent.objects.get_or_create(deduplication_key=f"work-recover:{item.id}:{cfg.autonomous_policy_version}", defaults={"event_type": "extract_message", "payload": {"raw_id": item.raw_message_id, "reanalyze": True, "batch_ids": [item.raw_message_id], "priority": "history"}})
     # Transient outages are probed again after quarantine; schema/auth failures
