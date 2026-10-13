@@ -60,6 +60,9 @@ def read_originals(raw, trace):
 
 
 def read_content(message, trace):
+    from .qwen_profile import MODEL
+    if trace.model_version == MODEL:
+        return message.content
     for item in trace.earlier_messages_context:
         if item['raw_message_id'] == message.id and item.get('evidence_excerpt'):
             return item['content']
@@ -136,6 +139,11 @@ def recover(result, raw, trace, cfg):
         inputs.pop('target_messages', None)
         payload['messages'][0]['content'] = ('Извлеки только факты типа '+kind+' из целевой реплики. Верни JSON facts и topic_updates по схеме. Для каждого факта укажи предмет темы в topic_updates: конкретное действие/объект, summary, state=open если предмет доказан, unknown если не хватает контекста. Контекст — источники для предмета, первого обещания и доказанного исполнения, не дополнительные цели. Для thread_key выбери тему из extraction_topics. Вопрос не факт. Обязательство — будущее действие автора или явно названного исполнителя, даже без сделки/суммы. Первое обещание сохраняет promise_message_id; повтор не новое обязательство. Последующее отправленное КП закрывает соответствующее обещание, общая ссылка/сумма — нет. Оплата на банковский расчётный счёт — increment, выставленный счёт — invoice. Подписанный договор и техническое изменение — project с current_action. Общий портфель/таблица не сделка. company_name — организация, не автор или исполнитель. Все доказательства — буквальные цитаты по ID; для обещания role=promise, для исполнения role=fulfillment. Имя, дата и срок только из оригиналов. Если известен день, deadline_precision=date, точное время не выдумывай. '+instructions[kind])
         payload['messages'][-1]['content'] = extraction_input(inputs)
+        from .qwen_profile import enabled as qwen_enabled, attach_schema, EVIDENCE_RULES
+        if qwen_enabled(prepared):
+            from .extraction_schema import extraction_schema
+            payload['messages'][0]['content'] += EVIDENCE_RULES
+            payload = attach_schema(payload, extraction_schema(inputs), inputs)
         if '_ollama_num_ctx' in payload:
             from .extraction_schema import extraction_schema
             payload['_ollama_format'] = extraction_schema(inputs)
@@ -196,7 +204,9 @@ def reconcile_promises(facts, raw, trace, cfg):
     originals = {item.id:item for item in read_originals(raw, trace)}
     context = [{'raw_message_id':item.id,'content':read_content(item, trace),'sender_name':item.sender_name,'timestamp':item.timestamp.isoformat()} for item in originals.values()]
     prepared = copy.copy(cfg)
-    prepared.max_completion_tokens = min(2048, prepared.max_completion_tokens)
+    from .qwen_profile import enabled as qwen_enabled
+    if not qwen_enabled(prepared):
+        prepared.max_completion_tokens = min(2048, prepared.max_completion_tokens)
     prepared.analysis_policy, prepared.full_history_policy = 'history-packets-v1','focused-facts-v1'
     counter, endpoint = context_runtime(prepared)
     source = source_metadata(raw)

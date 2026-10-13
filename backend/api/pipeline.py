@@ -17,7 +17,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from .ai_service import AIService, usage_event_id, outbox_claim
 from .context_tokens import canonical_json, extraction_input, payload_hash
 from .deduplication import normalize_deal_name
-from .facts import FactSchema, fact_identity, json_value, same_commitment_origin, normalize_fact_fields
+from .facts import FactSchema, fact_identity, json_value, same_commitment_origin, normalize_fact_fields, artifact_subject
 from .message_context import build_context, source_scope
 from .message_time import source_time
 from .models import (
@@ -58,6 +58,14 @@ def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False, targ
     schema.is_valid(raise_exception=True)
     accepted_facts = []
     for index, fact in enumerate(schema.validated_data):
+        if fact['fact_type']=='project' and artifact_subject(fact['object_name']):
+            if diagnostics is not None:
+                diagnostics.setdefault('excluded_artifact_subjects', []).append(index)
+            continue
+        if fact['fact_type']=='project' and (re.search(r'\S\s*;\s*\S', fact['object_name']) or re.match(r'^(?:запрос|просьба|напоминан\w*)\b', fact['current_action'], re.I)):
+            if diagnostics is not None:
+                diagnostics.setdefault('excluded_request_or_object_list', []).append(index)
+            continue
         if target_ids and fact.get('evidence_message_id') not in target_ids and not (fact['fact_type']=='commitment' and any(ref['raw_message_id'] in target_ids for ref in fact['evidence_messages'])):
             if diagnostics is not None:
                 diagnostics.setdefault('excluded_context_facts', []).append(index)
@@ -123,7 +131,13 @@ def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False, targ
         is_receipt_ack = lambda message: bool(re.search(r"\b(?:принято|принял|подтверждаю|верно)\b", message.content[:120], re.I)) and not re.search(r"\b(?:нов\w+|ещ[её]|втор\w+|дополнительн\w+)\b", message.content[:120], re.I)
         duplicate = next((previous for previous in accepted_facts if previous['fact_type']==fact['fact_type'] and (
             previous['thread_key']==fact['thread_key'] and same_commitment_origin(previous,fact) if fact['fact_type']=='commitment' else
-            fact_identity(previous)==fact_identity(fact) and (previous['evidence_message_id']==fact['evidence_message_id'] or
+            (fact_identity(previous)==fact_identity(fact) or (
+                fact['fact_type']=='payment' and previous['thread_key']==fact['thread_key']
+                and (not previous['object_name'] or not fact['object_name'])
+                and bool(previous['company_name'])
+                and normalize_deal_name(previous['company_name'])==normalize_deal_name(fact['company_name'])
+                and fact_identity({**previous,'object_name':''})==fact_identity({**fact,'object_name':''})
+            )) and (previous['evidence_message_id']==fact['evidence_message_id'] or
                 (fact['fact_type']=='payment' and (is_receipt_ack(evidence_raw) or is_receipt_ack(source_scope(raw).get(pk=previous['evidence_message_id'])))))
         )),None)
         if duplicate is not None:
@@ -242,6 +256,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 raise ProviderUnavailable('analysis_claim_expired')
         api_format = getattr(cfg, "chat_api_format", "openai_compatible")
         effective_provider_url = AIService.effective_chat_provider_url(cfg)
+        from .qwen_profile import enabled as qwen_enabled, attach_schema, PROFILE
         if trace.context_metadata.get("request_state") == "sent":
             raise ProviderUnavailable("context_request_uncertain")
         if "request_envelope" in trace.context_metadata:
@@ -256,6 +271,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 or api_format != snapshot_format
                 or not isinstance(snapshot_url, str)
                 or effective_provider_url.rstrip("/") != snapshot_url.rstrip("/")
+                or (qwen_enabled(cfg) and trace.context_metadata.get('provider_profile') != PROFILE)
             ):
                 raise ProviderUnavailable("context_configuration_changed")
             payload = _restore_request(trace)
@@ -276,14 +292,18 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             context, metadata, payload = build_context(
                 raw, cfg, known, trace.context_metadata["snapshot_max_id"], include_following=True, full_state=full_state, **({"batch_ids": batch_ids} if batch_ids else {}), **({"target_content":raw.content[segment_range[0]:segment_range[1]]} if segment_range else {})
             )
-            if '_ollama_num_ctx' in payload:
+            if '_ollama_num_ctx' in payload or qwen_enabled(cfg):
                 from .extraction_schema import extraction_schema, WIRE_VERSION
                 user = _extraction_user_message(payload)
                 inputs = json.loads(user['content'])
                 if trace.context_metadata.get('required_thread_keys'):
                     inputs['required_thread_keys'] = trace.context_metadata['required_thread_keys']
                     metadata['required_thread_keys'] = inputs['required_thread_keys']
-                payload['_ollama_format'] = extraction_schema(inputs)
+                if qwen_enabled(cfg):
+                    payload = attach_schema(payload, extraction_schema(inputs), inputs)
+                    metadata['provider_profile'] = PROFILE
+                else:
+                    payload['_ollama_format'] = extraction_schema(inputs)
                 metadata['payload_sha256'] = payload_hash(payload)
                 metadata['wire_schema_version'] = WIRE_VERSION
             envelope = copy.deepcopy(payload)
@@ -443,6 +463,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             )
             previous = FactCandidate.objects.filter(
                 Q(trace__raw_message__in=origin) | Q(thread_revision__thread_id__in=[revision.thread_id for revision in revisions.values()])
+                | Q(team=team, fact_type='commitment', proposed_changes__promise_message_id__in=[fact['promise_message_id'] for fact in facts if fact['fact_type']=='commitment'])
             ).exclude(trace=trace)
             if replacing:previous=FactCandidate.objects.filter(trace__raw_message_id__in=batch_ids or [raw.id]).exclude(trace=trace)
             accepted = list(previous.filter(status="approved"))
@@ -463,14 +484,14 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 revision = revisions[fact["thread_key"]]
                 replaced_promises = []
                 if fact['fact_type']=='commitment':
-                    replaced_promises = [item.id for item in pending_candidates if item.fact_type=='commitment' and item.thread_revision_id and item.thread_revision.thread_id==revision.thread_id and same_commitment_origin(item.proposed_changes,fact)]
-                related_approved = [item for item in accepted if not item.thread_revision_id or item.thread_revision.thread_id == revision.thread_id]
+                    replaced_promises = [item.id for item in pending_candidates if item.fact_type=='commitment' and same_commitment_origin(item.proposed_changes,fact)]
+                related_approved = [item for item in accepted if fact['fact_type']=='commitment' or not item.thread_revision_id or item.thread_revision.thread_id == revision.thread_id]
                 approved_obligation = next((item for item in related_approved if item.fact_type == "commitment" and same_commitment_origin(item.proposed_changes, fact) and hasattr(item, "accepted_commitment")), None) if fact["fact_type"] == "commitment" else None
                 fulfillment_update = bool(approved_obligation and (fact.get("commitment_status") in ("fulfilled", "cancelled") or fact.get("commitment_id")) and approved_obligation.accepted_commitment.status not in ("fulfilled", "cancelled"))
                 if approved_obligation and fulfillment_update:
                     fact["commitment_id"] = approved_obligation.accepted_commitment.id
                     fact["base_commitment_version"] = approved_obligation.accepted_commitment.version
-                if any(fact_identity(item.proposed_changes) == fact_identity(fact) for item in related_approved) and not fulfillment_update:
+                if fact['fact_type'] != 'commitment' and any(fact_identity(item.proposed_changes) == fact_identity(fact) for item in related_approved) and not fulfillment_update:
                     duplicates.append(index)
                     continue
                 if approved_obligation and not fulfillment_update:

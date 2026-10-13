@@ -114,8 +114,11 @@ def _execute_operation(pk):
                 from .analytics.data import OperationContext
                 from .analytics.host import run
 
+                from .models import AISettings
+                from .qwen_profile import enabled as qwen_enabled
+                analysis_seconds = 600 if qwen_enabled(AISettings.get_active()) else 150
                 deadline = time.monotonic() + min(
-                    150,
+                    analysis_seconds,
                     max(1, settings.AI_WORKER_TIMEOUT - 30),
                     max(0, (op.expires_at - timezone.now()).total_seconds()),
                 )

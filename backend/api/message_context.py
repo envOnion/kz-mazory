@@ -249,7 +249,8 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
     for message in qs.select_related("config").iterator(chunk_size=256):
         row = {field: getattr(message, field) for field in fields}
         original = source_metadata(message)
-        text = plain_text(row["content"])
+        from .qwen_profile import enabled as qwen_enabled
+        text = row['content'] if qwen_enabled(cfg) else plain_text(row["content"])
         if not text:
             empty += 1
             continue

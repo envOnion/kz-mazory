@@ -340,7 +340,12 @@ def run_outbox(pk):
         SourceWorkItem.objects.filter(pk=item.pk).update(state="processing", lease_until=event.lease_until, error_code="")
     context_token = usage_event_id.set(event.id)
     claim_token = outbox_claim.set(event.payload.get("claim_generation"))
-    deadline_token = extraction_deadline.set(time.monotonic() + 240 if event.event_type in ANALYSIS_EVENTS else None)
+    analysis_timeout = 240
+    if event.event_type in ANALYSIS_EVENTS:
+        from .qwen_profile import enabled as qwen_enabled
+        if qwen_enabled(AISettings.get_active()):
+            analysis_timeout = min(settings.AI_REQUEST_TIMEOUT, 1200)
+    deadline_token = extraction_deadline.set(time.monotonic() + analysis_timeout if event.event_type in ANALYSIS_EVENTS else None)
     try:
         from .temporal import backfill as temporal_backfill
         handlers = {
@@ -1156,3 +1161,9 @@ def waha_download_media(url):
             if len(result) > settings.MAX_ATTACHMENT_SIZE:
                 raise ProviderUnavailable("media_too_large")
     return bytes(result)
+
+
+def verify_qwen_provider():
+    """Maintenance canary: provider/usage rows only, no business or CRM writes."""
+    from .provider_canary import run
+    return run()

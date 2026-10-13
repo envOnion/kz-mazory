@@ -8,10 +8,10 @@ import type { DialogueThread } from '../src/types/factReview'
 const enabled = process.env.MAZORY_E2E_LAYA === '1'
 test.skip(!enabled, 'Private file verification requires the explicit isolated read-only profile')
 test.describe.configure({ mode: 'serial' })
-test.setTimeout(600000)
+test.setTimeout(process.env.MAZORY_E2E_MODEL === 'qwen3.8-27b' ? 3600000 : 600000)
 const dir = process.env.MAZORY_E2E_DIR!
-interface Input { id: string; title: string; messages: { ordinal: number; content: string; sender: string; timestamp: number; date: string }[] }
-interface Proof { messages: { id: number; message_id: string; processed: boolean; processing_state: string }[]; traces: { id: number; raw_message_id: number; status: string; error_code: string }[]; events: { id: number; event_type: string; state: string; error_code: string }[] }
+interface Input { id: string; title: string; chat_id: string; messages: { ordinal: number; content: string; sender: string; timestamp: number; date: string }[] }
+interface Proof { messages: { id: number; message_id: string; content: string; processed: boolean; processing_state: string }[]; traces: { id: number; raw_message_id: number; status: string; error_code: string }[]; events: { id: number; event_type: string; state: string; error_code: string }[] }
 interface OracleCase { id: string; expected: { commitment?: { responsible: string; deadline_date: string; deadline_precision: string; status: string }; payment?: { amount: string; currency: string; date: string; kind: string; company: string }; project?: string; crm_id?: string; capacity_mw?: number; contract_signed?: boolean; invoice_issued?: boolean; context_invoice_amount?: string; responsible?: string; status?: string; deadline_date?: string; fulfillment_date?: string; contract_amount?: null } }
 let session: { access: string; refresh: string; cookie_name: string; configs: Record<string, number> }
 let inputs: Input[]
@@ -43,23 +43,24 @@ test('five original file examples pass through the browser, genuine API and Q2 w
   mkdirSync(join(dir, 'laya-results'), { recursive: true })
   const oracle: { cases: OracleCase[] } = JSON.parse(readFileSync(join(dir, 'laya-oracle.json'), 'utf8'))
   for (const input of inputs) {
+    const messagePrefix = process.env.MAZORY_E2E_MODEL === 'qwen3.8-27b' ? `qwen-file-${createHash('sha256').update(input.id).digest('hex').slice(0,16)}` : `laya-file-${input.id}`
     writeFileSync(join(dir, 'laya-pause'), 'ingesting a bounded input window')
     for (const message of input.messages) {
-      const data = JSON.stringify({ event: 'message', session: 'default', payload: { id: `laya-file-${input.id}-${message.ordinal}`, body: message.content,
-        from: `laya-${input.id}@g.us`, participant: `${createHash('sha256').update(message.sender).digest().readUInt32BE(0)}@lid`, notifyName: message.sender, timestamp: message.timestamp } })
+      const data = JSON.stringify({ event: 'message', session: 'default', payload: { id: `${messagePrefix}-${message.ordinal}`, body: message.content,
+        from: input.chat_id, participant: `${createHash('sha256').update(message.sender).digest().readUInt32BE(0)}@lid`, notifyName: message.sender, timestamp: message.timestamp } })
       const response = await request.post('/api/whatsapp/webhook/', { data, headers: { 'Content-Type': 'application/json', 'X-Webhook-Hmac': createHmac('sha512', 'isolated-local-webhook-secret').update(data).digest('hex') } })
       expect([200, 202]).toContain(response.status())
     }
     unlinkSync(join(dir, 'laya-pause'))
     await expect.poll(() => {
       const proof: Proof = JSON.parse(readFileSync(join(dir, 'laya-proof.json'), 'utf8'))
-      const messages = proof.messages.filter(m => m.message_id.startsWith(`laya-file-${input.id}-`))
+      const messages = proof.messages.filter(m => m.message_id.startsWith(`${messagePrefix}-`))
       return messages.length === input.messages.length && messages.every(m => m.processed)
-    }, { timeout: 540000, intervals: [1000, 2000, 5000] }).toBe(true)
+    }, { timeout: process.env.MAZORY_E2E_MODEL === 'qwen3.8-27b' ? 1800000 : 540000, intervals: [1000, 2000, 5000] }).toBe(true)
     await expect.poll(async () => {
       const health = await (await request.get('/api/operations-health/', { headers })).json()
       return health.outbox.filter((row: { event_type: string; state: string; count: number }) => row.event_type === 'crm_match' && ['pending','enqueued','processing'].includes(row.state)).reduce((sum: number, row: { count: number }) => sum + row.count, 0)
-    }, { timeout: 300000 }).toBe(0)
+    }, { timeout: process.env.MAZORY_E2E_MODEL === 'qwen3.8-27b' ? 1800000 : 300000 }).toBe(0)
     const threads: Page<DialogueThread> = await (await request.get('/api/threads/?page_size=100', { headers })).json()
     const selected = threads.results.filter(t => t.chat_name === input.title)
     const details: DialogueThread[] = []
@@ -75,6 +76,13 @@ test('five original file examples pass through the browser, genuine API and Q2 w
     }
     const candidates = [...candidatesById.values()]
     const proof: Proof = JSON.parse(readFileSync(join(dir, 'laya-proof.json'), 'utf8'))
+    if (process.env.MAZORY_E2E_MODEL === 'qwen3.8-27b') {
+      for (const candidate of candidates) {
+        for (const evidence of candidate.evidence) {
+          expect.soft(evidence.quote, `${input.id}: full original ${evidence.source_id}`).toBe(proof.messages.find(m => m.id === evidence.source_id)?.content)
+        }
+      }
+    }
     writeFileSync(join(dir, `laya-results/${input.id}.json`), JSON.stringify({ input, threads: details, candidates, proof }, null, 2))
     const expected = oracle.cases.find(c => c.id === input.id)!.expected
     const normalize = (value: string) => value.toLocaleLowerCase().replace(/[«»/]/g, ' ').replace(/\s+/g, ' ').trim()
@@ -112,7 +120,7 @@ test('five original file examples pass through the browser, genuine API and Q2 w
         if(expected.crm_id) expect.soft(invoices.some(c=>c.crm_resolution.options.some(o=>o.bitrix_deal_id===expected.crm_id)),input.id).toBe(true)
         // The frozen oracle labels this amount as context from a question.
         // The answer confirms issuance, but need not confirm the amount.
-        expect.soft(invoices.every(c=>c.proposed_changes.amount == null || String(c.proposed_changes.amount)===expected.context_invoice_amount),input.id).toBe(true)
+        expect.soft(invoices.every(c=>c.proposed_changes.amount == null || (process.env.MAZORY_E2E_MODEL !== 'qwen3.8-27b' && String(c.proposed_changes.amount)===expected.context_invoice_amount)),input.id).toBe(true)
       }
       expect.soft(facts.some(c => c.fact_type === 'payment' && c.proposed_changes.payment_kind === 'increment'), input.id).toBe(false)
     }

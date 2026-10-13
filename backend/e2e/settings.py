@@ -28,6 +28,10 @@ Q_CLUSTER = {
 if os.getenv('MAZORY_E2E_REAL_MODEL') == '1':
     Q_CLUSTER.update(timeout=240,retry=270)
     AI_WORKER_TIMEOUT=300
+    if os.getenv('MAZORY_E2E_MODEL') == 'qwen3.8-27b':
+        AI_WORKER_TIMEOUT=AI_REQUEST_TIMEOUT+120
+        AI_TASK_LEASE=AI_WORKER_TIMEOUT+60
+        Q_CLUSTER.update(timeout=AI_WORKER_TIMEOUT,retry=AI_TASK_LEASE+60)
 ALLOWED_HOSTS = ["localhost", "127.0.0.1", "backend", "nginx"]
 BITRIX_TEAM_ID = 1
 WAHA_WEBHOOK_SECRET = "isolated-local-webhook-secret"

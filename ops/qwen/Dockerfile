@@ -1,0 +1,3 @@
+FROM ghcr.io/ggml-org/llama.cpp@sha256:20c6e722e2fcc5ca9c15401d3fd8e35408aaf8f9c54a12f32920f637c57959bb
+COPY start.sh /runtime/start.sh
+ENTRYPOINT ["/bin/sh", "/runtime/start.sh"]

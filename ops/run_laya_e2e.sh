@@ -6,6 +6,9 @@ fi
 task_project="${LAYA_E2E_PROJECT:-mazory-laya-e2e}"
 [[ "$task_project" =~ ^mazory-laya-e2e(-v[0-9]+)?$ ]] || exit 1
 compose=(docker --context kk-minsk compose -p "$task_project" -f compose.e2e.yml -f compose.e2e.real-model.yml -f compose.e2e.laya.yml)
+if [[ "${MAZORY_E2E_MODEL:-}" == qwen3.8-27b ]]; then
+  compose+=(-f compose.e2e.qwen.yml)
+fi
 for relay in llm-relay read-relay; do
   "${compose[@]}" exec -T "$relay" python -c 'import socket,os; socket.create_connection((os.environ["MAZORY_E2E_RELAY_BIND"],11435 if os.environ.get("MAZORY_E2E_REAL_MODEL")=="1" else 11436),timeout=2).close()'
 done

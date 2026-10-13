@@ -10,16 +10,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self): self.forward()
     def do_POST(self): self.forward()
     def forward(self):
-        if self.path not in ('/api/chat','/api/version','/api/show'):
+        qwen=os.getenv('MAZORY_E2E_MODEL')=='qwen3.8-27b'
+        paths=('/props','/v1/models','/v1/chat/completions','/apply-template','/tokenize') if qwen else ('/api/chat','/api/version','/api/show')
+        if self.path not in paths:
             self.send_error(404); return
         body=self.rfile.read(int(self.headers.get('Content-Length',0)))
-        if self.path in ('/api/chat','/api/show'):
+        if self.path in ('/api/chat','/api/show','/v1/chat/completions'):
             data=json.loads(body)
-            if data.get('model')!='gemma4:e4b': self.send_error(400); return
-        request=Request('http://127.0.0.1:11434'+self.path,data=body if self.command=='POST' else None,
+            if data.get('model')!=('qwen3.8-27b' if qwen else 'gemma4:e4b'): self.send_error(400); return
+        request=Request(('http://127.0.0.1:11571' if qwen else 'http://127.0.0.1:11434')+self.path,data=body if self.command=='POST' else None,
                         headers={'Content-Type':'application/json'},method=self.command)
         try:
-            with urlopen(request,timeout=180) as response:
+            with urlopen(request,timeout=1800 if qwen else 180) as response:
                 content=response.read(); self.send_response(response.status)
                 self.send_header('Content-Type','application/json'); self.send_header('Content-Length',str(len(content)))
                 self.end_headers(); self.wfile.write(content)
