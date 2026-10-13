@@ -22,6 +22,7 @@ ASSIGNMENTS = {
     "Новый объект БЦ Восток": ("east", "project"),
     "От компании Меридиан поступила оплата 117 млн тенге, объект не указан": ("meridian", "project"),
     "БЦ Восток: договор подписан на 25 млн тенге": ("east", "project"),
+    "БЦ Восток: монтаж начался": ("east", "project"),
     "БЦ Север: подготовь смету": ("north", "request"),
     "Сделаешь завтра?": ("north", "request"),
     "БЦ Север: да, подготовлю смету завтра": ("north", "promise"),
@@ -130,6 +131,8 @@ def classify(value):
             )
             if 'договор подписан на 25 млн' in row['content']:
                 facts[-1].update(contract_amount='25000000.00', currency='KZT')
+            if row['content'] == 'БЦ Восток: монтаж начался':
+                facts[-1].update(stage='in_execution')
         elif ready and promise and request:
             if key == "south" and "30 000 000" in promise["content"]:
                 facts.append(

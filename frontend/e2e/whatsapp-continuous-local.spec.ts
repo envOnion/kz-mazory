@@ -55,6 +55,15 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   const creates = provider().writes?.length
   await message(request, group, 'continuous-contract', 'БЦ Восток: договор подписан на 25 млн тенге')
   expect(provider().writes?.length).toBe(creates)
+  await message(request, group, 'continuous-unmapped-stage', 'БЦ Восток: монтаж начался')
+  await expect.poll(async () => {
+    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    return rows.results.some(row => row.proposed_changes.stage === 'in_execution')
+  }).toBe(true)
+  await expect.poll(() => proof().deliveries.filter(row => row.state === 'delivered').length).toBeGreaterThan(3)
+  expect(proof().events.some(row => row.error_code === 'crm_stage_mapping_missing')).toBe(false)
+  expect(Object.values(provider().deals || {}).find(row => row.TITLE === 'БЦ Восток')?.STAGE_ID).toBeUndefined()
+  await expect.poll(() => JSON.stringify(provider()).includes('Стадия Mazory: В исполнении')).toBe(true)
   await message(request, group, 'continuous-percent', 'БЦ Север: цена предложения на 15% ниже первоначальной стоимости')
   let candidate: Candidate | undefined
   await expect.poll(async () => {
