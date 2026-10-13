@@ -91,6 +91,7 @@ test('real reasoning and tool token counts survive provider restart, and the bro
   }, { timeout: 300000 }).toBe(true)
   const canary = JSON.parse(readFileSync(join(dir, 'qwen-canary-result.json'), 'utf8'))
   expect(canary.result).toMatchObject({ model: 'qwen3.8-27b', native_count_matches: true, native_tool_count_matches: true, answer: 391 })
+  expect(canary.result.large_request_bytes).toBeGreaterThan(2 * 1024 * 1024)
   const session: { access: string; refresh: string; cookie_name: string; user_id: number } = JSON.parse(readFileSync(join(dir, 'analytics-session.json'), 'utf8'))
   const headers = { Authorization: `Bearer ${session.access}` }
   await authenticate(context, session, 'analytics-session.json', headers)

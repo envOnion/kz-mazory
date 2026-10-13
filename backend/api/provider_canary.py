@@ -21,6 +21,12 @@ def run():
                        'required': ['answer'], 'additionalProperties': False}}}})
     base = AIService.effective_chat_provider_url(cfg)
     key = AIService._credential(cfg)
+    # Native source-bound schemas exceed nginx's default 1 MiB body limit.
+    # Ignored padding checks transport capacity without business data or inference.
+    transport_payload = {'content': '17', 'add_special': False, 'transport_padding': 'x' * (2 * 1024 * 1024)}
+    transport = AIService._post(base[:-3]+'/tokenize', transport_payload, (10,30), api_key=key, operation='token_count')
+    if not isinstance(transport.get('tokens'), list) or not transport['tokens']:
+        raise ProviderUnavailable('provider_large_request_failed')
     rendered = AIService._post(base[:-3]+'/apply-template', payload, (5,15), api_key=key, operation='token_count')
     tokens = AIService._post(base[:-3]+'/tokenize', {'content': rendered['prompt'], 'add_special':False}, (5,15), api_key=key, operation='token_count')
     count = counter.count_payload(payload)
@@ -45,6 +51,7 @@ def run():
     if response['choices'][0]['finish_reason'] != 'stop' or json.loads(message['content']) != {'answer':391} or not message.get('reasoning_content'):
         raise ProviderUnavailable('provider_canary_failed')
     return {'profile': PROFILE, 'model': cfg.chat_model_name, 'context': endpoint['context_length'],
+            'large_request_bytes': len(json.dumps(transport_payload, ensure_ascii=False, separators=(',',':')).encode()),
             'input_tokens': count, 'native_count_matches': True, 'native_tool_count_matches': True,
             'reasoning_characters':len(message['reasoning_content']),
             'seconds':round(time.monotonic()-started,3), 'finish_reason':'stop', 'answer':391}
