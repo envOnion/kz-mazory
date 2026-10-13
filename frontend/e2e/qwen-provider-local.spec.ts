@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type BrowserContext } from '@playwright/test'
 import { readFileSync, writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHmac, randomUUID } from 'node:crypto'
@@ -14,6 +14,21 @@ interface Proof {
   commitments: { id: number; commitment_text: string; status: string; source_message_id: number; deadline_at: string; fulfilled_at: string | null }[]
 }
 const proof = (): Proof => JSON.parse(readFileSync(join(dir, 'laya-proof.json'), 'utf8'))
+async function authenticate(context: BrowserContext, session: { access: string; refresh: string; cookie_name: string }, filename: string, headers: { Authorization: string }) {
+  context.on('response', async response => {
+    if (!response.url().includes('/api/auth/refresh/') || !response.ok()) return
+    const body: { access?: string } = await response.json()
+    const cookie = (await context.cookies()).find(c => c.name === session.cookie_name)
+    if (!body.access || !cookie) return
+    session.access = body.access
+    session.refresh = cookie.value
+    headers.Authorization = `Bearer ${body.access}`
+    const file = join(dir, filename), temporary = `${file}.${randomUUID()}`
+    writeFileSync(temporary, JSON.stringify(session))
+    renameSync(temporary, file)
+  })
+  await context.addCookies([{ name: session.cookie_name, value: session.refresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
+}
 function control(extra: Record<string, unknown>) {
   const file = join(dir, 'laya-control.json'), temporary = `${file}.${randomUUID()}`
   writeFileSync(temporary, JSON.stringify({ nonce: randomUUID(), mode: 'laya', live_crm: false, ...extra }))
@@ -53,7 +68,7 @@ test('two actions in one original stay distinct, repetition is deduplicated and 
   expect(table.deadline_at.slice(0, 10)).toBe('2026-08-21')
   const facts: Page<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
   expect(facts.results.filter(c => c.chat_name === 'LAYA synthetic routing' && c.fact_type === 'payment')).toHaveLength(0)
-  await context.addCookies([{ name: session.cookie_name, value: session.refresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
+  await authenticate(context, session, 'laya-session.json', headers)
   await page.goto('/')
   await page.getByRole('button', { name: 'Рабочий кабинет', exact: true }).click()
   await page.getByRole('button', { name: 'Обязательства', exact: true }).click()
@@ -78,7 +93,7 @@ test('real reasoning and tool token counts survive provider restart, and the bro
   expect(canary.result).toMatchObject({ model: 'qwen3.8-27b', native_count_matches: true, native_tool_count_matches: true, answer: 391 })
   const session: { access: string; refresh: string; cookie_name: string; user_id: number } = JSON.parse(readFileSync(join(dir, 'analytics-session.json'), 'utf8'))
   const headers = { Authorization: `Bearer ${session.access}` }
-  await context.addCookies([{ name: session.cookie_name, value: session.refresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
+  await authenticate(context, session, 'analytics-session.json', headers)
   await page.goto('/')
   await page.getByTestId('nav-kpi-dashboard').waitFor()
   const newDialogue = page.getByRole('button', { name: 'Новый диалог', exact: true })
@@ -133,10 +148,12 @@ test('two explicitly separate receipts with the same company, date and amount st
   }
   expect(facts).toHaveLength(2)
   expect(facts.every(c=>c.proposed_changes.amount==='500000.00' && c.proposed_changes.currency==='KZT' && c.proposed_changes.payment_date==='2026-08-23')).toBe(true)
-  await context.addCookies([{ name:session.cookie_name,value:session.refresh,url:`${process.env.MAZORY_E2E_URL}/api/auth/`,httpOnly:true,sameSite:'Lax' }])
+  await authenticate(context, session, 'laya-session.json', headers)
   await page.goto('/')
   await page.getByRole('button',{name:'Рабочий кабинет',exact:true}).click()
-  await page.getByRole('button',{name:'Проверка фактов',exact:true}).click()
-  await expect(page.getByText('Проверка фактов',{exact:true}).first()).toBeVisible()
+  await page.getByRole('button',{name:/^(Проверка фактов|Решения системы)$/}).click()
+  await expect(page.getByRole('heading',{name:'LAYA synthetic baseline · 2 на этой странице',exact:true})).toBeVisible()
+  await expect(page.getByRole('heading',{name:'Платёж',exact:true})).toHaveCount(2)
+  await page.screenshot({path:join(dir,'laya-results/qwen-distinct-receipts.png'),fullPage:true})
   writeFileSync(join(dir,'laya-results/qwen-distinct-receipts.json'),JSON.stringify({bodies,facts,proof:proof()},null,2))
 })
