@@ -41,6 +41,7 @@ test('two actions in one original stay distinct, repetition is deduplicated and 
   await expect.poll(() => proof().commitments.length, { timeout: 300000 }).toBe(2)
   expect(proof().commitments.every(c => c.source_message_id === originalId)).toBe(true)
   await send('По объекту Текстильный цех КП Алексею отправил. Таблицу Марине пока не передал. Оплаты не было.', timestamp + 3 * 86400)
+  await expect.poll(() => proof().commitments.find(c => /Алексе/i.test(c.commitment_text))?.status, { timeout: 300000 }).toBe('fulfilled')
   const commitments = proof().commitments
   expect(commitments).toHaveLength(2)
   const offer = commitments.find(c => /Алексе/i.test(c.commitment_text))!

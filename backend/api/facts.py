@@ -174,7 +174,7 @@ def _same_promise_action(left, right):
     if (left.get('deadline_message_id')==left.get('promise_message_id')
             and right.get('deadline_message_id')==right.get('promise_message_id')
             and left.get('deadline_at') and right.get('deadline_at')
-            and str(left['deadline_at'])!=str(right['deadline_at'])):
+            and json_value(left['deadline_at'])!=json_value(right['deadline_at'])):
         return False
     if normalize_deal_name(a)==normalize_deal_name(b):
         return True
