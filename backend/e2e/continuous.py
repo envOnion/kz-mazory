@@ -26,6 +26,11 @@ def update():
                 WhatsAppConfig.objects.get_or_create(group_jid=control['group'], defaults={'team_id': source.team_id, 'name': 'Continuous E2E', 'thread_routing_enabled': control['action']=='routing', 'snapshot': {'timezone':'UTC+03:00'}})
                 cfg.autonomous_enabled = cfg.autonomous_crm_enabled = True
                 cfg.thread_routing_mode = 'laya' if control['action']=='routing' else 'llm'
+                # Previous full-history cases deliberately leave a 12k window.
+                # This scenario needs the seeded 131k provider window to test
+                # a 9k fixed prompt independently of that overflow fixture.
+                cfg.context_window_tokens = 131072
+                cfg.analysis_input_token_limit = 16384
                 cfg.thread_extract_idle_seconds = 120
                 cfg.thread_extract_max_wait_seconds = 120
                 cfg.save()
@@ -54,6 +59,15 @@ def update():
             if control['action'] == 'assignee':
                 from api.models import UserProfile
                 UserProfile.objects.filter(phone='79990000002').update(bitrix_user_id=None)
+            if control['action'] == 'review_next':
+                (settings.E2E_DIR/'continuous-review.json').write_text(json.dumps({'message_id':control['message_id']}))
+            if control['action'] == 'release_review':
+                from api.autonomous import enqueue_decision
+                raw = RawMessage.objects.get(message_id=control['message_id'])
+                for candidate in FactCandidate.objects.filter(trace__raw_message=raw).select_related('trace'):
+                    candidate.trace.context_metadata['analysis_limits']['review_before_delivery']=False
+                    candidate.trace.save(update_fields=['context_metadata'])
+                    enqueue_decision(candidate.id, 'reviewed:'+control['nonce'])
             if control['action'] == 'bounded':
                 from api.processing_attempts import reserve_attempt
                 from django.db import transaction
@@ -61,16 +75,32 @@ def update():
                     raw = RawMessage.objects.select_for_update().get(message_id='continuous-east')
                     trace = reserve_attempt(raw, 'continuous-bounded:'+control['nonce'])
                     trace.context_metadata['full_history_policy'] = None
-                    trace.context_metadata['analysis_limits']['analysis_input_token_limit'] = 4096
+                    trace.context_metadata['analysis_limits']['analysis_input_token_limit'] = 16384
                     trace.save(update_fields=['context_metadata'])
                     OutboxEvent.objects.create(event_type='extract_message', deduplication_key='continuous-bounded:'+control['nonce'], payload={'raw_id':raw.id,'trace_id':trace.id,'batch_ids':[raw.id],'reanalyze':True,'analysis_policy':'history-packets-v1'})
                     state = json.loads((settings.E2E_DIR/'provider-state.json').read_text())
-                    state.update(bounded_schema_error_once=True, bounded_target_id=raw.id)
+                    state.update(bounded_schema_error_once=True, bounded_target_id=raw.id, bounded_token_floor=9000)
                     temporary = settings.E2E_DIR/'continuous-provider.tmp'
                     temporary.write_text(json.dumps(state))
                     temporary.chmod(0o666)
                     temporary.replace(settings.E2E_DIR/'provider-state.json')
             applied.write_text(json.dumps(control))
+    review_path=settings.E2E_DIR/'continuous-review.json'
+    if review_path.exists():
+        from django.db import transaction
+        from api.processing_attempts import reserve_attempt
+        target=json.loads(review_path.read_text())['message_id']
+        with transaction.atomic():
+            raw=RawMessage.objects.select_for_update().filter(message_id=target).first()
+            event=OutboxEvent.objects.filter(event_type='extract_message',state='pending',payload__raw_id=raw.id).first() if raw else None
+            if event:
+                trace=reserve_attempt(raw,'continuous-review:'+target)
+                trace.context_metadata['full_history_policy']=None
+                trace.context_metadata['analysis_limits']['review_before_delivery']=True
+                trace.save(update_fields=['context_metadata'])
+                event.payload={**event.payload,'trace_id':trace.id,'batch_ids':[raw.id],'analysis_policy':'history-packets-v1'}
+                event.save(update_fields=['payload'])
+                review_path.unlink()
     proof = {'messages': list(RawMessage.objects.filter(chat_id__startswith='continuous-').values('id','message_id','processed','processing_state')),
              'events': list(OutboxEvent.objects.values('id','event_type','state','error_code','payload')),
              'deliveries': list(CrmDelivery.objects.values('id','state','patch','outbox_event_id')),

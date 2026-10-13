@@ -576,11 +576,11 @@ import json
 try:
     BITRIX_STAGE_MAP = json.loads(os.getenv("BITRIX_STAGE_MAP", "") or "{}")
     if not isinstance(BITRIX_STAGE_MAP, dict) or any(
-        not isinstance(k, str) or not isinstance(v, str) or not v
+        not isinstance(k, str) or (v is not None and (not isinstance(v, str) or not v))
         for k, v in BITRIX_STAGE_MAP.items()
     ):
         raise ValueError()
 except (ValueError, TypeError):
     raise ImproperlyConfigured(
-        "BITRIX_STAGE_MAP must be a JSON object of stage strings"
+        "BITRIX_STAGE_MAP must map stages to non-empty strings or null (timeline only)"
     ) from None

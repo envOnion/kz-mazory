@@ -42,6 +42,7 @@ SECURE_SSL_REDIRECT = AUTH_COOKIE_SECURE = SESSION_COOKIE_SECURE = (
     CSRF_COOKIE_SECURE
 ) = False
 DEBUG = False
+BITRIX_STAGE_MAP = {'in_execution': None}
 AI_DAILY_REQUEST_LIMIT = 10000
 # Serial browser scenarios share one fixture user and poll Q2 faster than a person.
 # Production rate limits remain in mazory_backend.settings.

@@ -55,6 +55,15 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   const creates = provider().writes?.length
   await message(request, group, 'continuous-contract', 'БЦ Восток: договор подписан на 25 млн тенге')
   expect(provider().writes?.length).toBe(creates)
+  await message(request, group, 'continuous-unmapped-stage', 'БЦ Восток: монтаж начался')
+  await expect.poll(async () => {
+    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    return rows.results.some(row => row.proposed_changes.stage === 'in_execution')
+  }).toBe(true)
+  await expect.poll(() => proof().deliveries.filter(row => row.state === 'delivered').length).toBeGreaterThan(3)
+  expect(proof().events.some(row => row.error_code === 'crm_stage_mapping_missing')).toBe(false)
+  expect(Object.values(provider().deals || {}).find(row => row.TITLE === 'БЦ Восток')?.STAGE_ID).toBeUndefined()
+  await expect.poll(() => JSON.stringify(provider()).includes('Стадия Mazory: В исполнении')).toBe(true)
   await message(request, group, 'continuous-percent', 'БЦ Север: цена предложения на 15% ниже первоначальной стоимости')
   let candidate: Candidate | undefined
   await expect.poll(async () => {
@@ -87,6 +96,29 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   await expect.poll(() => proof().bounded_traces.some(trace => trace.status === 'success')).toBe(true)
   expect(proof().bounded_traces.length).toBeGreaterThan(1)
   expect(proof().bounded_traces.every(trace => trace.full_history_policy === null)).toBe(true)
+  await message(request, group, 'continuous-company-only', 'От компании Меридиан поступила оплата 117 млн тенге, объект не указан')
+  await expect.poll(async () => {
+    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=pending', { headers })).json()
+    return rows.results.find(row => row.proposed_changes.object_name === 'Меридиан')?.automatic_decision?.reason_code
+  }).toBe('company_not_object')
+  expect(Object.values(provider().deals || {}).some(row => row.TITLE === 'Меридиан')).toBe(false)
+  await message(request, group, 'continuous-unknown-party', 'БЦ Север: от компании Меридиан поступила оплата 20 000 000 ₸ сегодня')
+  await expect.poll(async () => {
+    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    return rows.results.some(row => row.fact_type === 'payment' && row.proposed_changes.amount === '20000000.00' && row.proposed_changes.company_name === 'Меридиан')
+  }).toBe(true)
+  expect(proof().events.some(event => event.event_type === 'autonomous_crm' && event.payload.kind === 'company')).toBe(false)
+  await control({ action: 'review_next', message_id: 'continuous-audit-held' })
+  await message(request, group, 'continuous-audit-held', 'БЦ Южный: оплата 45 млн тенге поступила сегодня')
+  await expect.poll(async () => {
+    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=pending', { headers })).json()
+    return rows.results.find(row => row.proposed_changes.amount === '45000000.00')?.automatic_decision?.reason_code
+  }).toBe('maintenance_review_required')
+  await control({ action: 'release_review', message_id: 'continuous-audit-held' })
+  await expect.poll(async () => {
+    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    return rows.results.some(row => row.proposed_changes.amount === '45000000.00')
+  }).toBe(true)
   await context.addCookies([{ name: session.cookie_name, value: session.refresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
   await page.goto('/')
   await page.getByRole('button', { name: 'Рабочий кабинет', exact: true }).click()

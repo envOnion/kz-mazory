@@ -142,7 +142,7 @@ def handle_failure(event, exc):
                     repair_key += f':{previous.id}'
                 trace = reserve_attempt(raw, repair_key)
                 limits = dict(previous.context_metadata.get("analysis_limits", {}))
-                if previous.context_metadata.get('full_history_policy') not in {'thread-context-v2', 'thread-routed-context-v1'}:
+                if previous.context_metadata.get('full_history_policy') not in {'thread-context-v2', 'thread-routed-context-v1'} and code in {'context_batch_too_large', 'provider_output_truncated'}:
                     limits["analysis_input_token_limit"] = max(4096, limits.get("analysis_input_token_limit", 16384) // 2)
                 elif full_output:
                     from .models import AISettings

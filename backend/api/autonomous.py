@@ -170,6 +170,14 @@ def _resolve_project(candidate, data):
 
 
 def _validate(candidate, data, primary, text):
+    label = data.get('object_name', '').strip()
+    if label:
+        quoted = re.escape(label)
+        company_only = (normalize_deal_name(data.get('company_name', '')) == normalize_deal_name(label)
+                        or re.search(r'(?:компани[яиюй]|ТОО)\s+[«"“]?\s*' + quoted + r'(?!\w)', text, re.I))
+        explicit_object = re.search(r'(?:объект\w*|проект\w*)\s+[«"“]?\s*' + quoted + r'(?!\w)', text, re.I)
+        if company_only and not explicit_object:
+            raise Deferred('company_not_object', 'Указана компания, но она не доказывает идентичность конкретного бизнес-объекта.')
     company = normalize_deal_name(data.get("company_name", ""))
     if company and not re.search(r"(?<!\w)" + re.escape(company) + r"(?!\w)", normalize_deal_name(text, max_length=None)):
         data["company_name"], data["party_role"] = "", "unknown"
@@ -429,13 +437,19 @@ def decide(candidate_id, *, preview=False):
         candidate = FactCandidate.objects.select_for_update(of=("self",)).select_related("project", "team", "trace__raw_message__config", "thread_revision__thread__project").get(pk=candidate_id)
         if candidate.status != "pending":
             return None
-        fingerprint = hashlib.sha256(json.dumps([candidate.proposed_changes, candidate.project.version if candidate.project_id else None, candidate.crm_match_revision, candidate.crm_match_state, candidate.trace.model_version, cfg.chat_model_name, list(candidate.evidence.values_list("raw_message_id", "quote"))], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        fingerprint_input = [candidate.proposed_changes, candidate.project.version if candidate.project_id else None, candidate.crm_match_revision, candidate.crm_match_state, candidate.trace.model_version, cfg.chat_model_name, list(candidate.evidence.values_list("raw_message_id", "quote"))]
+        review_required = candidate.trace.context_metadata.get('analysis_limits', {}).get('review_before_delivery', False)
+        if review_required:
+            fingerprint_input.append('review_before_delivery')
+        fingerprint = hashlib.sha256(json.dumps(fingerprint_input, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
         if not preview:
             existing = candidate.decisions.filter(policy_version=cfg.autonomous_policy_version, input_fingerprint=fingerprint).first()
             if existing:
                 return existing
         outcome, code, explanation, mode, data = "accepted", "source_validated", "Проверены цитаты WhatsApp, связь объекта, тип события и повторность.", "apply", {}
         try:
+            if review_required:
+                raise Deferred('maintenance_review_required', 'Исторический результат ожидает сверки с источником перед автоматической записью.')
             if candidate.trace.model_version != cfg.chat_model_name:
                 raise Deferred("extraction_model_changed", "Кандидат создан прежней моделью; перед автоматической записью нужен повторный разбор или проверка человеком.")
             raw, primary, refs, text = _evidence(candidate)

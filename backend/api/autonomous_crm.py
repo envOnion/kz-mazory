@@ -73,7 +73,7 @@ def deliver(payload):
             delivery.state = "superseded"
             delivery.save(update_fields=["state", "updated_at"])
             return
-        stage_missing = "stage" in project.whatsapp_fields and not settings.BITRIX_STAGE_MAP.get(project.status)
+        stage_missing = "stage" in project.whatsapp_fields and project.status not in settings.BITRIX_STAGE_MAP
         if "stage" in project.whatsapp_fields and settings.BITRIX_STAGE_MAP.get(project.status):
             delivery.patch["STAGE_ID"] = settings.BITRIX_STAGE_MAP[project.status]
             delivery.save(update_fields=["patch"])
@@ -140,7 +140,7 @@ def enqueue_effects(candidate, fact_event, cfg):
     if candidate.project_id:
         for party in candidate.project.parties.filter(decision=fact_event.decision).select_related("company"):
             company = party.company
-            if company.team_id == candidate.team_id and not company.bitrix_company_id:
+            if party.role != "unknown" and company.team_id == candidate.team_id and not company.bitrix_company_id:
                 queue("company", company, 1, {"TITLE": company.name})
 
 
@@ -194,6 +194,8 @@ def deliver_effect(payload):
                 candidate = delivery.fact_event.decision.candidate
                 decision = delivery.fact_event.decision
                 text = f"{marker}\nWhatsApp · {delivery.fact_event.event_type}\n{candidate.proposed_changes.get('evidence', '')}\nОснование: {decision.explanation}\nMazory: факт {candidate.id}, событие {delivery.fact_event_id}."
+                if candidate.proposed_changes.get('stage'):
+                    text += f"\nСтадия Mazory: {dict(Project.STATUS_CHOICES)[candidate.proposed_changes['stage']]}"
                 external = _result_id(BitrixService.call("crm.timeline.comment.add", {"fields": {"ENTITY_ID": project.bitrix_id, "ENTITY_TYPE": "deal", "COMMENT": text}}).get("result"))
         elif kind == "company":
             company = Company.objects.select_for_update().get(pk=local_id)

@@ -20,14 +20,18 @@ TOPICS = {
 }
 ASSIGNMENTS = {
     "Новый объект БЦ Восток": ("east", "project"),
+    "От компании Меридиан поступила оплата 117 млн тенге, объект не указан": ("meridian", "project"),
     "БЦ Восток: договор подписан на 25 млн тенге": ("east", "project"),
+    "БЦ Восток: монтаж начался": ("east", "project"),
     "БЦ Север: подготовь смету": ("north", "request"),
     "Сделаешь завтра?": ("north", "request"),
     "БЦ Север: да, подготовлю смету завтра": ("north", "promise"),
     "БЦ Север: оплата 50 000 000 ₸ поступила сегодня": ("north", "payment"),
+    "БЦ Север: от компании Меридиан поступила оплата 20 000 000 ₸ сегодня": ("north", "payment"),
     "БЦ Север: цена предложения на 15% ниже первоначальной стоимости": ("north", "payment"),
     "БЦ Север: оплата 60 000 000 ₸ поступила сегодня. По БЦ Южный выставлен счет примерно на 30 000 000 ₸, оплату ожидаем завтра.": ("north", "payment"),
     "БЦ Южный: оплата 20 000 000 ₸ поступила сегодня": ("south", "payment"),
+    "БЦ Южный: оплата 45 млн тенге поступила сегодня": ("south", "payment"),
     "БЦ Южный: проверь доставку": ("south", "request"),
     "БЦ Южный: проверю доставку в пятницу": ("south", "promise"),
     "БЦ Южный: согласуем график платежей": ("south", "request"),
@@ -61,7 +65,7 @@ def classify(value):
             None,
         )
         has_payment = any(role == "payment" for _, role in members)
-        ready = bool(promise and request) or key == "east" or has_payment
+        ready = bool(promise and request) or key in ("east", "meridian") or has_payment
         topic = TOPICS.get(key, "Тема требует уточнения")
         themes.append(
             {
@@ -109,20 +113,26 @@ def classify(value):
                     facts[-1].update(amount='15.00', payment_kind='invoice')
                 if '60 000 000' in row['content']:
                     facts[-1].update(amount='60000000.00', amount_precision='exact')
-        if ready and key == "east":
+                if 'от компании Меридиан' in row['content']:
+                    facts[-1].update(amount='20000000.00', company_name='Меридиан', party_role='unknown')
+                if '45 млн тенге' in row['content']:
+                    facts[-1].update(amount='45000000.00')
+        if ready and key in ("east", "meridian"):
             row = members[-1][0]
             facts.append(
                 {
                     "thread_key": key,
                     "evidence_message_id": row["raw_message_id"],
                     "fact_type": "project",
-                    "object_name": "БЦ Восток",
+                    "object_name": "Меридиан" if key == 'meridian' else "БЦ Восток",
                     "evidence": row["content"],
                     "confidence": 0.95,
                 }
             )
             if 'договор подписан на 25 млн' in row['content']:
                 facts[-1].update(contract_amount='25000000.00', currency='KZT')
+            if row['content'] == 'БЦ Восток: монтаж начался':
+                facts[-1].update(stage='in_execution')
         elif ready and promise and request:
             if key == "south" and "30 000 000" in promise["content"]:
                 facts.append(
@@ -443,6 +453,13 @@ class ProviderHandler(BaseHTTPRequestHandler):
             return self.respond({"result": True})
         if self.path.endswith("/messages/count_tokens"):
             state = json.loads(self.control.read_text())
+            if state.get('bounded_token_floor'):
+                try:
+                    value = json.loads(body['messages'][-1]['content'])
+                except (TypeError, ValueError):
+                    value = {}
+                if isinstance(value, dict) and value.get('target_message_id') == state.get('bounded_target_id'):
+                    return self.respond({'input_tokens': max(state['bounded_token_floor'], len(json.dumps(body,ensure_ascii=False))//4)})
             if state.get('analytics_force_compaction') and any(
                 len(json.loads(block['content']).get('rows', [])) > 5
                 for message in body.get('messages', []) if isinstance(message['content'], list)
