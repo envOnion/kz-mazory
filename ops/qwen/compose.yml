@@ -1,0 +1,37 @@
+services:
+  qwen:
+    build: .
+    image: mazory-qwen:medium-full-source-v1
+    container_name: mazory-qwen
+    restart: unless-stopped
+    networks: [inference]
+    ports: ['127.0.0.1:11571:8080']
+    environment:
+      LD_LIBRARY_PATH: /usr/local/nvidia/lib64:/usr/local/cuda/lib64
+    devices:
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+      - /dev/nvidia-uvm-tools:/dev/nvidia-uvm-tools
+    volumes:
+      - models:/models:ro
+      - /usr/lib/x86_64-linux-gnu/libcuda.so.595.104.02:/usr/local/nvidia/lib64/libcuda.so.1:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-ml.so.595.104.02:/usr/local/nvidia/lib64/libnvidia-ml.so.1:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-ptxjitcompiler.so.595.104.02:/usr/local/nvidia/lib64/libnvidia-ptxjitcompiler.so.1:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-nvvm.so.595.104.02:/usr/local/nvidia/lib64/libnvidia-nvvm.so.4:ro
+      - /usr/lib/x86_64-linux-gnu/libnvidia-gpucomp.so.595.104.02:/usr/local/nvidia/lib64/libnvidia-gpucomp.so.595.104.02:ro
+    command: [-m, /models/qwen3.8-27b.gguf, --alias, qwen3.8-27b, --host, '0.0.0.0', --port, '8080', -c, '49152', -np, '1', -ngl, '99', -fa, 'on', -ctk, f16, -ctv, f16, --no-context-shift, --jinja, --reasoning-format, deepseek, --reasoning-effort, medium, --temp, '0', --top-p, '0.95', --top-k, '20', --min-p, '0', -n, '32768']
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, http://127.0.0.1:8080/health]
+      start_period: 90s
+      interval: 10s
+      timeout: 5s
+      retries: 12
+networks:
+  inference:
+    external: true
+    name: coolify
+volumes:
+  models:
+    external: true
+    name: mazory-stronger-models

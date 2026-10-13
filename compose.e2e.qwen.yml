@@ -1,0 +1,18 @@
+# Extend the existing isolated real model profile; never production volumes.
+services:
+  llm-relay:
+    environment: {MAZORY_E2E_MODEL: qwen3.8-27b}
+  provider:
+    environment: {MAZORY_E2E_MODEL: qwen3.8-27b}
+  seed:
+    environment: &qwen-env
+      MAZORY_E2E_MODEL: qwen3.8-27b
+      AI_REQUEST_TIMEOUT: '1800'
+  backend:
+    environment: *qwen-env
+  qcluster:
+    environment: *qwen-env
+  outbox:
+    environment: *qwen-env
+  browser:
+    environment: {MAZORY_E2E_MODEL: qwen3.8-27b}

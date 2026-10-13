@@ -82,6 +82,7 @@ services:
     environment:
       <<: *environment
       Q_CLUSTER_NAME: history
+      AI_CREDENTIAL_ENCRYPTION_KEY: ${AI_CREDENTIAL_ENCRYPTION_KEY:?Set a Fernet AI credential key}
     command: [python, manage.py, qcluster]
   qcluster_crm:
     <<: *backend

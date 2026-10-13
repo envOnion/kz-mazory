@@ -2,6 +2,7 @@
 import hashlib
 import json
 import time
+import os
 from django.conf import settings
 from django.db import close_old_connections
 from django.utils import timezone
@@ -19,14 +20,17 @@ def seed(user, team):
     (settings.E2E_DIR / 'laya-parser.json').write_text(json.dumps({'messages': len(records), 'sha256': hashlib.sha256(source).hexdigest()}))
     configs = {}
     inputs = []
-    for case in oracle['cases']:
+    for index, case in enumerate(oracle['cases']):
+        qwen=os.getenv('MAZORY_E2E_MODEL') == 'qwen3.8-27b'
+        chat_id=f'qwen-window-{index+1}@g.us' if qwen else f"laya-{case['id']}@g.us"
+        title=f'Проверка Qwen {index+1}' if qwen else case['title']
         configs[case['id']] = WhatsAppConfig.objects.get_or_create(team=team, session_name='default',
-            group_jid=f"laya-{case['id']}@g.us", defaults={'name':case['title'], 'thread_routing_enabled':True, 'snapshot':{'timezone': 'Asia/Almaty'}})[0].id
+            group_jid=chat_id, defaults={'name':title, 'thread_routing_enabled':True, 'snapshot':{'timezone': 'Asia/Almaty'}})[0].id
         for item in case['messages']:
             parsed = records[item['ordinal'] - 1]
             if parsed.content != item['content'] or parsed.sender != item['sender'] or parsed.line_start != item['line_start']:
                 raise RuntimeError('Independent parser mismatch')
-        inputs.append({'id': case['id'], 'title': case['title'], 'messages': [{**item,
+        inputs.append({'id': case['id'], 'title': title, 'chat_id':chat_id, 'messages': [{**item,
             'timestamp': int(records[item['ordinal'] - 1].sent_at.timestamp())} for item in case['messages']]})
     synthetic_team, _ = Team.objects.get_or_create(name='Синтетические проверки LAYA')
     TeamMembership.objects.get_or_create(team=synthetic_team,user=user,role='team_lead',defaults={'status':'active'})
@@ -43,6 +47,11 @@ def seed(user, team):
     cfg.analysis_target_message_limit = 8
     cfg.context_window_tokens = 65536
     cfg.max_completion_tokens = cfg.analysis_output_token_limit = 8192
+    if os.getenv('MAZORY_E2E_MODEL') == 'qwen3.8-27b':
+        cfg.context_window_tokens = 49152
+        cfg.max_completion_tokens = cfg.analysis_output_token_limit = 32768
+        cfg.analysis_target_message_limit = 20
+        cfg.autonomous_context_messages = 30
     cfg.thread_extract_idle_seconds = 30
     cfg.save()
     BitrixSettings.objects.update(auto_import_deals=False, crm_matching_enabled=True)
@@ -63,6 +72,9 @@ def dispatch_forever():
                 async_task('e2e.laya_quality.seed')
             if control.get('mode') in ('llm','shadow','laya'):
                 AISettings.objects.update(thread_routing_mode=control['mode'])
+            if control.get('verify_qwen'):
+                task_id = async_task('api.tasks.verify_qwen_provider')
+                (settings.E2E_DIR/'qwen-canary-task.json').write_text(json.dumps({'id':task_id}))
             if type(control.get('bump_thread')) is int:
                 from api.models import DialogueThread
                 from django.db.models import F
@@ -82,14 +94,22 @@ def dispatch_forever():
                     continue
             if OutboxEvent.objects.filter(pk=event.id, state='pending').update(state='enqueued'):
                 async_task('api.tasks.run_outbox', event.id)
-        report = {'messages': list(RawMessage.objects.filter(chat_id__startswith='laya-').values('id','chat_id','message_id','content','processed','processing_state')),
+        report = {'messages': list(RawMessage.objects.filter(chat_id__regex=r'^(laya-|qwen-window-)').values('id','chat_id','message_id','content','processed','processing_state')),
                   'routing': list(ThreadRoutingAttempt.objects.values('raw_message_id','outcome','reason_code','scores','latency_ms','model_revision')),
                   # Full request envelopes remain in PostgreSQL and the API.
                   # Polling proof needs results, not repeated native JSON schemas.
-                  'traces': list(MessageProcessingTrace.objects.filter(raw_message__chat_id__startswith='laya-').values('id','raw_message_id','status','error_code','ai_extracted_facts')),
+                  'traces': list(MessageProcessingTrace.objects.filter(raw_message__chat_id__regex=r'^(laya-|qwen-window-)').values('id','raw_message_id','status','error_code','ai_extracted_facts')),
                   'events': list(OutboxEvent.objects.values('id','event_type','state','error_code','payload'))}
         from api.models import ProviderUsage
         report['usage'] = list(ProviderUsage.objects.values('outbox_event_id','operation','input_tokens','output_tokens'))
+        from api.models import Commitment
+        report['commitments'] = list(Commitment.objects.filter(source_message__chat_id__startswith='laya-synthetic-').values('id','responsible_name','commitment_text','status','source_message_id','deadline_at','fulfilled_at','version'))
+        canary = settings.E2E_DIR/'qwen-canary-task.json'
+        if canary.exists():
+            from django_q.models import Task
+            task=Task.objects.filter(pk=json.loads(canary.read_text())['id']).first()
+            if task:
+                (settings.E2E_DIR/'qwen-canary-result.json').write_text(json.dumps({'success':task.success,'result':task.result}, default=str))
         temporary = settings.E2E_DIR / 'laya-proof.tmp'
         temporary.write_text(json.dumps(report, default=str, ensure_ascii=False))
         temporary.replace(settings.E2E_DIR / 'laya-proof.json')

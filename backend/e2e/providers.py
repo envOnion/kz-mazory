@@ -313,10 +313,11 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 return self.respond({'error':'read-only relay refused request'},exc.code)
             except URLError:
                 return self.respond({'error':'read-only relay unavailable'},502)
-        if os.getenv("MAZORY_E2E_REAL_MODEL") == "1" and self.path in ("/api/chat","/api/version","/api/show"):
+        model_paths=("/props","/v1/models","/v1/chat/completions","/apply-template","/tokenize") if os.getenv('MAZORY_E2E_MODEL')=='qwen3.8-27b' else ("/api/chat","/api/version","/api/show")
+        if os.getenv("MAZORY_E2E_REAL_MODEL") == "1" and self.path in model_paths:
             data = json.dumps(body).encode() if self.command == "POST" else None
             try:
-                with urlopen(Request("http://llm-host:11435" + self.path, data=data, headers={"Content-Type":"application/json"}, method=self.command), timeout=180) as result:
+                with urlopen(Request("http://llm-host:11435" + self.path, data=data, headers={"Content-Type":"application/json"}, method=self.command), timeout=1800 if os.getenv('MAZORY_E2E_MODEL')=='qwen3.8-27b' else 180) as result:
                     return self.respond(json.loads(result.read()))
             except HTTPError as exc:
                 return self.respond(json.loads(exc.read()), exc.code)

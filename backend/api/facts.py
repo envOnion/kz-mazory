@@ -3,6 +3,7 @@
 from decimal import Decimal
 from datetime import datetime
 import math
+import re
 from zoneinfo import ZoneInfo
 from django.db import IntegrityError, transaction, connection
 from django.shortcuts import get_object_or_404
@@ -40,8 +41,13 @@ SUPPORTED_CURRENCIES = ("KZT", "USD", "EUR", "RUB")
 
 class EvidenceSchema(serializers.Serializer):
     raw_message_id = serializers.IntegerField(min_value=1)
-    quote = serializers.CharField(max_length=32000)
+    quote = serializers.CharField(max_length=32000, trim_whitespace=False)
     role = serializers.ChoiceField(choices=["request", "promise", "deadline", "fulfillment", "cancellation", "source", "identity", "amount", "date", "contract", "party"])
+
+    def validate_quote(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Требуется непустой исходный текст.")
+        return value
 
 
 class FactSchema(serializers.Serializer):
@@ -92,7 +98,7 @@ class FactSchema(serializers.Serializer):
     promise_message_id = serializers.IntegerField(min_value=1, required=False)
     evidence_messages = EvidenceSchema(many=True, default=list)
     sender_phone = serializers.CharField(max_length=32, allow_blank=True, default="")
-    evidence = serializers.CharField(max_length=32000, allow_blank=False)
+    evidence = serializers.CharField(max_length=32000, allow_blank=False, trim_whitespace=False)
     confidence = serializers.FloatField(min_value=0, max_value=1, default=0)
     uncertainties = serializers.ListField(
         child=serializers.CharField(max_length=255), max_length=20, default=list
@@ -104,6 +110,11 @@ class FactSchema(serializers.Serializer):
             raise serializers.ValidationError(
                 "Уверенность должна быть конечным числом."
             )
+        return value
+
+    def validate_evidence(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Требуется непустой исходный текст.")
         return value
 
     def validate(self, data):
@@ -139,18 +150,56 @@ def json_value(value):
     return value
 
 
+def artifact_subject(value):
+    """Documents/portfolio labels cannot identify a business project."""
+    return bool(re.match(
+        r'^(?:(?:онлайн|актуальн\w*|обновл[её]нн\w*|общ\w*)[-\s]+)*(?:таблиц\w*|файл\w*|ссылк\w*|отч[её]т\w*|портфел\w*|реестр\w*|список\w*|документ\w*|excel|xlsx)\b',
+        value.casefold().strip()))
+
+
+def _same_promise_action(left, right):
+    """Conservative paraphrase matching for delivery artifacts, not whole quotes."""
+    def signature(value):
+        text=normalize_deal_name(value)
+        text=re.sub(r'\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b', ' ', text)
+        artifact='table' if 'таблиц' in text else 'offer' if re.search(r'\bкп\b|коммерческ\w*\s+предлож',text) else None
+        delivery=bool(re.search(r'отправ|переда|высл|вышл|скин',text))
+        preparation=bool(re.search(r'подготов',text))
+        if not artifact or not (delivery or preparation):
+            return None
+        text=re.sub(r'\b(?:отправ\w*|переда\w*|высл\w*|скин\w*|подготов\w*|таблиц\w*|коммерческ\w*|предлож\w*|кп|онлайн|утром|завтра|сегодня|вечером|днем|днём|действующ\w*|год\w*|проект\w*|по|с|со|на|за|в|и|для)\b',' ',text)
+        return artifact, 'delivery' if delivery else 'preparation', set(re.findall(r'\w+',text))
+    a,b=left.get('commitment_text',''),right.get('commitment_text','')
+    # Distinct explicitly timed actions in one original are not one promise.
+    if (left.get('deadline_message_id')==left.get('promise_message_id')
+            and right.get('deadline_message_id')==right.get('promise_message_id')
+            and left.get('deadline_at') and right.get('deadline_at')
+            and str(left['deadline_at'])!=str(right['deadline_at'])):
+        return False
+    if normalize_deal_name(a)==normalize_deal_name(b):
+        return True
+    sa,sb=signature(a),signature(b)
+    if not sa or not sb or sa[:2]!=sb[:2]:
+        return False
+    return bool(sa[2]&sb[2]) and (sa[2]<=sb[2] or sb[2]<=sa[2])
+
+
 def same_commitment_origin(left, right):
     """Compare the actual promise evidence; wording/date changes are proposals."""
     def promises(data):
         return {(item.get("raw_message_id"), " ".join(item.get("quote", "").split())) for item in data.get("evidence_messages", []) if item.get("role") == "promise"}
     a, b = promises(left), promises(right)
+    same_actor = bool(left.get('responsible_name')) and normalize_deal_name(left['responsible_name']) == normalize_deal_name(right.get('responsible_name',''))
+    same_object = (
+        not left.get('object_name') or not right.get('object_name')
+        or normalize_deal_name(left['object_name']).replace('-', ' ') == normalize_deal_name(right['object_name']).replace('-', ' ')
+        or (artifact_subject(left['object_name']) and artifact_subject(right['object_name']))
+    )
+    if not (same_actor and same_object and _same_promise_action(left, right)):
+        return False
     if a and b:
-        if a == b:
-            return True
-        same_actor = normalize_deal_name(left.get('responsible_name','')) == normalize_deal_name(right.get('responsible_name',''))
-        same_object = not left.get('object_name') or not right.get('object_name') or normalize_deal_name(left['object_name']) == normalize_deal_name(right['object_name'])
-        return same_actor and same_object and any(xid==yid and min(len(xquote),len(yquote))>=12 and (xquote in yquote or yquote in xquote) for xid,xquote in a for yid,yquote in b)
-    return bool(left.get("evidence") and " ".join(left["evidence"].split()) == " ".join(right.get("evidence", "").split()))
+        return any(xid==yid and min(len(xquote),len(yquote))>=12 and (xquote in yquote or yquote in xquote) for xid,xquote in a for yid,yquote in b)
+    return bool(left.get("evidence") and left.get('evidence_message_id') == right.get('evidence_message_id') and " ".join(left["evidence"].split()) == " ".join(right.get("evidence", "").split()))
 
 
 def fact_identity(data):

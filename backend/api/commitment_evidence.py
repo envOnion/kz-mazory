@@ -5,6 +5,7 @@ from datetime import datetime, time, timedelta
 from .message_context import source_scope
 from .message_time import EXPORT_HEADER, grounded_dates, source_time, source_zone
 from .providers import ProviderUnavailable
+from .evidence_scope import delivery_action
 
 
 def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, autonomous=None):
@@ -69,6 +70,7 @@ def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, aut
         item["quote"] for item in refs if item["raw_message_id"] == deadline_id
     )
     deadline_text = EXPORT_HEADER.sub("", deadline_text)
+    deadline_text = delivery_action(deadline_text, fact.get('commitment_text',''))
     if autonomous and deadline_id != raw.id and not grounded_dates(deadline_text, date_message):
         initial_text = ' '.join(item['quote'] for item in refs if item['raw_message_id']==raw.id and item['role']=='promise')
         if grounded_dates(initial_text, raw):

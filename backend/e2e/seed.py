@@ -84,6 +84,12 @@ def seed():
         cfg.tokenizer_id=GEMMA_MANIFEST['repo']; cfg.tokenizer_revision=GEMMA_MANIFEST['revision']
         cfg.context_window_tokens=32768; cfg.max_completion_tokens=2048
         cfg.set_chat_api_key('synthetic-e2e-only'); cfg.save()
+        if os.getenv('MAZORY_E2E_MODEL') == 'qwen3.8-27b':
+            from api.context_tokens import QWEN_MANIFEST
+            cfg.chat_model_name='qwen3.8-27b'
+            cfg.tokenizer_id=QWEN_MANIFEST['repo']; cfg.tokenizer_revision=QWEN_MANIFEST['revision']
+            cfg.context_window_tokens=49152; cfg.max_completion_tokens=cfg.analysis_output_token_limit=32768
+            cfg.chat_temperature=0; cfg.save()
     BitrixSettings.objects.create(
         webhook_url="https://localhost/rest/1/fixture/",
         is_active=True,

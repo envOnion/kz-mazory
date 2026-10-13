@@ -109,21 +109,21 @@ def budget(cfg):
     return min(native, cfg.analysis_input_token_limit) if cfg.analysis_input_token_limit else native
 
 
-def row(message):
+def row(message, exact=False):
     source = source_metadata(message)
     return {'raw_message_id': message.id, 'message_id': message.message_id,
-            'source_revision': message.source_revision, 'content': plain_text(message.content),
+            'source_revision': message.source_revision, 'content': message.content if exact else plain_text(message.content),
             'sender_name': source['sender'], 'timestamp': source['sent_at'],
             'received_at': message.received_at.isoformat(), 'source_metadata': source,
             'order_time': (message.timestamp if message.sent_at_known else message.received_at).isoformat(),
             'partial': False}
 
 
-def snapshot(raw, maximum):
+def snapshot(raw, maximum, exact=False):
     qs, _ = history_queryset(raw, maximum, include_following=True)
     messages = list(qs.select_related('config').order_by('order_time', 'id')) + [raw]
     messages.sort(key=lambda m: (m.timestamp if m.sent_at_known else m.received_at, m.id))
-    return [row(message) for message in messages]
+    return [row(message, exact=exact) for message in messages]
 
 
 def source_hash(rows):
@@ -134,7 +134,9 @@ def source_hash(rows):
 def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
     """Select a chronological chunk using complete provider token counts."""
     counter, endpoint = context_runtime(cfg)
-    rows = snapshot(raw, maximum)
+    from .qwen_profile import enabled as qwen_enabled
+    exact = qwen_enabled(cfg)
+    rows = snapshot(raw, maximum, exact=exact)
     digest = source_hash(rows)
     if state.get('source_hash') and state['source_hash'] != digest:
         raise ProviderUnavailable('context_snapshot_mismatch')
@@ -208,11 +210,15 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
         message = payload['messages'][-1]
         import json
         value = json.loads(message['content'])
+        if exact:
+            value['target_original_complete'] = target_text == by_id[raw.id]['content']
         value['analysis_state'] = {'previous_result': prior, 'read_source_ids': previous_source_ids,
                 'reconciliation_page': part_index + 1, 'reconciliation_pages': len(parts),
                 'phase': 'reconcile' if final else 'read',
                 'instruction': 'Это промежуточный результат, не новые доказательства. Сверь его с очередными оригиналами. Обнови связи, переносы сроков, отмены и исполнения; не сохраняй противоречащий прежний статус. Верни единый актуальный результат для целей. Факты требуют точных цитат ранее прочитанных или текущих оригиналов. Не теряй существующие факты без объяснения в теме.'}
         value['analysis_instructions'] += ' Сжимай непродуктивные обсуждения в summary с ID незавершённых просьб и их смыслом. Не перечисляй каждую нейтральную реплику в выходе. Сохраняй целевые сообщения, обещания, запросы, переносы, отмены, исполнения и источники фактов. Верни актуальное состояние previous_result после сверки с оригиналами этой части. Каждый запрос содержит очередную страницу состояния; остальные страницы проверяются отдельно с теми же новыми оригиналами. evidence — буквальная цитата evidence_message_id, не пересказ. Для обязательства обязательно evidence_messages с role=promise и ID исходного обещания; для исполнения — role=fulfillment и fulfillment_message_id; для отмены — role=cancellation и более поздняя буквальная цитата отмены. Готовый и отправленный результат означает fulfilled, не cancelled. Ссылайся deadline_message_id на актуальное изменение срока, а не первоначальный срок. Используй короткие достаточные непрерывные цитаты, не копируй целиком длинные исходники.'
+        if exact:
+            value['analysis_instructions'] = value['analysis_instructions'].replace('Используй короткие достаточные непрерывные цитаты, не копируй целиком длинные исходники.', 'Цитаты evidence/quote — полные неизменённые оригиналы, включая отступы, пустые строки и завершающие пробелы.')
         if final:
             value['analysis_instructions'] += ' Все оригиналы snapshot уже прочитаны по этапам. Выполни окончательное сведение: просьба сама по себе не обещание; проверь авторство, отмены, переносы и исполнения через evidence_messages. Сводка служит указателем, а не доказательством.'
         from .context_tokens import extraction_input
@@ -338,7 +344,9 @@ def validate_evidence(result, raw, trace):
     result['facts'] = normalize_fact_fields(result.get('facts'))
     FactSchema(data=result.get('facts'), many=True).is_valid(raise_exception=True)
     from .pipeline import _source_quote
-    if raw.config_id and raw.config.thread_routing_enabled:
+    from .qwen_profile import MODEL
+    exact = trace.model_version == MODEL
+    if raw.config_id and raw.config.thread_routing_enabled and not exact:
         # Native decoding restricts quotes to the supplied originals, but a
         # model can still pair a literal quote with another supplied numeric ID.
         # Repair only a unique exact match inside this already-read snapshot.
@@ -370,7 +378,7 @@ def validate_evidence(result, raw, trace):
         matched = [ref for ref in fact.get('evidence_messages', [])
                    if ref['raw_message_id'] == fact.get('promise_message_id')
                    and ref['role'] == 'promise'] if fact['fact_type'] == 'commitment' else []
-        if len(matched) == 1:
+        if len(matched) == 1 and not exact:
             # Some models put a narrative summary in the redundant evidence
             # field. Bind it to their own explicit promise citation; that quote
             # still has to match the original read prefix below.
@@ -387,7 +395,7 @@ def validate_evidence(result, raw, trace):
         end = coverage.get(str(ref['raw_message_id']), 0)
         if message is None or not end:
             raise ProviderUnavailable('fact_thread_evidence_missing')
-        _source_quote(ref['quote'], plain_text(message.content)[:end])
+        _source_quote(ref['quote'], (message.content if exact else plain_text(message.content))[:end])
     from .dialogue_threads import normalize_themes
     result['threads'] = normalize_themes(result.get('threads'))
     if not isinstance(result['threads'], list) or any(not isinstance(theme, dict) or 'key' not in theme
@@ -442,7 +450,8 @@ def extract(payload):
             return
         trace.refresh_from_db()
     coverage = trace.context_metadata['full_history']
-    if source_hash(snapshot(trace.raw_message, trace.context_metadata['snapshot_max_id'])) != coverage['source_hash']:
+    from .qwen_profile import MODEL
+    if source_hash(snapshot(trace.raw_message, trace.context_metadata['snapshot_max_id'], exact=trace.model_version == MODEL)) != coverage['source_hash']:
         raise ProviderUnavailable('context_snapshot_mismatch')
     batch_ids = payload.get('batch_ids') or trace.context_metadata.get('batch_message_ids')
     stages = state.get('stage_trace_ids', []) + [trace.id]

@@ -243,7 +243,9 @@ class AIService:
         extraction_limit = extraction_deadline.get()
         deadline = extraction_limit or analytics_deadline.get()
         if extraction_limit and isinstance(timeout, tuple):
-            timeout = (min(timeout[0], 10), min(timeout[1], 180))
+            from .qwen_profile import MODEL
+            request_limit = min(settings.AI_REQUEST_TIMEOUT, 1200) if payload.get('model') == MODEL else 180
+            timeout = (min(timeout[0], 10), min(timeout[1], request_limit))
         if deadline is not None:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -534,6 +536,13 @@ class AIService:
             )
             data = normalize_response(raw_data)
         else:
+            from .qwen_profile import enabled as qwen_enabled, grounded_schema
+            if qwen_enabled(cfg) and '_ollama_format' in payload:
+                payload = dict(payload)
+                schema = payload.pop('_ollama_format')
+                inputs = json.loads(payload['messages'][-1]['content'])
+                payload['response_format'] = {'type': 'json_schema', 'json_schema': {
+                    'name': 'grounded_whatsapp', 'strict': True, 'schema': grounded_schema(schema, inputs)}}
             data = AIService._post(
                 f"{provider_url.rstrip('/')}/chat/completions",
                 payload,
@@ -552,6 +561,7 @@ class AIService:
                 "provider_stop_reason": choice.get("provider_stop_reason"),
                 "output_tokens": usage.get("completion_tokens"),
                 "response_characters": len(content) if isinstance(content, str) else 0,
+                "reasoning_characters": len(choice['message'].get('reasoning_content') or ''),
             }
             if choice.get("finish_reason") == "length":
                 raise ProviderUnavailable(
@@ -572,6 +582,12 @@ class AIService:
                 raise ProviderUnavailable("extraction_facts_missing", diagnostics=diagnostics)
             if not isinstance(result["facts"], list):
                 raise ProviderUnavailable("extraction_facts_type", diagnostics=diagnostics)
+            from .qwen_profile import enabled as qwen_enabled
+            if qwen_enabled(cfg):
+                from jsonschema import Draft202012Validator
+                schema = payload.get('response_format', {}).get('json_schema', {}).get('schema')
+                if schema and not Draft202012Validator(schema).is_valid(result):
+                    raise ProviderUnavailable('invalid_extraction_schema', diagnostics=diagnostics)
             return result, usage, diagnostics
         except (ValueError, KeyError, TypeError, IndexError, AttributeError):
             raise ProviderUnavailable(
@@ -603,6 +619,14 @@ class AIService:
                 },
             ],
         }
+        from .qwen_profile import enabled as qwen_enabled, parameters
+        if qwen_enabled(cfg):
+            payload = parameters(payload)
+            payload['max_tokens'] = min(cfg.max_completion_tokens, 8192)
+            from .context_tokens import context_runtime
+            counter, _ = context_runtime(cfg)
+            if counter.count_payload(payload) + payload['max_tokens'] + cfg.context_safety_tokens > cfg.context_window_tokens:
+                raise ProviderUnavailable('context_budget_exceeded')
         if api_format == ANTHROPIC_MESSAGES:
             request_payload = anthropic_message_payload(
                 payload, default_max_tokens=cfg.max_completion_tokens
@@ -634,7 +658,7 @@ class AIService:
             data = AIService._post(
                 f"{AIService.effective_chat_provider_url(cfg)}/chat/completions",
                 payload,
-                45,
+                600 if qwen_enabled(cfg) else 45,
                 api_format=api_format,
                 operation="chat",
                 api_key=api_key,
@@ -661,11 +685,16 @@ class AIService:
         )
         native = api_format == ANTHROPIC_MESSAGES
         gemma = not native and cfg.chat_model_name == "gemma4:e4b"
+        from .qwen_profile import enabled as qwen_enabled, parameters
+        qwen = not native and qwen_enabled(cfg)
+        if qwen:
+            payload = parameters(payload)
+            payload['max_tokens'] = min(cfg.max_completion_tokens, 8192)
         # Gemma's complete rendered conversation is counted by its pinned native
         # tokenizer below. UTF-8 bytes are not tokens (especially for Russian).
         available = (
             cfg.context_window_tokens
-            - cfg.max_completion_tokens
+            - payload.get('max_tokens', cfg.max_completion_tokens)
             - cfg.context_safety_tokens
         )
         if native:
@@ -681,6 +710,11 @@ class AIService:
                 raise ProviderUnavailable('context_budget_exceeded', diagnostics={
                     'input_tokens': counted['input_tokens'], 'available_input_tokens': available,
                 })
+        elif qwen:
+            from .context_tokens import context_runtime
+            counter, _ = context_runtime(cfg)
+            if counter.count_payload(payload) > available:
+                raise ProviderUnavailable('context_budget_exceeded')
         elif not gemma and len(json.dumps(payload, ensure_ascii=False).encode()) + 4096 > available:
             raise ProviderUnavailable("context_budget_use_filters")
         remaining = deadline - time.monotonic()
@@ -701,7 +735,7 @@ class AIService:
                 (AIService.effective_chat_provider_url(cfg)[:-3] + "/api/chat") if gemma else f"{AIService.effective_chat_provider_url(cfg)}"
                 + ("/v1/messages" if native else "/chat/completions"),
                 payload,
-                min(45, remaining),
+                min(600 if qwen else 45, remaining),
                 api_format=api_format,
                 operation="analytics",
                 headers=anthropic_headers(key) if native else None,

@@ -12,7 +12,7 @@ def get_redis_client():
     port = getattr(settings, 'REDIS_PORT', 6379)
     return redis.Redis(host=host, port=port, db=0, socket_timeout=5)
 
-def normalize_deal_name(raw_name: str) -> str:
+def normalize_deal_name(raw_name: str, *, max_length: int | None = 255) -> str:
     """
     Нормализует название сделки/объекта для строгой дедупликации:
     - Выполняет Unicode NFKC/casefold без потери казахских букв
@@ -35,7 +35,7 @@ def normalize_deal_name(raw_name: str) -> str:
     text = re.sub(r'[^\w\-]', ' ', text, flags=re.UNICODE).replace('_', ' ')
     # Схлопывание пробелов
     text = re.sub(r'\s+', ' ', text).strip()
-    return text[:255]
+    return text if max_length is None else text[:max_length]
 
 @contextmanager
 def get_deal_lock(normalized_name: str, timeout: int = 30):

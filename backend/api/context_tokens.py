@@ -1,5 +1,6 @@
 """Provider-specific token counting and verified routing for extraction."""
 
+import copy
 import hashlib
 import json
 import re
@@ -100,6 +101,38 @@ class QwenCounter(NativeCounter):
         rendered = self.template.render(
             messages=messages, add_generation_prompt=True, enable_thinking=False,
         )
+        return self.count_text(rendered)
+
+
+class QwenLlamaCounter(NativeCounter):
+    strategy = "qwen38_llamacpp_medium_local_manifest"
+
+    def __init__(self):
+        super().__init__(QWEN_MANIFEST)
+
+    def count_payload(self, payload):
+        messages = copy.deepcopy(payload.get("messages", []))
+        if (payload.get("reasoning_effort") != "medium"
+                or payload.get("chat_template_kwargs") != {"enable_thinking": True, "reasoning_effort": "medium"}
+                or not messages or any(not isinstance(row.get("content"), str)
+                    and not (row.get('role') == 'assistant' and row.get('tool_calls') and row.get('content') is None)
+                    for row in messages)):
+            raise ProviderUnavailable("context_token_count_unavailable")
+        # llama.cpp parses OpenAI's JSON argument string into a mapping before
+        # applying the model template, whose tool serializer iterates items.
+        for message in messages:
+            for call in message.get('tool_calls', []):
+                function = call.get('function', call)
+                arguments = function.get('arguments')
+                if isinstance(arguments, str):
+                    try:
+                        function['arguments'] = json.loads(arguments)
+                    except ValueError as exc:
+                        raise ProviderUnavailable('context_token_count_unavailable') from exc
+                if not isinstance(function.get('arguments'), dict):
+                    raise ProviderUnavailable('context_token_count_unavailable')
+        rendered = self.template.render(messages=messages, tools=payload.get("tools"),
+                                        add_generation_prompt=True, enable_thinking=True, reasoning_effort="medium")
         return self.count_text(rendered)
 
 
@@ -233,6 +266,39 @@ def gemma_counter():
         raise ProviderUnavailable("context_tokenizer_unavailable") from exc
 
 
+@lru_cache(maxsize=1)
+def qwen_llama_counter():
+    try:
+        return QwenLlamaCounter()
+    except (OSError, ValueError, KeyError) as exc:
+        raise ProviderUnavailable("context_tokenizer_unavailable") from exc
+
+
+def qwen_llama_runtime(cfg):
+    from .ai_service import AIService
+    from .qwen_profile import verify_metadata, PROFILE
+
+    if cfg.tokenizer_id != QWEN_MANIFEST["repo"] or cfg.tokenizer_revision != QWEN_MANIFEST["revision"]:
+        raise ProviderUnavailable("context_tokenizer_unavailable")
+    base = AIService.effective_chat_provider_url(cfg)
+    if not base.endswith("/v1"):
+        raise ProviderUnavailable("context_provider_unsupported")
+    key = "qwen-context:" + payload_hash({"url": base, "credential": cfg.chat_api_key_encrypted, "profile": PROFILE})
+    endpoint = cache.get(key)
+    if endpoint is None:
+        credential = AIService._credential(cfg)
+        props = AIService._post(base[:-3] + "/props", {}, (5, 15), api_key=credential, operation="model_metadata", http_method="GET")
+        models = AIService._post(base + "/models", {}, (5, 15), api_key=credential, operation="model_metadata", http_method="GET")
+        window = verify_metadata(props, models, cfg.context_window_tokens)
+        endpoint = {"tag": "llamacpp", "transport": "llamacpp", "context_length": window,
+                    "supported_parameters": ["max_tokens", "response_format", "reasoning_effort"],
+                    "api_format": "openai_compatible", "effective_provider_url": base}
+        cache.set(key, endpoint, timeout=300)
+    if endpoint["context_length"] < cfg.context_window_tokens:
+        raise ProviderUnavailable("context_model_window_unavailable")
+    return qwen_llama_counter(), endpoint
+
+
 def ollama_context_runtime(cfg):
     """Verify the installed model in the worker before trusting local counts."""
     from .ai_service import AIService
@@ -320,6 +386,9 @@ def context_runtime(cfg):
         }
     if api_format != "openai_compatible":
         raise ProviderUnavailable("context_provider_unsupported")
+    from .qwen_profile import enabled as qwen_enabled
+    if qwen_enabled(cfg):
+        return qwen_llama_runtime(cfg)
     if cfg.chat_model_name in QWEN_MANIFEST["models"] + GEMMA_MANIFEST["models"] or cfg.tokenizer_id in (QWEN_MANIFEST["repo"], GEMMA_MANIFEST["repo"]):
         return ollama_context_runtime(cfg)
     if (
@@ -468,4 +537,8 @@ def extraction_payload(
             payload["_ollama_num_ctx"] = cfg.context_window_tokens
     if "response_format" in endpoint.get("supported_parameters", []):
         payload["response_format"] = {"type": "json_object"}
+    if endpoint.get("transport") == "llamacpp":
+        from .qwen_profile import parameters, EVIDENCE_RULES
+        payload = parameters(payload)
+        payload["messages"][0]["content"] += EVIDENCE_RULES
     return payload

@@ -24,6 +24,7 @@ from .models import (
 )
 from .providers import ProviderUnavailable
 from .security import Conflict
+from .evidence_scope import delivery_action, statements
 
 logger = logging.getLogger(__name__)
 APPROXIMATE = re.compile(r"\b(около|порядка|примерно|почти|практически|ориентировочно)\b", re.I)
@@ -68,7 +69,7 @@ def _project_label_quoted(label, text):
     if label.isdecimal():
         # A payment amount equal to a numeric project label is not identity evidence.
         return bool(re.search(r"\b(?:объект\w*|проект\w*|жк|бц|мжд|мкр)\s*(?:№\s*)?" + re.escape(label) + r"(?![\w.,])", text, re.I))
-    return bool(re.search(r"(?<!\w)" + re.escape(label) + r"(?!\w)", normalize_deal_name(text)))
+    return bool(re.search(r"(?<!\w)" + re.escape(label) + r"(?!\w)", normalize_deal_name(text, max_length=None)))
 
 
 def _evidence(candidate):
@@ -164,7 +165,7 @@ def _resolve_project(candidate, data):
 
 def _validate(candidate, data, primary, text):
     company = normalize_deal_name(data.get("company_name", ""))
-    if company and not re.search(r"(?<!\w)" + re.escape(company) + r"(?!\w)", normalize_deal_name(text)):
+    if company and not re.search(r"(?<!\w)" + re.escape(company) + r"(?!\w)", normalize_deal_name(text, max_length=None)):
         data["company_name"], data["party_role"] = "", "unknown"
         candidate._discarded_fields = {"company_name": "Компания не подтверждена цитатами; основной факт проверен отдельно."}
     role_patterns = {"customer": r"заказчик", "supplier": r"поставщик", "contractor": r"подрядчик", "designer": r"проектировщик|проектн(?:ая|ой)\s+организаци", "payer": r"оплата\s+от|плательщик"}
@@ -248,7 +249,14 @@ def _validate(candidate, data, primary, text):
             return "apply"
         if data["direction"] == "income" and re.search(r"(?:оплатили|перечислили|перевели|оплатил)\s+(?:поставщик|подрядчик)", text, re.I):
             raise Deferred("direction_conflict", "Перечисление поставщику не является поступлением от клиента.")
-        if FUTURE.search(text) or not ACTUAL.search(text):
+        # Full original evidence may also discuss a different future payment.
+        # Require a completed monetary assertion for this amount in one sentence,
+        # rather than rejecting a receipt because another sentence has a plan.
+        receipt_statements = [statement for statement in statements(text)
+            if ACTUAL.search(statement) and not FUTURE.search(statement)
+            and not statement.rstrip().endswith('?')
+            and ('amount' not in data or _money_matches(data['amount'], statement))]
+        if not receipt_statements:
             raise Deferred("plan_not_actual", "Нет сообщения о фактически выполненном движении.", True)
         if re.search(r"на\s+сч[её]т[еу]|остаток|задолжен|план\s+сбор", text, re.I) and not re.search(r"поступил|зачислен|перечислил", text, re.I):
             raise Deferred("balance_not_payment", "Остаток/долг/план не является новым платежом.", True)
@@ -304,18 +312,18 @@ def _validate(candidate, data, primary, text):
                 raise Deferred("ambiguous_commitment", "Изменение не связано с исходным поручением.")
             if data.get("base_commitment_version") != existing.version:
                 raise Deferred("commitment_version_conflict", "Контекст обязательства устарел; требуется новая обработка.")
+            fulfillment_texts = [delivery_action(ref['quote'], existing.commitment_text)
+                for ref in data.get('evidence_messages', []) if ref['role']=='fulfillment']
             if data["commitment_status"] == "cancelled":
                 cancellation = [ref for ref in data.get("evidence_messages", []) if ref["role"] == "cancellation"]
                 if not cancellation or not any(re.search(r"отмен|не\s+нужно|не\s+требуется", ref["quote"], re.I) for ref in cancellation):
                     raise Deferred("cancellation_unproven", "Нет сообщения об отмене данного действия.")
-            elif data["commitment_status"] == "fulfilled" and any(re.search(r"частично|не\s+все|только\s+часть", ref["quote"], re.I) for ref in data.get("evidence_messages", []) if ref["role"] == "fulfillment"):
+            elif data["commitment_status"] == "fulfilled" and any(re.search(r"частично|не\s+все|только\s+часть", text, re.I) for text in fulfillment_texts):
                 raise Deferred("partial_execution", "Частичное выполнение не закрывает все исходное обязательство.")
-            elif data["commitment_status"] == "fulfilled" and any(re.search(r"не\s+(?:выполн|готов|найден|отправ|передан|получ|сделал|сделано|закрыт|заверш|поставлен|доставлен|провед)|не\s+удалось|еще\s+(?:ищем|ждем|ждём)|ожидаем", ref["quote"], re.I) for ref in data.get("evidence_messages", []) if ref["role"] == "fulfillment"):
+            elif data["commitment_status"] == "fulfilled" and any(re.search(r"не\s+(?:выполн|готов|найден|отправ|передан|получ|сделал|сделано|закрыт|заверш|поставлен|доставлен|провед)|не\s+удалось|еще\s+(?:ищем|ждем|ждём)|ожидаем", text, re.I) for text in fulfillment_texts):
                 raise Deferred("fulfillment_unproven", "Сообщение отрицает или еще ожидает выполнение; закрытие не доказано.")
-            elif data["commitment_status"] == "fulfilled" and not any(re.search(r"выполн|готов|найден|отправ|передан|получ|сделал|сделано|закрыт|заверш|поставлен|доставлен|провед", ref["quote"], re.I) for ref in data.get("evidence_messages", []) if ref["role"] == "fulfillment"):
+            elif data["commitment_status"] == "fulfilled" and not any(re.search(r"выполн|готов|найден|отправ|передан|получ|сделал|сделано|закрыт|заверш|поставлен|доставлен|провед", text, re.I) for text in fulfillment_texts):
                 raise Deferred("fulfillment_unproven", "Нет явного сообщения о результате конкретного действия.")
-            elif data["commitment_status"] == "fulfilled" and any(re.search(r"частично|не\s+все|только\s+часть", ref["quote"], re.I) for ref in data.get("evidence_messages", []) if ref["role"] == "fulfillment"):
-                raise Deferred("partial_execution", "Частичное выполнение не закрывает все исходное обязательство.")
             elif data["commitment_status"] == "pending":
                 deadlines = [ref for ref in data.get("evidence_messages", []) if ref["role"] == "deadline" and ref["raw_message_id"] != existing.source_message_id]
                 if not deadlines or not data.get("deadline_at"):
@@ -430,7 +438,7 @@ def decide(candidate_id, *, preview=False):
                 enqueue_crm_match(candidate.id)
                 candidate.refresh_from_db()
             mode = _validate(candidate, data, primary, text)
-            if candidate.fact_type == "project" and not candidate.project_id and candidate.crm_match_state in ("queued", "not_requested", "error"):
+            if not candidate.project_id and data.get('object_name') and candidate.crm_match_state in ("queued", "not_requested", "error"):
                 raise Deferred("crm_search_pending", "Для исключения дубля объекта ожидается завершение поиска CRM.")
         except Deferred as exc:
             outcome = "rejected" if exc.rejected else "deferred"

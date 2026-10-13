@@ -52,7 +52,9 @@ def field_schema(field):
         shape = {"type": "number"}
     else:
         shape = {"type": "string"}
-    if field.allow_null:
+    if field.allow_null or (isinstance(field, serializers.DecimalField) and not field.required):
+        # The business normalizer already treats optional null as unknown.
+        # Let native decoding say unknown rather than force a guessed number.
         shape = {"anyOf": [shape, {"type": "null"}]}
     return shape
 
@@ -88,6 +90,8 @@ def extraction_schema(input_data=None):
         variant["required"] = sorted(set(variant["required"]) | required[kind])
         if kind == "payment":
             known = copy.deepcopy(variant)
+            if 'anyOf' in known['properties']['amount']:
+                known['properties']['amount'] = known['properties']['amount']['anyOf'][0]
             known["properties"]["amount_precision"]["enum"] = ["exact", "approximate", "range"]
             known["required"] = sorted(set(known["required"]) | {"amount"})
             variants.append(known)
