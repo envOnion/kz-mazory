@@ -439,6 +439,14 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 return self.respond({"result": state.get('deals', {}).get(ident, {"ID": ident, "TITLE": "БЦ Север" if ident == "101" else "БЦ Южный"})})
             if self.path.endswith("crm.timeline.comment.list.json"):
                 return self.respond({"result": [row for row in state.get("comments", []) if str(row["ENTITY_ID"]) == str(body["filter"]["ENTITY_ID"])]})
+            if self.path.endswith("crm.timeline.comment.delete.json"):
+                state['comments'] = [row for row in state.get('comments', []) if str(row['ID']) != str(body['id'])]
+                self.save_control(state)
+                return self.respond({'result': True})
+            if self.path.endswith("crm.deal.delete.json"):
+                state.get('deals', {}).pop(str(body['id']), None)
+                self.save_control(state)
+                return self.respond({'result': True})
             if self.path.endswith("crm.timeline.comment.add.json"):
                 import fcntl
                 # Provider state is intentionally reset between browser scenarios;
@@ -504,6 +512,8 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 ]
                 filters = body.get("filter", {})
                 rows += state.get('clarification_catalog', [])
+                if '=ID' in filters:
+                    rows = [row for row in [*rows, *state.get('deals', {}).values()] if str(row['ID']) == str(filters['=ID'])]
                 if "=ORIGINATOR_ID" in filters:
                     rows = [row for row in state.get('deals', {}).values() if row.get('ORIGINATOR_ID') == filters['=ORIGINATOR_ID'] and row.get('ORIGIN_ID') == filters.get('=ORIGIN_ID')]
                 for name, value in filters.items():

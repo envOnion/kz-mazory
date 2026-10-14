@@ -231,6 +231,9 @@ class BitrixService:
         webhook_url = effective_webhook_url(cfg)
         if not cfg.is_active or not webhook_url:
             raise ProviderUnavailable("crm_disabled")
+        from .bitrix_journal import WRITES, mutation_call
+        if method in WRITES:
+            return mutation_call(method, params or {}, lambda: BitrixService._request(webhook_url, method, params))
         return BitrixService._request(webhook_url, method, params)
 
     @staticmethod
@@ -923,33 +926,26 @@ class BitrixService:
                 Project.objects.filter(pk=project.id).update(
                     bitrix_id=project.bitrix_id
                 )
-        if not project.bitrix_id:
-            if not cfg.auto_create_deals:
-                raise ProviderUnavailable("crm_creation_disabled")
-            result = BitrixService.call("crm.deal.add", {"fields": fields})
-            external = str(result["result"])
-            action = "create"
-        else:
-            external = project.bitrix_id
-            result = BitrixService.call(
-                "crm.deal.update", {"id": external, "fields": fields}
-            )
-            action = "update"
+        from .bitrix_journal import project_context
+        with project_context(project.id, f"approved_revision:{version}"):
+            if not project.bitrix_id:
+                if not cfg.auto_create_deals:
+                    raise ProviderUnavailable("crm_creation_disabled")
+                result = BitrixService.call("crm.deal.add", {"fields": fields})
+                external = str(result["result"])
+            else:
+                external = project.bitrix_id
+                result = BitrixService.call(
+                    "crm.deal.update", {"id": external, "fields": fields}
+                )
         with transaction.atomic():
             Project.objects.filter(pk=project.id, version=version).update(
                 bitrix_id=external,
                 needs_bitrix_sync=False,
                 last_bitrix_synced_at=timezone.now(),
             )
-            BitrixDealChangeLog.objects.create(
-                project=project,
-                bitrix_deal_id=external,
-                action=action,
-                payload=fields,
-                response_data={"ok": True},
-                status="success",
-                triggered_by=f"approved_revision:{version}",
-            )
+            # Provider mutations already have durable receipts in the shared
+            # journal, including when this local transaction is rolled back.
 
     @staticmethod
     def propose_import(payload):

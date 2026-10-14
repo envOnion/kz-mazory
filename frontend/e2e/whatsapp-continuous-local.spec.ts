@@ -9,6 +9,9 @@ import type { AutonomousOverview } from '../src/types/autonomous'
 const dir = process.env.MAZORY_E2E_DIR!
 test.skip(process.env.MAZORY_E2E_REAL_MODEL === '1', 'Portable isolated external provider profile required')
 interface Proof {
+  journal_fixture: { success: boolean; result: { deal_id: string; comment_id: string; partial_delivery_id: number } } | null
+  journal_rebuild: { success: boolean; result: { confirmed: number; unavailable: number; skipped: number } } | null
+  journal: { id: number; object_type: string; external_id: string; method: string; status: string; journal_key: string; delivery_id: number | null; reconstructed: boolean; payload: { fields?: { OPPORTUNITY?: string } }; created_at: string }[]
   topic_labels: { original_topic: string; display_topic: string }[]
   control_nonce: string | null
   messages: { id: number; message_id: string; processed: boolean; processing_state: string }[]
@@ -83,6 +86,8 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   await expect.poll(() => proof().events.some(row => row.error_code === 'crm_readback_mismatch')).toBe(true)
   expect(proof().deliveries.find(row => row.patch.OPPORTUNITY === '25000000.00')?.state).toBe('pending')
   expect(Object.values(provider().deals || {}).find(row => row.TITLE === 'БЦ Восток')?.OPPORTUNITY).toBeUndefined()
+  // Provider acknowledgement survives the business transaction's rollback.
+  expect(proof().journal.some(row => row.method === 'crm.deal.update' && row.status === 'accepted' && row.payload.fields?.OPPORTUNITY === '25000000.00')).toBe(true)
   write(join(dir, 'provider-state.json'), { ...provider(), crm_discard_write: false })
   await control({ action: 'retry' })
   await expect.poll(() => Object.values(provider().deals || {}).find(row => row.TITLE === 'БЦ Восток')?.OPPORTUNITY).toBe('25000000.00')
@@ -141,6 +146,9 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   expect(matchingTasks[0]!.deadline).toBeFalsy()
   expect(matchingTasks[0]!.responsibleId).toBe('7')
   expect(matchingTasks[0]!.ufCrmTask).toEqual(['D_101'])
+  expect(proof().journal.some(row => row.method === 'tasks.task.add' && row.external_id === task.id)).toBe(true)
+  expect(proof().journal.some(row => row.method === 'tasks.task.update' && row.external_id === task.id)).toBe(true)
+  expect(proof().journal.every(row => !row.method.endsWith('.get') && !row.method.endsWith('.list'))).toBe(true)
   await control({ action: 'bounded' })
   await expect.poll(() => proof().bounded_traces.some(trace => trace.status === 'success')).toBe(true)
   expect(proof().bounded_traces.length).toBeGreaterThan(1)
@@ -254,6 +262,46 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   await page.getByRole('button', { name: 'Отчеты по WhatsApp', exact: true }).click()
   await expect(page.getByText('Автоматическая обработка WhatsApp включена', { exact: true })).toBeVisible()
   await page.screenshot({ path: join(dir, 'continuous-delivery.png'), fullPage: true })
+  await page.goto('/admin/login/?next=/admin/api/bitrixdealchangelog/')
+  await page.getByLabel('Имя пользователя').fill('79990000001')
+  await page.getByLabel('Пароль').fill('local-e2e-only')
+  await page.getByRole('button', {name:/Войти/}).click()
+  await expect(page.locator('#result_list')).toContainText('crm.deal.add')
+  await expect(page.locator('#result_list')).toContainText('tasks.task.add')
+  await control({action:'journal_prepare'})
+  await expect.poll(() => proof().journal_fixture?.success).toBe(true)
+  const fixture = proof().journal_fixture!.result
+  const mutations = () => readFileSync(join(dir,'crm-requests.jsonl'),'utf8').trim().split('\n').map(line => JSON.parse(line) as {method:string}).filter(row => /\.(add|update|delete|complete|defer)\.json$/.test(row.method)).length
+  const beforeHistoryMutations = mutations()
+  const beforeHistoryWrites = provider().writes?.length
+  const beforeHistoryTasks = Object.keys(provider().tasks || {}).length
+  const beforeHistoryComments = provider().comments?.length
+  await control({action:'journal_history'})
+  await expect.poll(() => proof().journal_rebuild?.success).toBe(true)
+  // Earlier full-suite cases reset the provider, so their historical objects
+  // can be unavailable. Current objects must be positively verified.
+  expect(proof().journal.some(row => row.reconstructed && row.object_type === 'task' && row.external_id === task.id && row.status === 'confirmed')).toBe(true)
+  expect(proof().journal.some(row => row.reconstructed && row.object_type === 'timeline' && row.status === 'confirmed')).toBe(true)
+  expect(proof().journal.some(row => row.reconstructed && row.delivery_id === fixture.partial_delivery_id)).toBe(true)
+  expect(proof().journal.some(row => row.reconstructed && row.method === 'crm.deal.delete' && row.external_id === fixture.deal_id && row.status === 'confirmed')).toBe(true)
+  expect(proof().journal.some(row => row.reconstructed && row.method === 'crm.timeline.comment.delete' && row.external_id === fixture.comment_id && row.status === 'confirmed')).toBe(true)
+  const recovered = proof().journal.length
+  await control({action:'journal_retry'})
+  await expect.poll(() => proof().journal_rebuild?.result.confirmed).toBe(2)
+  expect(proof().journal.length).toBe(recovered)
+  await control({action:'journal_history_again'})
+  await expect.poll(() => proof().journal_rebuild?.result.confirmed).toBe(0)
+  expect(proof().journal.length).toBe(recovered)
+  expect(provider().writes?.length).toBe(beforeHistoryWrites)
+  expect(Object.keys(provider().tasks || {})).toHaveLength(beforeHistoryTasks)
+  expect(provider().comments?.length).toBe(beforeHistoryComments)
+  expect(mutations()).toBe(beforeHistoryMutations)
+  await page.reload()
+  await expect(page.locator('#result_list')).toContainText('Восстановленная доставка')
+  const taskLink=page.locator(`#result_list a[href$="/tasks/task/view/${task.id}/"]`).first()
+  await expect(taskLink).toBeVisible()
+  await expect(taskLink).toHaveAttribute('href',new RegExp(`/company/personal/user/7/tasks/task/view/${task.id}/$`))
+  await page.screenshot({path:join(dir,'bitrix-journal-history.png'),fullPage:true})
 })
 
 test('continuous reconciliation restores lost thread extraction without competing full-history jobs', async ({ request }) => {

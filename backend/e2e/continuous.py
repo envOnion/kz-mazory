@@ -93,6 +93,20 @@ def update():
                     event.save()
             if control['action'] == 'review_next':
                 (settings.E2E_DIR/'continuous-review.json').write_text(json.dumps({'message_id':control['message_id']}))
+            if control['action'] == 'journal_prepare':
+                from django_q.tasks import async_task
+                task_id=async_task('e2e.continuous.prepare_journal_history')
+                (settings.E2E_DIR/'journal-fixture-task.json').write_text(json.dumps({'id':task_id}))
+            if control['action'] in ('journal_history', 'journal_history_again', 'journal_retry'):
+                from django_q.tasks import async_task
+                from api.models import BitrixDealChangeLog
+                if control['action'] == 'journal_history':
+                    # Recreate the pre-upgrade gap in this isolated database.
+                    BitrixDealChangeLog.objects.filter(journal_key__startswith='request:').delete()
+                if control['action'] == 'journal_retry':
+                    BitrixDealChangeLog.objects.filter(journal_key__startswith='history-audit:').update(status='unavailable')
+                task_id=async_task('api.tasks.rebuild_bitrix_journal')
+                (settings.E2E_DIR/'journal-rebuild-task.json').write_text(json.dumps({'id':task_id}))
             if control['action'] == 'evidence_source':
                 source=WhatsAppConfig.objects.first()
                 WhatsAppConfig.objects.get_or_create(group_jid=control['group'],defaults={'team_id':source.team_id,'name':'Evidence boundary','snapshot':{'timezone':'UTC+03:00'}})
@@ -148,7 +162,13 @@ def update():
     proof['periodic']=json.loads(periodic.read_text()) if periodic.exists() else None
     from api.models import DialogueThread
     proof['multi_threads']=list(DialogueThread.objects.filter(topic='Разные объекты одного отчёта').values('id','project_id'))
-    from api.models import MessageProcessingTrace
+    from api.models import MessageProcessingTrace, BitrixDealChangeLog
+    proof['journal']=list(BitrixDealChangeLog.objects.values('id','object_type','external_id','method','status','journal_key','delivery_id','reconstructed','payload','created_at'))
+    from django_q.models import Task
+    journal_task=settings.E2E_DIR/'journal-rebuild-task.json'
+    proof['journal_rebuild']=Task.objects.filter(pk=json.loads(journal_task.read_text())['id']).values('success','result').first() if journal_task.exists() else None
+    journal_fixture=settings.E2E_DIR/'journal-fixture-task.json'
+    proof['journal_fixture']=Task.objects.filter(pk=json.loads(journal_fixture.read_text())['id']).values('success','result').first() if journal_fixture.exists() else None
     proof['topic_labels']=[row for t in MessageProcessingTrace.objects.filter(raw_message__message_id__in=['continuous-long-label','continuous-focused-long-label']) for row in t.context_metadata.get('topic_label_bounds', [])]
     proof['evidence_links']=[{'message_id':t.raw_message.message_id,'status':t.status,'error_code':t.error_code,'full_history_policy':t.context_metadata.get('full_history_policy','missing'),'repairs':t.context_metadata.get('schema_repairs',[]),'ranges':t.context_metadata.get('evidence_ranges',{})} for t in MessageProcessingTrace.objects.filter(raw_message__message_id__in=['continuous-context-evidence','continuous-unavailable-evidence']).select_related('raw_message')]
     proof['bounded_traces'] = [{'id':t.id,'status':t.status,'error_code':t.error_code,
@@ -157,3 +177,22 @@ def update():
     temporary = settings.E2E_DIR/'continuous-proof.tmp'
     temporary.write_text(json.dumps(proof,default=str))
     temporary.replace(settings.E2E_DIR/'continuous-proof.json')
+
+
+def prepare_journal_history():
+    """Real isolated provider operations followed by historical audit evidence."""
+    from api.bitrix_service import BitrixService
+    from api.models import AuditEvent
+    delivery=CrmDelivery.objects.filter(state='delivered',external_object_link__object_type='deal').select_related('fact_event__project','external_object_link').last()
+    project=delivery.fact_event.project
+    parent=delivery.external_object_link.external_id
+    external=str(BitrixService.call('crm.deal.add',{'fields':{'TITLE':'Journal removal fixture'}})['result'])
+    comment=str(BitrixService.call('crm.timeline.comment.add',{'fields':{'ENTITY_ID':parent,'ENTITY_TYPE':'deal','COMMENT':'Journal correction fixture'}})['result'])
+    BitrixService.call('crm.timeline.comment.delete',{'id':comment})
+    BitrixService.call('crm.deal.delete',{'id':external})
+    assert not BitrixService.call('crm.deal.list',{'filter':{'=ID':external}})['result']
+    assert not any(str(row['ID'])==comment for row in BitrixService.call('crm.timeline.comment.list',{'filter':{'ENTITY_ID':parent,'ENTITY_TYPE':'deal'}})['result'])
+    AuditEvent.objects.create(target_type='Project',target_id=project.id,action='source_review_crm_correction',before_after={'removed_deal':external,'removed_comment':comment,'external_deal':parent,'readback_verified':True})
+    # A real delivered command whose unsupported stage left a retryable state.
+    CrmDelivery.objects.filter(pk=delivery.id).update(state='partial',error_code='crm_stage_mapping_missing')
+    return {'deal_id':external,'comment_id':comment,'partial_delivery_id':delivery.id}

@@ -1031,10 +1031,17 @@ class BitrixDealChangeLog(TimestampedModel):
     ACTION_CHOICES = [
         ("create", "Создание сделки (crm.deal.add)"),
         ("update", "Обновление сделки (crm.deal.update)"),
+        ("add", "Создание"), ("change", "Изменение"),
+        ("delete", "Удаление"), ("complete", "Завершение задачи"),
+        ("defer", "Отложена задача"), ("restored", "Восстановленная доставка"),
     ]
     STATUS_CHOICES = [
         ("success", "Успешно"),
         ("error", "Ошибка"),
+        ("sending", "Отправляется"), ("accepted", "Bitrix принял запрос"),
+        ("unknown", "Результат отправки неизвестен"),
+        ("confirmed", "Историческое событие проверено чтением"),
+        ("unavailable", "Исторический объект недоступен для проверки"),
     ]
 
     project = models.ForeignKey(
@@ -1068,6 +1075,15 @@ class BitrixDealChangeLog(TimestampedModel):
     triggered_by = models.CharField(
         "Инициатор / Источник", max_length=128, default="system", blank=True
     )
+    object_type = models.CharField("Тип объекта", max_length=16, default="deal")
+    external_id = models.CharField("ID объекта Bitrix", max_length=64, blank=True, default="")
+    method = models.CharField("Метод Bitrix", max_length=64, blank=True, default="")
+    journal_key = models.CharField(max_length=128, unique=True, null=True, blank=True)
+    # Scalar provenance avoids waiting on locked project/delivery rows while
+    # the independent audit connection persists an acknowledged remote write.
+    source_project_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
+    delivery_id = models.PositiveBigIntegerField(null=True, blank=True, db_index=True)
+    reconstructed = models.BooleanField("Восстановлено из истории", default=False)
 
     class Meta:
         verbose_name = "Лог изменения сделки Bitrix24"

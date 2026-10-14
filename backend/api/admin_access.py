@@ -43,7 +43,11 @@ class ScopedReadOnlyAdmin(ModelAdmin):
             return qs.filter(raw_message__in=access.messages_for(user))
         if name == "Commitment":
             return qs.filter(pk__in=access.commitments_for(user))
-        if name in ("FinancialRecord", "BusinessEvent", "BitrixDealChangeLog"):
+        if name == 'BitrixDealChangeLog':
+            from django.db.models import Q
+            return qs.filter(Q(project__in=access.projects_for(user)) |
+                             Q(source_project_id__in=access.projects_for(user).values('id')))
+        if name in ("FinancialRecord", "BusinessEvent"):
             return qs.filter(project__in=access.projects_for(user))
         return qs.none()
 

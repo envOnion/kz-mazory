@@ -1185,6 +1185,7 @@ class BitrixSettingsAdmin(IntegrationAdmin):
 class BitrixDealChangeLogAdmin(ScopedReadOnlyAdmin):
     list_display = (
         "created_at_fmt",
+        "object_type", "method", "reconstructed",
         "bitrix_deal_link",
         "project_link",
         "action_badge",
@@ -1193,8 +1194,8 @@ class BitrixDealChangeLogAdmin(ScopedReadOnlyAdmin):
         "duration_fmt",
         "triggered_by",
     )
-    list_filter = ("status", "action", "created_at")
-    search_fields = ("bitrix_deal_id", "project__name", "error_message", "triggered_by")
+    list_filter = ("status", "object_type", "reconstructed", "action", "created_at")
+    search_fields = ("bitrix_deal_id", "external_id", "method", "project__name", "error_message", "triggered_by")
     readonly_fields = (
         "project",
         "bitrix_deal_id",
@@ -1207,6 +1208,7 @@ class BitrixDealChangeLogAdmin(ScopedReadOnlyAdmin):
         "formatted_payload",
         "formatted_response",
         "changed_fields",
+        "object_type", "external_id", "method", "delivery_id", "source_project_id", "reconstructed", "journal_key",
     )
     fields = (
         "created_at",
@@ -1219,6 +1221,7 @@ class BitrixDealChangeLogAdmin(ScopedReadOnlyAdmin):
         "error_message",
         "formatted_payload",
         "formatted_response",
+        "object_type", "external_id", "method", "delivery_id", "source_project_id", "reconstructed",
     )
 
     def has_add_permission(self, request):
@@ -1230,33 +1233,44 @@ class BitrixDealChangeLogAdmin(ScopedReadOnlyAdmin):
     def created_at_fmt(self, obj):
         return obj.created_at.strftime("%d.%m.%Y %H:%M:%S") if obj.created_at else "—"
 
-    created_at_fmt.short_description = "Время отправки"
+    created_at_fmt.short_description = "Время события"
 
     def bitrix_deal_link(self, obj):
-        if obj.bitrix_deal_id:
+        ident = obj.external_id or obj.bitrix_deal_id
+        if ident:
             cfg = BitrixSettings.get_active()
             base_url = (
                 cfg.webhook_url.split("/rest/")[0]
                 if "/rest/" in cfg.webhook_url
                 else "https://aquakip.bitrix24.kz"
             )
-            url = f"{base_url}/crm/deal/details/{obj.bitrix_deal_id}/"
+            if obj.object_type == 'task':
+                assignee = obj.payload.get('fields', {}).get('RESPONSIBLE_ID') or obj.response_data.get('proof', {}).get('responsibleId') or cfg.default_assigned_by_id
+                url = f"{base_url}/company/personal/user/{assignee}/tasks/task/view/{ident}/"
+            elif obj.object_type == 'company':
+                url = f"{base_url}/crm/company/details/{ident}/"
+            else:
+                deal_id = obj.bitrix_deal_id if obj.object_type == 'timeline' else ident
+                if not deal_id:
+                    return f"Комментарий #{ident}"
+                url = f"{base_url}/crm/deal/details/{deal_id}/"
             return format_html(
                 '<a href="{}" target="_blank" class="text-indigo-600 font-semibold underline">#{}</a>',
                 url,
-                obj.bitrix_deal_id,
+                ident,
             )
         return "—"
 
-    bitrix_deal_link.short_description = "Сделка Bitrix24"
+    bitrix_deal_link.short_description = "Объект Bitrix24"
 
     def project_link(self, obj):
-        if obj.project:
-            url = f"/admin/api/project/{obj.project.id}/change/"
+        project = obj.project or Project.objects.filter(pk=obj.source_project_id).first()
+        if project:
+            url = f"/admin/api/project/{project.id}/change/"
             return format_html(
                 '<a href="{}" class="text-indigo-600 font-semibold underline">{}</a>',
                 url,
-                obj.project.name,
+                project.name,
             )
         return "—"
 
@@ -1274,7 +1288,7 @@ class BitrixDealChangeLogAdmin(ScopedReadOnlyAdmin):
     action_badge.short_description = "Действие"
 
     def status_badge(self, obj):
-        color = "emerald" if obj.status == "success" else "rose"
+        color = "emerald" if obj.status in ("success", "accepted", "confirmed") else "rose"
         return format_html(
             '<span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-{}-500/10 text-{}-500">{}</span>',
             color,
@@ -1306,7 +1320,7 @@ class BitrixDealChangeLogAdmin(ScopedReadOnlyAdmin):
             formatted,
         )
 
-    formatted_payload.short_description = "Отправленные данные (Payload)"
+    formatted_payload.short_description = "Данные запроса / исторической команды"
 
     def formatted_response(self, obj):
         formatted = json.dumps(obj.response_data or {}, indent=2, ensure_ascii=False)

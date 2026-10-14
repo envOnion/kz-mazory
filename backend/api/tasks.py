@@ -1215,8 +1215,19 @@ def decide_fact(payload):
 
 def autonomous_crm(payload):
     from .autonomous_crm import deliver
-    deliver(payload)
+    from .models import CrmDelivery
+    from .bitrix_journal import delivery_context
+    delivery = CrmDelivery.objects.select_related('fact_event').get(
+        outbox_event__deduplication_key=f"autonomous-{payload['kind']}:{payload['local_id']}:{payload['version']}"
+        if payload.get('kind') else f"autonomous-crm:{payload['project_id']}:{payload['version']}")
+    with delivery_context(delivery):
+        deliver(payload)
     clarification_pump({})
+
+
+def rebuild_bitrix_journal():
+    from .bitrix_journal import reconstruct_history
+    return reconstruct_history()
 
 
 def autonomous_reconcile(payload):

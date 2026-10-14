@@ -231,6 +231,11 @@ else:
         }
     }
 
+# Independent autocommit journal on the SAME database survives a business
+# transaction rollback after Bitrix has already accepted a mutation.
+DATABASES['bitrix_journal'] = {**DATABASES['default'], 'ATOMIC_REQUESTS': False,
+                              'TEST': {'MIRROR': 'default'}}
+
 # Never fall back to the writer when analytics credentials are absent.
 if os.getenv('ANALYTICS_DB_PASSWORD'):
     DATABASES['analytics_readonly'] = {
