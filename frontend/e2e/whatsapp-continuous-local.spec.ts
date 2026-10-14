@@ -13,7 +13,7 @@ interface Proof {
   control_nonce: string | null
   messages: { id: number; message_id: string; processed: boolean; processing_state: string }[]
   events: { id: number; event_type: string; state: string; error_code: string; payload: { raw_id?: number; batch_ids?: number[]; thread_id?: number; kind?: string } }[]
-  deliveries: { id: number; state: string; patch: Record<string, unknown>; outbox_event_id: number }[]
+  deliveries: { id: number; state: string; patch: Record<string, unknown>; outbox_event_id: number; external_object_link__external_id: string | null }[]
   routing: { raw_message_id: number; outcome: string; selected_thread_id: number | null }[]
   catalog: { generation: number; state: string }[]
   hourly_at: string | null
@@ -22,7 +22,7 @@ interface Proof {
   evidence_links: { message_id: string; status: string; error_code: string; full_history_policy: string | null; repairs: string[]; ranges: Record<string, number> }[]
   bounded_traces: { id: number; status: string; error_code: string; full_history_policy: string | null }[]
 }
-interface Provider { deals?: Record<string, Record<string, unknown>>; writes?: Record<string, unknown>[]; tasks?: Record<string, { id: string; title: string; responsibleId: string }>; comments?: { COMMENT: string }[]; [key: string]: unknown }
+interface Provider { deals?: Record<string, Record<string, unknown>>; writes?: Record<string, unknown>[]; tasks?: Record<string, { id: string; title: string; description: string; deadline: string | null; responsibleId: string; ufCrmTask: string[] }>; comments?: { COMMENT: string }[]; [key: string]: unknown }
 function proof(): Proof { return JSON.parse(readFileSync(join(dir, 'continuous-proof.json'), 'utf8')) }
 function provider(): Provider { return JSON.parse(readFileSync(join(dir, 'provider-state.json'), 'utf8')) }
 function write(path: string, value: Record<string, unknown>) { const temporary = `${path}.${randomUUID()}`; writeFileSync(temporary, JSON.stringify(value)); chmodSync(temporary, 0o666); renameSync(temporary, path) }
@@ -125,8 +125,22 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   await control({ action: 'assignee' })
   await message(request, group, 'continuous-task-request', 'БЦ Север: подготовь смету')
   await message(request, group, 'continuous-task-promise', 'БЦ Север: да, подготовлю смету завтра')
-  await expect.poll(() => Object.values(provider().tasks || {}).some(task => task.responsibleId === '7')).toBe(true)
-  await expect.poll(() => proof().deliveries.some(row => row.state === 'delivered' && proof().events.find(event => event.id === row.outbox_event_id)?.payload.kind === 'task')).toBe(true)
+  await expect.poll(() => Object.values(provider().tasks || {}).some(task => task.responsibleId === '7' && task.title.endsWith('Подготовить смету БЦ Север'))).toBe(true)
+  const task = Object.values(provider().tasks || {}).find(row => row.title.endsWith('Подготовить смету БЦ Север'))!
+  await expect.poll(() => proof().deliveries.find(row => row.external_object_link__external_id === task.id)?.state).toBe('delivered')
+  expect(task.deadline).toBeFalsy()
+  expect(task.description).toMatch(/Срок по переписке: \d{4}-\d{2}-\d{2} \(дата, время не указано\)/)
+  expect(task.ufCrmTask).toEqual(['D_101'])
+  const taskDelivery = proof().deliveries.find(row => row.external_object_link__external_id === task.id)!
+  await control({ action: 'retry_unbound_task', delivery_id: taskDelivery.id })
+  await expect.poll(() => proof().deliveries.find(row => row.id === taskDelivery.id)?.state).toBe('delivered')
+  expect(proof().deliveries.find(row => row.id === taskDelivery.id)?.external_object_link__external_id).toBe(task.id)
+  const matchingTasks = Object.values(provider().tasks || {}).filter(row => row.title === task.title)
+  expect(matchingTasks).toHaveLength(1)
+  expect(matchingTasks[0]!.id).toBe(task.id)
+  expect(matchingTasks[0]!.deadline).toBeFalsy()
+  expect(matchingTasks[0]!.responsibleId).toBe('7')
+  expect(matchingTasks[0]!.ufCrmTask).toEqual(['D_101'])
   await control({ action: 'bounded' })
   await expect.poll(() => proof().bounded_traces.some(trace => trace.status === 'success')).toBe(true)
   expect(proof().bounded_traces.length).toBeGreaterThan(1)

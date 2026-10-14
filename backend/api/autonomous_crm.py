@@ -226,7 +226,9 @@ def deliver_effect(payload):
             marker = f"[MAZORY-TASK:{task.team_id}:{task.id}]"
             title = f"{marker} {task.commitment_text}"[:255]
             if not external:
-                response = BitrixService.call("tasks.task.list", {"filter": {"TITLE": f"{marker}%"}, "select": ["ID", "TITLE", "STATUS"]})
+                # The live portal treats an appended '%' literally. Search
+                # the literal marker, then validate the returned title below.
+                response = BitrixService.call("tasks.task.list", {"filter": {"TITLE": marker}, "select": ["ID", "TITLE", "STATUS"]})
                 rows = response.get("result", {}).get("tasks")
                 if not isinstance(rows, list) or response.get("next") or len(rows) > 1:
                     raise ProviderUnavailable("crm_origin_conflict")
@@ -239,6 +241,7 @@ def deliver_effect(payload):
                 delivery.save(update_fields=["state", "error_code", "updated_at"])
                 return
             fields = {"TITLE": title, "DESCRIPTION": f"WhatsApp. Исполнитель: {task.responsible_name}.\n{task.commitment_text}\nСостояние Mazory: {task.status}. Основание: событие {delivery.fact_event_id}."}
+            fields["DEADLINE"] = ""
             if task.project_id:
                 if not task.project.bitrix_id:
                     raise ProviderUnavailable("crm_deal_delivery_pending")
@@ -269,9 +272,17 @@ def deliver_effect(payload):
                     # Bitrix has no cancelled status: mark cancellation in the
                     # description and defer; never falsely complete the task.
                     BitrixService.call("tasks.task.defer", {"taskId": int(external)})
-            current = BitrixService.call("tasks.task.get", {"taskId": int(external), "select": ["ID", "TITLE", "RESPONSIBLE_ID", "UF_CRM_TASK", "STATUS"]}).get("result", {}).get("task", {})
+            readback_fields = ["ID", "TITLE", "RESPONSIBLE_ID", "UF_CRM_TASK", "STATUS", "DEADLINE"]
+            current = BitrixService.call("tasks.task.get", {"taskId": int(external), "select": readback_fields}).get("result", {}).get("task", {})
             if str(current.get("id")) != external or current.get("title") != title:
                 raise ProviderUnavailable("crm_readback_mismatch")
+            # Bitrix can insert its configured default on creation even when
+            # no source time was provided. Clear it and verify the write.
+            if not fields["DEADLINE"] and current.get("deadline"):
+                BitrixService.call("tasks.task.update", {"taskId": int(external), "fields": {"DEADLINE": ""}})
+                current = BitrixService.call("tasks.task.get", {"taskId": int(external), "select": readback_fields}).get("result", {}).get("task", {})
+                if str(current.get("id")) != external or current.get("title") != title or current.get("deadline"):
+                    raise ProviderUnavailable("crm_readback_mismatch")
             if "RESPONSIBLE_ID" in fields and str(current.get("responsibleId")) != str(fields["RESPONSIBLE_ID"]):
                 raise ProviderUnavailable("crm_readback_mismatch")
             if "UF_CRM_TASK" in fields and current.get("ufCrmTask") != fields["UF_CRM_TASK"]:

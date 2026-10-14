@@ -74,6 +74,23 @@ def update():
             if control['action'] == 'assignee':
                 from api.models import UserProfile
                 UserProfile.objects.filter(phone='79990000002').update(bitrix_user_id=None)
+            if control['action'] == 'retry_unbound_task':
+                from django.db import transaction
+                from api.models import Commitment
+                with transaction.atomic():
+                    delivery=CrmDelivery.objects.select_for_update().get(pk=control['delivery_id'])
+                    event=OutboxEvent.objects.select_for_update().get(pk=delivery.outbox_event_id)
+                    assert event.payload['kind']=='task' and delivery.state=='delivered'
+                    # Reproduce uncertain external success before the local
+                    # transaction persisted its external identity.
+                    Commitment.objects.filter(pk=event.payload['local_id']).update(bitrix_task_id=None)
+                    delivery.external_object_link.external_id=None
+                    delivery.external_object_link.save(update_fields=['external_id'])
+                    delivery.state='pending';delivery.error_code=''
+                    delivery.save(update_fields=['state','error_code'])
+                    event.state='pending';event.attempt_count=0;event.error_code='';event.lease_until=None
+                    event.next_attempt_at=timezone.now();event.payload.pop('claim_generation',None)
+                    event.save()
             if control['action'] == 'review_next':
                 (settings.E2E_DIR/'continuous-review.json').write_text(json.dumps({'message_id':control['message_id']}))
             if control['action'] == 'evidence_source':
@@ -121,7 +138,7 @@ def update():
                 review_path.unlink()
     proof = {'messages': list(RawMessage.objects.filter(chat_id__startswith='continuous-').values('id','message_id','processed','processing_state')),
              'events': list(OutboxEvent.objects.values('id','event_type','state','error_code','payload')),
-             'deliveries': list(CrmDelivery.objects.values('id','state','patch','outbox_event_id')),
+        'deliveries': list(CrmDelivery.objects.values('id','state','patch','outbox_event_id','external_object_link__external_id')),
              'routing': list(ThreadRoutingAttempt.objects.values('raw_message_id','outcome','selected_thread_id'))}
     proof['control_nonce']=json.loads(applied.read_text()).get('nonce') if applied.exists() else None
     from api.models import CrmCatalogSync, BitrixSettings
