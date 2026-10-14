@@ -6,6 +6,7 @@ from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied
 
@@ -83,15 +84,19 @@ def plan(candidate, decision):
     changes = schema.validated_data
     if candidate.fact_type == 'payment' and changes.get('amount') and not _money_matches(changes['amount'], text, monetary_unit=True):
         return None
+    from .bitrix_service import crm_match_query, normalize_crm_object_name, _partial_object_score
+    query = crm_match_query(candidate)
+    matches = [item for item in candidate.crm_matches.filter(crm_match_revision=candidate.crm_match_revision).order_by('-score', 'id')
+        if not query['object_name'] or any(query['object_name'] == normalize_crm_object_name(label) or _partial_object_score(query['object_name'], normalize_crm_object_name(label)) for label in (item.deal_title, item.object_label))]
     options = [{'deal_id': item.bitrix_deal_id, 'title': item.deal_title,
         'company': item.company_name, 'amount': str(item.opportunity) if item.opportunity is not None else None,
-        'currency': item.currency} for item in candidate.crm_matches.filter(crm_match_revision=candidate.crm_match_revision).order_by('-score', 'id')[:8]]
+        'currency': item.currency} for item in matches[:8]]
     if not options:
         from .tasks import enqueue_crm_match
         if candidate.crm_match_state in ('not_requested', 'error'):
             enqueue_crm_match(candidate.id, allowed_states=(candidate.crm_match_state,))
             return None
-        if candidate.crm_match_state != 'not_found':
+        if candidate.crm_match_state not in ('not_found', 'ambiguous', 'matched'):
             return None
     leads = TeamMembership.objects.filter(team_id=candidate.team_id, role='team_lead', status='active', user__is_active=True).select_related('user').order_by('id')
     recipient = next((lead.user for lead in leads if UserProfile.objects.filter(user=lead.user).exclude(phone='').exists() and access.configs_for(lead.user).filter(pk=raw.config_id).exists()), None)
@@ -220,7 +225,12 @@ def ingest(data):
         inner = original.get('_data') or {}
         quoted_id = inner.get('quotedStanzaID', '') if isinstance(inner.get('quotedStanzaID', ''), str) else ''
     questions = FactClarification.objects.select_related('recipient', 'config__team')
-    question = questions.filter(pk=int(code[1])).first() if code else questions.filter(notification__deliveries__provider_message_id=quoted_id).first() if quoted_id else None
+    stanza = re.fullmatch(r'[A-Za-z0-9-]{8,128}', quoted_id) is not None
+    quote_filter = Q(notification__deliveries__provider_message_id=quoted_id)
+    if stanza:
+        quote_filter |= Q(notification__deliveries__provider_message_id__endswith='_'+quoted_id)
+    matches = list(questions.filter(quote_filter, config__session_name=data['session']).distinct()[:2]) if quoted_id else []
+    question = questions.filter(pk=int(code[1])).first() if code else matches[0] if len(matches)==1 else None
     if payload['fromMe'] and (NotificationDelivery.objects.filter(provider_message_id=payload['id']).exclude(provider_message_id='').exists()
         or question and question.notification_id and body == f'{question.notification.title}\n{question.notification.message}'):
         return 'ignored'
@@ -236,7 +246,7 @@ def ingest(data):
         raise PermissionDenied('Ответ на уточнение доступен только его получателю.')
     if data['chat_id'] not in (question.config.group_jid, phone+'@c.us', phone+'@s.whatsapp.net'):
         raise PermissionDenied('Ответ пришёл из другого чата.')
-    if code and quoted_id and (not question.notification_id or not question.notification.deliveries.filter(provider_message_id=quoted_id).exists()):
+    if code and quoted_id and (len(matches)!=1 or matches[0].id != question.id):
         raise PermissionDenied('Код вопроса и цитируемое сообщение не совпадают.')
     with transaction.atomic():
         reply, created = ClarificationReply.objects.get_or_create(session=data['session'], provider_message_id=payload['id'], defaults={

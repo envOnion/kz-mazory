@@ -4,7 +4,7 @@ from datetime import timedelta
 from django.conf import settings
 from django.utils import timezone
 from api.models import (AISettings, FactCandidate, FactClarification, ClarificationReply,
-    WhatsAppConfig, UserProfile, RawMessage, FinancialRecord, CrmDelivery, OutboxEvent)
+    WhatsAppConfig, UserProfile, RawMessage, FinancialRecord, CrmDelivery, OutboxEvent, NotificationDelivery)
 
 
 def update():
@@ -38,7 +38,12 @@ def update():
                             'ASSIGNED_BY_ID': '7', 'DATE_CREATE': '2026-10-01T10:00:00+05:00', 'DATE_MODIFY': '2026-10-08T10:00:00+05:00',
                             'MOVED_TIME': '2026-10-07T10:00:00+05:00', 'BEGINDATE': '2026-10-01', 'CLOSEDATE': '2027-01-01', 'CLOSED': 'N'})
                 state['clarification_catalog'] = rows
-                state.setdefault('deals', {}).update({r['ID']: r for r in rows})
+                sample = rows[0]
+                state['clarification_catalog'] += [{**sample,'ID':'731','TITLE':'Поликлиника в мкр Шугла БМК 1,24 МВт','COMPANY_ID':'0'},
+                    {**sample,'ID':'732','TITLE':'КШ село Достык','COMPANY_ID':'900'}]
+                state.setdefault('companies',{})['900']={'ID':'900','TITLE':'Интегра'}
+                state['waha_missing_send_id'] = True
+                state.setdefault('deals', {}).update({r['ID']: r for r in state['clarification_catalog']})
                 temporary = p.with_suffix('.clarification.tmp'); temporary.write_text(json.dumps(state)); temporary.chmod(0o666); temporary.replace(p)
             if action == 'pause_reply':
                 (settings.E2E_DIR/'clarification-paused').touch()
@@ -66,6 +71,7 @@ def update():
             if action == 'finish':
                 p = settings.E2E_DIR/'provider-state.json'; state = json.loads(p.read_text())
                 state.pop('clarification_catalog', None)
+                state.pop('waha_missing_send_id', None)
                 temporary = p.with_suffix('.clarification.tmp'); temporary.write_text(json.dumps(state)); temporary.chmod(0o666); temporary.replace(p)
             applied.write_text(json.dumps({'nonce': control['nonce']}))
     proof = {'questions': list(FactClarification.objects.values('id','state','options','notification_id','candidate_id','resolution','candidate__trace__raw_message__message_id')),
@@ -74,6 +80,8 @@ def update():
         'candidates': list(FactCandidate.objects.filter(trace__raw_message__message_id__startswith='clarification-').values('id','status','trace__raw_message__message_id','decisions__reason_code')),
         'raw_ids': list(RawMessage.objects.filter(config__group_jid='clarification-e2e@g.us').values_list('message_id',flat=True)),
         'financial': list(FinancialRecord.objects.values('candidate_id','project__bitrix_id','amount','amount_precision')),
+        'notification_deliveries': list(NotificationDelivery.objects.values('id','notification_id','state','provider_message_id')),
+        'notification_events': list(OutboxEvent.objects.filter(event_type='notification').values('state','payload__delivery_id')),
         'deliveries': list(CrmDelivery.objects.values('state','fact_event__decision__candidate_id','external_object_link__external_id'))}
     temporary = settings.E2E_DIR/'clarification-proof.tmp'
     temporary.write_text(json.dumps(proof, default=str)); temporary.replace(settings.E2E_DIR/'clarification-proof.json')
