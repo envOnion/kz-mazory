@@ -44,6 +44,11 @@ ASSIGNMENTS = {
 
 
 def classify(value):
+    if value['content'] in ('БЦ Восток: КП согласовано','БЦ Восток: КП согласовано по недоступному сообщению'):
+        origin=next(row for row in value['context'] if row['content']=='Новый объект БЦ Восток') if value['content']=='БЦ Восток: КП согласовано' else {'raw_message_id':987654321,'content':'Новый объект БЦ Восток'}
+        current={'raw_message_id':value['target_message_id'],'content':value['content']}
+        return {'threads':[{'key':'evidence-link','thread_id':None,'topic':'Согласование КП БЦ Восток','summary':'КП согласовано','state':'ready','completion_reason':'Получено согласование','messages':[{'raw_message_id':current['raw_message_id'],'thought_state':'final','relation':'discusses'}]}],
+                'facts':[{'thread_key':'evidence-link','evidence_message_id':current['raw_message_id'],'fact_type':'project','object_name':'БЦ Восток','current_action':value['content'].split(': ',1)[1],'evidence':current['content'],'confidence':.95,'evidence_messages':[{'raw_message_id':current['raw_message_id'],'quote':current['content'],'role':'source'},{'raw_message_id':origin['raw_message_id'],'quote':origin['content'],'role':'request'}]}]}
     if value['content'].startswith('Полный разбор:'):
         return classify_full_history(value)
     records = list(value.get("context", [])) + [
