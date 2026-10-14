@@ -36,6 +36,7 @@ from .thread_routing import ANALYSIS_EVENTS
 CLUSTERS = {
     "otp": "delivery",
     "notification": "delivery",
+    "notification_reconcile": "delivery",
     "delivery_ack": "delivery",
     "clarification_pump": "delivery",
     "clarification_reply": "crm",
@@ -361,6 +362,7 @@ def run_outbox(pk):
             "index_message": index_message,
             "otp": deliver_otp,
             "notification": deliver_notification,
+            "notification_reconcile": reconcile_notification,
             "delivery_ack": apply_delivery_ack,
             "clarification_pump": clarification_pump,
             "clarification_reply": clarification_reply,
@@ -714,19 +716,62 @@ def deliver_notification(payload):
         question.save(update_fields=['source_snapshot'])
     delivery.state = "sending"
     delivery.save(update_fields=["state"])
-    result = send_waha_whatsapp_message_task(
-        question.source_snapshot['phone'] if question else user.username, f"{notification.title}\n{notification.message}",
-        session=question.config.session_name if question else 'default',
-    )
+    try:
+        result = send_waha_whatsapp_message_task(
+            question.source_snapshot['phone'] if question else user.username, f"{notification.title}\n{notification.message}",
+            session=question.config.session_name if question else 'default',
+        )
+    except requests.Timeout:
+        delivery.state = 'unknown'; delivery.error_code = 'waha_outcome_unknown'
+        delivery.save(update_fields=['state', 'error_code'])
+        if question: enqueue_notification_reconciliation(delivery.id)
+        raise WahaOutcomeUnknown()
     provider_id = result.get("id", "")
     if isinstance(provider_id, dict):
         provider_id = provider_id.get("_serialized", "")
     if not isinstance(provider_id, str) or not provider_id or len(provider_id) > 255:
         delivery.state = 'unknown'; delivery.error_code = 'waha_outcome_unknown'
         delivery.save(update_fields=['state', 'error_code'])
+        if question: enqueue_notification_reconciliation(delivery.id)
         raise WahaOutcomeUnknown()
     delivery.provider_message_id, delivery.state = str(provider_id)[:255], "sent"
     delivery.save(update_fields=["provider_message_id", "state", "updated_at"])
+
+
+def enqueue_notification_reconciliation(delivery_id):
+    OutboxEvent.objects.get_or_create(deduplication_key=f'notification-reconcile:{delivery_id}',
+        defaults={'event_type':'notification_reconcile','payload':{'delivery_id':delivery_id}})
+
+
+def reconcile_notification(payload):
+    """Recover an uncertain send only from one exact outgoing message; never resend."""
+    from .models import AuditEvent
+    delivery = NotificationDelivery.objects.select_related('notification__recipient').get(pk=payload['delivery_id'])
+    if delivery.state != 'unknown' or delivery.provider_message_id:
+        return
+    question = getattr(delivery.notification, 'clarification', None)
+    from .clarifications import authorized
+    if not question or not authorized(question):
+        return
+    session = quote(question.config.session_name, safe='')
+    chat = quote(question.source_snapshot['phone']+'@c.us', safe='')
+    rows = waha_request('GET', f'/api/{session}/chats/{chat}/messages?limit=50&downloadMedia=false')
+    if not isinstance(rows, list):
+        raise ProviderUnavailable('waha_reconciliation_pending')
+    body = f'{delivery.notification.title}\n{delivery.notification.message}'
+    matches = [row['id'] for row in rows if isinstance(row, dict) and row.get('fromMe') is True
+        and row.get('body') == body and isinstance(row.get('id'), str) and 0 < len(row['id']) <= 255
+        and isinstance(row.get('timestamp'), (int, float)) and not isinstance(row.get('timestamp'), bool)
+        and row['timestamp'] >= delivery.created_at.timestamp()-60]
+    if len(set(matches)) != 1:
+        raise ProviderUnavailable('waha_reconciliation_pending')
+    with transaction.atomic():
+        delivery = NotificationDelivery.objects.select_for_update().get(pk=delivery.id)
+        if delivery.state == 'unknown' and not delivery.provider_message_id:
+            delivery.provider_message_id = matches[0]; delivery.state = 'sent'; delivery.error_code = ''
+            delivery.save(update_fields=['provider_message_id','state','error_code','updated_at'])
+            AuditEvent.objects.create(target_type='NotificationDelivery',target_id=delivery.id,
+                action='waha_send_readback',before_after={'question_id':question.id,'exact_outgoing_matches':1})
 
 
 def apply_delivery_ack(payload):

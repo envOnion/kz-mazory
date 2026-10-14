@@ -48,15 +48,15 @@ def classify(value):
         raw_id = value['target_message_id']
         return {'threads': [{'key':'delivery-note', 'thread_id':None, 'topic':'Закрытие накладной', 'summary':value['content'], 'state':'ready', 'completion_reason':'Отчёт получен', 'messages':[{'raw_message_id':raw_id,'thought_state':'final','relation':'discusses'}]}],
             'facts':[{'thread_key':'delivery-note','evidence_message_id':raw_id,'fact_type':'payment','amount':'144000000.00','currency':'KZT','payment_kind':'invoice','evidence':value['content'],'confidence':.98}]}
-    if value['content'].startswith(('Парус:', 'Маяк:', 'Риф:')):
+    if value['content'].startswith(('Парус:', 'Маяк:', 'Риф:', 'Интегра — поликлиника Шугла:')):
         raw_id = value['target_message_id']
         label = value['content'].split(':')[0]
-        key = {'Парус': 'parus', 'Маяк': 'beacon', 'Риф': 'reef'}[label]
+        key = {'Парус': 'parus', 'Маяк': 'beacon', 'Риф': 'reef', 'Интегра — поликлиника Шугла':'clinic'}[label]
         return {'threads': [{'key': key, 'thread_id': None, 'topic': 'Оплата '+label,
             'summary': value['content'], 'state': 'ready', 'completion_reason': 'Получено сообщение об оплате',
             'messages': [{'raw_message_id': raw_id, 'thought_state': 'final', 'relation': 'discusses'}]}],
             'facts': [{'thread_key': key, 'evidence_message_id': raw_id, 'fact_type': 'payment',
-                'object_name': value['content'].split(':')[0], 'amount': '12000000.00', 'currency': 'KZT', 'payment_kind': 'increment',
+                'object_name': value['content'].split(':')[0], 'company_name':'Интегра' if key=='clinic' else '', 'amount': '12000000.00', 'currency': 'KZT', 'payment_kind': 'increment',
                 'payment_date': datetime.datetime.fromisoformat(value['sent_at']).date().isoformat(),
                 'evidence': value['content'], 'confidence': .98}]}
     if value['content'] in ('БЦ Восток: КП согласовано','БЦ Восток: КП согласовано по недоступному сообщению'):
@@ -371,9 +371,14 @@ class ProviderHandler(BaseHTTPRequestHandler):
         if self.path == '/api/sendText':
             state = json.loads(self.control.read_text())
             ident = 'fixture-waha-' + uuid.uuid4().hex
-            state.setdefault('waha_messages', []).append({'id': ident, **body})
+            state.setdefault('waha_messages', []).append({'id': ident, 'timestamp':fixture_time.time(), **body})
             self.save_control(state)
             return self.respond({} if state.get('waha_missing_send_id') else {'id': ident})
+        if self.path.startswith('/api/default/chats/') and urlsplit(self.path).path.endswith('/messages'):
+            state = json.loads(self.control.read_text())
+            chat = unquote(urlsplit(self.path).path.split('/')[4])
+            return self.respond([{'id':row['id'],'body':row['text'],'timestamp':row['timestamp'],'fromMe':True}
+                for row in state.get('waha_messages',[]) if row['chatId']==chat])
         if self.path == '/v1/systemone' and body.get('model') == 'e2e-whatsapp-v1':
             answers = {name: {'probabilities': {'A': .99 if 'БЦ Север' in question['criteria']['A'] and 'БЦ Север' in body['state']['message'] else .01,
                                                  'B': .01 if 'БЦ Север' in question['criteria']['A'] and 'БЦ Север' in body['state']['message'] else .99}}

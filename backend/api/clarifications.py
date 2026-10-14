@@ -83,15 +83,19 @@ def plan(candidate, decision):
     changes = schema.validated_data
     if candidate.fact_type == 'payment' and changes.get('amount') and not _money_matches(changes['amount'], text, monetary_unit=True):
         return None
+    from .bitrix_service import crm_match_query, normalize_crm_object_name, _partial_object_score
+    query = crm_match_query(candidate)
+    matches = [item for item in candidate.crm_matches.filter(crm_match_revision=candidate.crm_match_revision).order_by('-score', 'id')
+        if not query['object_name'] or any(query['object_name'] == normalize_crm_object_name(label) or _partial_object_score(query['object_name'], normalize_crm_object_name(label)) for label in (item.deal_title, item.object_label))]
     options = [{'deal_id': item.bitrix_deal_id, 'title': item.deal_title,
         'company': item.company_name, 'amount': str(item.opportunity) if item.opportunity is not None else None,
-        'currency': item.currency} for item in candidate.crm_matches.filter(crm_match_revision=candidate.crm_match_revision).order_by('-score', 'id')[:8]]
+        'currency': item.currency} for item in matches[:8]]
     if not options:
         from .tasks import enqueue_crm_match
         if candidate.crm_match_state in ('not_requested', 'error'):
             enqueue_crm_match(candidate.id, allowed_states=(candidate.crm_match_state,))
             return None
-        if candidate.crm_match_state != 'not_found':
+        if candidate.crm_match_state not in ('not_found', 'ambiguous', 'matched'):
             return None
     leads = TeamMembership.objects.filter(team_id=candidate.team_id, role='team_lead', status='active', user__is_active=True).select_related('user').order_by('id')
     recipient = next((lead.user for lead in leads if UserProfile.objects.filter(user=lead.user).exclude(phone='').exists() and access.configs_for(lead.user).filter(pk=raw.config_id).exists()), None)

@@ -5,10 +5,11 @@ import { join } from 'node:path'
 
 const dir = process.env.MAZORY_E2E_DIR!
 test.skip(process.env.MAZORY_E2E_REAL_MODEL === '1', 'Isolated provider scenario')
-interface Question { id: number; state: string; candidate_id: number; candidate__trace__raw_message__message_id: string; options: { deal_id: string; title: string }[] }
+interface Question { id: number; state: string; notification_id: number; candidate_id: number; candidate__trace__raw_message__message_id: string; options: { deal_id: string; title: string }[] }
 interface Proof { questions: Question[]; replies: { provider_message_id: string; state: string; error_code: string }[]; decisions: {id: number; status: string; decisions__reason_code: string}[]; candidates: {id: number; status: string; trace__raw_message__message_id: string; decisions__reason_code: string}[]; raw_ids: string[]; financial: { candidate_id: number; project__bitrix_id: string; amount: string; amount_precision: string }[]; deliveries: { state: string; fact_event__decision__candidate_id: number }[] }
 interface Provider { waha_messages?: { id: string; chatId: string; text: string }[]; comments?: { ENTITY_ID: string; COMMENT: string }[]; deals?: Record<string, { OPPORTUNITY: string; TITLE: string }>; [key: string]: unknown }
 const proof = (): Proof => JSON.parse(readFileSync(join(dir, 'clarification-proof.json'), 'utf8'))
+interface Proof { notification_deliveries: {notification_id: number; state: string; provider_message_id: string}[] }
 const provider = (): Provider => JSON.parse(readFileSync(join(dir, 'provider-state.json'), 'utf8'))
 const question = (id: string) => proof().questions.find(row => row.candidate__trace__raw_message__message_id === id)
 function write(path: string, value: Record<string, unknown>) { const tmp = path+randomUUID(); writeFileSync(tmp,JSON.stringify(value)); chmodSync(tmp,0o666); renameSync(tmp,path) }
@@ -27,6 +28,8 @@ test('WhatsApp clarification survives Q2 restart, validates answers, reads CRM b
   const q = question('clarification-parus')!
   await expect.poll(() => provider().waha_messages?.find(row => row.text.includes(`MZ-${q.id} `))?.id).toBeTruthy()
   const sent = provider().waha_messages!.find(row => row.text.includes(`MZ-${q.id} `))!
+  await expect.poll(() => proof().notification_deliveries.find(row => row.notification_id === q.notification_id)?.provider_message_id).toBe(sent.id)
+  expect(provider().waha_messages!.filter(row => row.text.includes(`MZ-${q.id} `))).toHaveLength(1)
   expect(sent.chatId).toBe('79990000001@c.us')
   expect(sent.text).toContain('12 000 000 KZT')
   expect(sent.text).toContain('№701')
@@ -87,5 +90,13 @@ test('WhatsApp clarification survives Q2 restart, validates answers, reads CRM b
   const note = proof().candidates.find(row => row.trace__raw_message__message_id === 'clarification-delivery-note')!
   expect(proof().financial.some(row => row.candidate_id === note.id)).toBe(false)
   expect(proof().deliveries.some(row => row.fact_event__decision__candidate_id === note.id)).toBe(false)
+  expect((await webhook(request,'clarification-clinic','Интегра — поликлиника Шугла: оплата 12 млн тенге поступила сегодня',group,{participant:'79990000002@c.us'})).status()).toBe(202)
+  await expect.poll(() => question('clarification-clinic')?.state).toBe('awaiting')
+  const clinic = question('clarification-clinic')!
+  expect(clinic.options.map(row => row.deal_id)).toEqual(['731'])
+  await expect.poll(() => provider().waha_messages?.find(row => row.text.includes(`MZ-${clinic.id} `))?.text).toContain('№731')
+  expect(provider().waha_messages!.find(row => row.text.includes(`MZ-${clinic.id} `))!.text).not.toContain('№732')
+  expect((await webhook(request,'clarification-clinic-unknown',`MZ-${clinic.id} не знаю`,'79990000001@c.us')).status()).toBe(202)
+  await expect.poll(() => question('clarification-clinic')?.state).toBe('unconfirmed')
   await control({action:'finish'})
 })

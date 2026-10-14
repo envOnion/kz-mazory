@@ -100,8 +100,15 @@ def _partial_object_score(expected, actual):
     if not expected or not actual or expected == actual:
         return 0
     shorter, longer = sorted((expected, actual), key=len)
-    if len(shorter) < 4 or shorter not in longer:
+    if len(shorter) < 4:
         return 0
+    if shorter not in longer:
+        # CRM titles often insert capacity or location words between a facility
+        # type and its name. This is only a suggested partial match.
+        tokens = set(re.findall(r'\w+', expected))
+        meaningful = {word for word in tokens if len(word) >= 4}
+        actual_tokens = set(re.findall(r'\w+', actual))
+        return 40 if len(meaningful) >= 2 and meaningful <= actual_tokens and {word for word in tokens if word.isdigit()} <= actual_tokens else 0
     ratio = len(shorter) / len(longer)
     return min(55, 40 + round(15 * ratio))
 
@@ -140,6 +147,9 @@ def crm_match_query(candidate):
         else {}
     )
     object_name = normalize_crm_object_name(data.get("object_name", ""))
+    company_name = normalize_company_name(data.get("company_name", ""))
+    if company_name:
+        object_name = re.sub(r'^'+re.escape(company_name)+r'(?!\w)[\s/\-–—]*', '', object_name).strip()
     project = candidate.project
     if (
         not object_name
@@ -151,7 +161,7 @@ def crm_match_query(candidate):
         object_name = normalize_crm_object_name(project.name)
     return {
         "object_name": object_name,
-        "company_name": normalize_company_name(data.get("company_name", "")),
+        "company_name": company_name,
     }
 
 
@@ -652,13 +662,10 @@ class BitrixService:
             )
         if object_normalized:
             collect_by_object(object_normalized)
-            fuzzy_term = _fuzzy_prefilter_term(object_normalized)
-            if (
-                not exact_company_ids
-                and fuzzy_term
-                and fuzzy_term != object_normalized
-            ):
-                collect_by_object(fuzzy_term)
+            terms = list(dict.fromkeys(token for token in re.findall(r'\w+', object_normalized) if len(token) >= 4))[:2]
+            for term in terms:
+                if term != object_normalized:
+                    collect_by_object(term)
 
         relevant = []
         projects_by_deal = {
