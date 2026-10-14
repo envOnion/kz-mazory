@@ -52,6 +52,9 @@ test('a repeated large report reconciles promises without duplicating originals 
   const session: {access:string} = JSON.parse(readFileSync(join(dir,'laya-session.json'),'utf8'))
   const headers = {Authorization:`Bearer ${session.access}`}
   const messageId = 'laya-compact-large-report-reconfirm'
+  const nonce = 'compact-promise-reconciliation'
+  writeFileSync(join(dir,'laya-control.json'),JSON.stringify({nonce,mode:'llm',live_crm:false,enable_baseline_threads:true}))
+  await expect.poll(() => JSON.parse(readFileSync(join(dir,'laya-control-applied.json'),'utf8')).nonce).toBe(nonce)
   const repeatedContent = input.content+'\n\nПовторное подтверждение: подготовлю и направлю коммерческое предложение по угольной котельной КЭС Курчатов 8 МВт до конца этой недели.'
   const body = JSON.stringify({event:'message',session:'default',payload:{id:messageId,body:repeatedContent,from:'laya-synthetic-baseline@g.us',participant:'979999@lid',notifyName:input.sender,timestamp:input.timestamp+120}})
   expect((await request.post('/api/whatsapp/webhook/',{data:body,headers:{'Content-Type':'application/json','X-Webhook-Hmac':createHmac('sha512','isolated-local-webhook-secret').update(body).digest('hex')}})).ok()).toBe(true)

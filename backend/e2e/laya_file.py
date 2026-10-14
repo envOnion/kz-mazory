@@ -72,6 +72,8 @@ def dispatch_forever():
                 async_task('e2e.laya_quality.seed')
             if control.get('mode') in ('llm','shadow','laya'):
                 AISettings.objects.update(thread_routing_mode=control['mode'])
+            if control.get('enable_baseline_threads'):
+                WhatsAppConfig.objects.filter(group_jid='laya-synthetic-baseline@g.us').update(thread_routing_enabled=True)
             if control.get('verify_qwen'):
                 task_id = async_task('api.tasks.verify_qwen_provider')
                 (settings.E2E_DIR/'qwen-canary-task.json').write_text(json.dumps({'id':task_id}))
