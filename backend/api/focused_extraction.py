@@ -4,7 +4,7 @@ import json
 import re
 from .ai_service import AIService
 from .context_tokens import context_runtime, extraction_payload, extraction_input, payload_hash
-from .dialogue_threads import normalize_themes
+from .dialogue_threads import normalize_themes, bound_topic_label
 from .message_context import source_scope
 from .message_time import source_metadata
 from .providers import ProviderUnavailable
@@ -182,6 +182,9 @@ def recover(result, raw, trace, cfg):
                             'raw_message_id':target.id,'kind':kind,'previous_quote':fact.get('evidence'),'selected_quote':quote})
                         fact['evidence'] = quote
         updates = supplemental.get('topic_updates')
+        if isinstance(updates, list):
+            for update in updates:
+                bound_topic_label(update, trace)
         if not isinstance(updates,list) or any(not isinstance(update,dict) or update.get('thread_key') not in inputs['known_extraction_theme_keys'] or update.get('state') not in ('open','unknown') or not isinstance(update.get('topic'),str) or not 1<=len(update['topic'])<=255 or not isinstance(update.get('summary'),str) or not 1<=len(update['summary'])<=2000 for update in updates):
             raise ProviderUnavailable('thread_classification_invalid')
         for update in updates:

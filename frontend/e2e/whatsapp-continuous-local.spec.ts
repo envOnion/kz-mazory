@@ -193,12 +193,48 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
     return rows.results.find(row => row.proposed_changes.evidence === 'КП: БЦ Север, предложение на 29 млн тенге')?.automatic_decision?.reason_code
   }).toBe('invoice_not_supported')
   expect((provider().comments || []).some(row => row.COMMENT.includes('КП: БЦ Север, предложение на 29 млн тенге'))).toBe(false)
+  for (const [id, body] of [
+    ['continuous-not-performed', 'БЦ Север: заказчиком не произведена 100% оплата в размере 14 500 000 тенге'],
+    ['continuous-future-performed', 'БЦ Север: заказчиком будет произведена 100% оплата в размере 14 500 000 тенге'],
+  ]) {
+    await message(request, group, id!, body!)
+    await expect.poll(async () => {
+      const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=rejected', { headers })).json()
+      return rows.results.some(row => row.proposed_changes.evidence === body && row.automatic_decision?.reason_code === 'plan_not_actual')
+    }).toBe(true)
+  }
+  const performed = 'БЦ Север: заказчиком произведена 100% оплата в размере 14 500 000 тенге'
+  await message(request, group, 'continuous-performed', performed)
+  await expect.poll(async () => {
+    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    return rows.results.some(row => row.proposed_changes.evidence === performed && row.automatic_decision?.reason_code === 'source_validated')
+  }).toBe(true)
+  await expect.poll(() => (provider().comments || []).some(row => row.COMMENT.includes(performed))).toBe(true)
   await context.addCookies([{ name: session.cookie_name, value: session.refresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
   await message(request, group, 'continuous-long-label', 'Длинная тема: получен управленческий отчёт')
   await expect.poll(() => proof().messages.find(row => row.message_id === 'continuous-long-label')?.processed).toBe(true)
   await expect.poll(() => proof().topic_labels.length).toBeGreaterThan(0)
   expect(proof().topic_labels[0]!.original_topic.length).toBeGreaterThan(255)
   expect(proof().topic_labels[0]!.display_topic.length).toBeLessThanOrEqual(255)
+  const focusedGroup = 'continuous-focused-long@g.us'
+  await control({ action: 'routing', group: focusedGroup })
+  await message(request, focusedGroup, 'continuous-focused-long-label', 'Длинная тема: КП отдельного объекта подготовлено')
+  await expect.poll(() => proof().messages.find(row => row.message_id === 'continuous-focused-long-label')?.processed).toBe(true)
+  await expect.poll(() => proof().topic_labels.length).toBeGreaterThan(1)
+  expect(proof().topic_labels.every(row => row.display_topic.length <= 255 && row.original_topic.length > 255)).toBe(true)
+  const reclassifiedGroup = 'continuous-reclassified@g.us'
+  await control({ action: 'start', group: reclassifiedGroup })
+  await control({ action: 'review_next', message_id: 'continuous-retained-facts' })
+  await message(request, reclassifiedGroup, 'continuous-retained-facts', 'БЦ Север: получено ТЗ. БЦ Запад: новый объект, получено ТЗ.')
+  const retainedRaw = () => proof().messages.find(row => row.message_id === 'continuous-retained-facts')?.id
+  await expect.poll(async () => {
+    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=pending', { headers })).json()
+    return rows.results.filter(row => row.proposed_changes.evidence_message_id === retainedRaw()).length
+  }).toBe(2)
+  await message(request, reclassifiedGroup, 'continuous-reclassified-context', 'Темы уточнены без новых фактов', 'continuous-retained-facts')
+  await expect.poll(() => proof().messages.find(row => row.message_id === 'continuous-reclassified-context')?.processed).toBe(true)
+  const retained: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=pending', { headers })).json()
+  expect(retained.results.filter(row => row.proposed_changes.evidence_message_id === retainedRaw())).toHaveLength(2)
   await page.goto('/')
   await page.getByRole('button', { name: 'Рабочий кабинет', exact: true }).click()
   await page.getByRole('button', { name: 'Отчеты по WhatsApp', exact: true }).click()
