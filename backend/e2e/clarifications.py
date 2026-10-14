@@ -80,7 +80,8 @@ def update():
         'candidates': list(FactCandidate.objects.filter(trace__raw_message__message_id__startswith='clarification-').values('id','status','trace__raw_message__message_id','decisions__reason_code')),
         'raw_ids': list(RawMessage.objects.filter(config__group_jid='clarification-e2e@g.us').values_list('message_id',flat=True)),
         'financial': list(FinancialRecord.objects.values('candidate_id','project__bitrix_id','amount','amount_precision')),
-        'notification_deliveries': list(NotificationDelivery.objects.values('notification_id','state','provider_message_id')),
+        'notification_deliveries': list(NotificationDelivery.objects.values('id','notification_id','state','provider_message_id')),
+        'notification_events': list(OutboxEvent.objects.filter(event_type='notification').values('state','payload__delivery_id')),
         'deliveries': list(CrmDelivery.objects.values('state','fact_event__decision__candidate_id','external_object_link__external_id'))}
     temporary = settings.E2E_DIR/'clarification-proof.tmp'
     temporary.write_text(json.dumps(proof, default=str)); temporary.replace(settings.E2E_DIR/'clarification-proof.json')

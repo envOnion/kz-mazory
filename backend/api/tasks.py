@@ -390,8 +390,10 @@ def run_outbox(pk):
         )
         ai_retries.record_attempt(event, "done")
     except WahaOutcomeUnknown:
+        recovered = event.event_type == 'notification' and NotificationDelivery.objects.filter(
+            pk=event.payload.get('delivery_id'), state__in=['sent','delivered']).exclude(provider_message_id='').exists()
         OutboxEvent.objects.filter(pk=pk).update(
-            state="unknown", error_code="waha_outcome_unknown", lease_until=None
+            state='done' if recovered else 'unknown', error_code='' if recovered else 'waha_outcome_unknown', lease_until=None
         )
         logger.warning("outbox_unknown id=%s type=%s", pk, event.event_type)
     except requests.Timeout:
@@ -770,6 +772,8 @@ def reconcile_notification(payload):
         if delivery.state == 'unknown' and not delivery.provider_message_id:
             delivery.provider_message_id = matches[0]; delivery.state = 'sent'; delivery.error_code = ''
             delivery.save(update_fields=['provider_message_id','state','error_code','updated_at'])
+            OutboxEvent.objects.filter(event_type='notification', payload__delivery_id=delivery.id,
+                state='unknown', error_code='waha_outcome_unknown').update(state='done', error_code='', lease_until=None)
             AuditEvent.objects.create(target_type='NotificationDelivery',target_id=delivery.id,
                 action='waha_send_readback',before_after={'question_id':question.id,'exact_outgoing_matches':1})
 

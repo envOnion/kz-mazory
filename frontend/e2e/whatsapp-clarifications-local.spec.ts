@@ -9,7 +9,7 @@ interface Question { id: number; state: string; notification_id: number; candida
 interface Proof { questions: Question[]; replies: { provider_message_id: string; state: string; error_code: string }[]; decisions: {id: number; status: string; decisions__reason_code: string}[]; candidates: {id: number; status: string; trace__raw_message__message_id: string; decisions__reason_code: string}[]; raw_ids: string[]; financial: { candidate_id: number; project__bitrix_id: string; amount: string; amount_precision: string }[]; deliveries: { state: string; fact_event__decision__candidate_id: number }[] }
 interface Provider { waha_messages?: { id: string; chatId: string; text: string }[]; comments?: { ENTITY_ID: string; COMMENT: string }[]; deals?: Record<string, { OPPORTUNITY: string; TITLE: string }>; [key: string]: unknown }
 const proof = (): Proof => JSON.parse(readFileSync(join(dir, 'clarification-proof.json'), 'utf8'))
-interface Proof { notification_deliveries: {notification_id: number; state: string; provider_message_id: string}[] }
+interface Proof { notification_deliveries: {id: number; notification_id: number; state: string; provider_message_id: string}[]; notification_events: {state: string; payload__delivery_id: number}[] }
 const provider = (): Provider => JSON.parse(readFileSync(join(dir, 'provider-state.json'), 'utf8'))
 const question = (id: string) => proof().questions.find(row => row.candidate__trace__raw_message__message_id === id)
 function write(path: string, value: Record<string, unknown>) { const tmp = path+randomUUID(); writeFileSync(tmp,JSON.stringify(value)); chmodSync(tmp,0o666); renameSync(tmp,path) }
@@ -29,6 +29,8 @@ test('WhatsApp clarification survives Q2 restart, validates answers, reads CRM b
   await expect.poll(() => provider().waha_messages?.find(row => row.text.includes(`MZ-${q.id} `))?.id).toBeTruthy()
   const sent = provider().waha_messages!.find(row => row.text.includes(`MZ-${q.id} `))!
   await expect.poll(() => proof().notification_deliveries.find(row => row.notification_id === q.notification_id)?.provider_message_id).toBe(sent.id)
+  const sentDelivery = proof().notification_deliveries.find(row => row.notification_id === q.notification_id)!
+  await expect.poll(() => proof().notification_events.find(row => row.payload__delivery_id === sentDelivery.id)?.state).toBe('done')
   expect(provider().waha_messages!.filter(row => row.text.includes(`MZ-${q.id} `))).toHaveLength(1)
   expect(sent.chatId).toBe('79990000001@c.us')
   expect(sent.text).toContain('12 000 000 KZT')
