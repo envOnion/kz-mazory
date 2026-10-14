@@ -28,7 +28,7 @@ from .evidence_scope import delivery_action, statements
 
 logger = logging.getLogger(__name__)
 APPROXIMATE = re.compile(r"\b(около|порядка|примерно|почти|практически|ориентировочно)\b", re.I)
-MONEY = re.compile(r"(?<![\w.,])(?P<number>\d{1,3}(?:\.\d{3}){2,}(?:,\d+)?|\d+(?:[ \u00a0]\d{3})*(?:[.,]\d+)?)\s*(?P<scale>млн|миллион\w*|тыс\w*|млрд|миллиард\w*)?(?![\d.,])", re.I)
+MONEY = re.compile(r"(?<![\w.,])(?P<number>\d{1,3}(?:\.\d{3}){2,}(?:,\d+)?|\d+(?:[ \u00a0\u202f]\d{3})*(?:[.,]\d+)?)\s*(?P<scale>млн|миллион\w*|тыс\w*|млрд|миллиард\w*)?(?![\d.,])", re.I)
 ACTUAL = re.compile(r"\b(?:поступил[аои]?|получил[аи]?|получен[аоы]?|оплатил[аи]?|оплачено|перечислил[аи]?|перечислен[аоы]?|зачислен[аоы]?|перевел[аи]?|перевёл[аи]?|перевели|(?:произведена|выполнена|осуществлена)\s+(?:\d+(?:[.,]\d+)?%\s+)?(?:оплата|предоплата))\b", re.I)
 FUTURE = re.compile(r"не\s+(?:поступ|получ|оплат|перечисл|произведен|выполнен|осуществлен)|(?:оплатим|оплатят|оплатить|поступит|поступят|получим|получат|перечислим|перечислят|перечислит|переведем|переведём|переведут|зачислят|ожидаем|планируем|ожидается|будет\s+(?:оплачен|произведен|выполнен|осуществлен))", re.I)
 
@@ -52,7 +52,7 @@ def enqueue_decision(candidate_id, trigger="extracted"):
 
 def _money_matches(value, text, *, monetary_unit=False):
     for match in MONEY.finditer(text):
-        number = match["number"].replace(" ", "").replace("\u00a0", "")
+        number = match["number"].replace(" ", "").replace("\u00a0", "").replace("\u202f", "")
         if number.count(".") >= 2:
             number = number.replace(".", "")
         amount = Decimal(number.replace(",", "."))
@@ -210,6 +210,23 @@ def _validate(candidate, data, primary, text):
             if field in data and (not _money_matches(data[field], text) or APPROXIMATE.search(text)):
                 raise Deferred("unknown_amount", "Точная сумма договора/себестоимости не доказана цитатой.")
         occurred = source_time(primary)[0]
+        if "sale_amount" in data:
+            from .commercial_amounts import sale_evidence
+            sale_clause = sale_evidence(candidate, data, primary)
+            if not sale_clause:
+                raise Deferred("unsupported_sale_amount", "Сумма продажи или нашего КП не найдена в разделе этого объекта в исходном сообщении. Прибыль, оплата, себестоимость и чужое предложение не являются ценой продажи.")
+            if occurred is None:
+                raise Deferred("unknown_source_time", "Для актуальной цены продажи нужна исходная дата сообщения.")
+        if candidate.project_id and occurred and {"sale_amount", "contract_amount"} & data.keys() and FieldAssertion.objects.filter(
+            fact_event__is_superseded=False, project_id=candidate.project_id,
+            field_name__in=("sale_amount", "contract_amount"), fact_event__occurred_at__gt=occurred,
+        ).exists():
+            raise Deferred("older_source_revision", "Более поздняя переписка уже уточнила цену продажи или договора; старый источник не заменяет текущую цену.")
+        if candidate.project_id and "sale_amount" in data:
+            from .commercial_amounts import rounded_restatement
+            if rounded_restatement(candidate.project, data["sale_amount"], sale_clause):
+                data.pop("sale_amount")
+                candidate._discarded_fields = {**getattr(candidate, "_discarded_fields", {}), "sale_amount": "Округлённый пересказ цены в миллионах без сообщения об изменении: сохранена ранее указанная точная сумма продажи."}
         if candidate.project_id and occurred and FieldAssertion.objects.filter(fact_event__is_superseded=False,project_id=candidate.project_id, field_name__in=[key for key in ("contract_amount", "cost_amount", "stage") if key in data], fact_event__occurred_at__gt=occurred).exists():
             raise Deferred("older_source_revision", "Более поздняя переписка уже уточнила значение; старый факт не заменяет текущий.")
         if "contract_amount" in data and not re.search(r"договор|контракт", text, re.I):
@@ -228,6 +245,16 @@ def _validate(candidate, data, primary, text):
             field_name__in=[key for key in ('current_action', 'next_action') if data.get(key)],
             fact_event__occurred_at__gt=occurred,
         ).exists():
+            if "sale_amount" in data:
+                # A later status-only report does not suppress a newly recovered
+                # price. Retain the existing status wording while applying price.
+                for field in ("current_action", "next_action"):
+                    if data.get(field) and FieldAssertion.objects.filter(
+                        fact_event__is_superseded=False, project_id=candidate.project_id,
+                        field_name=field, fact_event__occurred_at__gt=occurred,
+                    ).exists():
+                        data.pop(field)
+                return "apply"
             return 'observation'
     elif candidate.fact_type == "payment":
         amount_statements = [part for part in statements(text) if data.get("amount") and _money_matches(data["amount"], part, monetary_unit=True)]
@@ -424,7 +451,7 @@ def _publish(candidate, decision, data, raw, mode, event=None):
             normalized = normalize_deal_name(label)
             if normalized:
                 ProjectAlias.objects.get_or_create(project=project, normalized_name=normalized, defaults={"decision": decision})
-        for field in ("contract_amount", "cost_amount", "current_action", "next_action", "stage"):
+        for field in ("contract_amount", "sale_amount", "cost_amount", "current_action", "next_action", "stage"):
             if field in data and data[field] != "":
                 FieldAssertion.objects.create(fact_event=event, project=project, field_name=field, value=json_value(data[field]))
         # Mentioning a party does not authorize replacing the legal customer.

@@ -56,7 +56,7 @@ def projection_guard(ids):
         after=saved.get('project_after',{});before=saved.get('project_before',{})
         if candidate.project_id and candidate.fact_type=='project' and after:
             project=Project.objects.get(pk=candidate.project_id)
-            for name in ('contract_amount','cost_amount','contract_known','cost_confirmed','current_action','next_action','status','currency'):
+            for name in ('contract_amount','sale_amount','cost_amount','contract_known','cost_confirmed','current_action','next_action','status','currency'):
                 if before.get(name)!=after.get(name) and getattr(project,name)!=project._meta.get_field(name).to_python(after.get(name)):return 'projection_changed'
     return None
 
@@ -91,7 +91,7 @@ def replace_unsent(ids,trace):
             if candidate.project_id:
                 project=Project.objects.select_for_update().get(pk=candidate.project_id);projects.add(project.id)
                 if candidate.fact_type=='project':
-                    _restore(project,saved.get('project_before',{}),saved.get('project_after',{}),('contract_amount','cost_amount','contract_known','cost_confirmed','current_action','next_action','status','currency','whatsapp_fields'))
+                    _restore(project,saved.get('project_before',{}),saved.get('project_after',{}),('contract_amount','sale_amount','cost_amount','contract_known','cost_confirmed','current_action','next_action','status','currency','whatsapp_fields'))
                     other=FactCandidate.objects.filter(project=project,status='approved').exclude(pk__in=[row.id for row in old]).exists()
                     if not other:
                         for name in ('is_verified','identity_confirmed'):

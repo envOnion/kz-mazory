@@ -141,4 +141,4 @@ export interface OperationReceipt { operation_id: number; status: string }
 export interface Health { ai_last_24h: { requests: number; cost_usd: Money | null; unknown_cost_requests: number; failed_requests: number; mean_duration_ms: number | null }; outbox: { event_type: string; state: string; count: number }[]; oldest_pending_seconds: number; errors: { id: number; event_type: string; state: string; error_code: string; attempt_count: number }[] }
 export interface KpiFilters { team_id?: number; manager_id?: number; project_id?: number; currency?: string }
 
-export interface LegacyProject { id: number; name: string; team_id: number | null; contract_amount: Money; legacy_paid_amount: Money; currency: string }
+export interface LegacyProject { id: number; name: string; team_id: number | null; contract_amount: Money; sale_amount: Money | null; legacy_paid_amount: Money; currency: string }

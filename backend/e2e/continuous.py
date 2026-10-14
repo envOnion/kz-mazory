@@ -164,6 +164,13 @@ def update():
     proof['multi_threads']=list(DialogueThread.objects.filter(topic='Разные объекты одного отчёта').values('id','project_id'))
     from api.models import MessageProcessingTrace, BitrixDealChangeLog
     proof['journal']=list(BitrixDealChangeLog.objects.values('id','object_type','external_id','method','status','journal_key','delivery_id','reconstructed','payload','created_at'))
+    from api.models import Project, FinancialRecord, FieldAssertion, FactDecision
+    sale_projects=Project.objects.filter(name__in=['БЦ Янтарный','БЦ Гранитный'])
+    proof['sale_projects']=list(sale_projects.values('id','name','sale_amount','contract_known','contract_amount','paid_amount','bitrix_id'))
+    proof['sale_financial_records']=list(FinancialRecord.objects.filter(project__in=sale_projects).values('id','project_id','amount','status'))
+    proof['sale_candidates']=list(FactCandidate.objects.filter(trace__raw_message__message_id__startswith='continuous-sale-').values('id','fact_type','status','trace__raw_message__message_id','proposed_changes'))
+    proof['sale_assertions']=list(FieldAssertion.objects.filter(project__in=sale_projects,field_name='sale_amount').values('id','project_id','value','fact_event__decision__candidate_id'))
+    proof['sale_decisions']=list(FactDecision.objects.filter(candidate__trace__raw_message__message_id__startswith='continuous-sale-').values('candidate_id','validation'))
     from django_q.models import Task
     journal_task=settings.E2E_DIR/'journal-rebuild-task.json'
     proof['journal_rebuild']=Task.objects.filter(pk=json.loads(journal_task.read_text())['id']).values('success','result').first() if journal_task.exists() else None

@@ -235,6 +235,10 @@ class Project(TimestampedModel):
     )
 
     # Финансовые показатели (тенге ₸)
+    sale_amount = models.DecimalField(
+        "Сумма продажи", max_digits=14, decimal_places=2, null=True, blank=True,
+        help_text="Явная цена продажи или нашего КП; не подтверждает договор или оплату.",
+    )
     contract_amount = models.DecimalField(
         "Сумма Договора ₸", max_digits=14, decimal_places=2, default=0.00
     )

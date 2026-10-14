@@ -59,6 +59,9 @@ class FactSchema(serializers.Serializer):
     party_role = serializers.ChoiceField(choices=["unknown", "customer", "contractor", "supplier", "payer", "designer"], default="unknown")
     direction = serializers.ChoiceField(choices=["income", "expense"], default="income")
     amount_precision = serializers.ChoiceField(choices=["exact", "approximate", "range", "unknown"], default="exact")
+    sale_amount = serializers.DecimalField(
+        max_digits=14, decimal_places=2, min_value=Decimal("0.01"), required=False
+    )
     contract_amount = serializers.DecimalField(
         max_digits=14, decimal_places=2, min_value=0, required=False
     )
@@ -222,6 +225,7 @@ def fact_identity(data):
         "project": (
             "company_name",
             "contract_amount",
+            "sale_amount",
             "cost_amount",
             "currency",
             "stage",
@@ -236,7 +240,7 @@ def fact_identity(data):
         )
         for key in fields.get(kind, ())
     }
-    for key in ("amount", "contract_amount", "cost_amount"):
+    for key in ("amount", "contract_amount", "sale_amount", "cost_amount"):
         if value.get(key) is not None:
             value[key] = str(Decimal(value[key]).normalize())
     value.update(
@@ -250,6 +254,7 @@ def snapshot(project):
         "id",
         "name",
         "contract_amount",
+        "sale_amount",
         "cost_amount",
         "cost_confirmed",
         "contract_known",
@@ -590,11 +595,10 @@ def _materialize_crm_project(candidate, crm_match, data):
         )
 
     company = _company_from_crm_match(crm_match, data)
-    contract_amount = (
-        crm_match.opportunity
-        if crm_match.opportunity is not None
-        else data.get("contract_amount", Decimal(0))
-    )
+    # CRM opportunity is a commercial price; it does not prove a contract.
+    sale_amount = data.get("sale_amount")
+    if sale_amount is None and crm_match.opportunity and crm_match.opportunity > 0:
+        sale_amount = crm_match.opportunity
     try:
         with transaction.atomic():
             project = Project.objects.create(
@@ -605,7 +609,8 @@ def _materialize_crm_project(candidate, crm_match, data):
                 normalized_name=normalized,
                 source="bitrix_crm",
                 bitrix_id=bitrix_deal_id,
-                contract_amount=contract_amount,
+                contract_amount=data.get("contract_amount", Decimal(0)),
+                sale_amount=sale_amount,
                 currency=data["currency"],
             )
     except IntegrityError as exc:
@@ -745,7 +750,7 @@ def edit_candidate(candidate_id, user, reason, changes, remove_fields, base_vers
         removable -= {"fact_type", "evidence", "evidence_messages", "evidence_message_id", "promise_message_id", "commitment_id", "base_commitment_version"}
         if set(remove_fields or []) - removable:
             raise serializers.ValidationError("Можно удалить только необязательные значения, сохранив тип и доказательства.")
-        if candidate.fact_type == "project" and {"contract_amount", "cost_amount"} & (set(data) | set(remove_fields or [])):
+        if candidate.fact_type == "project" and {"contract_amount", "sale_amount", "cost_amount"} & (set(data) | set(remove_fields or [])):
             access.require_team_role(user, candidate.team_id, ["finance"])
         for name in remove_fields or []:
             data.pop(name, None)
@@ -871,7 +876,10 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
             raise serializers.ValidationError(
                 "Укажите причину исправления извлечённых значений."
             )
-        data = {**candidate.proposed_changes, **(changes or {})}
+        # Autonomous changes are the complete validated proposal. Merging them
+        # back into the model output would resurrect deliberately discarded
+        # fields (rounded prices or an obsolete action).
+        data = dict(changes) if system and changes is not None else {**candidate.proposed_changes, **(changes or {})}
         currency_was_explicit = "currency" in data
         schema = FactSchema(data=data)
         schema.is_valid(raise_exception=True)
@@ -976,11 +984,12 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                             "Проект уже связан с другой сделкой CRM."
                         )
                 _validate_project_currency(project, data["currency"])
-                if not system and any(key in data for key in ("cost_amount", "contract_amount")):
+                if not system and any(key in data for key in ("cost_amount", "contract_amount", "sale_amount")):
                     access.require_team_role(user, candidate.team_id, ["finance"])
                 project.currency = data["currency"]
                 for field in (
                     "contract_amount",
+                    "sale_amount",
                     "cost_amount",
                     "current_action",
                     "next_action",
@@ -989,7 +998,7 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                         setattr(project, field, data[field])
                 if "contract_amount" in data:
                     project.contract_known = True
-                project.whatsapp_fields = sorted(set(project.whatsapp_fields) | {field for field in ("contract_amount", "cost_amount", "current_action", "next_action", "stage") if field in data and data[field] != ""})
+                project.whatsapp_fields = sorted(set(project.whatsapp_fields) | {field for field in ("contract_amount", "sale_amount", "cost_amount", "current_action", "next_action", "stage") if field in data and data[field] != ""})
                 if "cost_amount" in data:
                     project.cost_confirmed = True
                 if "stage" in data:
@@ -1180,7 +1189,7 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                     project.identity_confirmed = True
                 project.is_verified = (
                     project.is_verified
-                    or (candidate.fact_type == "project" and "contract_amount" in data)
+                    or (candidate.fact_type == "project" and ("contract_amount" in data or "sale_amount" in data))
                     or candidate.fact_type == "payment"
                 )
                 project.version += 1
@@ -1192,6 +1201,26 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                     raise Conflict("Проект конфликтует с существующей записью.") from exc
                 candidate.project = project
                 candidate.proposed_changes = json_value(data)
+                if not system and candidate.fact_type == "project" and {"sale_amount", "contract_amount"} & data.keys():
+                    # Human review uses the same source chronology as autonomous
+                    # approval; a later CRM sync must not select an older price.
+                    from .models import FactEvent, FieldAssertion
+                    from .message_time import source_time
+                    source = candidate.trace.raw_message
+                    anchor = data.get("evidence_message_id")
+                    if anchor:
+                        ref = candidate.evidence.select_related("raw_message").filter(raw_message_id=anchor).first()
+                        if ref:
+                            source = ref.raw_message
+                    event = FactEvent.objects.create(
+                        team=candidate.team, project=project,
+                        event_key=f"reviewed-price:{candidate.id}", event_type="project_update",
+                        occurred_at=source_time(source)[0] if source else None,
+                        payload={**json_value(data), "reviewed_by": user.id, "candidate_id": candidate.id},
+                    )
+                    for field in ("sale_amount", "contract_amount"):
+                        if field in data:
+                            FieldAssertion.objects.create(fact_event=event, project=project, field_name=field, value=json_value(data[field]))
                 record_revision(project, user, old_stage)
                 AuditEvent.objects.create(
                     actor=user,

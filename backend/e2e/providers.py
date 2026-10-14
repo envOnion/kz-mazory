@@ -43,7 +43,52 @@ ASSIGNMENTS = {
 }
 
 
+def classify_sale_amount(value):
+    """External model responses, including wrong suggestions the app must reject."""
+    content, raw_id = value['content'], value['target_message_id']
+    scenarios = {
+        'БЦ Янтарный: договор передан на подпись. Сумма продажи: 29 428 679 тг. Планируемая прибыль: 3 998 607 тг.': [('БЦ Янтарный', '29428679.00')],
+        'БЦ Янтарный: сумма продажи 29 428 679 тг, планируемая прибыль 3 998 607 тг': [('БЦ Янтарный', '29428679.00')],
+        'БЦ Янтарный: сумма продажи 29.43 млн тг. Договор на подписи.': [('БЦ Янтарный', '29430000.00')],
+        'БЦ Янтарный: теперь новая сумма продажи 29.43 млн тг.': [('БЦ Янтарный', '29430000.00')],
+        'БЦ Гранитный: наше КП направлено заказчику на сумму 18 000 000 тг.': [('БЦ Гранитный', '18000000.00')],
+        'БЦ Гранитный: Сумма коммерческого предложения: 18 млн тг.': [('БЦ Гранитный', '18000000.00')],
+        'БЦ Гранитный: Стоимость по первоначальному коммерческому предложению: 18 млн тг.': [('БЦ Гранитный', '18000000.00')],
+        'БЦ Гранитный: Тендер выигран нами с предложением на сумму 18 млн тг. Конкурент предложил 17.5 млн тг.': [('БЦ Гранитный', '18000000.00')],
+        'БЦ Янтарный: пересмотрели предложение. Сумма продажи: 27 000 000 тг.': [('БЦ Янтарный', '27000000.00')],
+        'БЦ Янтарный: первоначальная сумма продажи: 31 000 000 тг.': [('БЦ Янтарный', '31000000.00')],
+        'БЦ Янтарный: конкурент предложил котельную за 22 000 000 тг.': [('БЦ Янтарный', '22000000.00')],
+        'БЦ Янтарный: поступила оплата 3 000 000 тг.': [('БЦ Янтарный', '3000000.00')],
+        'БЦ Янтарный: планируемая прибыль 3 998 607 тг.': [('БЦ Янтарный', '3998607.00')],
+        'БЦ Гранитный: выставлен счёт на аванс 5 000 000 тг.': [('БЦ Гранитный', '5000000.00')],
+        'БЦ Гранитный: наше КП на сумму 18 млн тг, ежемесячный платёж 3 млн тг.': [('БЦ Гранитный', '3000000.00')],
+        'БЦ Янтарный: заказчик рассматривает наше предложение, новая цена не названа.': [('БЦ Янтарный', None)],
+        # The second object's price is deliberately suggested for the first:
+        # a matching literal in the complete message is insufficient evidence.
+        'Отчёт по стоимости БЦ:\nБЦ Янтарный:\nСумма продажи: 26 000 000 тг.\nБЦ Гранитный:\nСумма продажи: 19 000 000 тг.': [('БЦ Янтарный', '19000000.00'), ('БЦ Гранитный', '19000000.00')],
+        'Отчёт по стоимости БЦ: актуальные предложения\nБЦ Янтарный:\nСумма продажи: 26 000 000 тг.\nПланируемая прибыль: 2 000 000 тг.\nБЦ Гранитный:\nСумма продажи: 19 000 000 тг.': [('БЦ Янтарный', '26000000.00'), ('БЦ Гранитный', '19000000.00')],
+    }
+    facts = []
+    for name, amount in scenarios[content]:
+        fact = {'thread_key':'sale-report', 'fact_type':'project', 'object_name':name,
+            'currency':'KZT', 'current_action':content, 'evidence_message_id':raw_id,
+            'evidence':content, 'confidence':.98}
+        if amount is not None:
+            fact['sale_amount'] = amount
+        facts.append(fact)
+    if content == 'БЦ Янтарный: поступила оплата 3 000 000 тг.':
+        facts.append({'thread_key':'sale-report', 'fact_type':'payment', 'object_name':'БЦ Янтарный',
+            'amount':'3000000.00', 'currency':'KZT', 'payment_kind':'increment',
+            'payment_date':datetime.datetime.fromisoformat(value['sent_at']).date().isoformat(),
+            'evidence_message_id':raw_id, 'evidence':content, 'confidence':.98})
+    return {'threads':[{'key':'sale-report', 'thread_id':None, 'topic':'Стоимость предложений по объектам',
+        'summary':content, 'state':'ready', 'completion_reason':'Получен отчёт по объекту',
+        'messages':[{'raw_message_id':raw_id, 'thought_state':'final', 'relation':'discusses'}]}], 'facts':facts}
+
+
 def classify(value):
+    if value['content'].startswith(('БЦ Янтарный:', 'БЦ Гранитный:', 'Отчёт по стоимости БЦ:')):
+        return classify_sale_amount(value)
     if value['content'].startswith('БЦ Север: заказчиком '):
         pk=value['target_message_id']
         return {'threads':[{'key':'performed-payment','thread_id':None,'topic':'Оплата БЦ Север','summary':value['content'],'state':'ready','completion_reason':'Получен отчёт об оплате','messages':[{'raw_message_id':pk,'thought_state':'final','relation':'discusses'}]}],

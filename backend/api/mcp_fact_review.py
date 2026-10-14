@@ -190,6 +190,7 @@ def create_fact_review_mcp(user):
                 "version": p.version,
                 "bitrix_id": p.bitrix_id,
                 "contract_amount": str(p.contract_amount) if p.contract_amount is not None else None,
+                "sale_amount": str(p.sale_amount) if p.sale_amount is not None else None,
                 "currency": p.currency,
             }
             for p in projects

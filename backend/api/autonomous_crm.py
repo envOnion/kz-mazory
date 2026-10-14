@@ -43,8 +43,10 @@ def enqueue_project(project, fact_event, cfg=None):
     })
     patch = {"TITLE": project.name} if project.source == "chat" else {}
     known = set(project.whatsapp_fields)
-    if project.contract_known and "contract_amount" in known:
-        patch.update(OPPORTUNITY=str(project.contract_amount), CURRENCY_ID=project.currency)
+    from .commercial_amounts import commercial_amount
+    price = commercial_amount(project)
+    if price is not None:
+        patch.update(OPPORTUNITY=str(price), CURRENCY_ID=project.currency)
     if "stage" in known and settings.BITRIX_STAGE_MAP.get(project.status):
         patch["STAGE_ID"] = settings.BITRIX_STAGE_MAP[project.status]
     event, created = OutboxEvent.objects.get_or_create(deduplication_key=f"autonomous-crm:{project.id}:{project.version}", defaults={

@@ -151,7 +151,7 @@ def require_review(user, candidate):
         candidate.fact_type == "project"
         and any(
             key in candidate.proposed_changes
-            for key in ("contract_amount", "cost_amount")
+            for key in ("contract_amount", "sale_amount", "cost_amount")
         )
     )
     role = "finance" if financial else "team_lead"

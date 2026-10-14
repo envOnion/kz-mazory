@@ -613,6 +613,7 @@ class ProjectAdmin(ScopedReadOnlyAdmin):
         "source",
         "company",
         "manager",
+        "sale_amount_fmt",
         "contract_amount_fmt",
         "paid_amount_fmt",
         "due_amount_fmt",
@@ -659,6 +660,11 @@ class ProjectAdmin(ScopedReadOnlyAdmin):
         )
 
     verified_badge.short_description = "Проверено"
+
+    def sale_amount_fmt(self, obj):
+        return f"{obj.sale_amount:,.2f} {obj.currency}" if obj.sale_amount is not None else "—"
+
+    sale_amount_fmt.short_description = "Сумма продажи"
 
     def contract_amount_fmt(self, obj):
         return f"{obj.contract_amount:,.2f} ₸" if obj.contract_amount else "—"

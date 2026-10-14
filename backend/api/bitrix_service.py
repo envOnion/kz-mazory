@@ -502,6 +502,7 @@ class BitrixService:
             locked.crm_matches.filter(
                 crm_match_revision=locked.crm_match_revision
             ).delete()
+            from .commercial_amounts import commercial_amount
             CandidateCrmMatch.objects.create(
                 candidate=locked,
                 crm_match_revision=locked.crm_match_revision,
@@ -519,7 +520,7 @@ class BitrixService:
                     project.company.name if project.company else ""
                 ),
                 object_label=project.name[:255],
-                opportunity=project.contract_amount,
+                opportunity=commercial_amount(project),
                 currency=project.currency[:3],
                 score=100,
                 match_reasons=["existing_project_bitrix_id"],
@@ -890,10 +891,14 @@ class BitrixService:
         revision = ProjectRevision.objects.get(project=project, version=version)
         snapshot = revision.snapshot
         stage = settings.BITRIX_STAGE_MAP.get(snapshot["status"])
+        from .commercial_amounts import commercial_amount
+        price = commercial_amount(project)
+        if price is None and snapshot.get("contract_known") and Decimal(str(snapshot.get("contract_amount") or 0)) > 0:
+            price = Decimal(snapshot["contract_amount"])
         fields = {
             "STAGE_ID": stage,
             "TITLE": snapshot["name"],
-            "OPPORTUNITY": snapshot["contract_amount"],
+            "OPPORTUNITY": str(price) if price is not None else None,
             "CURRENCY_ID": snapshot["currency"],
             "ORIGINATOR_ID": "MAZORY",
             "ORIGIN_ID": str(project.id),
@@ -903,7 +908,7 @@ class BitrixService:
         }
         if not stage:
             fields.pop("STAGE_ID", None)
-        if not snapshot.get("contract_known") and Decimal(str(snapshot.get("contract_amount") or 0)) <= 0:
+        if price is None:
             fields.pop("OPPORTUNITY", None)
         if not project.is_verified:
             fields = {"TITLE": snapshot["name"], "ORIGINATOR_ID": "MAZORY", "ORIGIN_ID": str(project.id)}
@@ -963,7 +968,7 @@ class BitrixService:
             raise ProviderUnavailable("crm_team_mapping_required")
         clean = {
             "name": str(data.get("TITLE", ""))[:255],
-            "contract_amount": str(data.get("OPPORTUNITY", "0")),
+            "sale_amount": str(data.get("OPPORTUNITY", "0")),
             "currency": str(data.get("CURRENCY_ID", "KZT")),
             "external_stage": str(data.get("STAGE_ID", "")),
         }
@@ -998,7 +1003,7 @@ class BitrixService:
             proposed = {
                 "fact_type": "project",
                 "object_name": clean["name"],
-                "contract_amount": clean["contract_amount"],
+                **({"sale_amount": clean["sale_amount"]} if Decimal(clean["sale_amount"]) > 0 else {}),
                 "currency": clean["currency"],
                 "evidence": content,
                 "confidence": 1,

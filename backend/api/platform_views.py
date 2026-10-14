@@ -65,6 +65,7 @@ def candidate_data(candidate, user, source_map=None, project_ids=None):
             "object_name": project.name,
             "company_name": project.company.name if project.company else "",
             "contract_amount": str(project.contract_amount),
+            "sale_amount": str(project.sale_amount) if project.sale_amount is not None else None,
             "cost_amount": str(project.cost_amount), "currency": project.currency,
             "stage": project.status, "current_action": project.current_action,
             "next_action": project.next_action,
@@ -1102,6 +1103,7 @@ class LegacyProjectsView(APIView):
                     "name": p.name,
                     "team_id": p.team_id,
                     "contract_amount": str(p.contract_amount),
+                    "sale_amount": str(p.sale_amount) if p.sale_amount is not None else None,
                     "legacy_paid_amount": str(p.paid_amount),
                     "currency": p.currency,
                 }

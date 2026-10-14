@@ -66,6 +66,7 @@ class ProjectSerializer(serializers.ModelSerializer):
             "contract_number",
             "deal_period",
             "contract_amount",
+            "sale_amount",
             "cost_amount",
             "profit_amount",
             "target_margin_percent",

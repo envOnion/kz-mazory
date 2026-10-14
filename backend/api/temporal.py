@@ -51,7 +51,9 @@ def queue(op_id,stage,cursor):
 
 
 def _backfill(payload):
-    from .migrations._temporal_v1 import HISTORY_FIELDS
+    from .migrations._temporal_v1 import HISTORY_FIELDS as ORIGINAL_HISTORY_FIELDS
+    HISTORY_FIELDS = {key: list(fields) for key, fields in ORIGINAL_HISTORY_FIELDS.items()}
+    HISTORY_FIELDS["project"].append("sale_amount")
     with transaction.atomic():
         op=AsyncOperation.objects.select_for_update().get(pk=payload['operation_id'])
         if op.status in ('succeeded','cancelled','failed'): return
