@@ -78,7 +78,8 @@ def recover(result, raw, trace, cfg):
     originals = read_originals(raw, trace)
     messages = [item for item in originals if item.id in targets]
     selected = [(item, kind) for item in messages for kind, pattern in [('commitment', EXPLICIT_FUTURE), ('project', PROJECT_SUBJECT), ('payment', PAYMENT_SUBJECT)]
-                if pattern.search(item.content) and needs_recovery(result['facts'], item, kind)]
+                if pattern.search(item.content) and (needs_recovery(result['facts'], item, kind)
+                    or kind == 'project' and len(re.findall(r'^\s*(?:#{1,4}\s*)?\d+[.)]\s+\S', item.content, re.M)) >= 3)]
     if not selected:
         return
     original_result = normalize_themes(result['threads'])
@@ -132,7 +133,7 @@ def recover(result, raw, trace, cfg):
             inputs['eligible_promise_ids'] = [item.id for item in [target,*rows] if item.timestamp<=target.timestamp and EXPLICIT_FUTURE.search(item.content)]
             inputs['eligible_promise_ids'] = sorted(set(inputs['eligible_promise_ids'])) or [target.id]
         instructions = {'commitment':'Извлеки конкретное будущее обещание целевой реплики. Рабочие материалы тоже действие. object_name — предмет действия (документ, таблица, предложение), не имя адресата. В commitment_text восстанови что именно надо сделать и отправить из оригиналов контекста. company_name пустая строка, если организация не названа. Повторное подтверждение относится к первому обещанию. Прочитай оригиналы для предмета действия и возможного исполнения.',
-                        'project':'Извлеки состояние конкретного коммерческого объекта из целевой реплики: договор, КП, технические параметры. Запиши подтверждённое состояние в current_action, включая значения, единицы и прежнее значение при изменении параметра. Рабочая таблица, отчёт и общий портфель не являются сделками. Вопрос без утверждения не изменение объекта.',
+                        'project':'Извлеки состояние каждого конкретного коммерческого объекта из целевой реплики: договор, КП, технические параметры. Если рабочий отчёт перечисляет несколько названных объектов, прочитай каждый пункт и верни отдельный project по каждому объекту с подтверждённым состоянием; будущие обещания не заменяют уже сообщённое состояние объекта. Запиши подтверждённое состояние в current_action, включая значения, единицы и прежнее значение при изменении параметра. Сам отчёт, рабочая таблица и общий портфель не являются сделками. Вопрос без утверждения не изменение объекта.',
                         'payment':'Извлеки финансовое событие целевой реплики. Поступление на расчётный счёт — increment; выставленный счёт — invoice. Будущее ожидание не состоявшееся поступление. Повторное упоминание относится к исходному событию. object_name — коммерческий объект, к которому относится счёт или платёж; слово «счёт» не название объекта. company_name — организация, не название объекта. Счёт клиенту и поступление от клиента имеют direction=income; expense требует доказанного расхода. Если иной день события явно не назван, payment_date — календарная дата sent_at целевой реплики. current_time не дата события.'}
         inputs['analysis_instructions'] = f' Отдельный разбор только {kind} из target_message_id. '+instructions[kind]+' Не извлекай отдельные факты контекста, если цель их не изменяет. Не угадывай недостающие поля. Верни только facts.'
         inputs.pop('batch_message_ids', None)
@@ -194,6 +195,7 @@ def reconcile_promises(facts, raw, trace, cfg):
     from .dialogue_threads import source_key
     from .pipeline import _source_quote
     from .deduplication import normalize_deal_name
+    from .evidence_scope import delivery_action
     drafts = [fact for fact in facts if fact['fact_type']=='commitment' and fact.get('commitment_status')!='cancelled']
     if not drafts:
         return facts
@@ -296,6 +298,19 @@ def reconcile_promises(facts, raw, trace, cfg):
         draft, basis = drafts[index],bases[basis_index]
         if normalize_deal_name(draft['responsible_name'])!=normalize_deal_name(basis['responsible_name']):
             raise ProviderUnavailable('commitment_resolution_invalid')
+        retained = []
+        if draft.get('commitment_status') == 'fulfilled' and draft.get('promise_message_id') == basis.get('promise_message_id'):
+            for ref in draft.get('evidence_messages', []):
+                message = originals.get(ref.get('raw_message_id'))
+                promise = originals.get(basis['promise_message_id'])
+                if ref.get('role') != 'fulfillment' or not message or not promise or message.timestamp < promise.timestamp:
+                    continue
+                quote = _source_quote(ref['quote'], message.content)
+                action = delivery_action(quote, draft['commitment_text'])
+                if EXPLICIT_FUTURE.search(action) or re.search(r'не\s+(?:готов|отправ|переда|выдан|выполн)|не\s+удалось|частично', action, re.I):
+                    continue
+                if re.search(r'отправил|отправлен|передал|передан|выдан|выдал|направил|направлен|выполн|подготовил|готов[аоы]?\b|сделал|пров[её]л|проведен', action, re.I):
+                    retained.append({'raw_message_id': message.id, 'quote': quote, 'role': 'fulfillment'})
         # Copy only validated original promise fields, keeping this extraction's theme.
         for key in ('promise_message_id','evidence_message_id','evidence','commitment_text','object_name','company_name','responsible_name','assignment_kind','deadline_at','deadline_precision','deadline_basis','deadline_message_id'):
             if key in basis:
@@ -303,6 +318,10 @@ def reconcile_promises(facts, raw, trace, cfg):
         draft['evidence_messages'] = [copy.deepcopy(item) for item in basis['evidence_messages']
                                       if item.get('role') != 'fulfillment']
         draft.update(commitment_status='pending',fulfillment_message_id=None,fulfilled_at=None)
+        if retained:
+            draft.update(commitment_status='fulfilled', fulfillment_message_id=retained[-1]['raw_message_id'])
+            draft['evidence_messages'].extend(retained)
+            continue
         if update.get('commitment_status')=='fulfilled':
             refs = update.get('evidence_messages')
             if not isinstance(refs,list) or not refs:
