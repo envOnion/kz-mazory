@@ -35,6 +35,10 @@ class ScopedReadOnlyAdmin(ModelAdmin):
             return qs.filter(projects__in=access.projects_for(user)).distinct()
         if name == "RawMessage":
             return qs.filter(pk__in=access.messages_for(user))
+        if name == 'FactClarification':
+            return qs.filter(config__in=access.configs_for(user), recipient=user)
+        if name == 'ClarificationReply':
+            return qs.filter(question__config__in=access.configs_for(user), question__recipient=user)
         if name in ("MessageProcessingTrace", "ThreadRoutingAttempt"):
             return qs.filter(raw_message__in=access.messages_for(user))
         if name == "Commitment":

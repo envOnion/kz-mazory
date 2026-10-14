@@ -2,12 +2,13 @@
 
 import copy
 import hashlib
+from django.conf import settings
 
 MODEL = "qwen3.8-27b"
 BUILD = "b11561-e937b17a2"
 TEMPLATE_SHA256 = "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
 CONTEXT = 49152
-PROFILE = "qwen27-medium-full-source-v10"
+PROFILE = "qwen27-medium-source-refs-v12" if settings.QWEN_COMPACT_EVIDENCE else "qwen27-medium-full-source-v10"
 
 EVIDENCE_RULES = """
 Правила доказательств применяются ко всем фактам и пояснениям. Сумма из вопроса/просьбы не становится подтверждённой суммой в последующем ответе только о статусе. Числовая сумма требует денежного утверждения; без него contract_amount/cost_amount/amount не возвращай, amount_precision=unknown. Подписание договора и выставление счёта сохраняй отдельно от подтверждённого поступления денег. Переговоры для решения проблемы не доказывают успешное решение. Кандидат справочника CRM не подтверждает связь: нужна доказанная идентичность без противоречия контрагенту.
@@ -18,6 +19,12 @@ object_name во всех типах фактов — именно имя реа
 Полный источник: evidence_message_id выбирает оригинальное сообщение, действительно подтверждающее факт, evidence — ВСЁ его исходное content, с точными пробелами и переводами строк. Аналогично каждый evidence_messages.raw_message_id связан с ВСЕМ оригиналом в quote; роль описывает его вклад. Native schema связывает ID и полный текст. Не цитируй один заголовок, не склеивай/нормализуй цитаты. При исполнении сохраняй исходное обещание и отдельное доказательство позднего выполнения.
 Для commitment evidence_message_id = promise_message_id, первичная evidence — оригинал исходного обещания. Первый evidence_messages обязательно этот же оригинал с role=promise; поздний запрос/срок/выполнение идут отдельными элементами после него.
 """
+if settings.QWEN_COMPACT_EVIDENCE:
+    EVIDENCE_RULES += '\nРазделяй компанию и объект во всех типах фактов, включая payment: если оригинал явно называет компанию, сохраняй её буквальное название в company_name. Поле company_name нельзя оставлять пустым, когда плательщик явно назван. Например «компания Top Build ... поступила оплата 117 млн» требует company_name="Top Build". Это не доказывает название бизнес-объекта: когда конкретный объект не назван, object_name="". Не переносить компанию в object_name вместо company_name.\n'
+    EVIDENCE_RULES = EVIDENCE_RULES.replace(
+        'Полный источник: evidence_message_id выбирает оригинальное сообщение, действительно подтверждающее факт, evidence — ВСЁ его исходное content, с точными пробелами и переводами строк. Аналогично каждый evidence_messages.raw_message_id связан с ВСЕМ оригиналом в quote; роль описывает его вклад. Native schema связывает ID и полный текст. Не цитируй один заголовок, не склеивай/нормализуй цитаты. При исполнении сохраняй исходное обещание и отдельное доказательство позднего выполнения.',
+        'Полный источник: evidence_message_id выбирает оригинальное сообщение, действительно подтверждающее факт. Чтобы не переписывать один оригинал много раз, evidence содержит только строку source:ID (например source:12 для evidence_message_id=12). Аналогично evidence_messages.quote = source:ID для того же raw_message_id. Native schema связывает ID и ссылку строго; backend восстановит ВСЁ исходное content из действительно прочитанного полного оригинала, с точными пробелами и переводами строк. Ссылки не заменяют чтение и проверку смысла. При исполнении сохраняй исходное обещание и отдельное доказательство позднего выполнения.')
+    EVIDENCE_RULES = EVIDENCE_RULES.replace('первичная evidence — оригинал исходного обещания.', 'первичная evidence — ссылка source:ID на оригинал исходного обещания.')
 
 
 def enabled(cfg):
@@ -55,6 +62,8 @@ def grounded_schema(schema, inputs):
     sources = originals(inputs)
     if not sources:
         raise ProviderUnavailable("context_originals_unavailable")
+    def quote(pk):
+        return f'source:{pk}' if settings.QWEN_COMPACT_EVIDENCE else sources[pk]
 
     def bind(node):
         if isinstance(node, list):
@@ -81,10 +90,10 @@ def grounded_schema(schema, inputs):
                         'type': 'object', 'additionalProperties': False,
                         'required': ['raw_message_id', 'quote', 'role'],
                         'properties': {'raw_message_id': {'type': 'integer', 'const': pk},
-                                       'quote': {'type': 'string', 'const': sources[pk]},
+                                       'quote': {'type': 'string', 'const': quote(pk)},
                                        'role': {'type': 'string', 'const': 'promise'}}}]
                 item["properties"][id_field] = {"type": "integer", "const": pk}
-                item["properties"][text_field] = {"type": "string", "const": sources[pk]}
+                item["properties"][text_field] = {"type": "string", "const": quote(pk)}
                 item["required"] = sorted(set(item.get("required", [])) | {id_field, text_field})
                 variants.append(item)
             if not variants:
@@ -93,6 +102,25 @@ def grounded_schema(schema, inputs):
         return result
 
     return bind(schema)
+
+
+def restore_evidence(result, inputs):
+    """Expand only atomic references to complete originals in this frozen request."""
+    if not settings.QWEN_COMPACT_EVIDENCE:
+        return result
+    sources = originals(inputs)
+    def expand(node):
+        if isinstance(node, list):
+            return [expand(item) for item in node]
+        if not isinstance(node, dict):
+            return node
+        value = {key: expand(item) for key, item in node.items()}
+        for id_field, quote_field in [('evidence_message_id', 'evidence'), ('raw_message_id', 'quote')]:
+            pk = value.get(id_field)
+            if type(pk) is int and pk in sources and value.get(quote_field) == f'source:{pk}':
+                value[quote_field] = sources[pk]
+        return value
+    return expand(result)
 
 
 def attach_schema(payload, schema, inputs):

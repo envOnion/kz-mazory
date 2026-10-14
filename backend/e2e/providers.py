@@ -44,6 +44,17 @@ ASSIGNMENTS = {
 
 
 def classify(value):
+    if value['content'].startswith(('Парус:', 'Маяк:', 'Риф:')):
+        raw_id = value['target_message_id']
+        label = value['content'].split(':')[0]
+        key = {'Парус': 'parus', 'Маяк': 'beacon', 'Риф': 'reef'}[label]
+        return {'threads': [{'key': key, 'thread_id': None, 'topic': 'Оплата '+label,
+            'summary': value['content'], 'state': 'ready', 'completion_reason': 'Получено сообщение об оплате',
+            'messages': [{'raw_message_id': raw_id, 'thought_state': 'final', 'relation': 'discusses'}]}],
+            'facts': [{'thread_key': key, 'evidence_message_id': raw_id, 'fact_type': 'payment',
+                'object_name': value['content'].split(':')[0], 'amount': '12000000.00', 'currency': 'KZT', 'payment_kind': 'increment',
+                'payment_date': datetime.datetime.fromisoformat(value['sent_at']).date().isoformat(),
+                'evidence': value['content'], 'confidence': .98}]}
     if value['content'] in ('БЦ Восток: КП согласовано','БЦ Восток: КП согласовано по недоступному сообщению'):
         origin=next(row for row in value['context'] if row['content']=='Новый объект БЦ Восток') if value['content']=='БЦ Восток: КП согласовано' else {'raw_message_id':987654321,'content':'Новый объект БЦ Восток'}
         current={'raw_message_id':value['target_message_id'],'content':value['content']}
@@ -353,6 +364,12 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 return self.respond(json.loads(exc.read()), exc.code)
         if self.path == "/health":
             return self.respond({"status": "ok"})
+        if self.path == '/api/sendText':
+            state = json.loads(self.control.read_text())
+            ident = 'fixture-waha-' + uuid.uuid4().hex
+            state.setdefault('waha_messages', []).append({'id': ident, **body})
+            self.save_control(state)
+            return self.respond({} if state.get('waha_missing_send_id') else {'id': ident})
         if self.path == '/v1/systemone' and body.get('model') == 'e2e-whatsapp-v1':
             answers = {name: {'probabilities': {'A': .99 if 'БЦ Север' in question['criteria']['A'] and 'БЦ Север' in body['state']['message'] else .01,
                                                  'B': .01 if 'БЦ Север' in question['criteria']['A'] and 'БЦ Север' in body['state']['message'] else .99}}
@@ -384,7 +401,14 @@ class ProviderHandler(BaseHTTPRequestHandler):
             if self.path.endswith("crm.timeline.comment.list.json"):
                 return self.respond({"result": [row for row in state.get("comments", []) if str(row["ENTITY_ID"]) == str(body["filter"]["ENTITY_ID"])]})
             if self.path.endswith("crm.timeline.comment.add.json"):
-                comment = {**body["fields"], "ID": str(1000 + len(state.get("comments", [])))}
+                import fcntl
+                # Provider state is intentionally reset between browser scenarios;
+                # CRM identities, like real Bitrix IDs, never restart with it.
+                with (self.control.parent/'comment-sequence').open('a+') as sequence:
+                    fcntl.flock(sequence, fcntl.LOCK_EX)
+                    sequence.seek(0); ident = int(sequence.read() or '1000') + 1
+                    sequence.seek(0); sequence.truncate(); sequence.write(str(ident)); sequence.flush()
+                comment = {**body["fields"], "ID": str(ident)}
                 state.setdefault("comments", []).append(comment)
                 self.save_control(state)
                 return self.respond({"result": comment["ID"]})
@@ -431,6 +455,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
                     },
                 ]
                 filters = body.get("filter", {})
+                rows += state.get('clarification_catalog', [])
                 if "=ORIGINATOR_ID" in filters:
                     rows = [row for row in state.get('deals', {}).values() if row.get('ORIGINATOR_ID') == filters['=ORIGINATOR_ID'] and row.get('ORIGIN_ID') == filters.get('=ORIGIN_ID')]
                 for name, value in filters.items():

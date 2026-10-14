@@ -22,9 +22,23 @@ from .models import (
     WhatsAppHistoryJob,
     WhatsAppHistoryRun,
     HistoryAnalysisItem,
+    FactClarification,
+    ClarificationReply,
 )
 from .providers import ProviderUnavailable
 from .trace_context_ui import ERRORS
+
+
+@admin.register(FactClarification)
+class FactClarificationAdmin(ScopedReadOnlyAdmin):
+    list_display = ('id', 'candidate', 'recipient', 'state', 'created_at', 'resolved_at')
+    list_filter = ('state',)
+
+
+@admin.register(ClarificationReply)
+class ClarificationReplyAdmin(ScopedReadOnlyAdmin):
+    list_display = ('id', 'question', 'sender', 'state', 'error_code', 'created_at')
+    list_filter = ('state',)
 
 
 @admin.register(WhatsAppHistoryJob)

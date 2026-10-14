@@ -335,6 +335,17 @@ class MessageIngestView(APIView):
                 },
             )
             return Response({"status": "accepted"}, status=202)
+        stamp = payload.get('timestamp')
+        try:
+            sent = datetime.fromtimestamp(stamp, dt_timezone.utc) if stamp else timezone.now()
+        except (ValueError, OverflowError, OSError):
+            raise ValidationError('Некорректное время сообщения.')
+        if sent > timezone.now() + timedelta(minutes=5):
+            raise ValidationError('Время сообщения находится в будущем.')
+        from .clarifications import ingest as ingest_clarification
+        clarification_status = ingest_clarification(data)
+        if clarification_status:
+            return Response({'status': clarification_status}, status=202 if clarification_status == 'accepted' else 200)
         cfg = WhatsAppConfig.objects.filter(
             session_name=data["session"],
             group_jid=data["chat_id"],
@@ -348,17 +359,6 @@ class MessageIngestView(APIView):
             return Response({"status": "ignored"})
         if not payload["body"].strip() and not payload["hasMedia"]:
             return Response({"status": "ignored"})
-        stamp = payload.get("timestamp")
-        try:
-            sent = (
-                datetime.fromtimestamp(stamp, dt_timezone.utc)
-                if stamp
-                else timezone.now()
-            )
-        except (ValueError, OverflowError, OSError):
-            raise ValidationError("Некорректное время сообщения.")
-        if sent > timezone.now() + timedelta(minutes=5):
-            raise ValidationError("Время сообщения находится в будущем.")
         revision = hashlib.sha256(payload["body"].encode()).hexdigest()
         from .participants import enqueue_participants, message_sender
         original_payload = data["original_payload"]

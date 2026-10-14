@@ -116,6 +116,7 @@ def visible_notifications(user):
 
 
 def serialize_notification(n):
+    clarification = getattr(n, 'clarification', None)
     return {
         "id": n.id,
         "title": n.title,
@@ -126,6 +127,7 @@ def serialize_notification(n):
         "acknowledged": n.acknowledged_at is not None,
         "project_id": n.project_id,
         "commitment_id": n.commitment_id,
+        "clarification": {'id': clarification.id, 'state': clarification.state} if clarification else None,
         "deliveries": list(
             n.deliveries.values("state", "channel", "updated_at", "error_code")
         ),

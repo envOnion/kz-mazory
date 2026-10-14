@@ -21,7 +21,7 @@ export interface Profile {
   ai_response_mode: 'detailed' | 'concise' | 'finance'; ai_auto_suggest_next_actions: boolean; updated_at: string; coverage: Coverage
 }
 export interface NotificationPreferences { quiet_start?: string; quiet_end?: string; digest_time?: string; whatsapp?: boolean; reminder?: boolean; daily_digest?: boolean }
-export interface NotificationItem { id: number; title: string; message: string; type: string; created_at: string; is_read: boolean; acknowledged: boolean; project_id: number | null; commitment_id: number | null; deliveries: Delivery[] }
+export interface NotificationItem { id: number; title: string; message: string; type: string; created_at: string; is_read: boolean; acknowledged: boolean; project_id: number | null; commitment_id: number | null; deliveries: Delivery[]; clarification?: { id: number; state: 'queued' | 'awaiting' | 'answered' | 'unconfirmed' | 'superseded' | 'expired' | 'resolved' } | null }
 export interface Delivery { state: string; channel: string; updated_at: string; error_code: string }
 export interface DispatchNotificationPayload { recipient_id: number; project_id?: number; title: string; message: string; type?: string; send_whatsapp?: boolean }
 export interface Session { id: number; device: string; created_at: string; last_used_at: string; expires_at: string }

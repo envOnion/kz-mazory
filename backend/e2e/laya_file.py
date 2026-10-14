@@ -98,7 +98,7 @@ def dispatch_forever():
                   'routing': list(ThreadRoutingAttempt.objects.values('raw_message_id','outcome','reason_code','scores','latency_ms','model_revision')),
                   # Full request envelopes remain in PostgreSQL and the API.
                   # Polling proof needs results, not repeated native JSON schemas.
-                  'traces': list(MessageProcessingTrace.objects.filter(raw_message__chat_id__regex=r'^(laya-|qwen-window-)').values('id','raw_message_id','status','error_code','ai_extracted_facts')),
+                  'traces': list(MessageProcessingTrace.objects.filter(raw_message__chat_id__regex=r'^(laya-|qwen-window-)').values('id','raw_message_id','status','error_code','ai_extracted_facts','context_metadata__provider_profile','context_metadata__response_diagnostics')),
                   'events': list(OutboxEvent.objects.values('id','event_type','state','error_code','payload'))}
         from api.models import ProviderUsage
         report['usage'] = list(ProviderUsage.objects.values('outbox_event_id','operation','input_tokens','output_tokens'))

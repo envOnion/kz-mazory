@@ -588,6 +588,8 @@ class AIService:
                 schema = payload.get('response_format', {}).get('json_schema', {}).get('schema')
                 if schema and not Draft202012Validator(schema).is_valid(result):
                     raise ProviderUnavailable('invalid_extraction_schema', diagnostics=diagnostics)
+                from .qwen_profile import restore_evidence
+                result = restore_evidence(result, json.loads(payload['messages'][-1]['content']))
             return result, usage, diagnostics
         except (ValueError, KeyError, TypeError, IndexError, AttributeError):
             raise ProviderUnavailable(

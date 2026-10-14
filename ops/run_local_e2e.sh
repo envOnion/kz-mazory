@@ -12,13 +12,15 @@ fi
 docker "${docker_args[@]}" compose -f compose.e2e.yml up --build --no-deps --abort-on-container-exit --exit-code-from browser browser &
 runner_pid=$!
 while kill -0 "$runner_pid" 2>/dev/null; do
-  if docker "${docker_args[@]}" compose -f compose.e2e.yml exec -T backend test -f /e2e/thread-restart-required 2>/dev/null &&
-     ! docker "${docker_args[@]}" compose -f compose.e2e.yml exec -T backend test -f /e2e/thread-restart-done 2>/dev/null; then
-    if ! docker "${docker_args[@]}" restart --timeout 10 mazory-e2e-qcluster-1; then
-      kill "$runner_pid"; wait "$runner_pid"; exit 1
+  for checkpoint in thread clarification; do
+    if docker "${docker_args[@]}" compose -f compose.e2e.yml exec -T backend test -f "/e2e/${checkpoint}-restart-required" 2>/dev/null &&
+       ! docker "${docker_args[@]}" compose -f compose.e2e.yml exec -T backend test -f "/e2e/${checkpoint}-restart-done" 2>/dev/null; then
+      if ! docker "${docker_args[@]}" compose -f compose.e2e.yml restart -t 10 qcluster; then
+        kill "$runner_pid"; wait "$runner_pid"; exit 1
+      fi
+      docker "${docker_args[@]}" compose -f compose.e2e.yml exec -T backend touch "/e2e/${checkpoint}-restart-done"
     fi
-    docker "${docker_args[@]}" compose -f compose.e2e.yml exec -T backend touch /e2e/thread-restart-done
-  fi
+  done
   sleep 2
 done
 wait "$runner_pid" || exit $?
