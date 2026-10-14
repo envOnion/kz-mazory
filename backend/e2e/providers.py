@@ -452,14 +452,23 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 self.save_control(state)
                 return self.respond({"result": comment["ID"]})
             if self.path.endswith("tasks.task.list.json"):
-                prefix = body.get('filter', {}).get('TITLE', '').rstrip('%')
+                # Live portal searches the literal value, including '%'.
+                prefix = body.get('filter', {}).get('TITLE', '')
                 return self.respond({"result": {"tasks": [task for task in state.get('tasks', {}).values() if task['title'].startswith(prefix)]}})
             if self.path.endswith("tasks.task.add.json"):
                 ident = str(2000 + len(state.get('tasks', {})))
                 fields = body['fields']
-                state.setdefault('tasks', {})[ident] = {'id': ident, 'title': fields['TITLE'], 'responsibleId': str(fields['RESPONSIBLE_ID']), 'ufCrmTask': fields.get('UF_CRM_TASK', []), 'status': '2'}
+                state.setdefault('tasks', {})[ident] = {'id': ident, 'title': fields['TITLE'], 'description': fields['DESCRIPTION'], 'deadline': fields.get('DEADLINE') or '2026-10-19T19:00:00+03:00', 'responsibleId': str(fields['RESPONSIBLE_ID']), 'ufCrmTask': fields.get('UF_CRM_TASK', []), 'status': '2'}
                 self.save_control(state)
                 return self.respond({"result": {"task": {"id": ident}}})
+            if self.path.endswith('tasks.task.update.json'):
+                task = state['tasks'][str(body['taskId'])]
+                for key, value in body['fields'].items():
+                    name = {'TITLE':'title','DESCRIPTION':'description','DEADLINE':'deadline','UF_CRM_TASK':'ufCrmTask','RESPONSIBLE_ID':'responsibleId'}.get(key)
+                    if name:
+                        task[name] = value
+                self.save_control(state)
+                return self.respond({'result': {'task': task}})
             if self.path.endswith('tasks.task.get.json'):
                 return self.respond({'result': {'task': state.get('tasks', {}).get(str(body['taskId']), {})}})
             if self.path.endswith("crm.company.list.json"):
