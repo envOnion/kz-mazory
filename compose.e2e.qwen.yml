@@ -8,6 +8,7 @@ services:
     environment: &qwen-env
       MAZORY_E2E_MODEL: qwen3.8-27b
       AI_REQUEST_TIMEOUT: '1800'
+      QWEN_COMPACT_EVIDENCE: ${QWEN_COMPACT_EVIDENCE:-0}
   backend:
     environment: *qwen-env
   qcluster:
@@ -15,4 +16,4 @@ services:
   outbox:
     environment: *qwen-env
   browser:
-    environment: {MAZORY_E2E_MODEL: qwen3.8-27b}
+    environment: {MAZORY_E2E_MODEL: qwen3.8-27b, QWEN_COMPACT_EVIDENCE: '${QWEN_COMPACT_EVIDENCE:-0}'}

@@ -24,6 +24,8 @@ def dispatch_forever():
         close_old_connections()
         from .continuous import update
         update()
+        from .clarifications import update as update_clarifications
+        update_clarifications()
         proof=settings.E2E_DIR/'temporal-semantic.json'
         if proof.exists():
             from api.models import AsyncOperation, TemporalEntityRevision
@@ -92,6 +94,7 @@ def dispatch_forever():
                 state="pending", next_attempt_at__lte=timezone.now()
             )
             .exclude(event_type="index_message")
+            .exclude(event_type='clarification_reply' if (settings.E2E_DIR/'clarification-paused').exists() else '__no_paused_event__')
             .order_by("id")[:100]
         ):
             # A webhook can commit between update() and this query. Leave its

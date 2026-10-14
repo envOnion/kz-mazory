@@ -2169,6 +2169,39 @@ class FactDecision(TimestampedModel):
         constraints = [models.UniqueConstraint(fields=["candidate", "policy_version", "input_fingerprint"], name="fact_decision_input_unique")]
 
 
+class FactClarification(TimestampedModel):
+    candidate = models.ForeignKey(FactCandidate, on_delete=models.PROTECT, related_name='primary_clarifications')
+    candidates = models.ManyToManyField(FactCandidate, related_name='clarifications')
+    decision = models.ForeignKey(FactDecision, on_delete=models.PROTECT)
+    config = models.ForeignKey(WhatsAppConfig, on_delete=models.PROTECT)
+    recipient = models.ForeignKey(User, on_delete=models.PROTECT)
+    notification = models.OneToOneField(Notification, null=True, blank=True, on_delete=models.PROTECT, related_name='clarification')
+    request_key = models.CharField(max_length=64, unique=True)
+    subject_key = models.CharField(max_length=64, db_index=True)
+    state = models.CharField(max_length=16, default='queued', db_index=True,
+        choices=[(value, value) for value in ('queued', 'awaiting', 'answered', 'unconfirmed', 'superseded', 'expired', 'resolved')])
+    options = models.JSONField(default=list)
+    candidate_snapshots = models.JSONField(default=dict)
+    source_snapshot = models.JSONField(default=dict)
+    resolution = models.JSONField(default=dict, blank=True)
+    expires_at = models.DateTimeField()
+    resolved_at = models.DateTimeField(null=True, blank=True)
+
+
+class ClarificationReply(TimestampedModel):
+    question = models.ForeignKey(FactClarification, on_delete=models.PROTECT, related_name='replies')
+    sender = models.ForeignKey(User, on_delete=models.PROTECT)
+    session = models.CharField(max_length=64)
+    provider_message_id = models.CharField(max_length=128)
+    quoted_message_id = models.CharField(max_length=255, blank=True)
+    body = models.TextField()
+    state = models.CharField(max_length=16, default='queued')
+    error_code = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=['session', 'provider_message_id'], name='clarification_reply_unique')]
+
+
 class FactEvent(TimestampedModel):
     is_superseded = models.BooleanField(default=False, db_index=True)
     decision = models.ForeignKey(FactDecision, null=True, blank=True, on_delete=models.PROTECT, related_name="events")

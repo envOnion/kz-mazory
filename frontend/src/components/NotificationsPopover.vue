@@ -72,6 +72,7 @@
               {{ item.message }}
             </p>
             <p v-for="(delivery, index) in item.deliveries" :key="index" class="text-xs text-slate-400">WhatsApp: {{ delivery.state === 'sent' ? 'Отправлено' : delivery.state === 'delivered' ? 'Доставлено' : delivery.state === 'unknown' ? 'Результат неизвестен' : delivery.state }}</p>
+            <p v-if="item.clarification" class="mt-1 text-xs text-indigo-300">{{ item.clarification.state === 'resolved' ? 'Ответ применён, запись в CRM проверена' : item.clarification.state === 'unconfirmed' ? 'Оставлено без подтверждения' : item.clarification.state === 'answered' ? 'Ответ принят, выполняется проверка факта' : ['expired', 'superseded'].includes(item.clarification.state) ? 'Вопрос устарел, запись удержана' : 'Ожидается ответ в WhatsApp' }}</p>
           </div>
 
           <!-- Unread Dot -->

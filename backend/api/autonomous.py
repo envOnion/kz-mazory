@@ -170,13 +170,15 @@ def _resolve_project(candidate, data):
 
 
 def _validate(candidate, data, primary, text):
+    from .clarifications import confirmed_identity
+    human_identity = confirmed_identity(candidate)
     label = data.get('object_name', '').strip()
     if label:
         quoted = re.escape(label)
         company_only = (normalize_deal_name(data.get('company_name', '')) == normalize_deal_name(label)
                         or re.search(r'(?:компани[яиюй]|ТОО)\s+[«"“]?\s*' + quoted + r'(?!\w)', text, re.I))
         explicit_object = re.search(r'(?:объект\w*|проект\w*)\s+[«"“]?\s*' + quoted + r'(?!\w)', text, re.I)
-        if company_only and not explicit_object:
+        if company_only and not explicit_object and not human_identity:
             raise Deferred('company_not_object', 'Указана компания, но она не доказывает идентичность конкретного бизнес-объекта.')
     company = normalize_deal_name(data.get("company_name", ""))
     if company and not re.search(r"(?<!\w)" + re.escape(company) + r"(?!\w)", normalize_deal_name(text, max_length=None)):
@@ -190,14 +192,14 @@ def _validate(candidate, data, primary, text):
     if candidate.project_id:
         labels = {normalize_deal_name(candidate.project.name), normalize_deal_name(candidate.project.normalized_name)} | set(candidate.project.aliases.values_list("normalized_name", flat=True))
         labels |= {normalize_deal_name(option.object_label or option.deal_title) for option in candidate.crm_matches.filter(project_id=candidate.project_id, crm_match_revision=candidate.crm_match_revision)}
-        if data.get("object_name") and normalize_deal_name(data["object_name"]) not in labels:
+        if data.get("object_name") and normalize_deal_name(data["object_name"]) not in labels and not human_identity:
             raise Deferred("ambiguous_project", "Название в источнике не соответствует выбранному проекту или его доказанным обозначениям.")
         named = any(_project_label_quoted(label, text) for label in labels)
         label = normalize_deal_name(data.get("object_name", ""))
         collisions = list(Project.objects.filter(team_id=candidate.team_id).filter(Q(normalized_name=label) | Q(name__iexact=data["object_name"]) | Q(aliases__normalized_name=label)).values_list("pk", flat=True).distinct()[:2]) if label else []
-        if len(collisions) > 1 and primary.project_id != candidate.project_id:
+        if len(collisions) > 1 and primary.project_id != candidate.project_id and not human_identity:
             raise Deferred("ambiguous_project", "Одно обозначение соответствует активному и/или архивному объекту; статус активности не доказывает выбор.")
-        if not named and primary.project_id != candidate.project_id:
+        if not named and primary.project_id != candidate.project_id and not human_identity:
             raise Deferred("ambiguous_project", "Цитаты не подтверждают связь события с выбранным объектом.")
     if candidate.fact_type == "project":
         if not data.get("object_name") and not candidate.project_id:
@@ -438,6 +440,10 @@ def decide(candidate_id, *, preview=False):
         if candidate.status != "pending":
             return None
         fingerprint_input = [candidate.proposed_changes, candidate.project.version if candidate.project_id else None, candidate.crm_match_revision, candidate.crm_match_state, candidate.trace.model_version, cfg.chat_model_name, list(candidate.evidence.values_list("raw_message_id", "quote"))]
+        from .clarifications import hold, plan
+        clarification_hold = hold(candidate)
+        if clarification_hold:
+            fingerprint_input.append(['human_clarification_hold', clarification_hold.pk, getattr(clarification_hold, 'state', 'unconfirmed')])
         review_required = candidate.trace.context_metadata.get('analysis_limits', {}).get('review_before_delivery', False)
         if review_required:
             fingerprint_input.append('review_before_delivery')
@@ -445,9 +451,12 @@ def decide(candidate_id, *, preview=False):
         if not preview:
             existing = candidate.decisions.filter(policy_version=cfg.autonomous_policy_version, input_fingerprint=fingerprint).first()
             if existing:
+                plan(candidate, existing)
                 return existing
         outcome, code, explanation, mode, data = "accepted", "source_validated", "Проверены цитаты WhatsApp, связь объекта, тип события и повторность.", "apply", {}
         try:
+            if clarification_hold:
+                raise Deferred('user_requested_unconfirmed' if getattr(clarification_hold, 'state', '') == 'unconfirmed' or isinstance(clarification_hold, FactDecision) else 'clarification_pending', 'Факт удержан до подтверждённого ответа на уточнение WhatsApp.')
             if review_required:
                 raise Deferred('maintenance_review_required', 'Исторический результат ожидает сверки с источником перед автоматической записью.')
             if candidate.trace.model_version != cfg.chat_model_name:
@@ -493,6 +502,8 @@ def decide(candidate_id, *, preview=False):
                         enqueue_effects(candidate, event, cfg)
                 elif outcome == "rejected":
                     _apply_candidate(candidate.id, None, "reject", explanation, system=True)
+                elif not preview:
+                    plan(candidate, decision)
                 AuditEvent.objects.create(target_type="FactDecision", target_id=decision.id, action="autonomous_decision", before_after={"outcome": outcome, "reason_code": code, "candidate_id": candidate.id, "policy_version": cfg.autonomous_policy_version})
                 if preview:
                     transaction.set_rollback(True)

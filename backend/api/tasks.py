@@ -37,6 +37,8 @@ CLUSTERS = {
     "otp": "delivery",
     "notification": "delivery",
     "delivery_ack": "delivery",
+    "clarification_pump": "delivery",
+    "clarification_reply": "crm",
     "crm_sync": "crm",
     "autonomous_crm": "crm",
     "crm_import": "crm",
@@ -360,6 +362,8 @@ def run_outbox(pk):
             "otp": deliver_otp,
             "notification": deliver_notification,
             "delivery_ack": apply_delivery_ack,
+            "clarification_pump": clarification_pump,
+            "clarification_reply": clarification_reply,
             "operation": run_operation,
             "crm_sync": sync_crm,
             "crm_import": import_crm,
@@ -648,6 +652,7 @@ def deliver_notification(payload):
     ).get(pk=payload["delivery_id"])
     notification = delivery.notification
     user = notification.recipient
+    question = getattr(notification, 'clarification', None)
 
     def cancel():
         delivery.state = "cancelled"
@@ -655,6 +660,11 @@ def deliver_notification(payload):
 
     if delivery.state in ("sent", "delivered", "unknown", "cancelled"):
         return
+    if question:
+        from .clarifications import authorized, valid
+        if question.state != 'awaiting' or question.expires_at <= timezone.now() or not authorized(question) or not valid(question):
+            question.state = 'superseded'; question.save(update_fields=['state'])
+            return cancel()
     if not access.has_access(user) or (
         notification.project_id
         and not access.projects_for(user, include_client=True)
@@ -696,14 +706,25 @@ def deliver_notification(payload):
             state="processing",
         ).update(state="pending", next_attempt_at=send_at)
         return
+    if question and 'self_phone' not in question.source_snapshot:
+        from .participants import phone_from_jid
+        account = waha_request('GET', '/api/sessions/'+quote(question.config.session_name, safe=''))
+        me = account.get('me') if isinstance(account, dict) else {}
+        question.source_snapshot['self_phone'] = phone_from_jid(me.get('id')) if isinstance(me, dict) else ''
+        question.save(update_fields=['source_snapshot'])
     delivery.state = "sending"
     delivery.save(update_fields=["state"])
     result = send_waha_whatsapp_message_task(
-        user.username, f"{notification.title}\n{notification.message}"
+        question.source_snapshot['phone'] if question else user.username, f"{notification.title}\n{notification.message}",
+        session=question.config.session_name if question else 'default',
     )
     provider_id = result.get("id", "")
     if isinstance(provider_id, dict):
         provider_id = provider_id.get("_serialized", "")
+    if not isinstance(provider_id, str) or not provider_id or len(provider_id) > 255:
+        delivery.state = 'unknown'; delivery.error_code = 'waha_outcome_unknown'
+        delivery.save(update_fields=['state', 'error_code'])
+        raise WahaOutcomeUnknown()
     delivery.provider_message_id, delivery.state = str(provider_id)[:255], "sent"
     delivery.save(update_fields=["provider_message_id", "state", "updated_at"])
 
@@ -1145,6 +1166,7 @@ def decide_fact(payload):
 def autonomous_crm(payload):
     from .autonomous_crm import deliver
     deliver(payload)
+    clarification_pump({})
 
 
 def autonomous_reconcile(payload):
@@ -1152,6 +1174,17 @@ def autonomous_reconcile(payload):
     from .autonomous_reports import refresh_reports
     reconcile()
     refresh_reports()
+    clarification_pump({})
+
+
+def clarification_pump(payload):
+    from .clarifications import pump
+    pump()
+
+
+def clarification_reply(payload):
+    from .clarifications import resolve
+    resolve(payload)
 
 
 def process_message_artifact(payload):
