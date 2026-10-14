@@ -540,10 +540,6 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                     },
                 )
                 FactCandidate.objects.filter(pk__in=replaced_promises).exclude(pk=candidate.pk).update(status='superseded')
-                revision = revisions[fact["thread_key"]]
-                if project and revision.thread.project_id != project.id:
-                    revision.thread.project = project
-                    revision.thread.save(update_fields=["project"])
                 references = fact.get("evidence_messages") or [{"raw_message_id": fact["evidence_message_id"], "quote": fact["evidence"], "role": "source"}]
                 for reference in references:
                     FactEvidence.objects.get_or_create(
@@ -566,6 +562,11 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 retained.append(candidate.pk)
             replaced_origins = {raw.id, *(batch_ids or []), *(fact["evidence_message_id"] for fact in facts)}
             previous.filter(status="pending", trace__raw_message_id__in=replaced_origins).exclude(pk__in=retained).update(status="superseded")
+            # All facts must exist before deciding whether their shared thread
+            # identifies one project. A multi-object report has no shared one.
+            from .facts import _link_thread_project
+            for candidate in FactCandidate.objects.filter(pk__in=retained, project__isnull=False).select_related("project", "thread_revision"):
+                _link_thread_project(candidate, candidate.project)
             locked.processed, locked.processing_state = (
                 True,
                 ("analyzed" if cfg.autonomous_enabled else "needs_review") if proposed else "no_facts",

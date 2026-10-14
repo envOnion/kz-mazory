@@ -9,6 +9,7 @@ import type { AutonomousOverview } from '../src/types/autonomous'
 const dir = process.env.MAZORY_E2E_DIR!
 test.skip(process.env.MAZORY_E2E_REAL_MODEL === '1', 'Portable isolated external provider profile required')
 interface Proof {
+  control_nonce: string | null
   messages: { id: number; message_id: string; processed: boolean; processing_state: string }[]
   events: { id: number; event_type: string; state: string; error_code: string; payload: { raw_id?: number; batch_ids?: number[]; thread_id?: number; kind?: string } }[]
   deliveries: { id: number; state: string; patch: Record<string, unknown>; outbox_event_id: number }[]
@@ -16,6 +17,7 @@ interface Proof {
   catalog: { generation: number; state: string }[]
   hourly_at: string | null
   periodic: { id: number | null; duplicate_id: number | null } | null
+  multi_threads: { id: number; project_id: number | null }[]
   bounded_traces: { id: number; status: string; error_code: string; full_history_policy: string | null }[]
 }
 interface Provider { deals?: Record<string, Record<string, unknown>>; writes?: Record<string, unknown>[]; tasks?: Record<string, { id: string; title: string; responsibleId: string }>; [key: string]: unknown }
@@ -26,6 +28,7 @@ async function control(value: Record<string, unknown>) {
   const nonce = randomUUID()
   write(join(dir, 'continuous-control.json'), { nonce, ...value })
   await expect.poll(() => existsSync(join(dir, 'continuous-applied.json')) ? JSON.parse(readFileSync(join(dir, 'continuous-applied.json'), 'utf8')).nonce : null).toBe(nonce)
+  await expect.poll(() => proof().control_nonce).toBe(nonce)
 }
 async function message(request: APIRequestContext, group: string, id: string, body: string) {
   const data = JSON.stringify({ event: 'message', session: 'default', payload: { id, body, from: group, participant: '79990000002@c.us', notifyName: 'Боб', timestamp: Math.floor(Date.now()/1000)-10 } })
@@ -53,6 +56,23 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   expect(overview.coverage.some(scope => scope.counts.no_facts === 735 && scope.gaps.length === 0)).toBe(true)
   expect((await request.post('/api/directory/crm-sync/', { headers, data: { team_id: 1 } })).ok()).toBe(true)
   await expect.poll(() => proof().catalog[0]?.state).toBe('succeeded')
+  await control({ action: 'review_next', message_id: 'continuous-multi-binding' })
+  await message(request, group, 'continuous-multi-binding', 'БЦ Север: получено ТЗ. БЦ Запад: новый объект, получено ТЗ.')
+  const mixedRaw = () => proof().messages.find(row => row.message_id === 'continuous-multi-binding')?.id
+  await expect.poll(async () => {
+    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=pending', { headers })).json()
+    const mixed = rows.results.filter(row => row.proposed_changes.evidence_message_id === mixedRaw())
+    return mixed.length === 2 && mixed.some(row => row.crm_resolution.state === 'matched') && mixed.some(row => row.crm_resolution.state === 'not_found')
+  }).toBe(true)
+  expect(proof().multi_threads).toHaveLength(1)
+  expect(proof().multi_threads[0]!.project_id).toBeNull()
+  await control({ action: 'release_review', message_id: 'continuous-multi-binding' })
+  await expect.poll(async () => {
+    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    return rows.results.filter(row => row.proposed_changes.evidence_message_id === mixedRaw()).length
+  }).toBe(2)
+  await expect.poll(() => Object.values(provider().deals || {}).find(row => row.TITLE === 'БЦ Запад')?.ID).toBeTruthy()
+  expect(proof().multi_threads[0]!.project_id).toBeNull()
   await message(request, group, 'continuous-east', 'Новый объект БЦ Восток')
   await expect.poll(() => Object.values(provider().deals || {}).find(row => row.TITLE === 'БЦ Восток')?.ID).toBeTruthy()
   await expect.poll(() => proof().deliveries.filter(row => row.state === 'delivered').length).toBeGreaterThan(0)
