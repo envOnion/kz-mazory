@@ -198,6 +198,12 @@ def prepare_themes(result, raw, trace):
         ]
     # DRF integer coercion is inappropriate for source identities supplied by AI.
     for row in rows:
+        if isinstance(row, dict) and isinstance(row.get('topic'), str) and len(row['topic']) > 255:
+            original = row['topic']
+            prefix = original[:255]
+            row['topic'] = prefix.rsplit(' ', 1)[0] or prefix
+            trace.context_metadata.setdefault('topic_label_bounds', []).append({
+                'key': row.get('key'), 'original_topic': original, 'display_topic': row['topic']})
         if not isinstance(row, dict) or (
             row.get("thread_id") is not None and type(row["thread_id"]) is not int
         ):

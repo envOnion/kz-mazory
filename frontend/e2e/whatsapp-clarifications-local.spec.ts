@@ -36,6 +36,7 @@ test('WhatsApp clarification survives Q2 restart, validates answers, reads CRM b
   expect(provider().waha_messages!.filter(row => row.text.includes(`MZ-${q.id} `))).toHaveLength(1)
   expect(sent.chatId).toBe('79990000001@c.us')
   expect(sent.text).toContain('12 000 000 KZT')
+  expect(sent.text).toContain('Почему нужен ответ:')
   expect(sent.text).toContain('№701')
   expect(sent.text).toContain('№702')
   expect(proof().financial.some(row => row.candidate_id === q.candidate_id)).toBe(false)
@@ -74,8 +75,13 @@ test('WhatsApp clarification survives Q2 restart, validates answers, reads CRM b
   const unknown = question('clarification-unknown')!
   expect((await webhook(request,'clarification-dont-know',`MZ-${unknown.id} оставь без подтверждения, я не знаю`,'79990000001@c.us')).status()).toBe(202)
   await expect.poll(() => question('clarification-unknown')?.state).toBe('unconfirmed')
+  await control({action:'unknown_exact',question_id:unknown.id})
+  expect(provider().deals?.['740']?.TITLE).toBe('Маяк')
   expect((await webhook(request,'clarification-unknown-followup','Маяк: оплата 12 млн тенге поступила сегодня, повторный отчёт',group,{participant:'79990000002@c.us'})).status()).toBe(202)
   await expect.poll(() => proof().raw_ids.includes('clarification-unknown-followup')).toBe(true)
+  await expect.poll(() => proof().candidates.find(row => row.trace__raw_message__message_id === 'clarification-unknown-followup' && row.decisions__reason_code === 'user_requested_unconfirmed')?.status).toBe('pending')
+  const repeatedUnknown = proof().candidates.find(row => row.trace__raw_message__message_id === 'clarification-unknown-followup')!
+  expect(proof().financial.some(row => row.candidate_id === repeatedUnknown.id)).toBe(false)
   await expect.poll(() => proof().questions.length).toBe(2)
   expect(proof().financial.some(row => row.candidate_id === unknown.candidate_id)).toBe(false)
   expect((await webhook(request,'clarification-stale','Риф: оплата 12 млн тенге поступила сегодня',group,{participant:'79990000002@c.us'})).status()).toBe(202)

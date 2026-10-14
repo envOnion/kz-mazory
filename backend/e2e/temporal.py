@@ -72,7 +72,7 @@ def benchmark():
     from api.analytics.catalog import CATALOG
     user=User.objects.get(username='79990000101')
     op=AsyncOperation.objects.create(requested_by=user,operation_type='temporal_e2e',status='running',
-        expires_at=__import__('django.utils.timezone',fromlist=['now']).now()+timedelta(minutes=10),
+        expires_at=__import__('django.utils.timezone',fromlist=['now']).now()+timedelta(days=7),
         access_fingerprint=access.fingerprint(user),idempotency_key=f'temporal-e2e:{time.monotonic_ns()}')
     report={}
     try:
@@ -151,7 +151,7 @@ def semantic_scenario(analyst):
     companion=Project.objects.create(team=team,name='Private average fixture',identity_confirmed=True,
         currency='USD',contract_known=True,contract_amount=Decimal('300'),archived=True)
     validation=AsyncOperation.objects.create(requested_by=admin,operation_type='temporal_e2e',status='running',
-        expires_at=timezone.now()+timedelta(minutes=10),access_fingerprint=access.fingerprint(admin),
+        expires_at=timezone.now()+timedelta(days=7),access_fingerprint=access.fingerprint(admin),
         idempotency_key=f'temporal-averages:{time.monotonic_ns()}')
     context=OperationContext(validation.id,admin.id,validation.access_fingerprint,validation.expires_at,time.monotonic()+30,{'period':'year','currency':'USD'})
     filters=[{'field':'project_id','op':'in','value':[project.id,companion.id]}]
@@ -199,7 +199,7 @@ def concurrent_backfill_scenario():
     (Path(settings.E2E_DIR)/'temporal-concurrent-session.json').write_text(json.dumps({'access':token}))
     op=AsyncOperation.objects.create(requested_by=owner,operation_type='temporal_backfill',
         request={},result={'stage':2,'cursor':project.id-1},
-        access_fingerprint=access.fingerprint(owner),expires_at=timezone.now()+timedelta(minutes=10),
+        access_fingerprint=access.fingerprint(owner),expires_at=timezone.now()+timedelta(days=7),
         idempotency_key=f'temporal-concurrent:{time.monotonic_ns()}')
     locked=threading.Event()
     def crm_update():
