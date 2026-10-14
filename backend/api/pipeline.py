@@ -330,6 +330,12 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 len(context),
             )
             trace.context_metadata, trace.model_version = metadata, cfg.chat_model_name
+        if not trace.context_metadata.get('full_history', {}).get('ranges') and not trace.context_metadata.get('evidence_ranges'):
+            offered = json.loads(_extraction_user_message(payload)['content'])
+            sources = [{'raw_message_id': offered['target_message_id'], 'content': offered['content']}]
+            sources.extend(offered.get('target_messages', []))
+            sources.extend(item for item in offered.get('context', []) if not item.get('partial'))
+            trace.context_metadata['evidence_ranges'] = {str(item['raw_message_id']): len(item['content']) for item in sources}
         trace.context_metadata["request_state"] = "sent"
         trace.context_metadata.setdefault("timings_ms", {})["prepare"] = round((time.monotonic()-preparation_started)*1000)
         trace.error_code = ""
@@ -366,9 +372,10 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         from .dialogue_threads import prepare_themes, ready_facts, persist_themes, lock_source
         from .focused_extraction import recover
         recover(result, raw, trace, cfg)
-        if getattr(cfg, 'full_history_policy', None) in {'thread-context-v2', 'thread-routed-context-v1'}:
-            from .full_history import validate_evidence
-            validate_evidence(result, raw, trace)
+        # Bounded packets also carry evidence_ranges. Validate their literal
+        # sources and complete source links after any focused extraction.
+        from .full_history import validate_evidence
+        validate_evidence(result, raw, trace)
         themes = prepare_themes(result, raw, trace)
         targets = set(trace.context_metadata.get('batch_message_ids') or [raw.id])
         facts = _facts(ready_facts(result, themes), raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True, target_ids=targets)
