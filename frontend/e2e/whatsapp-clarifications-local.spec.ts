@@ -11,6 +11,7 @@ interface Provider { waha_messages?: { id: string; chatId: string; text: string 
 const proof = (): Proof => JSON.parse(readFileSync(join(dir, 'clarification-proof.json'), 'utf8'))
 interface Proof { notification_deliveries: {id: number; notification_id: number; state: string; provider_message_id: string}[]; notification_events: {state: string; payload__delivery_id: number}[] }
 interface Proof { matches: {candidate_id: number; crm_match_revision: number; bitrix_deal_id: string}[] }
+interface Proof { deadlines: {trace__raw_message__message_id: string; proposed_changes__deadline_at: string | null; proposed_changes__deadline_precision: string}[] }
 const provider = (): Provider => JSON.parse(readFileSync(join(dir, 'provider-state.json'), 'utf8'))
 const question = (id: string) => proof().questions.find(row => row.candidate__trace__raw_message__message_id === id)
 function write(path: string, value: Record<string, unknown>) { const tmp = path+randomUUID(); writeFileSync(tmp,JSON.stringify(value)); chmodSync(tmp,0o666); renameSync(tmp,path) }
@@ -105,5 +106,8 @@ test('WhatsApp clarification survives Q2 restart, validates answers, reads CRM b
   await control({action:'clinic_prelink',question_id:clinic.id})
   await expect.poll(() => proof().matches.some(row => row.crm_match_revision > previousRevision && row.bitrix_deal_id === '731')).toBe(true)
   expect(proof().financial.some(row => row.candidate_id === clinic.candidate_id)).toBe(false)
+  expect((await webhook(request,'clarification-thursday','Срок четверг: подготовлю сравнительную таблицу до четверга',group,{participant:'79990000002@c.us',notifyName:'Боб',timestamp:1791878400})).status()).toBe(202)
+  await expect.poll(() => proof().deadlines.find(row=>row.trace__raw_message__message_id==='clarification-thursday')?.proposed_changes__deadline_at?.slice(0,10)).toBe('2026-10-15')
+  expect(proof().deadlines.find(row=>row.trace__raw_message__message_id==='clarification-thursday')?.proposed_changes__deadline_precision).toBe('date')
   await control({action:'finish'})
 })

@@ -87,6 +87,7 @@ def update():
         'decisions': list(FactCandidate.objects.filter(decisions__reason_code='source_review_hold').values('id','status','decisions__reason_code')),
         'candidates': list(FactCandidate.objects.filter(trace__raw_message__message_id__startswith='clarification-').values('id','status','trace__raw_message__message_id','decisions__reason_code')),
         'matches': list(CandidateCrmMatch.objects.filter(candidate__trace__raw_message__message_id='clarification-clinic').values('candidate_id','crm_match_revision','bitrix_deal_id')),
+        'deadlines': list(FactCandidate.objects.filter(trace__raw_message__message_id='clarification-thursday').values('trace__raw_message__message_id','proposed_changes__deadline_at','proposed_changes__deadline_precision')),
         'raw_ids': list(RawMessage.objects.filter(config__group_jid='clarification-e2e@g.us').values_list('message_id',flat=True)),
         'financial': list(FinancialRecord.objects.values('candidate_id','project__bitrix_id','amount','amount_precision')),
         'notification_deliveries': list(NotificationDelivery.objects.values('id','notification_id','state','provider_message_id')),
