@@ -17,9 +17,11 @@ TOPICS = {
     "south": "Доставка БЦ Южный",
     "general": "Список объектов команды",
     "east": "Новый объект БЦ Восток",
+    "multi": "Разные объекты одного отчёта",
 }
 ASSIGNMENTS = {
     "Новый объект БЦ Восток": ("east", "project"),
+    "БЦ Север: получено ТЗ. БЦ Запад: новый объект, получено ТЗ.": ("multi", "project"),
     "От компании Меридиан поступила оплата 117 млн тенге, объект не указан": ("meridian", "project"),
     "БЦ Восток: договор подписан на 25 млн тенге": ("east", "project"),
     "БЦ Восток: монтаж начался": ("east", "project"),
@@ -65,7 +67,7 @@ def classify(value):
             None,
         )
         has_payment = any(role == "payment" for _, role in members)
-        ready = bool(promise and request) or key in ("east", "meridian") or has_payment
+        ready = bool(promise and request) or key in ("east", "meridian", "multi") or has_payment
         topic = TOPICS.get(key, "Тема требует уточнения")
         themes.append(
             {
@@ -117,6 +119,10 @@ def classify(value):
                     facts[-1].update(amount='20000000.00', company_name='Меридиан', party_role='unknown')
                 if '45 млн тенге' in row['content']:
                     facts[-1].update(amount='45000000.00')
+        if ready and key == 'multi':
+            row=members[-1][0]
+            for label in ['БЦ Север','БЦ Запад']:
+                facts.append({'thread_key':key,'evidence_message_id':row['raw_message_id'],'fact_type':'project','object_name':label,'current_action':'Получено ТЗ','evidence':row['content'],'confidence':.95})
         if ready and key in ("east", "meridian"):
             row = members[-1][0]
             facts.append(

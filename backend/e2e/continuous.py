@@ -120,11 +120,14 @@ def update():
              'events': list(OutboxEvent.objects.values('id','event_type','state','error_code','payload')),
              'deliveries': list(CrmDelivery.objects.values('id','state','patch','outbox_event_id')),
              'routing': list(ThreadRoutingAttempt.objects.values('raw_message_id','outcome','selected_thread_id'))}
+    proof['control_nonce']=json.loads(applied.read_text()).get('nonce') if applied.exists() else None
     from api.models import CrmCatalogSync, BitrixSettings
     proof['catalog'] = list(CrmCatalogSync.objects.values('generation','state'))
     proof['hourly_at'] = BitrixSettings.objects.first().last_hourly_sync_at
     periodic=settings.E2E_DIR/'continuous-periodic.json'
     proof['periodic']=json.loads(periodic.read_text()) if periodic.exists() else None
+    from api.models import DialogueThread
+    proof['multi_threads']=list(DialogueThread.objects.filter(topic='Разные объекты одного отчёта').values('id','project_id'))
     from api.models import MessageProcessingTrace
     proof['bounded_traces'] = [{'id':t.id,'status':t.status,'error_code':t.error_code,
                                'full_history_policy':t.context_metadata.get('full_history_policy','missing')}

@@ -94,6 +94,14 @@ def dispatch_forever():
             .exclude(event_type="index_message")
             .order_by("id")[:100]
         ):
+            # A webhook can commit between update() and this query. Leave its
+            # target pending until the next tick attaches the review trace.
+            review_path=settings.E2E_DIR/'continuous-review.json'
+            if review_path.exists() and event.event_type=='extract_message':
+                from api.models import RawMessage
+                review_target=json.loads(review_path.read_text())['message_id']
+                if RawMessage.objects.filter(pk=event.payload.get('raw_id'),message_id=review_target).exists():
+                    continue
             if event.event_type == 'extract_message' and control.get('pause_thread_after_stage') and len(event.payload.get('full_history_state', {}).get('stage_trace_ids', [])) >= control['pause_thread_after_stage']:
                 (settings.E2E_DIR/'thread-paused.json').write_text(json.dumps({'event_id':event.id, 'trace_id':event.payload['trace_id'], 'history_run_id':event.payload.get('history_run_id'), 'state':event.payload['full_history_state']}))
                 continue

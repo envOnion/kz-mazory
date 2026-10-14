@@ -827,8 +827,8 @@ class BitrixService:
                 ]
             )
             if locked.thread_revision_id and locked.project_id:
-                from .models import DialogueThread
-                DialogueThread.objects.filter(pk=locked.thread_revision.thread_id, team_id=locked.team_id).update(project_id=locked.project_id)
+                from .facts import _link_thread_project
+                _link_thread_project(locked, locked.project)
         return state
 
     @staticmethod
