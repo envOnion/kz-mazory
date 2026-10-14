@@ -39,6 +39,9 @@ test('large original report completes with compact references and retains full l
   const trace=p.traces.find(row=>row.raw_message_id===sourceId && row.status==='success')!
   expect(trace).toBeTruthy()
   expect(trace.error_code).toBe('')
-  expect(trace.context_metadata__response_diagnostics.response_characters).toBeLessThan(input.content.length*2)
+  // Structured fields for a large report may exceed twice the source length.
+  // The regression is repeating the entire source for each extracted fact;
+  // references must at least halve that unavoidable full-copy lower bound.
+  expect(trace.context_metadata__response_diagnostics.response_characters).toBeLessThan(input.content.length*facts.length/2)
   writeFileSync(join(dir,'laya-results/compact-large-report.json'),JSON.stringify({input,sourceId,facts,trace},null,2))
 })

@@ -6,7 +6,7 @@ import { join } from 'node:path'
 const dir = process.env.MAZORY_E2E_DIR!
 test.skip(process.env.MAZORY_E2E_REAL_MODEL === '1', 'Isolated provider scenario')
 interface Question { id: number; state: string; candidate_id: number; candidate__trace__raw_message__message_id: string; options: { deal_id: string; title: string }[] }
-interface Proof { questions: Question[]; replies: { provider_message_id: string; state: string; error_code: string }[]; raw_ids: string[]; financial: { candidate_id: number; project__bitrix_id: string; amount: string; amount_precision: string }[]; deliveries: { state: string; fact_event__decision__candidate_id: number }[] }
+interface Proof { questions: Question[]; replies: { provider_message_id: string; state: string; error_code: string }[]; decisions: {id: number; status: string; decisions__reason_code: string}[]; candidates: {id: number; status: string; trace__raw_message__message_id: string; decisions__reason_code: string}[]; raw_ids: string[]; financial: { candidate_id: number; project__bitrix_id: string; amount: string; amount_precision: string }[]; deliveries: { state: string; fact_event__decision__candidate_id: number }[] }
 interface Provider { waha_messages?: { id: string; chatId: string; text: string }[]; comments?: { ENTITY_ID: string; COMMENT: string }[]; deals?: Record<string, { OPPORTUNITY: string; TITLE: string }>; [key: string]: unknown }
 const proof = (): Proof => JSON.parse(readFileSync(join(dir, 'clarification-proof.json'), 'utf8'))
 const provider = (): Provider => JSON.parse(readFileSync(join(dir, 'provider-state.json'), 'utf8'))
@@ -78,5 +78,14 @@ test('WhatsApp clarification survives Q2 restart, validates answers, reads CRM b
   expect((await webhook(request,'clarification-stale-answer',`MZ-${stale.id} 1`,'79990000001@c.us')).status()).toBe(202)
   await expect.poll(() => question('clarification-stale')?.state).toBe('superseded')
   expect(proof().financial.some(row => row.candidate_id === stale.candidate_id)).toBe(false)
+  await control({action:'review_hold',question_id:stale.id})
+  await expect.poll(() => proof().decisions.filter(row => row.id === stale.candidate_id).length).toBeGreaterThanOrEqual(2)
+  expect(proof().decisions.filter(row => row.id === stale.candidate_id).every(row => row.status === 'pending')).toBe(true)
+  expect(proof().deliveries.some(row => row.fact_event__decision__candidate_id === stale.candidate_id)).toBe(false)
+  expect((await webhook(request,'clarification-delivery-note','Накладная: закрыли накладную на 144 млн тенге',group,{participant:'79990000002@c.us'})).status()).toBe(202)
+  await expect.poll(() => proof().candidates.find(row => row.trace__raw_message__message_id === 'clarification-delivery-note' && row.decisions__reason_code === 'delivery_note_not_invoice')?.status).toBe('pending')
+  const note = proof().candidates.find(row => row.trace__raw_message__message_id === 'clarification-delivery-note')!
+  expect(proof().financial.some(row => row.candidate_id === note.id)).toBe(false)
+  expect(proof().deliveries.some(row => row.fact_event__decision__candidate_id === note.id)).toBe(false)
   await control({action:'finish'})
 })

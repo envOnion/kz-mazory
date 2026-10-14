@@ -44,6 +44,10 @@ ASSIGNMENTS = {
 
 
 def classify(value):
+    if value['content'].startswith('Накладная:'):
+        raw_id = value['target_message_id']
+        return {'threads': [{'key':'delivery-note', 'thread_id':None, 'topic':'Закрытие накладной', 'summary':value['content'], 'state':'ready', 'completion_reason':'Отчёт получен', 'messages':[{'raw_message_id':raw_id,'thought_state':'final','relation':'discusses'}]}],
+            'facts':[{'thread_key':'delivery-note','evidence_message_id':raw_id,'fact_type':'payment','amount':'144000000.00','currency':'KZT','payment_kind':'invoice','evidence':value['content'],'confidence':.98}]}
     if value['content'].startswith(('Парус:', 'Маяк:', 'Риф:')):
         raw_id = value['target_message_id']
         label = value['content'].split(':')[0]
