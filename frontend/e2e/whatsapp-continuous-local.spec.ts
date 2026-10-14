@@ -95,11 +95,12 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   await message(request, group, 'continuous-east', 'Новый объект БЦ Восток')
   await expect.poll(() => Object.values(provider().deals || {}).find(row => row.TITLE === 'БЦ Восток')?.ID).toBeTruthy()
   await expect.poll(() => proof().deliveries.filter(row => row.state === 'delivered').length).toBeGreaterThan(0)
+  const initialOpportunity = Object.values(provider().deals || {}).find(row => row.TITLE === 'БЦ Восток')!.OPPORTUNITY
   write(join(dir, 'provider-state.json'), { ...provider(), crm_discard_write: true })
   await message(request, group, 'continuous-contract', 'БЦ Восток: договор подписан на 25 млн тенге')
   await expect.poll(() => proof().events.some(row => row.error_code === 'crm_readback_mismatch')).toBe(true)
   expect(proof().deliveries.find(row => row.patch.OPPORTUNITY === '25000000.00')?.state).toBe('pending')
-  expect(Object.values(provider().deals || {}).find(row => row.TITLE === 'БЦ Восток')?.OPPORTUNITY).toBeUndefined()
+  expect(Object.values(provider().deals || {}).find(row => row.TITLE === 'БЦ Восток')!.OPPORTUNITY).toBe(initialOpportunity)
   // Provider acknowledgement survives the business transaction's rollback.
   expect(proof().journal.some(row => row.method === 'crm.deal.update' && row.status === 'accepted' && row.payload.fields?.OPPORTUNITY === '25000000.00')).toBe(true)
   write(join(dir, 'provider-state.json'), { ...provider(), crm_discard_write: false })
@@ -109,6 +110,7 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   const creates = provider().writes?.length
   await message(request, group, 'continuous-contract', 'БЦ Восток: договор подписан на 25 млн тенге')
   expect(provider().writes?.length).toBe(creates)
+  const initialStage = Object.values(provider().deals || {}).find(row => row.TITLE === 'БЦ Восток')!.STAGE_ID
   await message(request, group, 'continuous-unmapped-stage', 'БЦ Восток: монтаж начался')
   await expect.poll(async () => {
     const rows: ApiPage<Candidate> = await candidates(request, headers, 'approved')
@@ -116,7 +118,7 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   }).toBe(true)
   await expect.poll(() => proof().deliveries.filter(row => row.state === 'delivered').length).toBeGreaterThan(3)
   expect(proof().events.some(row => row.error_code === 'crm_stage_mapping_missing')).toBe(false)
-  expect(Object.values(provider().deals || {}).find(row => row.TITLE === 'БЦ Восток')?.STAGE_ID).toBeUndefined()
+  expect(Object.values(provider().deals || {}).find(row => row.TITLE === 'БЦ Восток')!.STAGE_ID).toBe(initialStage)
   await expect.poll(() => JSON.stringify(provider()).includes('Стадия Mazory: В исполнении')).toBe(true)
   await message(request, group, 'continuous-percent', 'БЦ Север: цена предложения на 15% ниже первоначальной стоимости')
   let candidate: Candidate | undefined
@@ -145,8 +147,9 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   await message(request, group, 'continuous-task-request', 'БЦ Север: подготовь смету')
   await message(request, group, 'continuous-task-promise', 'БЦ Север: да, подготовлю смету завтра')
   await expect.poll(() => Object.values(provider().tasks || {}).some(task => task.responsibleId === '7' && task.title.endsWith('Подготовить смету БЦ Север'))).toBe(true)
-  const task = Object.values(provider().tasks || {}).find(row => row.title.endsWith('Подготовить смету БЦ Север'))!
-  await expect.poll(() => proof().deliveries.find(row => row.external_object_link__external_id === task.id)?.state).toBe('delivered')
+  const taskId = Object.values(provider().tasks || {}).find(row => row.title.endsWith('Подготовить смету БЦ Север'))!.id
+  await expect.poll(() => proof().deliveries.find(row => row.external_object_link__external_id === taskId)?.state).toBe('delivered')
+  const task = Object.values(provider().tasks || {}).find(row => row.id === taskId)!
   expect(task.deadline).toBeFalsy()
   expect(task.description).toMatch(/Срок по переписке: \d{4}-\d{2}-\d{2} \(дата, время не указано\)/)
   expect(task.ufCrmTask).toEqual(['D_101'])
