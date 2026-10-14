@@ -44,6 +44,21 @@ ASSIGNMENTS = {
 
 
 def classify(value):
+    if value['content'].startswith('БЦ Север: заказчиком '):
+        pk=value['target_message_id']
+        return {'threads':[{'key':'performed-payment','thread_id':None,'topic':'Оплата БЦ Север','summary':value['content'],'state':'ready','completion_reason':'Получен отчёт об оплате','messages':[{'raw_message_id':pk,'thought_state':'final','relation':'discusses'}]}],
+            'facts':[{'thread_key':'performed-payment','fact_type':'payment','object_name':'БЦ Север','amount':'14500000.00','currency':'KZT','payment_kind':'increment','payment_date':datetime.datetime.fromisoformat(value['sent_at']).date().isoformat(),'evidence_message_id':pk,'evidence':value['content'],'confidence':.98}]}
+    if value['content'] == 'Темы уточнены без новых фактов':
+        prior = next(row for row in value['context'] if row['content'] == 'БЦ Север: получено ТЗ. БЦ Запад: новый объект, получено ТЗ.')
+        return {'threads':[{'key':'reclassified-context','thread_id':None,'topic':'Уточнённая тема обсуждения','summary':value['content'],'state':'unknown',
+            'messages':[{'raw_message_id':pk,'thought_state':'unknown','relation':'discusses'} for pk in [prior['raw_message_id'],value['target_message_id']]]}],'facts':[]}
+    if value['content'] == 'Длинная тема: КП отдельного объекта подготовлено':
+        raw_id = value['target_message_id']
+        if value.get('analysis_operation') == 'focused_fact_extraction':
+            key = value['known_extraction_theme_keys'][0]
+            return {'facts':[{'thread_key':key,'fact_type':'project','object_name':'','current_action':value['content'],'evidence_message_id':raw_id,'evidence':value['content'],'confidence':.95}],
+                'topic_updates':[{'thread_key':key,'topic':'Разбор подготовленного КП отдельного объекта и последующих договорённостей. '*12,'summary':value['content'],'state':'open'}]}
+        return {'threads':[{'key':'focused-long','thread_id':None,'topic':'Неопределённый объект','summary':value['content'],'state':'unknown','messages':[{'raw_message_id':raw_id,'thought_state':'unknown','relation':'discusses'}]}],'facts':[]}
     if value['content'] == 'Длинная тема: получен управленческий отчёт':
         raw_id=value['target_message_id']
         return {'threads':[{'key':'long-label','thread_id':None,'topic':'Многочастный управленческий отчёт по объектам и текущим договорённостям. '*12,'summary':value['content'],'state':'ready','completion_reason':'Отчёт завершён','messages':[{'raw_message_id':raw_id,'thought_state':'final','relation':'discusses'}]}],'facts':[]}

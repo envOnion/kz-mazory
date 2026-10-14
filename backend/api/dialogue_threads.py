@@ -145,6 +145,16 @@ def normalize_themes(rows):
     return rows
 
 
+def bound_topic_label(row, trace):
+    if isinstance(row, dict) and isinstance(row.get('topic'), str) and len(row['topic']) > 255:
+        original = row['topic']
+        prefix = original[:255]
+        row['topic'] = prefix.rsplit(' ', 1)[0] or prefix
+        trace.context_metadata.setdefault('topic_label_bounds', []).append({
+            'key': row.get('key', row.get('thread_key')), 'original_topic': original,
+            'display_topic': row['topic']})
+
+
 def prepare_themes(result, raw, trace):
     from .message_context import source_scope
 
@@ -198,12 +208,7 @@ def prepare_themes(result, raw, trace):
         ]
     # DRF integer coercion is inappropriate for source identities supplied by AI.
     for row in rows:
-        if isinstance(row, dict) and isinstance(row.get('topic'), str) and len(row['topic']) > 255:
-            original = row['topic']
-            prefix = original[:255]
-            row['topic'] = prefix.rsplit(' ', 1)[0] or prefix
-            trace.context_metadata.setdefault('topic_label_bounds', []).append({
-                'key': row.get('key'), 'original_topic': original, 'display_topic': row['topic']})
+        bound_topic_label(row, trace)
         if not isinstance(row, dict) or (
             row.get("thread_id") is not None and type(row["thread_id"]) is not int
         ):
@@ -442,8 +447,8 @@ def persist_themes(themes, raw, trace, facts):
     empty = DialogueThread.objects.filter(
         source_key=key, message_links__isnull=True
     ).exclude(state="superseded")
-    FactCandidate.objects.filter(
-        thread_revision__thread__in=empty, status="pending"
-    ).update(status="superseded")
+    # Moving a source to another topic does not replace its unreviewed facts.
+    # The immutable revision/evidence still grounds those facts; replacements
+    # are handled above and by the pipeline for the actual extraction targets.
     empty.update(state="superseded")
     return persisted
