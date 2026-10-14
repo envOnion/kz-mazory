@@ -131,6 +131,14 @@ def recover(result, raw, trace, cfg):
         inputs['extraction_topics'] = [{k:theme[k] for k in ('key','topic','summary')} for theme in relevant]
         if kind=='commitment':
             inputs['eligible_promise_ids'] = [item.id for item in [target,*rows] if item.timestamp<=target.timestamp and EXPLICIT_FUTURE.search(item.content)]
+            from .models import FactCandidate
+            from .dialogue_threads import source_key
+            read_ids = {item.id for item in [target, *rows] if item.timestamp <= target.timestamp}
+            previous_promises = FactCandidate.objects.filter(
+                thread_revision__thread__source_key=source_key(raw), fact_type='commitment',
+                status__in=['pending', 'approved'], trace__model_version=cfg.chat_model_name,
+                proposed_changes__promise_message_id__in=list(read_ids)).exclude(trace=trace)
+            inputs['eligible_promise_ids'].extend(row.proposed_changes['promise_message_id'] for row in previous_promises)
             inputs['eligible_promise_ids'] = sorted(set(inputs['eligible_promise_ids'])) or [target.id]
         instructions = {'commitment':'Извлеки конкретное будущее обещание целевой реплики. Рабочие материалы тоже действие. object_name — предмет действия (документ, таблица, предложение), не имя адресата. В commitment_text восстанови что именно надо сделать и отправить из оригиналов контекста. company_name пустая строка, если организация не названа. Повторное подтверждение относится к первому обещанию. Прочитай оригиналы для предмета действия и возможного исполнения.',
                         'project':'Извлеки состояние каждого конкретного коммерческого объекта из целевой реплики: договор, КП, технические параметры. Если рабочий отчёт перечисляет несколько названных объектов, прочитай каждый пункт и верни отдельный project по каждому объекту с подтверждённым состоянием; будущие обещания не заменяют уже сообщённое состояние объекта. Запиши подтверждённое состояние в current_action, включая значения, единицы и прежнее значение при изменении параметра. Сам отчёт, рабочая таблица и общий портфель не являются сделками. Вопрос без утверждения не изменение объекта.',

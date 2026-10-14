@@ -123,6 +123,28 @@ def restore_evidence(result, inputs):
     return expand(result)
 
 
+def order_promise_evidence(result, inputs):
+    """Keep provided evidence intact, placing its declared promise first."""
+    sources = originals(inputs)
+    value = copy.deepcopy(result)
+    reordered = []
+    for fact in value.get('facts', []):
+        if not isinstance(fact, dict) or fact.get('fact_type') != 'commitment':
+            continue
+        pk = fact.get('promise_message_id')
+        refs = fact.get('evidence_messages')
+        if type(pk) is not int or pk not in sources or fact.get('evidence_message_id') != pk or not isinstance(refs, list):
+            continue
+        quote = f'source:{pk}' if settings.QWEN_COMPACT_EVIDENCE else sources[pk]
+        positions = [index for index, ref in enumerate(refs) if isinstance(ref, dict)
+            and ref.get('raw_message_id') == pk and ref.get('role') == 'promise' and ref.get('quote') == quote]
+        if len(positions) == 1 and positions[0]:
+            index = positions[0]
+            fact['evidence_messages'] = [refs[index], *refs[:index], *refs[index+1:]]
+            reordered.append({'promise_message_id': pk, 'previous_index': index})
+    return value, reordered
+
+
 def attach_schema(payload, schema, inputs):
     result = copy.deepcopy(payload)
     result.pop("_ollama_format", None)
