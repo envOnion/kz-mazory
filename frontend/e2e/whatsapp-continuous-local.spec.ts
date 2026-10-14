@@ -9,6 +9,7 @@ import type { AutonomousOverview } from '../src/types/autonomous'
 const dir = process.env.MAZORY_E2E_DIR!
 test.skip(process.env.MAZORY_E2E_REAL_MODEL === '1', 'Portable isolated external provider profile required')
 interface Proof {
+  topic_labels: { original_topic: string; display_topic: string }[]
   control_nonce: string | null
   messages: { id: number; message_id: string; processed: boolean; processing_state: string }[]
   events: { id: number; event_type: string; state: string; error_code: string; payload: { raw_id?: number; batch_ids?: number[]; thread_id?: number; kind?: string } }[]
@@ -21,7 +22,7 @@ interface Proof {
   evidence_links: { message_id: string; status: string; error_code: string; full_history_policy: string | null; repairs: string[]; ranges: Record<string, number> }[]
   bounded_traces: { id: number; status: string; error_code: string; full_history_policy: string | null }[]
 }
-interface Provider { deals?: Record<string, Record<string, unknown>>; writes?: Record<string, unknown>[]; tasks?: Record<string, { id: string; title: string; responsibleId: string }>; [key: string]: unknown }
+interface Provider { deals?: Record<string, Record<string, unknown>>; writes?: Record<string, unknown>[]; tasks?: Record<string, { id: string; title: string; responsibleId: string }>; comments?: { COMMENT: string }[]; [key: string]: unknown }
 function proof(): Proof { return JSON.parse(readFileSync(join(dir, 'continuous-proof.json'), 'utf8')) }
 function provider(): Provider { return JSON.parse(readFileSync(join(dir, 'provider-state.json'), 'utf8')) }
 function write(path: string, value: Record<string, unknown>) { const temporary = `${path}.${randomUUID()}`; writeFileSync(temporary, JSON.stringify(value)); chmodSync(temporary, 0o666); renameSync(temporary, path) }
@@ -31,8 +32,8 @@ async function control(value: Record<string, unknown>) {
   await expect.poll(() => existsSync(join(dir, 'continuous-applied.json')) ? JSON.parse(readFileSync(join(dir, 'continuous-applied.json'), 'utf8')).nonce : null).toBe(nonce)
   await expect.poll(() => proof().control_nonce).toBe(nonce)
 }
-async function message(request: APIRequestContext, group: string, id: string, body: string, replyToId?: string) {
-  const data = JSON.stringify({ event: 'message', session: 'default', payload: { id, body, from: group, participant: '79990000002@c.us', notifyName: 'Боб', timestamp: Math.floor(Date.now()/1000)-10, ...(replyToId ? { replyTo: { quotedMessageId: replyToId } } : {}) } })
+async function message(request: APIRequestContext, group: string, id: string, body: string, replyToId?: string, timestamp = Math.floor(Date.now()/1000)-10) {
+  const data = JSON.stringify({ event: 'message', session: 'default', payload: { id, body, from: group, participant: '79990000002@c.us', notifyName: 'Боб', timestamp, ...(replyToId ? { replyTo: { quotedMessageId: replyToId } } : {}) } })
   const response = await request.post('/api/whatsapp/webhook/', { data, headers: { 'Content-Type': 'application/json', 'X-Webhook-Hmac': createHmac('sha512', 'isolated-local-webhook-secret').update(data).digest('hex') } })
   expect([200, 202]).toContain(response.status())
 }
@@ -166,6 +167,16 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
     return rows.results.some(row => row.proposed_changes.current_action === 'КП согласовано')
   }).toBe(true)
   const contextSource = proof().messages.find(row => row.message_id === 'continuous-evidence-origin')!
+  const agreedRows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+  const agreedProject = agreedRows.results.find(row => row.proposed_changes.current_action === 'КП согласовано')!.project_id!
+  await message(request, evidenceGroup, 'continuous-older-status', 'БЦ Восток: историческое КП подготовлено', undefined, Math.floor(Date.now()/1000)-86400)
+  await expect.poll(async () => {
+    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    return rows.results.find(row => row.proposed_changes.current_action === 'КП подготовлено')?.automatic_decision?.reason_code
+  }).toBe('historical_observation')
+  const actualProjects: ApiPage<{ id: number; current_action: string }> = await (await request.get(`/api/projects/?search=${encodeURIComponent('Восток')}`, { headers })).json()
+  expect(actualProjects.results.find(row => row.id === agreedProject)?.current_action).toBe('КП согласовано')
+  await expect.poll(() => (provider().comments || []).some(row => row.COMMENT.includes('БЦ Восток: историческое КП подготовлено'))).toBe(true)
   expect(proof().evidence_links.some(trace => trace.status === 'success' && trace.full_history_policy === null && trace.repairs.includes('literal_fact_source_link') && trace.ranges[String(contextSource.id)] === 'Новый объект БЦ Восток'.length)).toBe(true)
   expect(proof().evidence_links.some(trace => trace.error_code)).toBe(false)
   await control({ action: 'review_next', message_id: 'continuous-unavailable-evidence' })
@@ -176,7 +187,18 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
     const rows: ApiPage<Candidate> = await (await request.get(`/api/candidates/?status=${status}`, { headers })).json()
     expect(rows.results.some(row => row.proposed_changes.evidence_message_id === invalidSource.id)).toBe(false)
   }
+  await message(request, group, 'continuous-proposal-price', 'КП: БЦ Север, предложение на 29 млн тенге')
+  await expect.poll(async () => {
+    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=rejected', { headers })).json()
+    return rows.results.find(row => row.proposed_changes.evidence === 'КП: БЦ Север, предложение на 29 млн тенге')?.automatic_decision?.reason_code
+  }).toBe('invoice_not_supported')
+  expect((provider().comments || []).some(row => row.COMMENT.includes('КП: БЦ Север, предложение на 29 млн тенге'))).toBe(false)
   await context.addCookies([{ name: session.cookie_name, value: session.refresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
+  await message(request, group, 'continuous-long-label', 'Длинная тема: получен управленческий отчёт')
+  await expect.poll(() => proof().messages.find(row => row.message_id === 'continuous-long-label')?.processed).toBe(true)
+  await expect.poll(() => proof().topic_labels.length).toBeGreaterThan(0)
+  expect(proof().topic_labels[0]!.original_topic.length).toBeGreaterThan(255)
+  expect(proof().topic_labels[0]!.display_topic.length).toBeLessThanOrEqual(255)
   await page.goto('/')
   await page.getByRole('button', { name: 'Рабочий кабинет', exact: true }).click()
   await page.getByRole('button', { name: 'Отчеты по WhatsApp', exact: true }).click()

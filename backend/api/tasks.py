@@ -40,6 +40,7 @@ CLUSTERS = {
     "delivery_ack": "delivery",
     "clarification_pump": "delivery",
     "clarification_reply": "crm",
+    "decide_fact": "crm",
     "crm_sync": "crm",
     "autonomous_crm": "crm",
     "crm_import": "crm",

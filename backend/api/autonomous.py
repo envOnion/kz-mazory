@@ -223,6 +223,12 @@ def _validate(candidate, data, primary, text):
                 raise Deferred("unsupported_stage", "План завершения или отрицание не подтверждают завершенный объект.")
             if not re.search(words[data["stage"]], text, re.I):
                 raise Deferred("unsupported_stage", "Стадия не имеет основания в цитатах.")
+        if candidate.project_id and occurred and FieldAssertion.objects.filter(
+            fact_event__is_superseded=False, project_id=candidate.project_id,
+            field_name__in=[key for key in ('current_action', 'next_action') if data.get(key)],
+            fact_event__occurred_at__gt=occurred,
+        ).exists():
+            return 'observation'
     elif candidate.fact_type == "payment":
         amount_statements = [part for part in statements(text) if data.get("amount") and _money_matches(data["amount"], part, monetary_unit=True)]
         amount_text = "\n".join(amount_statements) or text
@@ -234,6 +240,8 @@ def _validate(candidate, data, primary, text):
             raise Deferred("currency_conflict", "Валюта извлеченного значения противоречит источнику.")
         if data.get("amount") and not _money_matches(data["amount"], text, monetary_unit=True):
             raise Deferred("unknown_amount", "Сумма финансового показателя не подтверждена цитатой.")
+        if data['payment_kind'] == 'invoice' and not re.search(r'сч[её]т|инвойс|invoice', amount_text, re.I):
+            raise Deferred('invoice_not_supported', 'Цена коммерческого предложения не подтверждает выставленный счёт.', True)
         if APPROXIMATE.search(amount_text) or primary.raw_payload.get("artifact_id"):
             data["amount_precision"] = "approximate"
         if data["payment_kind"] in ("cumulative", "balance", "debt", "invoice", "transfer"):
@@ -388,7 +396,7 @@ def _participant(candidate, data, raw):
 def _source_event(candidate, decision, data, raw, mode):
     return FactEvent.objects.create(
         decision=decision, team=candidate.team, project=candidate.project,
-        event_key=f"decision:{decision.id}", event_type="payment_schedule" if mode == "schedule" else f"reported_{data['payment_kind']}" if mode == "observation" else candidate.fact_type,
+        event_key=f"decision:{decision.id}", event_type="payment_schedule" if mode == "schedule" else f"reported_{data['payment_kind']}" if mode == "observation" and candidate.fact_type == 'payment' else candidate.fact_type,
         occurred_at=source_time(raw)[0], payload=json_value(data),
     )
 
@@ -475,6 +483,9 @@ def decide(candidate_id, *, preview=False):
                 enqueue_crm_match(candidate.id)
                 candidate.refresh_from_db()
             mode = _validate(candidate, data, primary, text)
+            if mode == 'observation' and candidate.fact_type == 'project':
+                code = 'historical_observation'
+                explanation = 'Историческое сообщение сохранено без замены более позднего подтверждённого состояния проекта.'
             if not candidate.project_id and data.get('object_name') and candidate.crm_match_state in ("queued", "not_requested", "error"):
                 raise Deferred("crm_search_pending", "Для исключения дубля объекта ожидается завершение поиска CRM.")
         except Deferred as exc:

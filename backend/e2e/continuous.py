@@ -132,6 +132,7 @@ def update():
     from api.models import DialogueThread
     proof['multi_threads']=list(DialogueThread.objects.filter(topic='Разные объекты одного отчёта').values('id','project_id'))
     from api.models import MessageProcessingTrace
+    proof['topic_labels']=[row for t in MessageProcessingTrace.objects.filter(raw_message__message_id='continuous-long-label') for row in t.context_metadata.get('topic_label_bounds', [])]
     proof['evidence_links']=[{'message_id':t.raw_message.message_id,'status':t.status,'error_code':t.error_code,'full_history_policy':t.context_metadata.get('full_history_policy','missing'),'repairs':t.context_metadata.get('schema_repairs',[]),'ranges':t.context_metadata.get('evidence_ranges',{})} for t in MessageProcessingTrace.objects.filter(raw_message__message_id__in=['continuous-context-evidence','continuous-unavailable-evidence']).select_related('raw_message')]
     proof['bounded_traces'] = [{'id':t.id,'status':t.status,'error_code':t.error_code,
                                'full_history_policy':t.context_metadata.get('full_history_policy','missing')}

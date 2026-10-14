@@ -44,6 +44,17 @@ ASSIGNMENTS = {
 
 
 def classify(value):
+    if value['content'] == 'Длинная тема: получен управленческий отчёт':
+        raw_id=value['target_message_id']
+        return {'threads':[{'key':'long-label','thread_id':None,'topic':'Многочастный управленческий отчёт по объектам и текущим договорённостям. '*12,'summary':value['content'],'state':'ready','completion_reason':'Отчёт завершён','messages':[{'raw_message_id':raw_id,'thought_state':'final','relation':'discusses'}]}],'facts':[]}
+    if value['content'] == 'КП: БЦ Север, предложение на 29 млн тенге':
+        raw_id=value['target_message_id']
+        return {'threads':[{'key':'proposal-price','thread_id':None,'topic':'КП БЦ Север','summary':value['content'],'state':'ready','completion_reason':'Подготовлено КП','messages':[{'raw_message_id':raw_id,'thought_state':'final','relation':'discusses'}]}],
+            'facts':[{'thread_key':'proposal-price','fact_type':'payment','object_name':'БЦ Север','amount':'29000000.00','currency':'KZT','payment_kind':'invoice','evidence_message_id':raw_id,'evidence':value['content'],'confidence':.95}]}
+    if value['content'] == 'БЦ Восток: историческое КП подготовлено':
+        raw_id=value['target_message_id']
+        return {'threads':[{'key':'east-history','thread_id':None,'topic':'История БЦ Восток','summary':value['content'],'state':'ready','completion_reason':'Сообщён исторический статус','messages':[{'raw_message_id':raw_id,'thought_state':'final','relation':'discusses'}]}],
+            'facts':[{'thread_key':'east-history','fact_type':'project','object_name':'БЦ Восток','current_action':'КП подготовлено','evidence_message_id':raw_id,'evidence':value['content'],'confidence':.95}]}
     if value['content'].startswith('Срок четверг:'):
         raw_id = value['target_message_id']
         return {'threads':[{'key':'thursday-table','thread_id':None,'topic':'Сравнительная таблица','summary':'Подготовить сравнительную таблицу к четвергу','state':'ready','completion_reason':'Названо действие и срок','messages':[{'raw_message_id':raw_id,'thought_state':'final','relation':'discusses'}]}],

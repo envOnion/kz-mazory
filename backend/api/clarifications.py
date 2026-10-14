@@ -49,6 +49,18 @@ def hold(candidate):
     question = candidate.clarifications.filter(state__in=['queued', 'awaiting', 'unconfirmed', 'expired', 'superseded']).order_by('-id').first()
     if question:
         return question
+    raw = candidate.trace.raw_message
+    if raw and raw.config_id:
+        from .deduplication import normalize_deal_name
+        label = normalize_deal_name(candidate.proposed_changes.get('object_name', ''))
+        if label:
+            for unknown in FactClarification.objects.filter(config_id=raw.config_id, state='unconfirmed', candidate__status='pending').select_related('candidate'):
+                aliases = [unknown.candidate.proposed_changes.get('object_name', '')]
+                saved = unknown.source_snapshot.get('object_aliases', [])
+                if isinstance(saved, list):
+                    aliases.extend(value for value in saved if isinstance(value, str))
+                if label in {normalize_deal_name(value) for value in aliases if value}:
+                    return unknown
     # A human defer survives unrelated version/model/catalog changes.
     decision = candidate.decisions.filter(actor_kind='human', outcome='deferred', reason_code='user_requested_unconfirmed').order_by('-id').first()
     answered = candidate.clarifications.filter(state__in=['answered', 'resolved']).order_by('-updated_at').first()
@@ -157,6 +169,7 @@ def message(question):
     if end < len(content): excerpt += '…'
     lines = [f"В сообщении от {date}, {raw.sender_name or 'участник чата'}, по «{label}» указано: {fact}.",
         'Фрагмент оригинала: «'+excerpt+'»',
+        'Почему нужен ответ: '+question.decision.explanation,
         'Связь с конкретной сделкой пока не подтверждена. В Bitrix есть варианты:' if question.options else 'Поиск Bitrix не дал подтверждённых вариантов. Нужна конкретная сделка; угадывать её по этому сообщению нельзя.']
     for index, option in enumerate(question.options, 1):
         detail = f"{index}. «{option['title']}» — №{option['deal_id']}"

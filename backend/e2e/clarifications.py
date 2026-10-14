@@ -48,6 +48,15 @@ def update():
                 temporary = p.with_suffix('.clarification.tmp'); temporary.write_text(json.dumps(state)); temporary.chmod(0o666); temporary.replace(p)
             if action == 'pause_reply':
                 (settings.E2E_DIR/'clarification-paused').touch()
+            if action == 'unknown_exact':
+                q=FactClarification.objects.get(pk=control['question_id'],state='unconfirmed')
+                p=settings.E2E_DIR/'provider-state.json';state=json.loads(p.read_text())
+                sample=state['clarification_catalog'][0]
+                row={**sample,'ID':'740','TITLE':'Маяк','COMPANY_ID':'0'}
+                state['clarification_catalog']=[item for item in state['clarification_catalog'] if 'Маяк' not in item['TITLE']]+[row]
+                state.setdefault('deals',{})['740']=row
+                temporary=p.with_suffix('.clarification.tmp');temporary.write_text(json.dumps(state));temporary.chmod(0o666);temporary.replace(p)
+                Project.objects.get_or_create(bitrix_id='740',defaults={'team_id':q.candidate.team_id,'name':'Маяк','source':'bitrix_crm','identity_confirmed':True})
             if action == 'resume_reply':
                 (settings.E2E_DIR/'clarification-paused').unlink(missing_ok=True)
             if action == 'stale':
