@@ -370,7 +370,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
             return self.respond({"status": "ok"})
         if self.path == '/api/sendText':
             state = json.loads(self.control.read_text())
-            ident = 'fixture-waha-' + uuid.uuid4().hex
+            ident = 'true_' + body['chatId'] + '_' + uuid.uuid4().hex
             state.setdefault('waha_messages', []).append({'id': ident, 'timestamp':fixture_time.time(), **body})
             self.save_control(state)
             return self.respond({} if state.get('waha_missing_send_id') else {'id': ident})

@@ -52,7 +52,7 @@ test('WhatsApp clarification survives Q2 restart, validates answers, reads CRM b
   expect((await webhook(request,'clarification-opaque',`MZ-${q.id} 2`,group,{participant:'79990000001@lid'})).status()).toBe(403)
   expect(proof().replies.some(row => row.provider_message_id === 'clarification-attacker')).toBe(false)
   await control({action:'pause_reply'})
-  const answer = {fromMe:true,to:'79990000001@c.us',replyTo:{quotedMessageId:sent.id}}
+  const answer = {fromMe:true,to:'79990000001@c.us',_data:{quotedStanzaID:sent.id.split('_').at(-1)}}
   expect((await webhook(request,'clarification-answer','2','79990000001@c.us',answer)).status()).toBe(202)
   expect((await webhook(request,'clarification-answer','2','79990000001@c.us',answer)).status()).toBe(202)
   await expect.poll(() => proof().replies.find(row => row.provider_message_id === 'clarification-answer')?.state).toBe('queued')
