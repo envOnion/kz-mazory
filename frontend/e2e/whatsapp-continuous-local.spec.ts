@@ -35,6 +35,20 @@ async function control(value: Record<string, unknown>) {
   await expect.poll(() => existsSync(join(dir, 'continuous-applied.json')) ? JSON.parse(readFileSync(join(dir, 'continuous-applied.json'), 'utf8')).nonce : null).toBe(nonce)
   await expect.poll(() => proof().control_nonce).toBe(nonce)
 }
+async function candidates(request: APIRequestContext, headers: Record<string, string>, status: string): Promise<ApiPage<Candidate>> {
+  const results: Candidate[] = []
+  let next: string | null = `/api/candidates/?status=${status}`
+  let count = 0
+  while (next) {
+    const response = await request.get(next, { headers })
+    expect(response.ok()).toBe(true)
+    const page: ApiPage<Candidate> = await response.json()
+    results.push(...page.results)
+    count = page.count
+    next = page.next
+  }
+  return { count, results, next: null }
+}
 async function message(request: APIRequestContext, group: string, id: string, body: string, replyToId?: string, timestamp = Math.floor(Date.now()/1000)-10) {
   const data = JSON.stringify({ event: 'message', session: 'default', payload: { id, body, from: group, participant: '79990000002@c.us', notifyName: 'Боб', timestamp, ...(replyToId ? { replyTo: { quotedMessageId: replyToId } } : {}) } })
   const response = await request.post('/api/whatsapp/webhook/', { data, headers: { 'Content-Type': 'application/json', 'X-Webhook-Hmac': createHmac('sha512', 'isolated-local-webhook-secret').update(data).digest('hex') } })
@@ -65,7 +79,7 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   await message(request, group, 'continuous-multi-binding', 'БЦ Север: получено ТЗ. БЦ Запад: новый объект, получено ТЗ.')
   const mixedRaw = () => proof().messages.find(row => row.message_id === 'continuous-multi-binding')?.id
   await expect.poll(async () => {
-    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=pending', { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, 'pending')
     const mixed = rows.results.filter(row => row.proposed_changes.evidence_message_id === mixedRaw())
     return mixed.length === 2 && mixed.some(row => row.crm_resolution.state === 'matched') && mixed.some(row => row.crm_resolution.state === 'not_found')
   }).toBe(true)
@@ -73,7 +87,7 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   expect(proof().multi_threads[0]!.project_id).toBeNull()
   await control({ action: 'release_review', message_id: 'continuous-multi-binding' })
   await expect.poll(async () => {
-    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, 'approved')
     return rows.results.filter(row => row.proposed_changes.evidence_message_id === mixedRaw()).length
   }).toBe(2)
   await expect.poll(() => Object.values(provider().deals || {}).find(row => row.TITLE === 'БЦ Запад')?.ID).toBeTruthy()
@@ -97,7 +111,7 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   expect(provider().writes?.length).toBe(creates)
   await message(request, group, 'continuous-unmapped-stage', 'БЦ Восток: монтаж начался')
   await expect.poll(async () => {
-    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, 'approved')
     return rows.results.some(row => row.proposed_changes.stage === 'in_execution')
   }).toBe(true)
   await expect.poll(() => proof().deliveries.filter(row => row.state === 'delivered').length).toBeGreaterThan(3)
@@ -107,7 +121,7 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   await message(request, group, 'continuous-percent', 'БЦ Север: цена предложения на 15% ниже первоначальной стоимости')
   let candidate: Candidate | undefined
   await expect.poll(async () => {
-    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=pending', { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, 'pending')
     candidate = rows.results.find(row => row.proposed_changes.amount === '15.00')
     return candidate?.automatic_decision?.reason_code
   }).toBe('unknown_amount')
@@ -118,7 +132,7 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   }).toBe('extraction_model_changed')
   await message(request, group, 'continuous-mixed-report', 'БЦ Север: оплата 60 000 000 ₸ поступила сегодня. По БЦ Южный выставлен счет примерно на 30 000 000 ₸, оплату ожидаем завтра.')
   await expect.poll(async () => {
-    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, 'approved')
     const receipt = rows.results.find(row => row.proposed_changes.amount === '60000000.00')
     return receipt?.proposed_changes.amount_precision
   }).toBe('exact')
@@ -155,25 +169,25 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   expect(proof().bounded_traces.every(trace => trace.full_history_policy === null)).toBe(true)
   await message(request, group, 'continuous-company-only', 'От компании Меридиан поступила оплата 117 млн тенге, объект не указан')
   await expect.poll(async () => {
-    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=pending', { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, 'pending')
     return rows.results.find(row => row.proposed_changes.object_name === 'Меридиан')?.automatic_decision?.reason_code
   }).toBe('company_not_object')
   expect(Object.values(provider().deals || {}).some(row => row.TITLE === 'Меридиан')).toBe(false)
   await message(request, group, 'continuous-unknown-party', 'БЦ Север: от компании Меридиан поступила оплата 20 000 000 ₸ сегодня')
   await expect.poll(async () => {
-    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, 'approved')
     return rows.results.some(row => row.fact_type === 'payment' && row.proposed_changes.amount === '20000000.00' && row.proposed_changes.company_name === 'Меридиан')
   }).toBe(true)
   expect(proof().events.some(event => event.event_type === 'autonomous_crm' && event.payload.kind === 'company')).toBe(false)
   await control({ action: 'review_next', message_id: 'continuous-audit-held' })
   await message(request, group, 'continuous-audit-held', 'БЦ Южный: оплата 45 млн тенге поступила сегодня')
   await expect.poll(async () => {
-    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=pending', { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, 'pending')
     return rows.results.find(row => row.proposed_changes.amount === '45000000.00')?.automatic_decision?.reason_code
   }).toBe('maintenance_review_required')
   await control({ action: 'release_review', message_id: 'continuous-audit-held' })
   await expect.poll(async () => {
-    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, 'approved')
     return rows.results.some(row => row.proposed_changes.amount === '45000000.00')
   }).toBe(true)
   const evidenceGroup = 'continuous-evidence@g.us'
@@ -185,15 +199,15 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   await expect.poll(() => proof().evidence_links.some(trace => trace.status === 'success')).toBe(true)
   await control({ action: 'release_review', message_id: 'continuous-context-evidence' })
   await expect.poll(async () => {
-    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, 'approved')
     return rows.results.some(row => row.proposed_changes.current_action === 'КП согласовано')
   }).toBe(true)
   const contextSource = proof().messages.find(row => row.message_id === 'continuous-evidence-origin')!
-  const agreedRows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+  const agreedRows: ApiPage<Candidate> = await candidates(request, headers, 'approved')
   const agreedProject = agreedRows.results.find(row => row.proposed_changes.current_action === 'КП согласовано')!.project_id!
   await message(request, evidenceGroup, 'continuous-older-status', 'БЦ Восток: историческое КП подготовлено', undefined, Math.floor(Date.now()/1000)-86400)
   await expect.poll(async () => {
-    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, 'approved')
     return rows.results.find(row => row.proposed_changes.current_action === 'КП подготовлено')?.automatic_decision?.reason_code
   }).toBe('historical_observation')
   const actualProjects: ApiPage<{ id: number; current_action: string }> = await (await request.get(`/api/projects/?search=${encodeURIComponent('Восток')}`, { headers })).json()
@@ -206,12 +220,12 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   await expect.poll(() => proof().evidence_links.some(trace => trace.message_id === 'continuous-unavailable-evidence' && trace.error_code === 'fact_thread_evidence_missing')).toBe(true)
   const invalidSource = proof().messages.find(row => row.message_id === 'continuous-unavailable-evidence')!
   for (const status of ['pending', 'approved']) {
-    const rows: ApiPage<Candidate> = await (await request.get(`/api/candidates/?status=${status}`, { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, status)
     expect(rows.results.some(row => row.proposed_changes.evidence_message_id === invalidSource.id)).toBe(false)
   }
   await message(request, group, 'continuous-proposal-price', 'КП: БЦ Север, предложение на 29 млн тенге')
   await expect.poll(async () => {
-    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=rejected', { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, 'rejected')
     return rows.results.find(row => row.proposed_changes.evidence === 'КП: БЦ Север, предложение на 29 млн тенге')?.automatic_decision?.reason_code
   }).toBe('invoice_not_supported')
   expect((provider().comments || []).some(row => row.COMMENT.includes('КП: БЦ Север, предложение на 29 млн тенге'))).toBe(false)
@@ -221,14 +235,14 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   ]) {
     await message(request, group, id!, body!)
     await expect.poll(async () => {
-      const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=rejected', { headers })).json()
+      const rows: ApiPage<Candidate> = await candidates(request, headers, 'rejected')
       return rows.results.some(row => row.proposed_changes.evidence === body && row.automatic_decision?.reason_code === 'plan_not_actual')
     }).toBe(true)
   }
   const performed = 'БЦ Север: заказчиком произведена 100% оплата в размере 14 500 000 тенге'
   await message(request, group, 'continuous-performed', performed)
   await expect.poll(async () => {
-    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, 'approved')
     return rows.results.some(row => row.proposed_changes.evidence === performed && row.automatic_decision?.reason_code === 'source_validated')
   }).toBe(true)
   await expect.poll(() => (provider().comments || []).some(row => row.COMMENT.includes(performed))).toBe(true)
@@ -250,12 +264,12 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   await message(request, reclassifiedGroup, 'continuous-retained-facts', 'БЦ Север: получено ТЗ. БЦ Запад: новый объект, получено ТЗ.')
   const retainedRaw = () => proof().messages.find(row => row.message_id === 'continuous-retained-facts')?.id
   await expect.poll(async () => {
-    const rows: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=pending', { headers })).json()
+    const rows: ApiPage<Candidate> = await candidates(request, headers, 'pending')
     return rows.results.filter(row => row.proposed_changes.evidence_message_id === retainedRaw()).length
   }).toBe(2)
   await message(request, reclassifiedGroup, 'continuous-reclassified-context', 'Темы уточнены без новых фактов', 'continuous-retained-facts')
   await expect.poll(() => proof().messages.find(row => row.message_id === 'continuous-reclassified-context')?.processed).toBe(true)
-  const retained: ApiPage<Candidate> = await (await request.get('/api/candidates/?status=pending', { headers })).json()
+  const retained: ApiPage<Candidate> = await candidates(request, headers, 'pending')
   expect(retained.results.filter(row => row.proposed_changes.evidence_message_id === retainedRaw())).toHaveLength(2)
   await page.goto('/')
   await page.getByRole('button', { name: 'Рабочий кабинет', exact: true }).click()

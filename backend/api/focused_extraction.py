@@ -56,7 +56,7 @@ def read_originals(raw, trace):
         ids.add(raw.id)
     return list(source_scope(raw).filter(pk__in=ids,
         id__lte=trace.context_metadata['snapshot_max_id']).exclude(
-        processing_state__in=['deleted','superseded']).select_related('config').order_by('timestamp','id'))
+        processing_state__in=['deleted','superseded','clarification_reply']).select_related('config').order_by('timestamp','id'))
 
 
 def read_content(message, trace):

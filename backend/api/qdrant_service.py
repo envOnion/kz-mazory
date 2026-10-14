@@ -111,7 +111,7 @@ class QdrantService:
         raw_ids = [hit.payload.get("raw_message_id") for hit in hits if hit.payload]
         sources = {
             m.id: m
-            for m in RawMessage.objects.filter(id__in=raw_ids, config_id__in=config_ids)
+            for m in RawMessage.objects.filter(id__in=raw_ids, config_id__in=config_ids).exclude(processing_state='clarification_reply')
         }
         results = []
         for hit in hits:

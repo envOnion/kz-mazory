@@ -40,6 +40,7 @@ CLUSTERS = {
     "delivery_ack": "delivery",
     "clarification_pump": "delivery",
     "clarification_reply": "crm",
+    "price_question": "crm",
     "decide_fact": "crm",
     "crm_sync": "crm",
     "autonomous_crm": "crm",
@@ -367,6 +368,7 @@ def run_outbox(pk):
             "delivery_ack": apply_delivery_ack,
             "clarification_pump": clarification_pump,
             "clarification_reply": clarification_reply,
+            "price_question": price_question,
             "operation": run_operation,
             "crm_sync": sync_crm,
             "crm_import": import_crm,
@@ -510,7 +512,7 @@ def run_outbox(pk):
         if event.event_type == "autonomous_crm":
             from .models import CrmDelivery
             current = OutboxEvent.objects.get(pk=event.pk)
-            CrmDelivery.objects.filter(outbox_event=event).exclude(state__in=("delivered", "superseded")).update(state=current.state, error_code=current.error_code)
+            CrmDelivery.objects.filter(outbox_event=event).exclude(state__in=("delivered", "superseded", "blocked")).update(state=current.state, error_code=current.error_code)
         if event.event_type == "extract_message":
             from .models import SourceWorkItem
             OutboxEvent.objects.filter(
@@ -810,6 +812,8 @@ def apply_delivery_ack(payload):
 
 def extract_message(payload):
     raw = RawMessage.objects.select_related('config').get(pk=payload['raw_id'])
+    if raw.processing_state == 'clarification_reply':
+        return
     manual = any(payload.get(key) for key in ('history_run_id','requested_by_id','reanalyze','commitment_refresh'))
     remaining = RawMessage.objects.filter(pk__in=payload.get('batch_ids') or [],processed=False).exists()
     # Another successful packet may already cover an incoming event. Reserving
@@ -1222,6 +1226,9 @@ def autonomous_crm(payload):
         if payload.get('kind') else f"autonomous-crm:{payload['project_id']}:{payload['version']}")
     with delivery_context(delivery):
         deliver(payload)
+    if not payload.get('kind'):
+        from .price_questions import enqueue
+        enqueue(payload['project_id'])
     clarification_pump({})
 
 
@@ -1235,6 +1242,8 @@ def autonomous_reconcile(payload):
     from .autonomous_reports import refresh_reports
     reconcile()
     refresh_reports()
+    from .price_questions import reconcile as reconcile_prices
+    reconcile_prices()
     clarification_pump({})
 
 
@@ -1246,6 +1255,12 @@ def clarification_pump(payload):
 def clarification_reply(payload):
     from .clarifications import resolve
     resolve(payload)
+
+
+def price_question(payload):
+    from .price_questions import plan_project
+    plan_project(payload['project_id'], payload.get('review'))
+    clarification_pump({})
 
 
 def process_message_artifact(payload):

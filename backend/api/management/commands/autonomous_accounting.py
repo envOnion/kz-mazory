@@ -42,7 +42,7 @@ class Command(BaseCommand):
                 raise CommandError("Для backfill нужен автономный режим.")
             count = 0
             for config in WhatsAppConfig.objects.filter(is_active=True, team__is_active=True):
-                ids = list(RawMessage.objects.filter(config=config, source="waha").exclude(processing_state__in=("deleted", "superseded")).exclude(content="").order_by("timestamp", "id").values_list("id", flat=True)[:options["limit"]])
+                ids = list(RawMessage.objects.filter(config=config, source="waha").exclude(processing_state__in=("deleted", "superseded", "clarification_reply")).exclude(content="").order_by("timestamp", "id").values_list("id", flat=True)[:options["limit"]])
                 size = max(1, cfg.autonomous_context_messages)
                 for offset in range(0, len(ids), size):
                     batch = ids[offset:offset + size]

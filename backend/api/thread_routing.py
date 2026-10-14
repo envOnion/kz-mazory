@@ -169,7 +169,7 @@ def route_message(payload):
     raw = RawMessage.objects.select_related("config__team", "team", "project").get(pk=payload["raw_id"])
     source_scope(raw)
     cfg = AISettings.get_active()
-    if raw.processed or raw.processing_state in ("deleted", "superseded"):
+    if raw.processed or raw.processing_state in ("deleted", "superseded", "clarification_reply"):
         return
     candidates = snapshot(raw)
     input_hash = digest([raw.content, raw.sender_name, candidates, cfg.routing_policy_version,str(cfg.laya_match_threshold),str(cfg.laya_match_margin),settings.LAYA_MODEL,settings.LAYA_MODEL_REVISION,settings.LAYA_CALIBRATION_REVISION])
@@ -237,7 +237,7 @@ def build_thread_context(raw, cfg, known_projects, maximum, state):
     from .message_context import source_scope
     thread = DialogueThread.objects.get(pk=state["routing_thread_id"], source_key=source_key(raw))
     ids = list(thread.message_links.values_list("raw_message_id", flat=True))
-    rows = list(source_scope(raw).filter(pk__in=ids, id__lte=maximum).exclude(processing_state__in=["deleted", "superseded"]).order_by("timestamp", "id"))
+    rows = list(source_scope(raw).filter(pk__in=ids, id__lte=maximum).exclude(processing_state__in=["deleted", "superseded", "clarification_reply"]).order_by("timestamp", "id"))
     context = [{"raw_message_id": item.id, "content": item.content, "sender_name": item.sender_name, "timestamp": item.timestamp.isoformat(),
                 "received_at": item.received_at.isoformat(), "source_metadata": source_metadata(item), "partial": False}
                for item in rows if item.pk != raw.pk]

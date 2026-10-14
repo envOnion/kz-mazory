@@ -31,12 +31,12 @@ def track_backfill(user, job_id, request_key):
         config=config, source="waha", session_name=config.session_name, chat_id=config.group_jid,
     ).exclude(processing_state__in=["deleted", "superseded"])
     ids = set(messages.values_list("id", flat=True))
-    text_ids = set(messages.exclude(content__regex=r"^\s*$").values_list("id", flat=True))
+    text_ids = set(messages.exclude(content__regex=r"^\s*$").exclude(processing_state='clarification_reply').values_list("id", flat=True))
     prefix = f"thread-rebuild:{user.id}:{request_key}:"
     events = [event for event in OutboxEvent.objects.select_for_update().filter(
         event_type="extract_message", deduplication_key__startswith=prefix,
     ) if event.payload.get("raw_id") in text_ids]
-    if not text_ids or {event.payload["raw_id"] for event in events} != text_ids:
+    if not ids or {event.payload["raw_id"] for event in events} != text_ids:
         raise ValidationError("Тематический разбор ещё не создал задания для всей истории этого источника.")
     if any(event.payload.get("history_run_id") is not None for event in events):
         raise ValidationError("Задания уже принадлежат другому запуску истории.")
@@ -45,7 +45,7 @@ def track_backfill(user, job_id, request_key):
         settings_snapshot={"only_new": False, "analysis_mode": "reprocess_all",
             "analyze_after_import": True, "poll_seconds": job.poll_seconds,
             "thread_rebuild_request_key": request_key, "thread_rebuild_user_id": user.id},
-        fetched_count=len(ids), existing_count=len(ids), no_text_count=len(ids - text_ids),
+        fetched_count=len(ids), existing_count=len(ids), no_text_count=messages.filter(content__regex=r"^\s*$").count(),
         scheduled_count=len(events), status_message="Отслеживаем уже запущенный тематический разбор истории.",
     )
     run.messages.add(*ids)
@@ -82,7 +82,7 @@ def backfill_page(payload):
     ids = list(
         access.messages_for(user)
         .filter(config=config, id__gt=payload["cursor"])
-        .exclude(processing_state__in=["deleted", "superseded"])
+        .exclude(processing_state__in=["deleted", "superseded", "clarification_reply"])
         .order_by("id")
         .values_list("id", flat=True)[:100]
     )

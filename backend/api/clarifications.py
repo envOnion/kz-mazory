@@ -2,7 +2,7 @@
 import hashlib
 import json
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 
 from django.db import transaction
@@ -13,7 +13,7 @@ from rest_framework.exceptions import PermissionDenied
 from . import access
 from .models import (AISettings, AuditEvent, CandidateCrmMatch, ClarificationReply,
     CrmDelivery, FactCandidate, FactClarification, FactDecision, NotificationDelivery,
-    OutboxEvent, Project, TeamMembership, UserProfile)
+    OutboxEvent, Project, RawMessage, TeamMembership, UserProfile, WhatsAppConfig)
 
 
 def digest(value):
@@ -54,7 +54,7 @@ def hold(candidate):
         from .deduplication import normalize_deal_name
         label = normalize_deal_name(candidate.proposed_changes.get('object_name', ''))
         if label:
-            for unknown in FactClarification.objects.filter(config_id=raw.config_id, state='unconfirmed', candidate__status='pending').select_related('candidate'):
+            for unknown in FactClarification.objects.filter(kind='identity', config_id=raw.config_id, state='unconfirmed', candidate__status='pending').select_related('candidate'):
                 aliases = [unknown.candidate.proposed_changes.get('object_name', '')]
                 saved = unknown.source_snapshot.get('object_aliases', [])
                 if isinstance(saved, list):
@@ -70,7 +70,7 @@ def hold(candidate):
 def confirmed_identity(candidate):
     if not candidate.project_id:
         return False
-    return candidate.clarifications.filter(state__in=['answered', 'resolved'],
+    return candidate.clarifications.filter(kind='identity', state__in=['answered', 'resolved'],
         resolution__deal_id=candidate.project.bitrix_id,
         resolution__applied_candidate_ids__contains=[candidate.id]).exists()
 
@@ -140,6 +140,9 @@ def plan(candidate, decision):
 
 
 def message(question):
+    if question.kind == 'sale_amount':
+        from .sale_clarifications import message as price_message
+        return price_message(question)
     from .message_time import source_time, source_zone
     c = question.candidate
     raw = c.trace.raw_message
@@ -188,6 +191,26 @@ def message(question):
 def pump():
     from .notifications import create_notification
     for question in FactClarification.objects.filter(state='answered'):
+        if question.kind == 'sale_amount':
+            from .sale_clarifications import finish
+            if finish(question):
+                question.state = 'resolved'; question.resolved_at = timezone.now()
+                question.save(update_fields=['state', 'resolved_at'])
+                from .sale_clarifications import _money
+                result = question.resolution
+                create_notification(question.recipient, 'Сумма записана в Bitrix',
+                    f'По вашему ответу на MZ-{question.id} в сделку «{question.project.name}» №{result["deal_id"]} записано {_money(result["amount"], result["currency"])}. Значение проверено обратным чтением Bitrix.',
+                    'crm_clarification', f'clarification-price-resolved:{question.id}', project=question.project, whatsapp=True)
+            else:
+                delivery = CrmDelivery.objects.filter(pk=question.resolution.get('delivery_id')).first()
+                if delivery and delivery.state in ('superseded', 'blocked'):
+                    question.state = 'superseded'
+                    question.resolution = {**question.resolution, 'delivery_error': delivery.error_code or 'newer_project_version'}
+                    question.save(update_fields=['state', 'resolution'])
+                    create_notification(question.recipient, 'Сумма сделки требует сверки',
+                        f'По вопросу MZ-{question.id} сохранён ваш ответ, но сделка изменилась до записи. Сумма в Bitrix не перезаписана. Запись удержана для сверки.',
+                        'crm_clarification', f'clarification-price-conflict:{question.id}', project=question.project, whatsapp=True)
+            continue
         ids = list(question.candidates.values_list('id', flat=True))
         deliveries = CrmDelivery.objects.filter(fact_event__decision__candidate_id__in=ids)
         if ids and not question.candidates.exclude(status='approved').exists() and deliveries.exists() and not deliveries.exclude(state__in=['delivered', 'superseded']).exists():
@@ -201,19 +224,22 @@ def pump():
             UserProfile.objects.select_for_update().filter(user_id=recipient_id).first()
             if FactClarification.objects.filter(recipient_id=recipient_id, state='awaiting').exists():
                 continue
-            q = FactClarification.objects.select_for_update(of=('self',)).select_related('recipient', 'config__team', 'candidate__trace__raw_message').filter(recipient_id=recipient_id, state='queued').order_by('-created_at', '-id').first()
+            q = FactClarification.objects.select_for_update(of=('self',)).select_related('recipient', 'config__team', 'candidate__trace__raw_message').filter(recipient_id=recipient_id, state='queued').order_by('created_at', 'id').first()
             if not q:
                 continue
             if not authorized(q) or not valid(q):
                 q.state = 'superseded'; q.save(update_fields=['state']); continue
-            q.notification = create_notification(q.recipient, 'Нужно уточнить сделку Bitrix', message(q),
-                'crm_clarification', f'clarification:{q.id}', whatsapp=True)
+            q.notification = create_notification(q.recipient, 'Нужна сумма сделки Bitrix' if q.kind == 'sale_amount' else 'Нужно уточнить сделку Bitrix', message(q),
+                'crm_clarification', f'clarification:{q.id}', project=q.project if q.kind == 'sale_amount' else None, whatsapp=True)
             q.state = 'awaiting'
             q.expires_at = now+timedelta(days=7)
             q.save(update_fields=['notification', 'state', 'expires_at'])
 
 
 def valid(question):
+    if question.kind == 'sale_amount':
+        from .sale_clarifications import valid as price_valid
+        return price_valid(question)
     cfg = AISettings.get_active()
     if not cfg.autonomous_enabled:
         return False
@@ -262,16 +288,64 @@ def ingest(data):
     if code and quoted_id and (len(matches)!=1 or matches[0].id != question.id):
         raise PermissionDenied('Код вопроса и цитируемое сообщение не совпадают.')
     with transaction.atomic():
+        WhatsAppConfig.objects.select_for_update().get(pk=question.config_id)
         reply, created = ClarificationReply.objects.get_or_create(session=data['session'], provider_message_id=payload['id'], defaults={
             'question': question, 'sender': question.recipient, 'body': body[:32000], 'quoted_message_id': quoted_id})
         if not created and (reply.question_id != question.id or reply.sender_id != question.recipient_id):
             raise PermissionDenied('Идентификатор ответа уже использован.')
         if created:
+            if question.kind == 'sale_amount':
+                stamp = payload.get('timestamp')
+                sent = datetime.fromtimestamp(stamp, dt_timezone.utc) if stamp else timezone.now()
+                content = payload['body']
+                raw, raw_created = RawMessage.objects.get_or_create(source='waha', session_name=data['session'],
+                    message_id=payload['id'], source_revision=hashlib.sha256(content.encode()).hexdigest(), defaults={
+                        'config': question.config, 'team_id': question.config.team_id, 'project_id': question.project_id,
+                        'chat_id': data['chat_id'], 'sender_phone': phone, 'sender_name': question.recipient.get_full_name() or question.recipient.username,
+                        'timestamp': sent, 'sent_at_known': bool(stamp), 'content': content,
+                        'raw_payload': {'event': data['event'], 'session': data['session'], 'payload': original, 'clarification_question_id': question.id},
+                        'processed': True, 'processing_state': 'clarification_reply'})
+                if not raw_created and (raw.config_id != question.config_id or raw.team_id != question.config.team_id or raw.project_id not in (None, question.project_id) or raw.chat_id != data['chat_id'] or raw.content != content or raw.sender_phone != phone or abs((raw.timestamp - sent).total_seconds()) >= 1):
+                    raise PermissionDenied('Исходное сообщение уже связано с другим фактом.')
+                reply.raw_message = raw
+                reply.save(update_fields=['raw_message'])
+                if not raw_created:
+                    from .thread_routing import ANALYSIS_EVENTS
+                    analysis = OutboxEvent.objects.filter(event_type__in=ANALYSIS_EVENTS).filter(Q(payload__raw_id=raw.id) | Q(payload__batch_ids__contains=[raw.id]))
+                    conflict = analysis.filter(state='processing').exists() or FactCandidate.objects.filter(trace__raw_message=raw).exists()
+                    # Q2 claims an outbox row before taking the config lock.
+                    # Cancel after releasing this lock; source guards already
+                    # prohibit model persistence if a claim wins that race.
+                    transaction.on_commit(lambda: analysis.filter(state__in=('pending', 'enqueued')).update(
+                        state='cancelled', error_code='clarification_reply_not_model_input', lease_until=None))
+                    raw.project_id = question.project_id
+                    raw.processed, raw.processing_state = True, 'clarification_reply'
+                    raw.raw_payload = {**raw.raw_payload, 'clarification_question_id': question.id}
+                    raw.raw_payload.pop('clarification_pending_auth', None)
+                    raw.save(update_fields=['project', 'processed', 'processing_state', 'raw_payload'])
+                    if conflict:
+                        reply.state, reply.error_code = 'ignored', 'clarification_source_conflict'
+                        reply.save(update_fields=['state', 'error_code'])
+                        question.state = 'unconfirmed'
+                        question.resolution = {'reply_id': reply.id, 'raw_message_id': raw.id, 'external_writes_allowed': False,
+                            'preserved_hold': 'Исходный ответ уже участвовал в машинной обработке; требуется сверка сохранённых фактов.'}
+                        question.save(update_fields=['state', 'resolution'])
+                        from .notifications import create_notification
+                        from .sale_clarifications import _audit_reply
+                        create_notification(question.recipient, f'Ответ на MZ-{question.id} сохранён',
+                            'Запись суммы удержана: это сообщение уже участвовало в другом разборе. Ответ сохранён; требуется сверка, чтобы не создать повторный факт.',
+                            'crm_clarification', f'clarification-answer:{reply.id}', project=question.project, whatsapp=True)
+                        _audit_reply(reply)
+                        return 'accepted'
             OutboxEvent.objects.create(event_type='clarification_reply', deduplication_key=f'clarification-reply:{reply.id}', payload={'reply_id': reply.id})
     return 'accepted'
 
 
 def resolve(payload):
+    reply = ClarificationReply.objects.select_related('question').get(pk=payload['reply_id'])
+    if reply.question.kind == 'sale_amount':
+        from .sale_clarifications import resolve as resolve_price
+        return resolve_price(reply.id)
     from .bitrix_service import BitrixService
     from .facts import select_crm_match
     from .autonomous import enqueue_decision

@@ -2190,6 +2190,9 @@ class FactDecision(TimestampedModel):
 
 
 class FactClarification(TimestampedModel):
+    kind = models.CharField(max_length=32, default='identity', choices=[('identity', 'Идентичность сделки'), ('sale_amount', 'Сумма продажи')])
+    project = models.ForeignKey(Project, null=True, blank=True, on_delete=models.PROTECT, related_name='price_clarifications')
+    price_context = models.JSONField(default=dict, blank=True)
     candidate = models.ForeignKey(FactCandidate, on_delete=models.PROTECT, related_name='primary_clarifications')
     candidates = models.ManyToManyField(FactCandidate, related_name='clarifications')
     decision = models.ForeignKey(FactDecision, on_delete=models.PROTECT)
@@ -2209,6 +2212,7 @@ class FactClarification(TimestampedModel):
 
 
 class ClarificationReply(TimestampedModel):
+    raw_message = models.ForeignKey(RawMessage, null=True, blank=True, on_delete=models.PROTECT, related_name='clarification_replies')
     question = models.ForeignKey(FactClarification, on_delete=models.PROTECT, related_name='replies')
     sender = models.ForeignKey(User, on_delete=models.PROTECT)
     session = models.CharField(max_length=64)

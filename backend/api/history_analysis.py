@@ -18,6 +18,13 @@ def schedule(run):
     items = []
     for raw in run.messages.order_by("timestamp", "id"):
         item, _ = HistoryAnalysisItem.objects.get_or_create(run=run, raw_message=raw)
+        if raw.processing_state == 'clarification_reply':
+            item.state, item.disposition = 'succeeded', 'clarification_reply'
+            item.reason_code = 'human_clarification_source'
+            item.reason_description = 'Ответ на уточнение уже сохранён в человеческом журнале; повторное извлечение моделью не требуется.'
+            item.trace = raw.traces.filter(model_version='human-whatsapp-answer').order_by('-id').first()
+            item.save()
+            continue
         if run.settings_snapshot.get("replace_unsent") and item.outbox_event_id is None:
             from .replay_replacement import guard, LABELS
             code = guard(raw, lock=True)
@@ -65,7 +72,7 @@ def schedule(run):
         if "root_event_id" not in event.payload:
             event.payload = {**event.payload, "root_event_id":event.id}
             event.save(update_fields=["payload"])
-    run.scheduled_count = run.analysis_items.exclude(disposition="no_text").count()
+    run.scheduled_count = run.analysis_items.exclude(disposition__in=("no_text", "clarification_reply")).count()
     run.save(update_fields=["scheduled_count"])
 
 
@@ -96,6 +103,7 @@ def counts(run):
               "skipped_crm_delivered": outcomes["skipped_crm_delivered"], "blocked":states["blocked"],
               "pending": sum(states[x] for x in ACTIVE), "cancelled": states["cancelled"],
               "facts": outcomes["facts"], "no_facts": outcomes["no_facts"],
+              "human_answers": outcomes["clarification_reply"],
               "insufficient_data": outcomes["insufficient_data"],
               "retry_wait": states["retry_wait"], "processing": states["processing"], "queued": states["queued"]}
     events = OutboxEvent.objects.filter(historyanalysisitem__run=run).distinct()
@@ -123,7 +131,7 @@ def summary(value):
         return f"Обработано {value['processed']} / {value['total']}; ошибок: {value['errors']}"
     accounted = value["processed"] + value["no_text"] + value["errors"] + value["cancelled"] + value["pending"] + value.get("skipped_crm_delivered",0) + value.get("blocked",0)
     return (f"Учтено: {accounted} / {value['total']} · Отменено: {value['cancelled']} · Проанализировано: {value['processed']} / {value['total'] - value['no_text']} · "
-            f"Без текста: {value['no_text']} · Уже доставлено в CRM: {value.get('skipped_crm_delivered',0)} · Заблокировано: {value.get('blocked',0)} · С фактами: {value['facts']} · Без фактов: {value['no_facts']} · "
+            f"Без текста: {value['no_text']} · Ответов на уточнения: {value.get('human_answers',0)} · Уже доставлено в CRM: {value.get('skipped_crm_delivered',0)} · Заблокировано: {value.get('blocked',0)} · С фактами: {value['facts']} · Без фактов: {value['no_facts']} · "
             f"Недостаточно данных: {value['insufficient_data']} · В работе: {value['processing']} · "
             f"В очереди: {value['queued']} · Повторы: {value['retry_wait']} · Ошибки: {value['errors']} · "
             f"Кандидатов: {value['candidates']} · Принято: {value['accepted']}")

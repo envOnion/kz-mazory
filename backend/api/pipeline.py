@@ -201,7 +201,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             .select_related("config__team", "team", "project")
             .get(pk=raw_id)
         )
-        if raw.processed and not explicit:
+        if raw.processing_state == 'clarification_reply' or raw.processed and not explicit:
             return
         if trace_id is not None:
             trace = raw.traces.get(pk=trace_id)
@@ -421,6 +421,16 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 .get(pk=raw_id)
             )
             source_scope(locked)
+            protected_ids = {locked.id, *(batch_ids or []), *[item['raw_message_id'] for item in trace.earlier_messages_context]}
+            protected_ids.update(trace.context_metadata.get('batch_message_ids', []))
+            protected_ids.update(link['raw_message_id'] for theme in themes.values() for link in theme['messages'])
+            protected_ids.update(fact.get('evidence_message_id') for fact in facts)
+            protected_ids.update(ref['raw_message_id'] for fact in facts for ref in fact.get('evidence_messages', []))
+            if source_scope(locked).filter(pk__in=protected_ids, processing_state='clarification_reply').exists():
+                trace.status, trace.result_summary = 'warning', 'Сообщение сохранено как ответ на уточнение; машинные факты не применены.'
+                trace.context_metadata['request_state'] = 'superseded'
+                trace.save()
+                return
             if full_state and full_state.get("routing_thread_id"):
                 from .models import DialogueThread
                 routing_thread = DialogueThread.objects.select_for_update().get(pk=full_state["routing_thread_id"])

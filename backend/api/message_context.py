@@ -64,7 +64,7 @@ def history_queryset(raw, snapshot_id, include_following=False):
             session_name=raw.session_name,
             message_id=raw.message_id,
         )
-        .exclude(processing_state__in=["superseded", "deleted", "deduplication_ambiguous", "export_staged"])
+        .exclude(processing_state__in=["superseded", "deleted", "deduplication_ambiguous", "export_staged", "clarification_reply"])
     )
     if include_following:
         at = raw.timestamp if raw.sent_at_known else raw.received_at

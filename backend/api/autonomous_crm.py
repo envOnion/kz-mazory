@@ -2,10 +2,11 @@
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import F
 from django.utils import timezone
 from decimal import Decimal, InvalidOperation
 
-from .models import AISettings, BitrixSettings, Commitment, Company, CrmDelivery, ExternalObjectLink, OutboxEvent, Project
+from .models import AISettings, BitrixSettings, Commitment, Company, CrmDelivery, ExternalObjectLink, FieldAssertion, OutboxEvent, Project
 from .providers import ProviderUnavailable
 
 
@@ -27,7 +28,34 @@ def verify_deal(external, patch):
             raise ProviderUnavailable("crm_readback_mismatch")
 
 
-def enqueue_project(project, fact_event, cfg=None):
+def _current_price_assertion(project):
+    """Use the same source ordering as commercial_amount."""
+    known = set(project.whatsapp_fields)
+    fields = []
+    if project.sale_amount is not None and 'sale_amount' in known:
+        fields.append('sale_amount')
+    if project.contract_known and 'contract_amount' in known:
+        fields.append('contract_amount')
+    assertions = FieldAssertion.objects.filter(project=project, field_name__in=fields,
+        fact_event__is_superseded=False).select_related('fact_event').order_by(
+            F('fact_event__occurred_at').desc(nulls_last=True), '-id')
+    for assertion in assertions:
+        try:
+            value = Decimal(str(assertion.value))
+        except (InvalidOperation, ValueError, TypeError):
+            continue
+        if value.is_finite() and value > 0:
+            return assertion
+    return None
+
+
+def _price_has_own_delivery(project):
+    """A status update cannot revive a blocked price or bypass its readback."""
+    assertion = _current_price_assertion(project)
+    return bool(assertion and assertion.fact_event.event_key.startswith('sale-clarification-reply:'))
+
+
+def enqueue_project(project, fact_event, cfg=None, *, price_only=False, crm_baseline=None):
     cfg = cfg or AISettings.get_active()
     if not cfg.autonomous_crm_enabled:
         return
@@ -41,16 +69,23 @@ def enqueue_project(project, fact_event, cfg=None):
         "object_type": "deal", "local_type": "Project", "local_id": project.id,
         "external_id": project.bitrix_id or None,
     })
-    patch = {"TITLE": project.name} if project.source == "chat" else {}
+    if price_only and not isinstance(crm_baseline, dict):
+        raise ValueError('price_delivery_baseline_required')
+    patch = {"TITLE": project.name} if project.source == "chat" and not price_only else {}
     known = set(project.whatsapp_fields)
     from .commercial_amounts import commercial_amount
     price = commercial_amount(project)
-    if price is not None:
+    if price is not None and (price_only or not _price_has_own_delivery(project)):
         patch.update(OPPORTUNITY=str(price), CURRENCY_ID=project.currency)
-    if "stage" in known and settings.BITRIX_STAGE_MAP.get(project.status):
+    if not price_only and "stage" in known and settings.BITRIX_STAGE_MAP.get(project.status):
         patch["STAGE_ID"] = settings.BITRIX_STAGE_MAP[project.status]
+    payload = {"project_id": project.id, "version": project.version}
+    if price_only:
+        if set(patch) != {'OPPORTUNITY', 'CURRENCY_ID'}:
+            raise ValueError('price_delivery_amount_required')
+        payload.update(price_only=True, crm_baseline=crm_baseline)
     event, created = OutboxEvent.objects.get_or_create(deduplication_key=f"autonomous-crm:{project.id}:{project.version}", defaults={
-        "event_type": "autonomous_crm", "payload": {"project_id": project.id, "version": project.version},
+        "event_type": "autonomous_crm", "payload": payload,
     })
     if created:
         CrmDelivery.objects.create(outbox_event=event, external_object_link=link, fact_event=fact_event, target_version=project.version, patch=patch)
@@ -69,14 +104,35 @@ def deliver(payload):
     with transaction.atomic():
         project = Project.objects.select_for_update().get(pk=project_id)
         delivery = CrmDelivery.objects.select_for_update(of=("self",)).select_related("external_object_link").get(outbox_event__deduplication_key=f"autonomous-crm:{project.id}:{version}")
-        if delivery.state in ("delivered", "superseded"):
+        if delivery.state in ("delivered", "superseded", "blocked"):
             return
-        if project.version != version:
+        price_only = payload.get('price_only') is True
+        current_price = _current_price_assertion(project) if price_only else None
+        baseline = payload.get('crm_baseline', {})
+        try:
+            same_price = current_price and Decimal(str(current_price.value)) == Decimal(str(delivery.patch.get('OPPORTUNITY')))
+        except (InvalidOperation, ValueError, TypeError):
+            same_price = False
+        # A new stage/description does not invalidate an already accepted
+        # price. A newer price source or changed identity still does.
+        price_is_current = price_only and isinstance(baseline, dict) and same_price and (
+            current_price.fact_event_id == delivery.fact_event_id
+            and current_price.fact_event.team_id == project.team_id
+            and not project.archived
+            and project.bitrix_id == str(baseline.get('ID'))
+            and str(delivery.external_object_link.external_id) == str(baseline.get('ID'))
+            and project.name == baseline.get('TITLE')
+            and project.currency == delivery.patch.get('CURRENCY_ID'))
+        if price_only and not price_is_current or not price_only and project.version != version:
             delivery.state = "superseded"
             delivery.save(update_fields=["state", "updated_at"])
             return
-        stage_missing = "stage" in project.whatsapp_fields and project.status not in settings.BITRIX_STAGE_MAP
-        if "stage" in project.whatsapp_fields and settings.BITRIX_STAGE_MAP.get(project.status):
+        if not price_only and _price_has_own_delivery(project):
+            delivery.patch.pop('OPPORTUNITY', None)
+            delivery.patch.pop('CURRENCY_ID', None)
+            delivery.save(update_fields=['patch'])
+        stage_missing = not price_only and "stage" in project.whatsapp_fields and project.status not in settings.BITRIX_STAGE_MAP
+        if not price_only and "stage" in project.whatsapp_fields and settings.BITRIX_STAGE_MAP.get(project.status):
             delivery.patch["STAGE_ID"] = settings.BITRIX_STAGE_MAP[project.status]
             delivery.save(update_fields=["patch"])
         integration = BitrixSettings.get_active()
@@ -84,6 +140,8 @@ def deliver(payload):
             raise ProviderUnavailable("crm_disabled")
         link = delivery.external_object_link
         external = link.external_id or project.bitrix_id
+        if price_only and not external:
+            raise ProviderUnavailable('price_delivery_identity_missing')
         if not external:
             # Reconcile every unknown add outcome using the stable origin.
             rows = BitrixService.call("crm.deal.list", {"filter": {"=ORIGINATOR_ID": "MAZORY", "=ORIGIN_ID": link.origin_key}, "select": ["ID"]}).get("result", [])
@@ -95,6 +153,20 @@ def deliver(payload):
             current = BitrixService.call("crm.deal.get", {"id": external}).get("result")
             if not isinstance(current, dict):
                 raise ProviderUnavailable("crm_invalid_response")
+            if price_only:
+                baseline = payload.get('crm_baseline', {})
+                identity_matches = isinstance(baseline, dict) and set(delivery.patch) == {'OPPORTUNITY', 'CURRENCY_ID'} and all(
+                    str(current.get(key, '')) == str(baseline.get(key, ''))
+                    for key in ('ID', 'TITLE', 'CURRENCY_ID', 'ORIGINATOR_ID', 'ORIGIN_ID'))
+                try:
+                    amount_matches = Decimal(str(current.get('OPPORTUNITY'))) in (
+                        Decimal(str(baseline.get('OPPORTUNITY'))), Decimal(str(delivery.patch.get('OPPORTUNITY'))))
+                except (InvalidOperation, TypeError):
+                    amount_matches = False
+                if not identity_matches or not amount_matches:
+                    delivery.state, delivery.error_code = 'blocked', 'crm_price_changed'
+                    delivery.save(update_fields=['state', 'error_code', 'updated_at'])
+                    return
             # Human-owned CRM values are not read back as WhatsApp facts.
             patch = {key: value for key, value in delivery.patch.items() if str(current.get(key, "")) != str(value)}
             if patch:
@@ -112,7 +184,10 @@ def deliver(payload):
         verify_deal(external, delivery.patch)
         link.external_id = external
         link.save(update_fields=["external_id"])
-        Project.objects.filter(pk=project.id).update(bitrix_id=external, last_bitrix_synced_at=timezone.now(), needs_bitrix_sync=False)
+        sync_state = {'bitrix_id': external, 'last_bitrix_synced_at': timezone.now()}
+        if project.version == version:
+            sync_state['needs_bitrix_sync'] = False
+        Project.objects.filter(pk=project.id).update(**sync_state)
         delivery.state, delivery.error_code = ("partial", "crm_stage_mapping_missing") if stage_missing else ("delivered", "")
         delivery.save(update_fields=["state", "error_code", "updated_at"])
     if stage_missing:

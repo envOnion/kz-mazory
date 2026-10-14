@@ -83,6 +83,8 @@ def _evidence(candidate):
     raw = candidate.trace.raw_message
     if not raw or raw.source not in ("waha", "whatsapp", "whatsapp_export", "chat"):
         raise Deferred("unsupported_source", "Для автоматического учета нужен источник WhatsApp.")
+    if raw.processing_state == 'clarification_reply':
+        raise Deferred('clarification_reply_processed', 'Ответ на вопрос обрабатывается отдельным проверенным сценарием, без повторного извлечения моделью.')
     if candidate.team_id != (raw.config.team_id if raw.config_id else raw.team_id):
         raise Deferred("source_team_conflict", "Команда кандидата не совпадает с командой источника.")
     from .models import NotificationDelivery
@@ -93,7 +95,7 @@ def _evidence(candidate):
     if not refs:
         raise Deferred("unsupported_quote", "Нет сохраненной цитаты источника.", True)
     ids = {ref.raw_message_id for ref in refs}
-    if ids != set(scope.filter(pk__in=ids).exclude(processing_state__in=("deleted", "superseded")).values_list("pk", flat=True)):
+    if ids != set(scope.filter(pk__in=ids).exclude(processing_state__in=("deleted", "superseded", "clarification_reply")).values_list("pk", flat=True)):
         raise Deferred("source_unavailable", "Доказательства недоступны в текущем источнике.")
     for ref in refs:
         if _source_quote(ref.quote, ref.raw_message.content) != ref.quote:
@@ -612,9 +614,9 @@ def reconcile(limit=100):
     if not cfg.autonomous_enabled:
         return
     cursor = cfg.autonomous_reconcile_cursor
-    candidates = list(FactCandidate.objects.filter(status="pending", team__is_active=True, pk__gt=cursor).order_by("id")[:limit])
+    candidates = list(FactCandidate.objects.filter(status="pending", team__is_active=True, pk__gt=cursor).exclude(source_key__startswith='price-question:').order_by("id")[:limit])
     if not candidates:
-        candidates = list(FactCandidate.objects.filter(status="pending", team__is_active=True).order_by("id")[:limit])
+        candidates = list(FactCandidate.objects.filter(status="pending", team__is_active=True).exclude(source_key__startswith='price-question:').order_by("id")[:limit])
     for candidate in candidates:
         decide(candidate.id)
     if candidates:

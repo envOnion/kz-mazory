@@ -298,8 +298,8 @@ def progress(run):
             deduplication_key__in=successful.values("operation_key"),
         ).count()
         processed = successful.filter(
-            raw_message_id__in=run.messages.exclude(content__regex=r"^\s*$").values("id"),
-        ).values("raw_message_id").distinct().count() + run.no_text_count
+            raw_message_id__in=run.messages.exclude(content__regex=r"^\s*$").exclude(processing_state='clarification_reply').values("id"),
+        ).values("raw_message_id").distinct().count() + run.no_text_count + run.messages.filter(processing_state='clarification_reply').exclude(content__regex=r"^\s*$").count()
         return {
             "total": total,
             "processed": processed,
@@ -462,7 +462,7 @@ def persist_items(run, config, batch):
             run.no_text_count += int(not bool(raw.content.strip()))
             if run.settings_snapshot.get("only_new"):
                 run.fetched_count += 1
-        if run.settings_snapshot.get("analysis_policy") or raw.processing_state == "deduplication_ambiguous":
+        if run.settings_snapshot.get("analysis_policy") or raw.processing_state in ("deduplication_ambiguous", "clarification_reply"):
             continue
         if (
             run.settings_snapshot.get("analysis_mode") == "reprocess_all"

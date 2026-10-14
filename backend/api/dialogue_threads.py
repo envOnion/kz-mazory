@@ -235,7 +235,7 @@ def prepare_themes(result, raw, trace):
     valid_ids = set(
         source_scope(raw)
         .filter(id__in=ids, id__lte=trace.context_metadata["snapshot_max_id"])
-        .exclude(processing_state__in=["deleted", "superseded"])
+        .exclude(processing_state__in=["deleted", "superseded", "clarification_reply"])
         .values_list("id", flat=True)
     )
     diagnostics = {"reference_count":len(ids), "unoffered_reference_count":len(ids - allowed),

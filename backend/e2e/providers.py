@@ -87,6 +87,19 @@ def classify_sale_amount(value):
 
 
 def classify(value):
+    if value['content'] in ('БЦ Лазурный: получено техническое задание, стоимость предложения пока не названа.',
+            'БЦ Бирюзовый: согласовали график монтажа, бригада приступает завтра.',
+            'БЦ Авантюрин: получен уточнённый график работ от заказчика.',
+            'БЦ Авантюрин: уточнили дату выезда, бригада приедет завтра.'):
+        raw_id = value['target_message_id']
+        name = value['content'].split(':', 1)[0]
+        return {'threads': [{'key': 'missing-sale-price', 'thread_id': None,
+            'topic': 'Работа по объекту '+name, 'summary': value['content'],
+            'state': 'ready', 'completion_reason': 'Получено техническое задание',
+            'messages': [{'raw_message_id': raw_id, 'thought_state': 'final', 'relation': 'discusses'}]}],
+            'facts': [{'thread_key': 'missing-sale-price', 'fact_type': 'project',
+                'object_name': name, 'currency': 'KZT', 'current_action': value['content'],
+                'evidence_message_id': raw_id, 'evidence': value['content'], 'confidence': .98}]}
     if value['content'].startswith(('БЦ Янтарный:', 'БЦ Гранитный:', 'Отчёт по стоимости БЦ:')):
         return classify_sale_amount(value)
     if value['content'].startswith('БЦ Север: заказчиком '):
@@ -452,8 +465,19 @@ class ProviderHandler(BaseHTTPRequestHandler):
         if self.path.startswith('/api/default/chats/') and urlsplit(self.path).path.endswith('/messages'):
             state = json.loads(self.control.read_text())
             chat = unquote(urlsplit(self.path).path.split('/')[4])
+            history = state.get('sale_clarification_history', {})
+            if history.get('chat_id') == chat:
+                query = parse_qs(urlsplit(self.path).query)
+                offset, limit = int(query.get('offset', ['0'])[0]), int(query.get('limit', ['250'])[0])
+                with (self.control.parent/'sale-clarification-history-requests.jsonl').open('a') as stream:
+                    stream.write(json.dumps({'chat_id': chat, 'offset': offset, 'limit': limit})+'\n')
+                return self.respond(history['messages'][offset:offset+limit])
             return self.respond([{'id':row['id'],'body':row['text'],'timestamp':row['timestamp'],'fromMe':True}
                 for row in state.get('waha_messages',[]) if row['chatId']==chat])
+        if self.path.startswith('/api/default/groups/'):
+            history = json.loads(self.control.read_text()).get('sale_clarification_history', {})
+            if history.get('chat_id') == unquote(urlsplit(self.path).path.rsplit('/', 1)[-1]):
+                return self.respond({'id': history['chat_id'], 'subject': 'Sale clarification E2E'})
         if self.path == '/v1/systemone' and body.get('model') == 'e2e-whatsapp-v1':
             answers = {name: {'probabilities': {'A': .99 if 'БЦ Север' in question['criteria']['A'] and 'БЦ Север' in body['state']['message'] else .01,
                                                  'B': .01 if 'БЦ Север' in question['criteria']['A'] and 'БЦ Север' in body['state']['message'] else .99}}
@@ -466,7 +490,8 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 {'id': '10003@lid', 'pn': '79990000003@c.us'},
             ])
         if self.path.startswith('/api/sessions/'):
-            return self.respond({'me': {'id': '79990000001@c.us', 'lid': '10001@lid', 'pushName': 'Проверяющий'}})
+            return self.respond({'status': 'WORKING', 'config': {'noweb': {'store': {'enabled': True, 'fullSync': True}}},
+                'me': {'id': '79990000001@c.us', 'lid': '10001@lid', 'pushName': 'Проверяющий'}})
         if self.path.startswith('/api/') and '/lids/' in self.path:
             return self.respond({'lid':unquote(urlsplit(self.path).path.rsplit('/',1)[-1]),'pn':None})
         if self.path.startswith('/api/contacts?'):
@@ -578,7 +603,8 @@ class ProviderHandler(BaseHTTPRequestHandler):
             if self.path.endswith("crm.deal.add.json"):
                 state.setdefault("writes", []).append(body["fields"])
                 ident = str(103 + len(state.get('deals', {})))
-                state.setdefault('deals', {})[ident] = {**body['fields'], 'ID': ident}
+                state.setdefault('deals', {})[ident] = {'OPPORTUNITY': '0.00', 'CURRENCY_ID': 'KZT',
+                    'STAGE_ID': 'NEW', **body['fields'], 'ID': ident}
                 self.save_control(state)
                 return self.respond({"result": ident})
             if self.path.endswith('crm.deal.update.json'):

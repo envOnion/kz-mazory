@@ -26,6 +26,8 @@ def dispatch_forever():
         update()
         from .clarifications import update as update_clarifications
         update_clarifications()
+        from .sale_clarifications import update as update_sale_clarifications
+        update_sale_clarifications()
         proof=settings.E2E_DIR/'temporal-semantic.json'
         if proof.exists():
             from api.models import AsyncOperation, TemporalEntityRevision
@@ -95,6 +97,8 @@ def dispatch_forever():
             )
             .exclude(event_type="index_message")
             .exclude(event_type='clarification_reply' if (settings.E2E_DIR/'clarification-paused').exists() else '__no_paused_event__')
+            .exclude(event_type='clarification_reply' if (settings.E2E_DIR/'sale-clarification-paused').exists() else '__no_paused_sale_event__')
+            .exclude(event_type='autonomous_crm' if (settings.E2E_DIR/'sale-clarification-delivery-paused').exists() else '__no_paused_sale_delivery__')
             .order_by("id")[:100]
         ):
             # A webhook can commit between update() and this query. Leave its

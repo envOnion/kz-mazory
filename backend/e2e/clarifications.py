@@ -19,6 +19,9 @@ def update():
             if action == 'start':
                 from django.contrib.auth.models import User
                 from api.authentication import create_session
+                # Earlier independent cases can have an unanswered price question.
+                # Release the shared fixture recipient before testing identity choices.
+                FactClarification.objects.filter(kind='sale_amount', state__in=['queued', 'awaiting']).update(state='unconfirmed')
                 cfg = AISettings.objects.first()
                 cfg.autonomous_enabled = cfg.autonomous_crm_enabled = True
                 cfg.thread_routing_mode = 'llm'; cfg.context_window_tokens = 131072
@@ -32,6 +35,7 @@ def update():
                 (settings.E2E_DIR/'clarification-session.json').write_text(json.dumps({'access': access, 'refresh': refresh, 'cookie_name': settings.AUTH_REFRESH_COOKIE}))
                 p = settings.E2E_DIR/'provider-state.json'; state = json.loads(p.read_text())
                 state.pop('thread_window', None); state.pop('autonomous', None)
+                state['waha_messages'] = []
                 rows = []
                 for name, ids in [('Парус', [701,702]), ('Маяк', [711,712]), ('Риф', [721,722])]:
                     for index, ident in enumerate(ids, 1):
@@ -91,8 +95,8 @@ def update():
                 state.pop('waha_missing_send_id', None)
                 temporary = p.with_suffix('.clarification.tmp'); temporary.write_text(json.dumps(state)); temporary.chmod(0o666); temporary.replace(p)
             applied.write_text(json.dumps({'nonce': control['nonce']}))
-    proof = {'questions': list(FactClarification.objects.values('id','state','options','notification_id','candidate_id','resolution','candidate__trace__raw_message__message_id')),
-        'replies': list(ClarificationReply.objects.values('id','question_id','provider_message_id','state','error_code')),
+    proof = {'questions': list(FactClarification.objects.filter(kind='identity').values('id','state','options','notification_id','candidate_id','resolution','candidate__trace__raw_message__message_id')),
+        'replies': list(ClarificationReply.objects.filter(question__kind='identity').values('id','question_id','provider_message_id','state','error_code')),
         'decisions': list(FactCandidate.objects.filter(decisions__reason_code='source_review_hold').values('id','status','decisions__reason_code')),
         'candidates': list(FactCandidate.objects.filter(trace__raw_message__message_id__startswith='clarification-').values('id','status','trace__raw_message__message_id','decisions__reason_code')),
         'matches': list(CandidateCrmMatch.objects.filter(candidate__trace__raw_message__message_id='clarification-clinic').values('candidate_id','crm_match_revision','bitrix_deal_id')),

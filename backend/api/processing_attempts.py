@@ -17,11 +17,15 @@ def require_reanalysis(user, raw):
         raise PermissionDenied("Нет доступа к исходному сообщению.")
     team_id = raw.config.team_id if raw.config_id else raw.team_id
     access.require_team_role(user, team_id, ["team_lead"])
+    if raw.processing_state == 'clarification_reply':
+        raise PermissionDenied("Ответ на уточнение сохранён как человеческий факт и не передаётся на повторный анализ модели.")
     source_scope(raw)
 
 
 def reserve_attempt(raw, operation_key):
     """Caller holds the source row lock; the unique constraint is the final guard."""
+    if raw.processing_state == 'clarification_reply':
+        raise ProviderUnavailable('clarification_reply_not_model_input')
     existing = MessageProcessingTrace.objects.filter(
         operation_key=operation_key
     ).first()

@@ -12,7 +12,7 @@ fi
 docker "${docker_args[@]}" compose -f compose.e2e.yml up --build --no-deps --abort-on-container-exit --exit-code-from browser browser &
 runner_pid=$!
 while kill -0 "$runner_pid" 2>/dev/null; do
-  for checkpoint in thread clarification; do
+  for checkpoint in thread clarification sale-clarification; do
     if docker "${docker_args[@]}" compose -f compose.e2e.yml exec -T backend test -f "/e2e/${checkpoint}-restart-required" 2>/dev/null &&
        ! docker "${docker_args[@]}" compose -f compose.e2e.yml exec -T backend test -f "/e2e/${checkpoint}-restart-done" 2>/dev/null; then
       if ! docker "${docker_args[@]}" compose -f compose.e2e.yml restart -t 10 qcluster; then
