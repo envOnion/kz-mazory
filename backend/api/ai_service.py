@@ -585,6 +585,10 @@ class AIService:
             from .qwen_profile import enabled as qwen_enabled
             if qwen_enabled(cfg):
                 from jsonschema import Draft202012Validator
+                from .qwen_profile import order_promise_evidence
+                result, reordered = order_promise_evidence(result, json.loads(payload['messages'][-1]['content']))
+                if reordered:
+                    diagnostics['promise_evidence_order'] = reordered
                 schema = payload.get('response_format', {}).get('json_schema', {}).get('schema')
                 if schema and not Draft202012Validator(schema).is_valid(result):
                     raise ProviderUnavailable('invalid_extraction_schema', diagnostics=diagnostics)

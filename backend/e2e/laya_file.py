@@ -72,6 +72,8 @@ def dispatch_forever():
                 async_task('e2e.laya_quality.seed')
             if control.get('mode') in ('llm','shadow','laya'):
                 AISettings.objects.update(thread_routing_mode=control['mode'])
+            if control.get('enable_baseline_threads'):
+                WhatsAppConfig.objects.filter(group_jid='laya-synthetic-baseline@g.us').update(thread_routing_enabled=True)
             if control.get('verify_qwen'):
                 task_id = async_task('api.tasks.verify_qwen_provider')
                 (settings.E2E_DIR/'qwen-canary-task.json').write_text(json.dumps({'id':task_id}))
@@ -98,7 +100,7 @@ def dispatch_forever():
                   'routing': list(ThreadRoutingAttempt.objects.values('raw_message_id','outcome','reason_code','scores','latency_ms','model_revision')),
                   # Full request envelopes remain in PostgreSQL and the API.
                   # Polling proof needs results, not repeated native JSON schemas.
-                  'traces': list(MessageProcessingTrace.objects.filter(raw_message__chat_id__regex=r'^(laya-|qwen-window-)').values('id','raw_message_id','status','error_code','ai_extracted_facts','context_metadata__provider_profile','context_metadata__response_diagnostics')),
+                  'traces': list(MessageProcessingTrace.objects.filter(raw_message__chat_id__regex=r'^(laya-|qwen-window-)').values('id','raw_message_id','status','error_code','ai_extracted_facts','context_metadata__provider_profile','context_metadata__response_diagnostics','context_metadata__promise_identity','context_metadata__promise_reconciliation')),
                   'events': list(OutboxEvent.objects.values('id','event_type','state','error_code','payload'))}
         from api.models import ProviderUsage
         report['usage'] = list(ProviderUsage.objects.values('outbox_event_id','operation','input_tokens','output_tokens'))

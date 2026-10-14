@@ -116,6 +116,9 @@ def grounded_dates(text, raw, *, default_to_source=False):
         relative = {'сегодня': 0, 'вчера': -1, 'позавчера': -2, 'завтра': 1, 'послезавтра': 2}
         words = set(re.findall(r'\w+', text.casefold()))
         dates.update(sent.date() + timedelta(days=offset) for word, offset in relative.items() if word in words)
+        weekdays = ('понедельника', 'вторника', 'среды', 'четверга', 'пятницы', 'субботы', 'воскресенья')
+        for name in re.findall(r'\b(?:до|к)\s+(?:ближайшего\s+|ближайшей\s+)?('+'|'.join(weekdays)+r')\b', text.casefold()):
+            dates.add(sent.date() + timedelta(days=(weekdays.index(name)-sent.weekday()) % 7))
         if default_to_source and not dates:
             dates.add(sent.date())
     return dates

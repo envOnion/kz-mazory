@@ -459,6 +459,17 @@ class BitrixService:
             return "stale"
         if not project.bitrix_id:
             return ""
+        labels = [normalize_crm_object_name(project.name), *(
+            normalize_crm_object_name(name)
+            for name in project.aliases.values_list('normalized_name', flat=True)
+        )]
+        if query['object_name'] and not any(
+            query['object_name'] == label or _partial_object_score(query['object_name'], label)
+            for label in labels
+        ):
+            # A previously attached project is a suggestion until its object
+            # identity agrees with the source; otherwise read CRM afresh.
+            return ""
         with transaction.atomic():
             from .dialogue_threads import lock_candidate_source
             lock_candidate_source(candidate)

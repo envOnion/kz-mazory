@@ -44,6 +44,10 @@ ASSIGNMENTS = {
 
 
 def classify(value):
+    if value['content'].startswith('Срок четверг:'):
+        raw_id = value['target_message_id']
+        return {'threads':[{'key':'thursday-table','thread_id':None,'topic':'Сравнительная таблица','summary':'Подготовить сравнительную таблицу к четвергу','state':'ready','completion_reason':'Названо действие и срок','messages':[{'raw_message_id':raw_id,'thought_state':'final','relation':'discusses'}]}],
+            'facts':[{'thread_key':'thursday-table','fact_type':'commitment','object_name':'','company_name':'','commitment_text':'Подготовить сравнительную таблицу','responsible_name':'Боб','promise_message_id':raw_id,'evidence_message_id':raw_id,'evidence':value['content'],'evidence_messages':[{'raw_message_id':raw_id,'quote':value['content'],'role':'promise'}],'deadline_message_id':raw_id,'deadline_at':'2026-10-15T23:59:59+05:00','deadline_precision':'date','confidence':.98}]}
     if value['content'].startswith('Накладная:'):
         raw_id = value['target_message_id']
         return {'threads': [{'key':'delivery-note', 'thread_id':None, 'topic':'Закрытие накладной', 'summary':value['content'], 'state':'ready', 'completion_reason':'Отчёт получен', 'messages':[{'raw_message_id':raw_id,'thought_state':'final','relation':'discusses'}]}],
