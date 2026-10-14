@@ -49,6 +49,18 @@ def update():
                 c = question.candidate
                 c.proposed_changes = {**c.proposed_changes, 'current_action': 'Новая версия кандидата'}
                 c.save(update_fields=['proposed_changes'])
+            if action == 'review_hold':
+                from api.models import FactDecision
+                from api.autonomous import enqueue_decision
+                question = FactClarification.objects.get(pk=control['question_id'])
+                c = question.candidate
+                FactDecision.objects.create(candidate=c, outcome='deferred', reason_code='source_review_hold',
+                    input_fingerprint='e2e-reviewed-source-hold', policy_version=AISettings.get_active().autonomous_policy_version,
+                    explanation='Проверка оригинала не подтверждает факт.', validation={'review_hold': True})
+                # A later catalog revision and a worker rerun must retain the hold.
+                c.crm_match_revision += 1
+                c.save(update_fields=['crm_match_revision'])
+                enqueue_decision(c.id, 'e2e-reviewed-source-hold')
             if action == 'expire':
                 FactClarification.objects.filter(pk=control['question_id']).update(expires_at=timezone.now()-timedelta(seconds=1))
             if action == 'finish':
@@ -58,6 +70,8 @@ def update():
             applied.write_text(json.dumps({'nonce': control['nonce']}))
     proof = {'questions': list(FactClarification.objects.values('id','state','options','notification_id','candidate_id','resolution','candidate__trace__raw_message__message_id')),
         'replies': list(ClarificationReply.objects.values('id','question_id','provider_message_id','state','error_code')),
+        'decisions': list(FactCandidate.objects.filter(decisions__reason_code='source_review_hold').values('id','status','decisions__reason_code')),
+        'candidates': list(FactCandidate.objects.filter(trace__raw_message__message_id__startswith='clarification-').values('id','status','trace__raw_message__message_id','decisions__reason_code')),
         'raw_ids': list(RawMessage.objects.filter(config__group_jid='clarification-e2e@g.us').values_list('message_id',flat=True)),
         'financial': list(FinancialRecord.objects.values('candidate_id','project__bitrix_id','amount','amount_precision')),
         'deliveries': list(CrmDelivery.objects.values('state','fact_event__decision__candidate_id','external_object_link__external_id'))}

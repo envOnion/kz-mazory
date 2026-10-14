@@ -42,6 +42,9 @@ def authorized(question):
 
 
 def hold(candidate):
+    review = candidate.decisions.filter(validation__has_key='review_hold').order_by('-id').first()
+    if review and review.validation.get('review_hold'):
+        return review
     question = candidate.clarifications.filter(state__in=['queued', 'awaiting', 'unconfirmed', 'expired', 'superseded']).order_by('-id').first()
     if question:
         return question

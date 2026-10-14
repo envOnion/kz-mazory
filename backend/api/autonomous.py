@@ -226,6 +226,8 @@ def _validate(candidate, data, primary, text):
     elif candidate.fact_type == "payment":
         amount_statements = [part for part in statements(text) if data.get("amount") and _money_matches(data["amount"], part, monetary_unit=True)]
         amount_text = "\n".join(amount_statements) or text
+        if data['payment_kind'] == 'invoice' and re.search(r'накладн', amount_text, re.I) and not re.search(r'сч[её]т|инвойс|invoice', amount_text, re.I):
+            raise Deferred('delivery_note_not_invoice', 'Накладная не подтверждает выставленный счёт или денежное поступление.')
         currencies = {code for code, pattern in {"KZT": r"тенге|\bтг\b|₸|\bKZT\b", "USD": r"доллар|\bUSD\b|\$", "EUR": r"евро|\bEUR\b|€", "RUB": r"рубл|\bRUB\b|₽"}.items() if re.search(pattern, data["evidence"], re.I)}
         chosen = data.get("currency", candidate.project.currency if candidate.project_id else "KZT")
         if len(currencies) == 1 and chosen not in currencies:
@@ -456,6 +458,8 @@ def decide(candidate_id, *, preview=False):
         outcome, code, explanation, mode, data = "accepted", "source_validated", "Проверены цитаты WhatsApp, связь объекта, тип события и повторность.", "apply", {}
         try:
             if clarification_hold:
+                if isinstance(clarification_hold, FactDecision) and clarification_hold.validation.get('review_hold'):
+                    raise Deferred('source_review_hold', clarification_hold.explanation)
                 raise Deferred('user_requested_unconfirmed' if getattr(clarification_hold, 'state', '') == 'unconfirmed' or isinstance(clarification_hold, FactDecision) else 'clarification_pending', 'Факт удержан до подтверждённого ответа на уточнение WhatsApp.')
             if review_required:
                 raise Deferred('maintenance_review_required', 'Исторический результат ожидает сверки с источником перед автоматической записью.')
