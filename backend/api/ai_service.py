@@ -256,6 +256,20 @@ class AIService:
                 else tuple(min(t, remaining) for t in timeout)
             )
         cfg = AISettings.get_active()
+        if payload.get("model") == "openrouter/free":
+            from .free_router import request
+            payload = request(payload, cfg.max_completion_tokens)
+        if headers is None:
+            if not api_key:
+                raise ProviderUnavailable("ai_not_configured")
+            headers = {"Authorization": f"Bearer {api_key}"}
+        if http_method not in ("GET", "POST"):
+            raise ProviderUnavailable("provider_invalid_request")
+        request_url = checked_ai_url(url)
+        try:
+            request_body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8") if http_method == "POST" else None
+        except (TypeError, ValueError):
+            raise ProviderUnavailable("provider_invalid_request") from None
         day = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
         today = ProviderUsage.objects.filter(created_at__gte=day)
         spent = today.aggregate(total=Sum("cost_usd"))["total"] or Decimal(0)
@@ -268,18 +282,12 @@ class AIService:
         started = time.monotonic()
         data, succeeded, error = {}, False, ""
         try:
-            if headers is None:
-                if not api_key:
-                    raise ProviderUnavailable("ai_not_configured")
-                headers = {"Authorization": f"Bearer {api_key}"}
-            if http_method not in ("GET", "POST"):
-                raise ProviderUnavailable("provider_invalid_request")
             request = requests.get if http_method == "GET" else requests.post
             if http_method == "POST":
                 headers = {**headers, "Content-Type": "application/json"}
             response = request(
-                checked_ai_url(url),
-                **({"data": json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")} if http_method == "POST" else {}),
+                request_url,
+                **({"data": request_body} if http_method == "POST" else {}),
                 headers=headers,
                 timeout=timeout,
                 allow_redirects=False,
@@ -373,7 +381,11 @@ class AIService:
                     outbox_event_id=usage_event_id.get(),
                     api_format=api_format,
                     operation=operation,
-                    model_name=payload.get("model", "")[:128],
+                    model_name=(
+                        data["model"] if payload.get("model") == "openrouter/free"
+                        and isinstance(data, dict) and isinstance(data.get("model"), str)
+                        else payload.get("model", "")
+                    )[:128],
                     duration_ms=min(
                         int((time.monotonic() - started) * 1000),
                         MAX_USAGE_TOKEN_COUNT,
@@ -536,6 +548,9 @@ class AIService:
             )
             data = normalize_response(raw_data)
         else:
+            if cfg.chat_model_name == "openrouter/free":
+                from .free_router import request
+                payload = request(payload, cfg.max_completion_tokens)
             from .qwen_profile import enabled as qwen_enabled, grounded_schema
             if qwen_enabled(cfg) and '_ollama_format' in payload:
                 payload = dict(payload)
@@ -563,6 +578,8 @@ class AIService:
                 "response_characters": len(content) if isinstance(content, str) else 0,
                 "reasoning_characters": len(choice['message'].get('reasoning_content') or ''),
             }
+            if cfg.chat_model_name == "openrouter/free":
+                diagnostics.update(requested_model=cfg.chat_model_name, resolved_model=data.get("model"))
             if choice.get("finish_reason") == "length":
                 raise ProviderUnavailable(
                     "provider_output_truncated", diagnostics=diagnostics
@@ -582,6 +599,11 @@ class AIService:
                 raise ProviderUnavailable("extraction_facts_missing", diagnostics=diagnostics)
             if not isinstance(result["facts"], list):
                 raise ProviderUnavailable("extraction_facts_type", diagnostics=diagnostics)
+            if cfg.chat_model_name == "openrouter/free":
+                from jsonschema import Draft202012Validator
+                schema = payload.get("response_format", {}).get("json_schema", {}).get("schema")
+                if schema and not Draft202012Validator(schema).is_valid(result):
+                    raise ProviderUnavailable("invalid_extraction_schema", diagnostics=diagnostics)
             from .qwen_profile import enabled as qwen_enabled
             if qwen_enabled(cfg):
                 from jsonschema import Draft202012Validator

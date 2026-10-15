@@ -1,0 +1,11 @@
+services:
+  qcluster:
+    environment:
+      MAZORY_E2E_ROUTER: '1'
+  outbox:
+    environment:
+      MAZORY_E2E_ROUTER: '1'
+  browser:
+    environment:
+      MAZORY_E2E_ROUTER: '1'
+    command: [node, node_modules/@playwright/test/cli.js, test, --config=playwright.local.config.ts, free-router-local.spec.ts]

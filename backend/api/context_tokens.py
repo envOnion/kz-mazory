@@ -386,6 +386,9 @@ def context_runtime(cfg):
         }
     if api_format != "openai_compatible":
         raise ProviderUnavailable("context_provider_unsupported")
+    if cfg.chat_model_name == "openrouter/free":
+        from .free_router import runtime
+        return runtime(cfg)
     from .qwen_profile import enabled as qwen_enabled
     if qwen_enabled(cfg):
         return qwen_llama_runtime(cfg)
@@ -545,4 +548,7 @@ def extraction_payload(
         from .qwen_profile import parameters, EVIDENCE_RULES
         payload = parameters(payload)
         payload["messages"][0]["content"] += EVIDENCE_RULES
+    if endpoint.get("transport") == "openrouter_free":
+        from .free_router import request
+        payload = request(payload, cfg.max_completion_tokens)
     return payload

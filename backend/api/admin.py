@@ -957,6 +957,7 @@ class AISettingsAdmin(IntegrationAdmin):
             {
                 "fields": (
                     "daily_request_limit",
+                    "minute_request_limit",
                     "daily_budget_usd",
                 )
             },
@@ -994,9 +995,9 @@ class AISettingsAdmin(IntegrationAdmin):
         from django.utils import timezone
         from .models import OutboxEvent
 
-        if {"daily_request_limit", "daily_budget_usd"} & set(form.changed_data):
+        if {"daily_request_limit", "minute_request_limit", "daily_budget_usd"} & set(form.changed_data):
             OutboxEvent.objects.filter(
-                state="pending", error_code="ai_daily_budget_exhausted"
+                state="pending", error_code__in=["ai_daily_budget_exhausted", "ai_minute_limit_exhausted"]
             ).update(next_attempt_at=timezone.now())
 
     @method_decorator(
@@ -1553,7 +1554,7 @@ class MessageProcessingTraceAdmin(ScopedReadOnlyAdmin):
     @admin.display(description="Результат")
     def trace_result(self, obj):
         retry = retry_view(obj)
-        if retry.get("state") in ("pending", "processing", "budget_wait"):
+        if retry.get("state") in ("pending", "processing", "budget_wait", "rate_wait"):
             return format_html(
                 '<div class="mazory-list-stack"><span class="mazory-admin-badge mazory-admin-badge--warn">{}</span>'
                 '<span class="mazory-list-meta">Попытки: {} из {}. {}</span></div>',

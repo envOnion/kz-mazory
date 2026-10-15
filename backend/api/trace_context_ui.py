@@ -55,6 +55,7 @@ ERRORS = {
     "ai_not_configured": "API-ключ выбранного AI-канала не настроен. Замените ключ в настройках AI.",
     "credential_decryption_failed": "Сохранённый API-ключ AI недоступен. Замените его в настройках AI.",
     "ai_daily_budget_exhausted": "Исчерпан суточный бюджет запросов AI.",
+    "ai_minute_limit_exhausted": "Достигнут минутный лимит AI; запрос ожидает освобождения квоты.",
     "provider_response_error": "Провайдер AI сообщил об ошибке вместо результата анализа.",
     "provider_usage_persistence_failed": "Не удалось сохранить аудит AI-запроса; результат не применён.",
     "invalid_extraction_schema": "Модель вернула некорректный JSON или отсутствует массив facts.",

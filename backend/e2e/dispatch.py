@@ -11,6 +11,9 @@ from django.utils import timezone
 
 def dispatch_forever():
     import os
+    if os.getenv('MAZORY_E2E_ROUTER') == '1':
+        from .free_router import dispatch
+        return dispatch()
     if os.getenv('MAZORY_E2E_LAYA') == '1':
         from .laya_file import dispatch_forever as dispatch_laya
         return dispatch_laya()

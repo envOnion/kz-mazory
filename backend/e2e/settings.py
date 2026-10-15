@@ -25,6 +25,9 @@ Q_CLUSTER = {
     "ack_failures": True,
     "max_attempts": 1,
 }
+if os.getenv("MAZORY_E2E_ROUTER") == "1":
+    Q_CLUSTER["name"] = "ai"
+    Q_CLUSTER["workers"] = 4
 if os.getenv('MAZORY_E2E_REAL_MODEL') == '1':
     Q_CLUSTER.update(timeout=240,retry=270)
     AI_WORKER_TIMEOUT=300

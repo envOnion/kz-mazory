@@ -74,11 +74,13 @@ def record_attempt(event, state, code="", next_at=None):
     if state == "cancelled":
         trace.status = "warning"
         trace.result_summary = "Запуск отменён администратором. Повторы этой попытки не назначаются."
-    elif state in ("pending", "processing", "budget_wait"):
+    elif state in ("pending", "processing", "budget_wait", "rate_wait"):
         trace.status = "warning"
         trace.result_summary = (
             "Ожидает возобновления суточного бюджета AI."
             if state == "budget_wait"
+            else "Ожидает освобождения минутного лимита AI."
+            if state == "rate_wait"
             else f"Попыток выполнено: {event.attempt_count} из {MAX_ATTEMPTS}. "
             "Анализ будет повторён автоматически."
         )

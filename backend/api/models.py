@@ -773,6 +773,14 @@ class AISettings(TimestampedModel):
             "embeddings, chat и подсчёт токенов."
         ),
     )
+    minute_request_limit = models.PositiveIntegerField(
+        "Лимит запросов AI в минуту",
+        default=0,
+        help_text=(
+            "0 — без ограничений. Общий лимит всех внешних AI-запросов "
+            "за последние 60 секунд для всех воркеров, включая повторы."
+        ),
+    )
     daily_budget_usd = models.DecimalField(
         "Бюджет AI в сутки, USD",
         max_digits=12,

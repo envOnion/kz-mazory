@@ -217,6 +217,13 @@ def _execute_operation(pk):
                 locked.status, locked.result, locked.error_code = "succeeded", json_value(result), ""
                 locked.save(update_fields=["status", "result", "error_code"])
     except Exception as exc:
+        if isinstance(exc, ProviderUnavailable) and str(exc) in (
+            "ai_minute_limit_exhausted", "ai_daily_budget_exhausted",
+        ):
+            AsyncOperation.objects.filter(pk=pk, status="running").update(status="queued", error_code="")
+            # The existing durable outbox owns the retry and routes it to the
+            # correct worker cluster. A separate Q2 schedule could be stranded.
+            raise
         code = (
             str(exc)[:64]
             if isinstance(exc, ProviderUnavailable)

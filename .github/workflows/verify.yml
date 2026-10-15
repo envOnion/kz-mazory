@@ -13,7 +13,7 @@ jobs:
   verify:
     name: Docker build and local E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     env:
       E2E_PYTHON_BASE_IMAGE: mirror.gcr.io/library/python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
       E2E_NODE_BASE_IMAGE: mirror.gcr.io/library/node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
@@ -27,6 +27,8 @@ jobs:
         run: |
           docker compose -f compose.e2e.yml up -d --build nginx qcluster outbox
           bash ops/run_local_e2e.sh
+      - name: Free Router shared quota and durable retry E2E
+        run: bash ops/run_router_e2e.sh
       - name: Production settings check inside Docker
         run: docker run --rm -v "$PWD/ops:/checks:ro" --entrypoint python mazory-e2e-backend /checks/check_deployment.py /app
       - name: Frontend dependency audit inside Docker
@@ -41,6 +43,10 @@ jobs:
           mkdir -p artifacts
           docker compose -f compose.e2e.yml logs --no-color > artifacts/services.log
           docker cp "$(docker compose -f compose.e2e.yml ps -a -q browser):/e2e/playwright" artifacts/ || true
+          docker compose -p mazory-router-e2e -f compose.e2e.yml -f compose.e2e.router.yml logs --no-color > artifacts/router-services.log
+          mkdir -p artifacts/router
+          docker cp "$(docker compose -p mazory-router-e2e -f compose.e2e.yml -f compose.e2e.router.yml ps -a -q browser):/e2e/playwright" artifacts/router/ || true
+          docker cp "$(docker compose -p mazory-router-e2e -f compose.e2e.yml -f compose.e2e.router.yml ps -a -q backend):/e2e/router-proof.json" artifacts/router/ || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -48,4 +54,6 @@ jobs:
           path: artifacts
       - name: Remove isolated containers and volumes
         if: always()
-        run: docker compose -f compose.e2e.yml down --volumes --remove-orphans
+        run: |
+          docker compose -f compose.e2e.yml down --volumes --remove-orphans
+          docker compose -p mazory-router-e2e -f compose.e2e.yml -f compose.e2e.router.yml down --volumes --remove-orphans

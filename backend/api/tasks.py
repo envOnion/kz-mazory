@@ -74,14 +74,15 @@ def verify_ai_context():
         expected_api_format=endpoint["api_format"],
     )
     actual = usage.get("prompt_tokens")
-    if type(actual) is not int or actual != expected:
-        raise ProviderUnavailable("context_token_count_invalid")
+    from .free_router import validate_usage
+    validate_usage(counter, expected, actual)
     return {
         "model": cfg.chat_model_name, "token_counter": counter.strategy,
         "context_window_tokens": cfg.context_window_tokens,
         "max_completion_tokens": cfg.max_completion_tokens,
         "input_tokens_expected": expected, "input_tokens_actual": actual,
         "finish_reason": diagnostics.get("finish_reason"),
+        "resolved_model": diagnostics.get("resolved_model", cfg.chat_model_name),
     }
 
 
@@ -119,11 +120,12 @@ def verify_history_packets():
         not theme["completion_reason"] or not any(link["thought_state"] == "final" for link in theme["messages"])
     ) for theme in themes.validated_data):
         raise ProviderUnavailable("analysis_probe_classification_invalid")
-    if usage.get("prompt_tokens") != expected:
-        raise ProviderUnavailable("context_token_count_invalid")
+    from .free_router import validate_usage
+    validate_usage(counter, expected, usage.get("prompt_tokens"))
     return {"model":cfg.chat_model_name, "input_tokens_expected":expected,
         "input_tokens_actual":usage["prompt_tokens"], "finish_reason":diagnostics.get("finish_reason"),
-        "classification_validated":True, "business_records_created":0}
+        "classification_validated":True, "business_records_created":0,
+        "resolved_model":diagnostics.get("resolved_model", cfg.chat_model_name)}
 
 
 def dispatch_outbox(limit=100):
@@ -426,6 +428,15 @@ def run_outbox(pk):
             if isinstance(exc, ProviderUnavailable)
             else type(exc).__name__
         )
+        if code == "ai_minute_limit_exhausted":
+            next_at = timezone.now() + timedelta(seconds=max(1, exc.retry_after or 60))
+            uncancelled_attempt(pk).update(
+                state="pending", error_code=code, lease_until=None, next_attempt_at=next_at,
+                attempt_count=max(0, event.attempt_count - 1),
+            )
+            event.attempt_count = max(0, event.attempt_count - 1)
+            ai_retries.record_attempt(event, "rate_wait", code, next_at)
+            return
         if (event.event_type == "thread_backfill" and code == "thread_history_busy") or code in ("history_budget_reserved", "autonomous_crm_paused", "crm_deal_delivery_pending"):
             # Waiting for earlier pages is normal progress, not a failed attempt.
             uncancelled_attempt(pk).update(

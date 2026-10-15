@@ -634,6 +634,28 @@ class ProviderHandler(BaseHTTPRequestHandler):
             return self.respond(
                 {"input_tokens": max(1, len(json.dumps(body, ensure_ascii=False)) // 4)}
             )
+        if self.path.endswith('/chat/completions') and body.get('model') == 'openrouter/free':
+            state = json.loads(self.control.read_text())
+            with (self.control.parent / 'router-provider.jsonl').open('a') as stream:
+                stream.write(json.dumps({'at':fixture_time.time(), 'provider':body.get('provider'), 'model':body['model'],
+                    'status':429 if state.get('router_429_once') else 200, 'has_tools':bool(body.get('tools')),
+                    'response_format':(body.get('response_format') or {}).get('type')})+'\n')
+            if state.get('router_429_once'):
+                state['router_429_once'] = False
+                self.save_control(state)
+                self.send_response(429)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Retry-After', '2')
+                self.end_headers()
+                self.wfile.write(b'{"error":{"code":429,"message":"Temporary shared pool limit"}}')
+                return
+            if body.get('tools'):
+                return self.respond({'model':'fixture/routed-model:free', 'choices':[{'message':{'role':'assistant','content':'Привет! Помогу с аналитикой.'},'finish_reason':'stop'}],
+                    'usage':{'prompt_tokens':100,'completion_tokens':30,'cost':0}})
+            value = json.loads(body['messages'][-1]['content'])
+            result = classify(value) if 'target_message_id' in value else {'ok':True}
+            return self.respond({'model':'fixture/routed-model:free','choices':[{'message':{'role':'assistant','content':json.dumps(result,ensure_ascii=False)},'finish_reason':'stop'}],
+                'usage':{'prompt_tokens':100,'completion_tokens':30,'cost':0}})
         if self.path.endswith("/v1/messages") and any(t.get("name") == "query_dataset" for t in body.get("tools", [])):
             import time
             state = json.loads(self.control.read_text())
