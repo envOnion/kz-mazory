@@ -12,12 +12,12 @@ interface Proof {
   events: { state: string; error_code: string; attempt_count: number; event_type: string }[]
   usage: { model_name: string; succeeded: boolean; error_code: string }[]
   probes: { status: string; worker_pid: number }[]
-  traces: { id: number; raw_message_id: number; status: string }[]
+  traces: { id: number; raw_message_id: number; status: string; error_code: string }[]
   facts: { trace_id: number; fact_type: string; proposed_changes: Record<string, unknown> }[]
   operations: { id: number; status: string; error_code: string }[]
 }
 const proof = (): Proof => JSON.parse(readFileSync(join(directory, 'router-proof.json'), 'utf8'))
-interface ProviderCall { at: number; provider: { require_parameters: boolean }; model: string; status: number; has_tools: boolean; response_format?: string }
+interface ProviderCall { at: number; provider: { require_parameters: boolean }; model: string; status: number; has_tools: boolean; response_format?: string; invalid_schema: boolean }
 const providerCalls = (): ProviderCall[] => readFileSync(join(directory, 'router-provider.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
 
 test('router settings, cross-worker quota, persisted wait and local upstream 429 use real browser/API/DB/Q2', async ({ page, request }) => {
@@ -76,13 +76,16 @@ test('router settings, cross-worker quota, persisted wait and local upstream 429
   await page.locator('button[name=_save], input[name=_save]').click()
   await expect.poll(() => proof().settings[0]?.minute_request_limit).toBe(0)
   const control = JSON.parse(readFileSync(join(directory, 'provider-state.json'), 'utf8')) as Record<string, unknown>
-  writeFileSync(join(directory, 'router-control.tmp'), JSON.stringify({ ...control, router_429_once: true }))
+  writeFileSync(join(directory, 'router-control.tmp'), JSON.stringify({ ...control, router_429_once: true, router_invalid_schema_once: true }))
   renameSync(join(directory, 'router-control.tmp'), join(directory, 'provider-state.json'))
   const retryData = JSON.stringify({ ...envelope, payload: { ...envelope.payload, id: 'router-after-429', timestamp: sentAt + 1 } })
   expect((await request.post('/api/whatsapp/webhook/', { data: retryData, headers: {
     'Content-Type': 'application/json', 'X-Webhook-Hmac': createHmac('sha512', 'isolated-local-webhook-secret').update(retryData).digest('hex'),
   } })).ok()).toBe(true)
   await expect.poll(() => proof().usage.some(row => row.error_code === 'provider_rate_limited')).toBe(true)
+  await expect.poll(() => proof().traces.some(row => row.error_code === 'invalid_extraction_schema'), { timeout: 90000 }).toBe(true)
+  const rejected = proof().traces.filter(row => row.error_code === 'invalid_extraction_schema')
+  expect(proof().facts.some(fact => rejected.some(trace => trace.id === fact.trace_id))).toBe(false)
   await expect.poll(() => proof().messages.find(row => row.message_id === 'router-after-429')?.processed, { timeout: 150000 }).toBe(true)
   for (const message of proof().messages) {
     const traces = proof().traces.filter(row => row.raw_message_id === message.id && row.status === 'success')
@@ -91,7 +94,8 @@ test('router settings, cross-worker quota, persisted wait and local upstream 429
   }
   const calls = providerCalls()
   expect(calls.every(call => call.model === 'openrouter/free' && JSON.stringify(call.provider) === JSON.stringify({ require_parameters: true }))).toBe(true)
-  expect(calls.some(call => call.response_format === 'json_object' || call.response_format === 'json_schema')).toBe(true)
+  expect(calls.filter(call => !call.has_tools && call.response_format).every(call => call.response_format === 'json_schema')).toBe(true)
+  expect(calls.some(call => call.response_format === 'json_schema' && call.invalid_schema && call.status === 200)).toBe(true)
   expect(calls.some(call => call.has_tools)).toBe(true)
   const firstAfterWindow = calls[3]!
   expect(firstAfterWindow.at - calls[0]!.at).toBeGreaterThanOrEqual(59)

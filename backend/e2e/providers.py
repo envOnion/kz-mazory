@@ -395,6 +395,32 @@ def classify_full_history(value):
     return {'threads':themes, 'facts':facts}
 
 
+def router_extraction(value):
+    """Explicit current wire response for the router E2E's synthetic project report."""
+    if value['content'] != 'БЦ Восток: историческое КП подготовлено':
+        raise ValueError('Unsupported isolated router extraction fixture')
+    target = value['target_message_id']
+    targets = value.get('batch_message_ids') or [target]
+    def link(raw_id):
+        return {'raw_message_id': raw_id, 'thought_state': 'final', 'relation': 'discusses',
+            'rationale': 'Сообщён конкретный статус подготовки КП.'}
+    result = {'threads': {'t0': {'thread_id': None, 'parent_key': None,
+        'topic': 'КП БЦ Восток', 'summary': value['content'], 'state': 'ready',
+        'completion_reason': 'Сообщён конкретный статус подготовки КП.',
+        'messages': {f'm{raw_id}': link(raw_id) for raw_id in targets}}},
+        'facts': [{'thread_key': 't0', 'fact_type': 'project', 'object_name': 'БЦ Восток',
+            'company_name': '', 'current_action': 'КП подготовлено',
+            'evidence_message_id': target, 'evidence': value['content'], 'confidence': .95,
+            'evidence_messages': [{'raw_message_id': target, 'quote': value['content'], 'role': 'source'}],
+            'uncertainties': []}]}
+    classifications = [{**link(raw_id), 'thread_key': 't0'} for raw_id in targets]
+    if len(targets) == 1:
+        result['target_classification'] = classifications[0]
+    else:
+        result['target_classifications'] = {f'c{index}': row for index, row in enumerate(classifications)}
+    return result
+
+
 class ProviderHandler(BaseHTTPRequestHandler):
     control = None
 
@@ -639,7 +665,8 @@ class ProviderHandler(BaseHTTPRequestHandler):
             with (self.control.parent / 'router-provider.jsonl').open('a') as stream:
                 stream.write(json.dumps({'at':fixture_time.time(), 'provider':body.get('provider'), 'model':body['model'],
                     'status':429 if state.get('router_429_once') else 200, 'has_tools':bool(body.get('tools')),
-                    'response_format':(body.get('response_format') or {}).get('type')})+'\n')
+                    'response_format':(body.get('response_format') or {}).get('type'),
+                    'invalid_schema':bool(state.get('router_invalid_schema_once') and not state.get('router_429_once'))})+'\n')
             if state.get('router_429_once'):
                 state['router_429_once'] = False
                 self.save_control(state)
@@ -653,7 +680,12 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 return self.respond({'model':'fixture/routed-model:free', 'choices':[{'message':{'role':'assistant','content':'Привет! Помогу с аналитикой.'},'finish_reason':'stop'}],
                     'usage':{'prompt_tokens':100,'completion_tokens':30,'cost':0}})
             value = json.loads(body['messages'][-1]['content'])
-            result = classify(value) if 'target_message_id' in value else {'ok':True}
+            result = router_extraction(value) if 'target_message_id' in value else {'ok':True}
+            if state.get('router_invalid_schema_once'):
+                state['router_invalid_schema_once'] = False
+                self.save_control(state)
+                result.pop('target_classification', None)
+                result.pop('target_classifications', None)
             return self.respond({'model':'fixture/routed-model:free','choices':[{'message':{'role':'assistant','content':json.dumps(result,ensure_ascii=False)},'finish_reason':'stop'}],
                 'usage':{'prompt_tokens':100,'completion_tokens':30,'cost':0}})
         if self.path.endswith("/v1/messages") and any(t.get("name") == "query_dataset" for t in body.get("tools", [])):
