@@ -2391,3 +2391,143 @@ class WhatsAppHistoryRunMessage(TimestampedModel):
         db_table = 'api_whatsapphistoryrun_messages'
         unique_together = [('whatsapphistoryrun', 'rawmessage')]
         default_permissions = ('view',)
+
+
+class CommunicationRecord(TimestampedModel):
+    """One projection per logical communication: inbound, outbound or system.
+
+    Business state stays canonical in the origin models; this record is the
+    single addressable unit of the messenger journal.  Exactly one origin link
+    is required, except internal service entries identified solely by their
+    deduplication key.
+    """
+
+    CATEGORY_CHOICES = [
+        ("group", "Групповой чат"),
+        ("private", "Личная переписка"),
+        ("system", "Система"),
+    ]
+    DIRECTION_CHOICES = [
+        ("inbound", "Входящее"),
+        ("outbound", "Исходящее"),
+        ("internal", "Служебное"),
+    ]
+    PURPOSE_CHOICES = [
+        ("source", "Исходное сообщение"),
+        ("clarification", "Уточнение"),
+        ("reply", "Ответ на уточнение"),
+        ("notification", "Уведомление"),
+        ("auth", "Код входа"),
+        ("system", "Системное событие"),
+    ]
+
+    team = models.ForeignKey(Team, null=True, blank=True, on_delete=models.PROTECT, related_name="communication_records")
+    config = models.ForeignKey(WhatsAppConfig, null=True, blank=True, on_delete=models.SET_NULL, related_name="communication_records")
+    recipient = models.ForeignKey(User, null=True, blank=True, on_delete=models.SET_NULL, related_name="communication_records")
+    raw_message = models.OneToOneField(RawMessage, null=True, blank=True, on_delete=models.CASCADE, related_name="communication_record")
+    notification = models.OneToOneField(Notification, null=True, blank=True, on_delete=models.CASCADE, related_name="communication_record")
+    otp_outbox = models.OneToOneField(OutboxEvent, null=True, blank=True, on_delete=models.CASCADE, related_name="communication_record")
+    deduplication_key = models.CharField(max_length=191, unique=True)
+    session_name = models.CharField(max_length=255, blank=True, default="")
+    chat_id = models.CharField(max_length=255, blank=True, default="")
+    category = models.CharField(max_length=16, choices=CATEGORY_CHOICES)
+    direction = models.CharField(max_length=16, choices=DIRECTION_CHOICES)
+    purpose = models.CharField(max_length=24, choices=PURPOSE_CHOICES, default="source")
+    sanitized_body = models.TextField(blank=True, default="")
+    occurred_at = models.DateTimeField(null=True, blank=True)
+    time_is_estimated = models.BooleanField(default=False)
+
+    class Meta:
+        verbose_name = "Сообщение коммуникаций"
+        verbose_name_plural = "Сообщения коммуникаций"
+        ordering = ["-occurred_at", "-id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    (
+                        Q(raw_message__isnull=False, notification__isnull=True, otp_outbox__isnull=True)
+                        | Q(raw_message__isnull=True, notification__isnull=False, otp_outbox__isnull=True)
+                        | Q(raw_message__isnull=True, notification__isnull=True, otp_outbox__isnull=False)
+                        | Q(
+                            raw_message__isnull=True,
+                            notification__isnull=True,
+                            otp_outbox__isnull=True,
+                            deduplication_key__gt="",
+                        )
+                    )
+                ),
+                name="communication_record_exactly_one_origin",
+            ),
+            models.CheckConstraint(
+                condition=~Q(category="group") | Q(team__isnull=False, config__isnull=False),
+                name="communication_record_group_requires_scope",
+            ),
+            models.CheckConstraint(
+                condition=~Q(purpose__in=["auth", "clarification", "reply"]) | Q(recipient__isnull=False),
+                name="communication_record_personal_requires_recipient",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["team", "category", "occurred_at", "id"], name="comm_record_scope_idx"),
+            models.Index(fields=["session_name", "chat_id", "category", "occurred_at", "id"], name="comm_record_ns_idx"),
+            models.Index(fields=["recipient", "occurred_at", "id"], name="comm_record_recipient_idx"),
+        ]
+
+    def __str__(self):
+        return f"#{self.pk} {self.category}/{self.purpose} {self.session_name}:{self.chat_id}"
+
+
+class CommunicationEvent(TimestampedModel):
+    """Append-only journal of attempts and transitions for a record.
+
+    ``event_key`` is unique per source operation, stage and attempt so a
+    repeated webhook or task run cannot duplicate history.  Current business
+    state remains canonical in the linked models; events only correlate it.
+    """
+
+    KIND_CHOICES = [
+        ("received", "Сообщение получено"),
+        ("dispatch", "Отправка поставлена в очередь"),
+        ("sent", "Отправлено провайдеру"),
+        ("ack", "Подтверждение провайдера"),
+        ("delivery_failed", "Ошибка доставки"),
+        ("analysis_started", "Начат анализ"),
+        ("analysis_finished", "Анализ завершён"),
+        ("analysis_error", "Ошибка анализа"),
+        ("clarification_created", "Уточнение создано"),
+        ("clarification_state", "Переход уточнения"),
+        ("answer_interpreted", "Ответ обработан"),
+        ("crm_state", "Переход доставки в CRM"),
+        ("reanalyze", "Повторный анализ"),
+        ("history_reconstructed", "Восстановлено из истории"),
+        ("unknown_result", "Результат неизвестен"),
+    ]
+
+    record = models.ForeignKey(CommunicationRecord, on_delete=models.CASCADE, related_name="events")
+    parent_event = models.ForeignKey("self", null=True, blank=True, on_delete=models.SET_NULL, related_name="child_events")
+    trace = models.ForeignKey(MessageProcessingTrace, null=True, blank=True, on_delete=models.SET_NULL, related_name="communication_events")
+    clarification = models.ForeignKey(FactClarification, null=True, blank=True, on_delete=models.SET_NULL, related_name="communication_events")
+    reply = models.ForeignKey(ClarificationReply, null=True, blank=True, on_delete=models.SET_NULL, related_name="communication_events")
+    notification_delivery = models.ForeignKey(NotificationDelivery, null=True, blank=True, on_delete=models.SET_NULL, related_name="communication_events")
+    outbox_event = models.ForeignKey(OutboxEvent, null=True, blank=True, on_delete=models.SET_NULL, related_name="communication_events")
+    crm_delivery = models.ForeignKey(CrmDelivery, null=True, blank=True, on_delete=models.SET_NULL, related_name="communication_events")
+    event_key = models.CharField(max_length=191, unique=True)
+    kind = models.CharField(max_length=40, choices=KIND_CHOICES)
+    state = models.CharField(max_length=40)
+    occurred_at = models.DateTimeField(null=True, blank=True)
+    time_is_estimated = models.BooleanField(default=False)
+    safe_metadata = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        verbose_name = "Событие коммуникации"
+        verbose_name_plural = "События коммуникаций"
+        ordering = ["occurred_at", "id"]
+        indexes = [
+            models.Index(fields=["record", "occurred_at", "id"], name="comm_event_record_idx"),
+            models.Index(fields=["clarification"], name="comm_event_clar_idx"),
+            models.Index(fields=["outbox_event"], name="comm_event_outbox_idx"),
+            models.Index(fields=["crm_delivery"], name="comm_event_crm_idx"),
+        ]
+
+    def __str__(self):
+        return f"#{self.pk} {self.kind}/{self.state} record={self.record_id}"
