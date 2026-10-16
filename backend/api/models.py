@@ -335,6 +335,10 @@ class CrmProjectSnapshot(TimestampedModel):
     source_close_date = models.DateField(null=True, blank=True)
     source_closed = models.BooleanField(default=False)
 
+    class Meta:
+        verbose_name = "Снимок сделки CRM"
+        verbose_name_plural = "Снимки сделок CRM"
+
 
 class RawMessage(TimestampedModel):
     project = models.ForeignKey(
@@ -1285,6 +1289,10 @@ class Team(TimestampedModel):
     def __str__(self):
         return self.name
 
+    class Meta:
+        verbose_name = "Команда"
+        verbose_name_plural = "Команды"
+
 
 class TeamMembership(TimestampedModel):
     ROLES = [
@@ -1306,6 +1314,8 @@ class TeamMembership(TimestampedModel):
     invited_until = models.DateTimeField(null=True, blank=True)
 
     class Meta:
+        verbose_name = "Участие в команде"
+        verbose_name_plural = "Участия в командах"
         constraints = [
             models.UniqueConstraint(
                 fields=["user", "team", "role"], name="membership_unique"
@@ -1327,6 +1337,8 @@ class ClientProjectAccess(TimestampedModel):
     )
 
     class Meta:
+        verbose_name = "Доступ клиента к проекту"
+        verbose_name_plural = "Доступы клиентов к проектам"
         constraints = [
             models.UniqueConstraint(
                 fields=["user", "project"], name="client_project_unique"
@@ -1342,6 +1354,8 @@ class ChatAccess(TimestampedModel):
     is_active = models.BooleanField(default=True)
 
     class Meta:
+        verbose_name = "Доступ к чатам"
+        verbose_name_plural = "Доступы к чатам"
         constraints = [
             models.UniqueConstraint(
                 fields=["user", "config"], name="chat_access_unique"
@@ -1360,12 +1374,20 @@ class AuthSession(TimestampedModel):
     device = models.CharField(max_length=256, blank=True)
     ip_address = models.GenericIPAddressField(null=True, blank=True)
 
+    class Meta:
+        verbose_name = "Сессия авторизации"
+        verbose_name_plural = "Сессии авторизации"
+
 
 class AdminMFA(TimestampedModel):
     user = models.OneToOneField(User, on_delete=models.CASCADE)
     encrypted_secret = models.TextField()
     confirmed_at = models.DateTimeField(null=True, blank=True)
     last_counter = models.BigIntegerField(default=-1)
+
+    class Meta:
+        verbose_name = "MFA администратора"
+        verbose_name_plural = "MFA администраторов"
 
 
 class DialogueThread(TimestampedModel):
@@ -1386,6 +1408,10 @@ class DialogueThread(TimestampedModel):
     version = models.PositiveIntegerField(default=0)
     snapshot_max_id = models.PositiveBigIntegerField(default=0)
 
+    class Meta:
+        verbose_name = "Тред"
+        verbose_name_plural = "Треды"
+
 
 class ThreadMessage(TimestampedModel):
     assignment_method = models.CharField(max_length=8, choices=[("llm", "LLM"), ("laya", "LAYA")], default="llm")
@@ -1397,6 +1423,8 @@ class ThreadMessage(TimestampedModel):
     rationale = models.CharField(max_length=1000, blank=True)
 
     class Meta:
+        verbose_name = "Сообщение треда"
+        verbose_name_plural = "Сообщения треда"
         constraints = [models.UniqueConstraint(fields=["thread", "raw_message"], name="thread_message_unique")]
 
 
@@ -1411,6 +1439,8 @@ class ThreadRevision(TimestampedModel):
     completion_reason = models.CharField(max_length=1000, blank=True)
 
     class Meta:
+        verbose_name = "Ревизия треда"
+        verbose_name_plural = "Ревизии тредов"
         constraints = [models.UniqueConstraint(fields=["thread", "version"], name="thread_revision_unique")]
 
 
@@ -1428,12 +1458,18 @@ class ThreadRoutingAttempt(TimestampedModel):
     policy_version = models.CharField(max_length=64)
     latency_ms = models.PositiveIntegerField(default=0)
 
+    class Meta:
+        verbose_name = "Попытка определения темы"
+        verbose_name_plural = "Попытки определения темы"
+
 
 class ThreadSubscription(TimestampedModel):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="thread_subscriptions")
     thread = models.ForeignKey(DialogueThread, on_delete=models.CASCADE, related_name="subscriptions")
 
     class Meta:
+        verbose_name = "Подписка на тред"
+        verbose_name_plural = "Подписки на треды"
         constraints = [
             models.UniqueConstraint(fields=["user", "thread"], name="unique_user_thread_subscription")
         ]
@@ -1447,6 +1483,10 @@ class CrmCatalogSync(TimestampedModel):
     imported_count = models.PositiveIntegerField(default=0)
     last_success_at = models.DateTimeField(null=True, blank=True)
     error_code = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        verbose_name = "Синхронизация каталога CRM"
+        verbose_name_plural = "Синхронизации каталога CRM"
 
 
 class FactCandidate(TimestampedModel):
@@ -1506,6 +1546,10 @@ class FactCandidate(TimestampedModel):
     reviewed_at = models.DateTimeField(null=True, blank=True)
     review_reason = models.TextField(blank=True)
 
+    class Meta:
+        verbose_name = "Предложенное изменение"
+        verbose_name_plural = "Предложенные изменения"
+
 
 class CandidateCrmMatch(TimestampedModel):
     SELECTION_STATE_CHOICES = [
@@ -1552,6 +1596,8 @@ class CandidateCrmMatch(TimestampedModel):
     captured_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
+        verbose_name = "Сопоставление с CRM"
+        verbose_name_plural = "Сопоставления с CRM"
         ordering = ["-crm_match_revision", "-score", "id"]
         constraints = [
             models.UniqueConstraint(
@@ -1578,6 +1624,10 @@ class FactEvidence(TimestampedModel):
     quote = models.TextField()
     field_name = models.CharField(max_length=64, blank=True)
 
+    class Meta:
+        verbose_name = "Основание факта"
+        verbose_name_plural = "Основания фактов"
+
 
 class ProjectRevision(TimestampedModel):
     project = models.ForeignKey(
@@ -1592,6 +1642,8 @@ class ProjectRevision(TimestampedModel):
     source = models.CharField(max_length=32, default="review")
 
     class Meta:
+        verbose_name = "История изменений проекта"
+        verbose_name_plural = "Истории изменений проекта"
         constraints = [
             models.UniqueConstraint(
                 fields=["project", "version"], name="project_version_unique"
@@ -1614,6 +1666,8 @@ class PaymentScheduleItem(TimestampedModel):
     is_verified = models.BooleanField(default=False)
 
     class Meta:
+        verbose_name = "Позиция графика оплат"
+        verbose_name_plural = "Позиции графиков оплат"
         constraints = [
             models.CheckConstraint(
                 condition=models.Q(amount__gt=0), name="schedule_positive"
@@ -1631,6 +1685,8 @@ class PaymentAllocation(TimestampedModel):
     amount = models.DecimalField(max_digits=14, decimal_places=2)
 
     class Meta:
+        verbose_name = "Распределение оплаты"
+        verbose_name_plural = "Распределения оплат"
         constraints = [
             models.CheckConstraint(
                 condition=~models.Q(amount=0), name="allocation_nonzero"
@@ -1655,6 +1711,8 @@ class SalesTarget(TimestampedModel):
     approved_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
+        verbose_name = "План продаж"
+        verbose_name_plural = "Планы продаж"
         constraints = [
             models.UniqueConstraint(
                 fields=["team", "profile", "month", "currency", "version"],
@@ -1680,6 +1738,10 @@ class StageTransition(TimestampedModel):
     to_stage = models.CharField(max_length=64)
     effective_at = models.DateTimeField(default=timezone.now)
 
+    class Meta:
+        verbose_name = "Переход стадии"
+        verbose_name_plural = "Переходы стадий"
+
 
 class Notification(TimestampedModel):
     recipient = models.ForeignKey(
@@ -1701,6 +1763,10 @@ class Notification(TimestampedModel):
     read_at = models.DateTimeField(null=True, blank=True)
     acknowledged_at = models.DateTimeField(null=True, blank=True)
 
+    class Meta:
+        verbose_name = "Уведомление"
+        verbose_name_plural = "Уведомления"
+
 
 class NotificationDelivery(TimestampedModel):
     notification = models.ForeignKey(
@@ -1714,6 +1780,8 @@ class NotificationDelivery(TimestampedModel):
     next_attempt_at = models.DateTimeField(default=timezone.now)
 
     class Meta:
+        verbose_name = "Доставка уведомления"
+        verbose_name_plural = "Доставки уведомлений"
         constraints = [
             models.UniqueConstraint(
                 fields=["notification", "channel", "attempt_no"],
@@ -1735,6 +1803,8 @@ class ReminderOccurrence(TimestampedModel):
     state = models.CharField(max_length=16, default="queued")
 
     class Meta:
+        verbose_name = "Напоминание"
+        verbose_name_plural = "Напоминания"
         constraints = [
             models.UniqueConstraint(
                 fields=[
@@ -1766,6 +1836,8 @@ class OutboxEvent(TimestampedModel):
     error_code = models.CharField(max_length=64, blank=True)
 
     class Meta:
+        verbose_name = "Событие обработки и отправки"
+        verbose_name_plural = "События обработки и отправки"
         indexes = [models.Index(fields=["analysis_source_key", "state", "next_attempt_at", "analysis_position"], name="analysis_dispatch_idx")]
 
 
@@ -1781,6 +1853,8 @@ class AsyncOperation(TimestampedModel):
     access_fingerprint = models.CharField(max_length=64, blank=True)
 
     class Meta:
+        verbose_name = "Фоновая операция"
+        verbose_name_plural = "Фоновые операции"
         constraints = [
             models.UniqueConstraint(
                 fields=["requested_by", "idempotency_key"],
@@ -1797,6 +1871,8 @@ class AuditEvent(TimestampedModel):
     before_after = models.JSONField(default=dict)
 
     class Meta:
+        verbose_name = "Запись журнала действий"
+        verbose_name_plural = "Журнал действий"
         ordering = ["-created_at"]
         default_permissions = ("view",)
 
@@ -1810,6 +1886,10 @@ class PrivateAttachment(TimestampedModel):
     published_to_client = models.BooleanField(default=False)
     transcript = models.TextField(blank=True)
     state = models.CharField(max_length=16, default="queued")
+
+    class Meta:
+        verbose_name = "Вложение"
+        verbose_name_plural = "Вложения"
 
 
 class ProviderUsage(TimestampedModel):
@@ -1829,6 +1909,10 @@ class ProviderUsage(TimestampedModel):
     output_tokens = models.PositiveIntegerField(null=True)
     cost_usd = models.DecimalField(max_digits=14, decimal_places=8, null=True)
     error_code = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        verbose_name = "Расход ресурсов провайдера"
+        verbose_name_plural = "Расходы ресурсов провайдера"
 
 
 HISTORY_ACTIVE_STATES = (
@@ -2055,6 +2139,8 @@ class WhatsAppHistoryItem(TimestampedModel):
     seen_scan = models.PositiveIntegerField()
 
     class Meta:
+        verbose_name = "Строка истории WhatsApp"
+        verbose_name_plural = "Строки истории WhatsApp"
         constraints = [
             models.UniqueConstraint(
                 fields=["run", "message_id"], name="history_run_message_unique"
@@ -2116,6 +2202,8 @@ class WhatsAppMessageAlias(TimestampedModel):
     source_revision = models.CharField(max_length=64)
 
     class Meta:
+        verbose_name = "Транспортный алиас сообщения"
+        verbose_name_plural = "Транспортные алиасы сообщений"
         constraints = [models.UniqueConstraint(fields=["config", "session_name", "chat_id", "namespace", "external_id", "source_revision"], name="whatsapp_transport_alias_unique")]
 
 
@@ -2130,6 +2218,8 @@ class McpToken(TimestampedModel):
     token_encrypted = models.TextField(blank=True, default="")
 
     class Meta:
+        verbose_name = "Ключ доступа MCP"
+        verbose_name_plural = "Ключи доступа MCP"
         ordering = ["-created_at"]
         constraints = [models.UniqueConstraint(fields=["user"], condition=models.Q(purpose="portal", is_active=True), name="one_active_portal_mcp_token")]
 
@@ -2143,6 +2233,10 @@ class Participant(TimestampedModel):
     def __str__(self):
         return self.display_name
 
+    class Meta:
+        verbose_name = "Участник WhatsApp"
+        verbose_name_plural = "Участники WhatsApp"
+
 
 class ParticipantIdentity(TimestampedModel):
     participant = models.ForeignKey(Participant, on_delete=models.PROTECT, related_name="identities")
@@ -2151,6 +2245,8 @@ class ParticipantIdentity(TimestampedModel):
     resolution_state = models.CharField(max_length=16, default="resolved")
 
     class Meta:
+        verbose_name = "Идентификатор участника"
+        verbose_name_plural = "Идентификаторы участников"
         constraints = [models.UniqueConstraint(fields=["namespace", "value"], name="participant_identity_unique")]
 
 
@@ -2160,6 +2256,8 @@ class CompanyAlias(TimestampedModel):
     decision = models.ForeignKey("FactDecision", null=True, on_delete=models.PROTECT)
 
     class Meta:
+        verbose_name = "Вариант названия контрагента"
+        verbose_name_plural = "Варианты названий контрагентов"
         constraints = [models.UniqueConstraint(fields=["company", "normalized_name"], name="company_alias_unique")]
 
 
@@ -2169,6 +2267,8 @@ class ProjectAlias(TimestampedModel):
     decision = models.ForeignKey("FactDecision", null=True, on_delete=models.PROTECT)
 
     class Meta:
+        verbose_name = "Вариант названия проекта"
+        verbose_name_plural = "Варианты названий проектов"
         constraints = [models.UniqueConstraint(fields=["project", "normalized_name"], name="project_alias_unique")]
 
 
@@ -2179,6 +2279,8 @@ class ProjectParty(TimestampedModel):
     decision = models.ForeignKey("FactDecision", on_delete=models.PROTECT)
 
     class Meta:
+        verbose_name = "Сторона проекта"
+        verbose_name_plural = "Стороны проекта"
         constraints = [models.UniqueConstraint(fields=["project", "company", "role"], name="project_party_unique")]
 
 
@@ -2194,6 +2296,8 @@ class FactDecision(TimestampedModel):
     validation = models.JSONField(default=dict)
 
     class Meta:
+        verbose_name = "Решение по факту"
+        verbose_name_plural = "Решения по фактам"
         constraints = [models.UniqueConstraint(fields=["candidate", "policy_version", "input_fingerprint"], name="fact_decision_input_unique")]
 
 
@@ -2218,6 +2322,10 @@ class FactClarification(TimestampedModel):
     expires_at = models.DateTimeField()
     resolved_at = models.DateTimeField(null=True, blank=True)
 
+    class Meta:
+        verbose_name = "Уточнение"
+        verbose_name_plural = "Уточнения"
+
 
 class ClarificationReply(TimestampedModel):
     raw_message = models.ForeignKey(RawMessage, null=True, blank=True, on_delete=models.PROTECT, related_name='clarification_replies')
@@ -2231,6 +2339,8 @@ class ClarificationReply(TimestampedModel):
     error_code = models.CharField(max_length=64, blank=True)
 
     class Meta:
+        verbose_name = "Ответ на уточнение"
+        verbose_name_plural = "Ответы на уточнения"
         constraints = [models.UniqueConstraint(fields=['session', 'provider_message_id'], name='clarification_reply_unique')]
 
 
@@ -2245,6 +2355,8 @@ class FactEvent(TimestampedModel):
     payload = models.JSONField(default=dict)
 
     class Meta:
+        verbose_name = "Событие факта"
+        verbose_name_plural = "События фактов"
         default_permissions = ("view",)
 
 
@@ -2258,6 +2370,8 @@ class FieldAssertion(TimestampedModel):
     value = models.JSONField(null=True)
 
     class Meta:
+        verbose_name = "Подтверждение значения поля"
+        verbose_name_plural = "Подтверждения значений полей"
         constraints = [models.CheckConstraint(condition=(models.Q(project__isnull=False, commitment__isnull=True, financial_record__isnull=True) | models.Q(project__isnull=True, commitment__isnull=False, financial_record__isnull=True) | models.Q(project__isnull=True, commitment__isnull=True, financial_record__isnull=False)), name="assertion_one_target")]
 
 
@@ -2269,6 +2383,8 @@ class SourceWorkItem(TimestampedModel):
     error_code = models.CharField(max_length=64, blank=True)
 
     class Meta:
+        verbose_name = "Обработка источника"
+        verbose_name_plural = "Обработки источника"
         constraints = [models.UniqueConstraint(fields=["raw_message", "processing_version"], name="source_work_version_unique")]
 
 
@@ -2280,6 +2396,8 @@ class SourceCheckpoint(TimestampedModel):
     counts = models.JSONField(default=dict)
 
     class Meta:
+        verbose_name = "Контрольная точка обработки"
+        verbose_name_plural = "Контрольные точки обработки"
         constraints = [models.UniqueConstraint(fields=["team", "source_scope"], name="source_checkpoint_unique")]
 
 
@@ -2289,6 +2407,10 @@ class MessageArtifact(TimestampedModel):
     state = models.CharField(max_length=32, default="unavailable")
     extracted_text = models.TextField(blank=True)
     error_code = models.CharField(max_length=64, blank=True)
+
+    class Meta:
+        verbose_name = "Вложение и извлечённый текст"
+        verbose_name_plural = "Вложения и извлечённый текст"
 
 
 class ExternalObjectLink(TimestampedModel):
@@ -2301,6 +2423,8 @@ class ExternalObjectLink(TimestampedModel):
     origin_key = models.CharField(max_length=255, unique=True)
 
     class Meta:
+        verbose_name = "Связь с объектом CRM"
+        verbose_name_plural = "Связи с объектами CRM"
         constraints = [models.UniqueConstraint(fields=["team", "integration_key", "object_type", "external_id"], condition=models.Q(external_id__isnull=False), name="external_object_namespace_unique")]
 
 
@@ -2313,6 +2437,10 @@ class CrmDelivery(TimestampedModel):
     patch = models.JSONField(default=dict)
     error_code = models.CharField(max_length=64, blank=True)
 
+    class Meta:
+        verbose_name = "Доставка изменения в CRM"
+        verbose_name_plural = "Доставки изменений в CRM"
+
 
 class ProviderReservation(TimestampedModel):
     purpose = models.CharField(max_length=16, default="live")
@@ -2323,12 +2451,20 @@ class ProviderReservation(TimestampedModel):
     state = models.CharField(max_length=16, default="reserved")
     lease_until = models.DateTimeField()
 
+    class Meta:
+        verbose_name = "Резервирование ресурсов ИИ"
+        verbose_name_plural = "Резервирования ресурсов ИИ"
+
 
 class AnalyticsConversation(TimestampedModel):
     last_activity_at = models.DateTimeField(null=True, blank=True)
     owner = models.ForeignKey(User, on_delete=models.CASCADE, related_name="analytics_conversations")
     title = models.CharField(max_length=200, default="Новый диалог")
     default_scope = models.JSONField(default=dict)
+
+    class Meta:
+        verbose_name = "Аналитический диалог"
+        verbose_name_plural = "Аналитические диалоги"
 
 
 class AnalyticsTurn(TimestampedModel):
@@ -2343,6 +2479,8 @@ class AnalyticsTurn(TimestampedModel):
     state = models.CharField(max_length=16, default="queued")
 
     class Meta:
+        verbose_name = "Шаг аналитического диалога"
+        verbose_name_plural = "Шаги аналитических диалогов"
         ordering = ["sequence"]
         constraints = [models.UniqueConstraint(fields=["conversation", "sequence"], name="analytics_turn_sequence_unique")]
 
@@ -2356,6 +2494,10 @@ class AnalyticsArtifact(TimestampedModel):
     access_fingerprint = models.CharField(max_length=64)
     generated_at = models.DateTimeField(auto_now_add=True)
     expires_at = models.DateTimeField(db_index=True)
+
+    class Meta:
+        verbose_name = "Артефакт аналитики"
+        verbose_name_plural = "Артефакты аналитики"
 
 
 class TemporalEntityRevision(TimestampedModel):
@@ -2378,6 +2520,8 @@ class TemporalEntityRevision(TimestampedModel):
     snapshot = models.JSONField(default=dict)
 
     class Meta:
+        verbose_name = "Версия данных"
+        verbose_name_plural = "Версии данных"
         default_permissions = ("view",)
         constraints = [models.UniqueConstraint(fields=["entity_type", "entity_id", "revision"], name="temporal_entity_revision_unique")]
         indexes = [models.Index(fields=["team", "project", "recorded_at"], name="temporal_scope_time_idx")]
@@ -2388,6 +2532,8 @@ class WhatsAppHistoryRunMessage(TimestampedModel):
     rawmessage = models.ForeignKey(RawMessage, on_delete=models.CASCADE)
 
     class Meta:
+        verbose_name = "Сообщение запуска импорта"
+        verbose_name_plural = "Сообщения запусков импорта"
         db_table = 'api_whatsapphistoryrun_messages'
         unique_together = [('whatsapphistoryrun', 'rawmessage')]
         default_permissions = ('view',)
@@ -2445,10 +2591,10 @@ class CommunicationRecord(TimestampedModel):
             models.CheckConstraint(
                 condition=(
                     (
-                        Q(raw_message__isnull=False, notification__isnull=True, otp_outbox__isnull=True)
-                        | Q(raw_message__isnull=True, notification__isnull=False, otp_outbox__isnull=True)
-                        | Q(raw_message__isnull=True, notification__isnull=True, otp_outbox__isnull=False)
-                        | Q(
+                        models.Q(raw_message__isnull=False, notification__isnull=True, otp_outbox__isnull=True)
+                        | models.Q(raw_message__isnull=True, notification__isnull=False, otp_outbox__isnull=True)
+                        | models.Q(raw_message__isnull=True, notification__isnull=True, otp_outbox__isnull=False)
+                        | models.Q(
                             raw_message__isnull=True,
                             notification__isnull=True,
                             otp_outbox__isnull=True,
@@ -2459,11 +2605,11 @@ class CommunicationRecord(TimestampedModel):
                 name="communication_record_exactly_one_origin",
             ),
             models.CheckConstraint(
-                condition=~Q(category="group") | Q(team__isnull=False, config__isnull=False),
+                condition=~models.Q(category="group") | models.Q(team__isnull=False, config__isnull=False),
                 name="communication_record_group_requires_scope",
             ),
             models.CheckConstraint(
-                condition=~Q(purpose__in=["auth", "clarification", "reply"]) | Q(recipient__isnull=False),
+                condition=~models.Q(purpose__in=["auth", "clarification", "reply"]) | models.Q(recipient__isnull=False),
                 name="communication_record_personal_requires_recipient",
             ),
         ]

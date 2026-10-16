@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Real Q2 restart at a durable between-chunk checkpoint in the isolated stack.
 set -uo pipefail
-if [[ -z "${CI:-}" && "${E2E_DOCKER_CONTEXT:-}" != "kk-minsk" ]]; then
-  echo 'Local E2E requires E2E_DOCKER_CONTEXT=kk-minsk' >&2
+if [[ -z "${CI:-}" && "${E2E_DOCKER_CONTEXT:-}" != "kk-minsk" && "${E2E_DOCKER_CONTEXT:-}" != "socktainer" ]]; then
+  echo 'Local E2E requires E2E_DOCKER_CONTEXT=kk-minsk (or socktainer for a local Apple Container engine)' >&2
   exit 1
 fi
 docker_args=()
