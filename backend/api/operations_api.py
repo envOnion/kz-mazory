@@ -15,7 +15,7 @@ from rest_framework.views import APIView
 
 from . import access
 from .communication import sanitize_body, sanitize_data
-from .messenger_api import axes_for_records, decode_cursor, encode_cursor, page_size, records_scope, record_href
+from .messenger_api import aggregate_analysis_axes, decode_cursor, encode_cursor, page_size, records_scope, record_href
 from .models import (BitrixDealChangeLog, BitrixSettings, CommunicationRecord,
     CrmCatalogSync, CrmDelivery, Commitment, MessageProcessingTrace, NotificationDelivery,
     SourceWorkItem, Team, Project)
@@ -151,20 +151,9 @@ class AnalyticsOperationsView(APIView):
                 raise ValidationError({'error': 'Укажите целочисленный ID команды.'})
             scope = scope.filter(team_id=int(team))
         inbound = _window(scope.filter(direction='inbound', purpose='source'), 'occurred_at', period)
-        states, attention_count = {}, 0
-        # Count the entire cohort; never silently cap the denominator at 5000.
-        batch = []
-        for row in inbound.order_by('id').iterator(chunk_size=1000):
-            batch.append(row)
-            if len(batch) == 1000:
-                for axes in axes_for_records(batch).values():
-                    states[axes['analysis']] = states.get(axes['analysis'], 0) + 1
-                    attention_count += int(axes['attention'])
-                batch = []
-        if batch:
-            for axes in axes_for_records(batch).values():
-                states[axes['analysis']] = states.get(axes['analysis'], 0) + 1
-                attention_count += int(axes['attention'])
+        # The status CTE is shared with Messenger filters. Aggregate the complete
+        # scoped cohort in PostgreSQL; do not transfer every inbound row to Python.
+        states, attention_count = aggregate_analysis_axes(inbound)
         crm = crm_scope(request.user)
         events = outbox_scope(request.user)
         if team:

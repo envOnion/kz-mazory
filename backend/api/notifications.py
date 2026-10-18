@@ -21,8 +21,13 @@ from .models import (
 from . import access
 
 
-def preferences(user):
-    profile = UserProfile.objects.filter(user=user).first()
+_PROFILE_NOT_LOADED = object()
+
+
+def preferences(user, *, profile=_PROFILE_NOT_LOADED):
+    """Resolve notification settings, optionally from an already-loaded profile."""
+    if profile is _PROFILE_NOT_LOADED:
+        profile = UserProfile.objects.filter(user=user).first()
     value = dict(profile.notification_preferences) if profile else {}
     value.setdefault("timezone", profile.timezone if profile else "Asia/Almaty")
     value.setdefault("quiet_start", "21:00")
@@ -34,9 +39,9 @@ def preferences(user):
     return value
 
 
-def next_delivery_time(user, now=None):
+def next_delivery_time(user, now=None, *, prefs=None):
     now = now or timezone.now()
-    prefs = preferences(user)
+    prefs = prefs or preferences(user)
     local = now.astimezone(ZoneInfo(prefs["timezone"]))
     start, end = (
         time.fromisoformat(prefs["quiet_start"]),
@@ -72,6 +77,7 @@ def create_notification(
     commitment=None,
     whatsapp=False,
     event=None,
+    preloaded_preferences=None,
 ):
     with transaction.atomic():
         notification, created = Notification.objects.get_or_create(
@@ -86,11 +92,12 @@ def create_notification(
                 "business_event": event,
             },
         )
-        prefs = preferences(user)
+        prefs = preloaded_preferences or preferences(user)
         enabled = prefs.get(category, True)
         if created and whatsapp and prefs["whatsapp"] and enabled:
             delivery = NotificationDelivery.objects.create(
-                notification=notification, next_attempt_at=next_delivery_time(user)
+                notification=notification,
+                next_attempt_at=next_delivery_time(user, prefs=prefs),
             )
             OutboxEvent.objects.create(
                 event_type="notification",
@@ -353,37 +360,98 @@ def plan_digests(now=None):
 
     now = now or timezone.now()
     count = 0
-    for user in User.objects.filter(
-        is_active=True, memberships__status="active"
-    ).distinct():
-        prefs = preferences(user)
+    users = list(
+        User.objects.filter(is_active=True, memberships__status="active")
+        .select_related("profile")
+        .distinct()
+    )
+    eligible = []
+    dedup_keys = []
+    for user in users:
+        prefs = preferences(user, profile=getattr(user, "profile", None))
         if not prefs.get("daily_digest", False):
             continue
         local = now.astimezone(ZoneInfo(prefs["timezone"]))
         if local.time().replace(tzinfo=None) < time.fromisoformat(prefs["digest_time"]):
             continue
-        mart = datamart.get_sales_kpi_mart(user)
+        key = f"digest:{local.date().isoformat()}:{user.id}"
+        eligible.append((user, prefs, key))
+        dedup_keys.append(key)
+
+    # A repeated minute tick must not run the potentially expensive mart for a
+    # digest that has already been persisted. The key is still enforced by the
+    # unique constraint inside create_notification for racing workers.
+    existing = set(
+        Notification.objects.filter(deduplication_key__in=dedup_keys)
+        .values_list("deduplication_key", flat=True)
+    ) if dedup_keys else set()
+    for user, prefs, key in eligible:
+        if key in existing:
+            continue
+        mart = datamart.get_sales_kpi_mart(
+            user, profile=getattr(user, "profile", None)
+        )
         create_notification(
             user,
             "Ежедневная сводка",
             f"Поступления: {mart['fact']} {mart['currency']}. {mart['coverage']['message']}",
             "daily_digest",
-            f"digest:{local.date().isoformat()}",
+            key.removesuffix(f":{user.id}"),
             whatsapp=True,
+            preloaded_preferences=prefs,
         )
         count += 1
     return count
 
 
 def plan_risks(now=None):
-    from .models import AISettings, Project, Team, ProviderUsage
+    from .models import AISettings, Project, Team, TeamMembership, ProviderUsage
     from .datamart import datamart
     from django.db.models import Sum
 
     now = now or timezone.now()
-    for project in Project.objects.filter(
+    pending_risks = []
+    projects = list(Project.objects.filter(
         is_verified=True, version__gt=0, team__is_active=True, archived=False
-    ).select_related("team", "manager__user"):
+    ).select_related("team", "manager"))
+    project_team_ids = {project.team_id for project in projects}
+    membership_rows = list(
+        TeamMembership.objects.filter(
+            team_id__in=project_team_ids,
+            team__is_active=True,
+            status="active",
+            role__in=["finance", "team_lead", "manager"],
+        ).values_list("user_id", "team_id", "role")
+    ) if project_team_ids else []
+    lead_finance_team_memberships = {
+        (user_id, team_id)
+        for user_id, team_id, role in membership_rows
+        if role in ("finance", "team_lead")
+    }
+    manager_team_memberships = {
+        (user_id, team_id)
+        for user_id, team_id, role in membership_rows
+        if role == "manager"
+    }
+    candidate_user_ids = {
+        user_id for user_id, _, _ in membership_rows
+    }
+    candidate_user_ids.update(
+        project.manager.user_id for project in projects if project.manager_id
+    )
+    risk_users = {
+        user.id: user
+        for user in User.objects.filter(
+            pk__in=candidate_user_ids, is_active=True
+        ).select_related("profile")
+    }
+    recipients_by_team_role = {}
+    for user_id, team_id, role in membership_rows:
+        user = risk_users.get(user_id)
+        if user is not None and role in ("finance", "team_lead"):
+            recipients_by_team_role.setdefault((team_id, role), {})[user_id] = user
+
+    for project in projects:
         risk = []
         if project.status == "proposal_sent" and project.updated_at <= now - timedelta(
             days=project.team.stalled_days
@@ -413,39 +481,53 @@ def plan_risks(now=None):
                 )
             )
         for category, title, key in risk:
-            users = User.objects.filter(
-                memberships__team=project.team,
-                memberships__role__in=["finance"]
-                if category == "critical_kpi"
-                else ["team_lead"],
-                memberships__status="active",
-                is_active=True,
+            role = "finance" if category == "critical_kpi" else "team_lead"
+            recipients = dict(
+                recipients_by_team_role.get((project.team_id, role), {})
             )
-            recipients = {u.id: u for u in users}
-            if (
-                project.manager
-                and access.projects_for(project.manager.user)
-                .filter(pk=project.pk)
-                .exists()
+            manager_user = risk_users.get(project.manager.user_id) if project.manager_id else None
+            if manager_user and (
+                manager_user.is_superuser
+                or (manager_user.id, project.team_id) in lead_finance_team_memberships
+                or (manager_user.id, project.team_id) in manager_team_memberships
             ):
-                recipients[project.manager.user.id] = project.manager.user
+                recipients[manager_user.id] = manager_user
             for user in recipients.values():
-                if preferences(user).get(category, False):
-                    create_notification(
-                        user,
-                        title,
-                        project.name,
-                        category,
-                        key,
-                        project=project,
-                        whatsapp=True,
+                prefs = preferences(user, profile=getattr(user, "profile", None))
+                if prefs.get(category, False):
+                    pending_risks.append(
+                        (user, prefs, project, title, category, key)
                     )
+    risk_dedup_keys = [f"{key}:{user.id}" for user, _, _, _, _, key in pending_risks]
+    existing_risks = set(
+        Notification.objects.filter(deduplication_key__in=risk_dedup_keys)
+        .values_list("deduplication_key", flat=True)
+    ) if risk_dedup_keys else set()
+    for user, prefs, project, title, category, key in pending_risks:
+        if f"{key}:{user.id}" in existing_risks:
+            continue
+        create_notification(
+            user,
+            title,
+            project.name,
+            category,
+            key,
+            project=project,
+            whatsapp=True,
+            preloaded_preferences=prefs,
+        )
     for user in User.objects.filter(
         is_active=True, memberships__status="active"
-    ).distinct():
-        if not preferences(user).get("critical_kpi", False):
+    ).select_related("profile").distinct():
+        prefs = preferences(user, profile=getattr(user, "profile", None))
+        if not prefs.get("critical_kpi", False):
             continue
-        mart = datamart.get_sales_kpi_mart(user)
+        # No period-only cache is safe here: facts and targets can cross the
+        # 50/80/100% thresholds independently during the same month. Recompute
+        # the mart so a new threshold crossing cannot be hidden by an older key.
+        mart = datamart.get_sales_kpi_mart(
+            user, profile=getattr(user, "profile", None)
+        )
         for manager in mart["managers"]:
             for threshold in (50, 80, 100):
                 if (
@@ -459,6 +541,7 @@ def plan_risks(now=None):
                         "critical_kpi",
                         f"target:{mart['period_start']}:{manager['id']}:{manager['targetAmount']}:{threshold}",
                         whatsapp=True,
+                        preloaded_preferences=prefs,
                     )
     day = now.replace(hour=0, minute=0, second=0, microsecond=0)
     usage = ProviderUsage.objects.filter(created_at__gte=day)
@@ -469,8 +552,9 @@ def plan_risks(now=None):
         or (cfg.daily_budget_usd > 0 and spent >= cfg.daily_budget_usd * Decimal("0.8"))
         or usage.filter(succeeded=False).count() >= 10
     ):
-        for user in User.objects.filter(is_staff=True, is_active=True):
+        for user in User.objects.filter(is_staff=True, is_active=True).select_related("profile"):
             if access.integration_allowed(user):
+                prefs = preferences(user, profile=getattr(user, "profile", None))
                 create_notification(
                     user,
                     "Требуется проверка AI-интеграции",
@@ -478,6 +562,7 @@ def plan_risks(now=None):
                     "technical",
                     f"ai-alert:{day.date()}",
                     whatsapp=False,
+                    preloaded_preferences=prefs,
                 )
 
 

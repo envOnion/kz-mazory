@@ -43,7 +43,10 @@ def outbox_scope(user):
     condition |= Q(_scope_config_id__in=access.configs_for(user).values('id'))
     condition |= Q(_scope_operation_id__in=AsyncOperation.objects.filter(requested_by=user).values('id'))
     condition |= Q(id__in=crm_scope(user).values('outbox_event_id'))
-    return qs.filter(condition).distinct()
+    # The outer queryset traverses only OutboxEvent's single-valued FK to
+    # BusinessEvent; all other branches are IN subqueries. This cannot fan out
+    # rows, so DISTINCT only adds a sort/hash to a potentially large scan.
+    return qs.filter(condition)
 
 
 def outbox_team_scope(qs, team_id):
@@ -55,6 +58,9 @@ def outbox_team_scope(qs, team_id):
                 then=Cast(KeyTextTransform(key,'payload'),models.BigIntegerField())),
                 default=None,output_field=models.BigIntegerField())})
     raw = RawMessage.objects.filter(Q(team_id=team_id)|Q(team__isnull=True,config__team_id=team_id))
+    # Every outer relation here is a ForeignKey (BusinessEvent -> Project);
+    # all other ownership checks are subqueries, so the result is already
+    # unique by OutboxEvent.pk and does not need a DISTINCT pass.
     return qs.filter(
         Q(business_event__project__team_id=team_id) |
         Q(id__in=CommunicationEvent.objects.filter(record__team_id=team_id).values('outbox_event_id')) |
@@ -67,4 +73,4 @@ def outbox_team_scope(qs, team_id):
         Q(_team_candidate_id__in=FactCandidate.objects.filter(team_id=team_id).values('id')) |
         Q(_team_team_id=team_id) |
         Q(id__in=CrmDelivery.objects.filter(external_object_link__team_id=team_id).values('outbox_event_id'))
-    ).distinct()
+    )

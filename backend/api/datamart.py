@@ -4,7 +4,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
-from django.db.models import Sum, Q, Count, Min, Max
+from django.db.models import Sum, Q, Count, Min, Max, F, Window
+from django.db.models.functions import RowNumber
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 from . import access
@@ -19,6 +20,7 @@ from .models import (
 )
 
 ZERO = Decimal("0.00")
+_PROFILE_NOT_LOADED = object()
 
 
 def money(value):
@@ -186,9 +188,12 @@ def project_row(p, *, paid_total=None, payments_known=None):
 
 
 class DataMartService:
-    def get_sales_kpi_mart(self, user, period="this_month", filters=None):
+    def get_sales_kpi_mart(
+        self, user, period="this_month", filters=None, *, profile=_PROFILE_NOT_LOADED
+    ):
         qs, currency = scoped_projects(user, filters)
-        profile = UserProfile.objects.filter(user=user).first()
+        if profile is _PROFILE_NOT_LOADED:
+            profile = UserProfile.objects.filter(user=user).first()
         zone = profile.timezone if profile else "Asia/Almaty"
         start, end, today = period_bounds(period, zone)
         all_payments = confirmed_payments(user, filters)
@@ -232,26 +237,77 @@ class DataMartService:
             month__lt=end,
             is_active=True,
         )
-        managers = []
-        for manager in profiles.order_by("id"):
-            own_fact = (
-                payments.filter(credited_profile=manager).aggregate(s=Sum("amount"))[
-                    "s"
-                ]
-                or ZERO
+        manager_profiles = list(profiles.select_related("user").order_by("id"))
+        manager_ids = [manager.id for manager in manager_profiles]
+        manager_facts = {
+            row["credited_profile_id"]: row
+            for row in payments.filter(credited_profile_id__in=manager_ids)
+            .values("credited_profile_id")
+            .annotate(total=Sum("amount"), count=Count("id"))
+        }
+        target_stats = {
+            row["profile_id"]: row
+            for row in targets.filter(profile_id__in=manager_ids)
+            .values("profile_id")
+            .annotate(total=Sum("amount"), count=Count("id"))
+        }
+        expected_teams_by_manager = {
+            row["memberships__user__profile__id"]: row["team_count"]
+            for row in teams.filter(
+                memberships__user__profile__id__in=manager_ids,
+                memberships__status="active",
             )
-            own_targets = targets.filter(profile=manager)
-            expected_teams = (
-                teams.filter(
-                    memberships__user=manager.user, memberships__status="active"
+            .values("memberships__user__profile__id")
+            .annotate(team_count=Count("id", distinct=True))
+        }
+        project_counts = {
+            row["manager_id"]: row["project_count"]
+            for row in qs.filter(manager_id__in=manager_ids)
+            .order_by()
+            .values("manager_id")
+            .annotate(project_count=Count("id", distinct=True))
+        }
+        project_rows = {manager_id: [] for manager_id in manager_ids}
+        if manager_ids:
+            for project in (
+                Project.objects.filter(
+                    pk__in=qs.filter(manager_id__in=manager_ids).values("pk")
                 )
-                .distinct()
-                .count()
+                .annotate(
+                    _manager_rank=Window(
+                        expression=RowNumber(),
+                        partition_by=[F("manager_id")],
+                        order_by=F("contract_amount").desc(),
+                    )
+                )
+                .filter(_manager_rank__lte=50)
+                .select_related("manager", "company", "crm_snapshot")
+                .order_by("manager_id", "_manager_rank")
+            ):
+                project_rows[project.manager_id].append(project)
+        project_ids = [p.id for rows in project_rows.values() for p in rows]
+        project_payment_stats = {
+            (row["project_id"], row["currency"]): row
+            for row in FinancialRecord.objects.filter(
+                project_id__in=project_ids,
+                is_verified=True,
+                status="received",
+                direction="income",
+                amount_precision="exact",
             )
+            .values("project_id", "currency")
+            .annotate(total=Sum("amount"), count=Count("id"))
+        }
+        managers = []
+        for manager in manager_profiles:
+            facts = manager_facts.get(manager.id, {})
+            own_fact = facts.get("total") or ZERO
+            own_targets = target_stats.get(manager.id, {})
+            expected_teams = expected_teams_by_manager.get(manager.id, 0)
             target = (
-                own_targets.aggregate(s=Sum("amount"))["s"]
+                own_targets.get("total")
                 if expected_teams
-                and own_targets.count() == month_count * expected_teams
+                and own_targets.get("count", 0) == month_count * expected_teams
                 and not (filters or {}).get("project_id")
                 else None
             )
@@ -260,7 +316,7 @@ class DataMartService:
                 if complete and target and target > 0
                 else None
             )
-            projects = qs.filter(manager=manager)
+            manager_projects = project_rows[manager.id]
             managers.append(
                 {
                     "id": manager.id,
@@ -268,9 +324,9 @@ class DataMartService:
                     "role": manager.role,
                     "avatar": manager.avatar_url,
                     "salesAmount": formatted(own_fact, currency)
-                    if complete or payments.filter(credited_profile=manager).exists()
+                    if complete or facts.get("count", 0)
                     else "Нет зарегистрированных оплат",
-                    "source_count": payments.filter(credited_profile=manager).count(),
+                    "source_count": facts.get("count", 0),
                     "fact": money(own_fact),
                     "targetAmount": money(target) if target is not None else None,
                     "targetFormatted": formatted(target, currency)
@@ -283,12 +339,21 @@ class DataMartService:
                     "statusColor": "green"
                     if percentage is not None and percentage >= 100
                     else "yellow",
-                    "dealsCount": projects.count(),
+                    "dealsCount": project_counts.get(manager.id, 0),
                     "trend": "Полная история" if complete else "Неполная история",
                     "trendPositive": complete,
                     "projects": [
-                        project_row(p)
-                        for p in projects.select_related("manager", "company")[:50]
+                        project_row(
+                            p,
+                            paid_total=(
+                                project_payment_stats.get((p.id, p.currency), {}).get("total")
+                                or ZERO
+                            ),
+                            payments_known=bool(
+                                project_payment_stats.get((p.id, p.currency), {}).get("count")
+                            ),
+                        )
+                        for p in manager_projects
                     ],
                 }
             )

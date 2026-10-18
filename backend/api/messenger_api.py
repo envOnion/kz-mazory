@@ -117,11 +117,13 @@ def records_scope(user):
     if access.is_client(user):
         # Клиенту — только собственные личные записи (уведомления по своим проектам).
         return qs.filter(recipient=user)
+    # All outer joins are single-valued FKs; authorization collections are
+    # subqueries. The OR branches cannot duplicate CommunicationRecord rows.
     return qs.filter(
         Q(category="group", config__in=access.configs_for(user))
         | Q(recipient=user)
         | Q(raw_message__in=access.messages_for(user).exclude(source="waha"))
-    ).distinct()
+    )
 
 
 def record_href(record, **extra):
@@ -329,8 +331,8 @@ def _attention_batches(qs):
         yield batch, axes_for_records(batch)
 
 
-def _analysis_match_ids(qs, state=None, *, attention=False):
-    """Filter states from one materialized latest-state relation in PostgreSQL."""
+def _current_axes_cte(qs):
+    """Build the scoped latest-state relation shared by filtering and analytics."""
     trace_fields = MessageProcessingTrace._meta
     work_fields = SourceWorkItem._meta
     clarification_fields = FactClarification._meta
@@ -375,9 +377,6 @@ def _analysis_match_ids(qs, state=None, *, attention=False):
     event_decision = column(fact_event_fields, 'decision')
     decision_candidate = column(decision_fields, 'candidate')
     candidate_trace = column(candidate_fields, 'trace')
-
-    state_filter = "AND analysis = %s" if state else ""
-    attention_filter = "AND has_attention" if attention else ""
 
     sql = f"""
         WITH scoped_records AS MATERIALIZED ({scoped_sql}),
@@ -472,12 +471,37 @@ def _analysis_match_ids(qs, state=None, *, attention=False):
                 LIMIT 1
             ) AS otp ON TRUE
         )
-        SELECT id FROM current_axes WHERE TRUE {state_filter} {attention_filter}
     """
-    params = [*scoped_params]
+    return sql, scoped_params
+
+
+def _analysis_match_ids(qs, state=None, *, attention=False):
+    """Filter states from one materialized latest-state relation in PostgreSQL."""
+    cte_sql, params = _current_axes_cte(qs)
+    state_filter = "AND analysis = %s" if state else ""
+    attention_filter = "AND has_attention" if attention else ""
+    sql = f"{cte_sql} SELECT id FROM current_axes WHERE TRUE {state_filter} {attention_filter}"
+    params = [*params]
     if state:
         params.append(state)
     return RawSQL(sql, params, output_field=BigIntegerField())
+
+
+def aggregate_analysis_axes(qs):
+    """Return complete per-analysis counts and attention count in one SQL query."""
+    sql, params = _current_axes_cte(qs)
+    sql += """
+        SELECT analysis, COUNT(*) AS total,
+               COUNT(*) FILTER (WHERE has_attention) AS attention
+        FROM current_axes
+        GROUP BY analysis
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+    states = {state: total for state, total, _attention in rows}
+    attention_count = sum(attention for _state, _total, attention in rows)
+    return states, attention_count
 
 
 def filter_record_statuses(request, qs):
