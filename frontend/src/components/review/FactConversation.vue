@@ -23,6 +23,7 @@
             <strong>{{ message.sender_name }}</strong> · {{ ({ intermediate: 'Промежуточная реплика', final: 'Завершает мысль', unknown: 'Связь требует уточнения' })[message.thought_state] }}
             <p>{{ message.content }}</p>
           </article>
+          <button v-if="context.thread.messages_next_cursor" class="btn" :disabled="loading" @click="loadThreadMessages">Загрузить ещё сообщения темы</button>
         </section>
         <p class="text-sm text-amber-200">{{ context.coverage }}</p>
         <div class="flex gap-2">
@@ -132,6 +133,7 @@ import { api } from "../../composables/api";
 import type {
   CandidateContext,
   ConversationMessage,
+  DialogueThread,
 } from "../../types/factReview";
 import { dateLabel } from "./presentation";
 const props = defineProps<{ candidateId: number }>();
@@ -204,6 +206,23 @@ async function loadAi() {
       e instanceof Error ? e.message : "Не удалось загрузить контекст AI.";
   } finally {
     loading.value = false;
+  }
+}
+async function loadThreadMessages() {
+  const thread = context.value?.thread
+  if (!thread?.messages_next_cursor || loading.value) return
+  loading.value = true
+  error.value = ""
+  try {
+    const query = new URLSearchParams({ messages_cursor: thread.messages_next_cursor, ...(thread.revision_id ? { revision_id: String(thread.revision_id) } : {}) })
+    const page = await api<DialogueThread>(`/threads/${thread.id}/?${query}`)
+    if (context.value?.thread?.id !== thread.id) return
+    thread.messages = [...thread.messages, ...page.messages]
+    thread.messages_next_cursor = page.messages_next_cursor
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Не удалось загрузить сообщения темы."
+  } finally {
+    loading.value = false
   }
 }
 </script>

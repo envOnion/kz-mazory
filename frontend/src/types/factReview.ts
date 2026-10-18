@@ -27,7 +27,7 @@ export interface DialogueThreadFact {
   id: number;
   fact_type: string;
   status: string;
-  proposed_changes: any;
+  proposed_changes: { amount?: number | string; description?: string; title?: string; due_date?: string; party?: string; [key: string]: unknown };
   in_progress?: boolean;
 }
 
@@ -37,6 +37,7 @@ export interface DialogueThread {
   summary: string;
   state: 'open' | 'ready' | 'unknown' | 'superseded';
   version: number;
+  revision_id?: number;
   routing_enabled?: boolean;
   routing_state?: 'needs_context' | 'prepared' | 'disabled';
   routing_descriptor_version?: number;
@@ -57,8 +58,11 @@ export interface DialogueThread {
   total_amount?: number | string | null;
   updated_at?: string;
   children?: { id: number; topic: string; state: string; version: number; updated_at: string }[];
-  facts?: { id: number; fact_type: string; status: string; proposed_changes: any; in_progress?: boolean }[];
+  children_next_cursor?: string | null;
+  facts?: DialogueThreadFact[];
+  facts_next_cursor?: string | null;
   messages: (ConversationMessage & { thought_state: 'intermediate' | 'final' | 'unknown'; relation: string; rationale: string; assignment_method?: 'llm' | 'laya'; routing_reason?: string; routing_latency_ms?: number | null })[];
+  messages_next_cursor?: string | null;
 }
 export interface CandidateContext {
   thread?: DialogueThread | null;

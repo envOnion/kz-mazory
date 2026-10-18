@@ -110,7 +110,7 @@
     <button class="btn" @click="markAllAsRead">Прочитать все</button><article v-for="item in notifications" :key="item.id" class="panel space-y-2"><h2 class="font-semibold">{{ item.title }}</h2><p>{{ item.message }}</p><p class="text-xs text-slate-400">{{ item.created_at ? new Date(item.created_at).toLocaleString() : 'Дата не указана' }} · {{ item.is_read ? 'Прочитано' : 'Новое' }}</p><p v-for="(delivery, index) in item.deliveries" :key="index" class="text-xs">WhatsApp: {{ deliveryLabel(delivery.state) }}</p><button v-if="!item.acknowledged" class="btn" @click="acknowledge(item.id)">Подтвердить получение</button></article>
     <form v-if="lead || financeRole" @submit.prevent="sendNotice" class="panel space-y-3"><h2 class="font-semibold">Адресное уведомление</h2><label class="block max-w-sm">Получатель<select class="field block w-full truncate mt-1" v-model="noticeForm.recipient_id" required><option v-for="p in directory.profiles" :key="p.id" :value="p.user_id">{{ p.full_name }}</option></select></label><input class="field w-full" v-model="noticeForm.title" placeholder="Заголовок" required maxlength="255" /><textarea class="field w-full" v-model="noticeForm.message" placeholder="Сообщение" required maxlength="4000" /><label class="block"><input type="checkbox" v-model="noticeForm.send_whatsapp" /> Продублировать в WhatsApp</label><button class="btn-primary" :disabled="busy">Отправить уведомление</button></form>
   </template>
-  <dialog ref="dialog" class="w-[min(90vw,800px)] rounded-2xl bg-slate-900 text-slate-100 border border-slate-600 p-6 backdrop:bg-black/70"><div class="flex justify-between gap-3 mb-4"><h2 class="font-semibold">{{ modalTitle }}</h2><button class="btn" @click="dialog?.close()">Закрыть</button></div><pre class="whitespace-pre-wrap break-words text-sm max-h-[65vh] overflow-auto">{{ modalText }}</pre></dialog>
+  <dialog ref="dialog" class="w-[min(90vw,800px)] rounded-2xl bg-slate-900 text-slate-100 border border-slate-600 p-6 backdrop:bg-black/70"><div class="flex justify-between gap-3 mb-4"><h2 class="font-semibold">{{ modalTitle }}</h2><button class="btn" @click="dialog?.close()">Закрыть</button></div><div v-if="projectHistory" class="flex flex-wrap gap-2 mb-4"><button v-if="projectHistory.revisions_next_cursor" class="btn" :disabled="historyLoading" @click="loadMoreProjectHistory('revisions')">Загрузить версии</button><button v-if="projectHistory.events_next_cursor" class="btn" :disabled="historyLoading" @click="loadMoreProjectHistory('events')">Загрузить события</button><template v-if="projectHistory.revisions.length"><select v-model="selectedHistoryVersion" class="field"><option v-for="revision in projectHistory.revisions" :key="revision.version" :value="revision.version">Версия {{ revision.version }} · {{ revision.source }}</option></select><button class="btn" :disabled="historyLoading || selectedHistoryVersion === null" @click="loadProjectRevision">Открыть снимок версии</button></template></div><pre class="whitespace-pre-wrap break-words text-sm max-h-[65vh] overflow-auto">{{ modalText }}</pre></dialog>
 </section>
 </template>
 <script setup lang="ts">
@@ -176,6 +176,8 @@ async function changeCandidatePage(delta: number) { candidatePage.value += delta
 const crmSelections = ref<Record<number, number>>({})
 const noticeForm = ref({ recipient_id: 0, title: '', message: '', send_whatsapp: false })
 const dialog = ref<HTMLDialogElement>(), modalTitle = ref(''), modalText = ref('')
+interface ProjectHistoryPage { project_id: number; revisions: { version: number; approved_at: string; approved_by_id: number | null; source: string; snapshot_available: boolean }[]; revisions_next_cursor: string | null; events: { id: number; action: string; created_at: string; before_after: Record<string, unknown> }[]; events_next_cursor: string | null; revision_detail?: { version: number; snapshot: Record<string, unknown>; approved_at: string; approved_by_id: number | null; source: string } }
+const projectHistory = ref<ProjectHistoryPage | null>(null), selectedHistoryVersion = ref<number | null>(null), historyLoading = ref(false)
 const { notifications, fetchNotifications, markAllAsRead, acknowledge, dispatchNotification } = useNotifications()
 function canReview(item: Candidate) {
   if (automatic.value) return false
@@ -313,9 +315,42 @@ async function matchCrm(item: Candidate) {
 }
 async function taskAction(item: CommitmentItem, action: string) { await perform(() => post(`/commitments/${item.id}/action/`, { action, version: item.version, reason: reasons.value[item.id] || '', ...(action === 'postpone' && deadlines.value[item.id] ? { deadline_at: new Date(`${deadlines.value[item.id]}:00+06:00`).toISOString() } : {}) })) }
 async function assignProject(project: ManagerProjectSummary) { await perform(() => post(`/projects/${project.id}/assign/`, { manager_id: assignments.value[project.id], base_version: project.version, reason: reasons.value[project.id], transfer_open_commitments: transferTasks.value[project.id] || false })) }
-async function openText(title: string, work: () => Promise<unknown>) { error.value = ''; try { const result = await work(); modalTitle.value = title; modalText.value = typeof result === 'string' ? result : JSON.stringify(result, null, 2); dialog.value?.showModal() } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка загрузки' } }
-
-async function showHistory(id: number) { await openText('История подтверждений', () => api(`/projects/${id}/history/`)) }
+async function showHistory(id: number) {
+  error.value = ''; historyLoading.value = true
+  try {
+    const result = await api<ProjectHistoryPage>(`/projects/${id}/history/`)
+    projectHistory.value = result; selectedHistoryVersion.value = result.revisions[0]?.version ?? null
+    modalTitle.value = 'История подтверждений'; modalText.value = JSON.stringify(result, null, 2); dialog.value?.showModal()
+  } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка загрузки' }
+  finally { historyLoading.value = false }
+}
+async function loadMoreProjectHistory(section: 'revisions' | 'events') {
+  const current = projectHistory.value
+  if (!current) return
+  const cursor = section === 'revisions' ? current.revisions_next_cursor : current.events_next_cursor
+  if (!cursor) return
+  historyLoading.value = true
+  try {
+    const query = new URLSearchParams({ include: section, limit: '50', [`${section}_cursor`]: cursor })
+    const page = await api<ProjectHistoryPage>(`/projects/${current.project_id}/history/?${query}`)
+    if (section === 'revisions') { current.revisions.push(...page.revisions); current.revisions_next_cursor = page.revisions_next_cursor }
+    else { current.events.push(...page.events); current.events_next_cursor = page.events_next_cursor }
+    modalText.value = JSON.stringify(current, null, 2)
+  } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка загрузки истории' }
+  finally { historyLoading.value = false }
+}
+async function loadProjectRevision() {
+  const current = projectHistory.value
+  if (!current || selectedHistoryVersion.value === null) return
+  historyLoading.value = true
+  try {
+    const query = new URLSearchParams({ include: 'revisions', revision_version: String(selectedHistoryVersion.value) })
+    const page = await api<ProjectHistoryPage>(`/projects/${current.project_id}/history/?${query}`)
+    current.revision_detail = page.revision_detail
+    modalText.value = JSON.stringify(current, null, 2)
+  } catch (e) { error.value = e instanceof Error ? e.message : 'Не удалось открыть снимок версии' }
+  finally { historyLoading.value = false }
+}
 async function sendNotice() { await perform(() => dispatchNotification(noticeForm.value), 'Уведомление сохранено; доставка отслеживается отдельно') }
 onMounted(async () => { try { await refreshDirectory() } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка' }; await load() })
 </script>

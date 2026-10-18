@@ -18,6 +18,7 @@
       <div class="dialogue-column">
         <h2>Диалог <span class="muted">{{ turns.length ? `${turns.length} запросов` : '' }}</span></h2>
         <div ref="transcript" class="transcript" aria-live="polite" aria-relevant="additions text">
+          <button v-if="hasOlderTurns" class="chat-button" :disabled="loadingOlderTurns" @click="$emit('loadOlderTurns')">{{ loadingOlderTurns ? 'Загрузка…' : 'Загрузить предыдущие запросы' }}</button>
           <div v-if="!turns.length" class="welcome-answer"><Sparkles :size="20" /><p>Привет! Помогу разобраться в поступлениях, сделках и задачах. Что посмотрим?</p><div class="suggestions"><button v-for="p in initialPrompts" :key="p" class="chat-button" @click="$emit('submit', p)">{{ p }} <ArrowUpRight :size="14" /></button></div></div>
           <article v-for="turn in turns" :key="turn.id" class="turn" :class="{ selected: selectedTurnId === turn.id }" :data-testid="`chat-turn-${turn.sequence}`">
             <div class="user-message"><span class="message-label">Вы</span><p>{{ turn.user_text }}</p></div>
@@ -61,8 +62,8 @@ import type { KpiFilters, Directory, DirectoryProject } from '../types/platform'
 import { loadDirectory } from '../composables/directory'
 import AnswerMarkdown from './AnswerMarkdown.vue'
 import PresentationRenderer from '../presentation/PresentationRenderer.vue'
-const props = defineProps<{ turns: AnalyticsTurn[]; conversations: ConversationRef[]; conversationId: number | null; selectedTurnId: number | null; artifact: Artifact | null; presentation: PresentationDocument | null; isGenerating: boolean; error: string; period: string }>()
-const emit = defineEmits<{ submit: [prompt: string, patch?: QueryPatch]; followup: [turnId: number, artifactId: number | undefined, prompt: string, patch?: QueryPatch]; selectTurn: [id: number, artifactId?: number]; loadConversation: [id: number]; newConversation: []; cancel: [operationId: number]; openSource: [id: number]; changeFilters: [filters: KpiFilters]; changePeriod: [period: string] }>()
+const props = defineProps<{ turns: AnalyticsTurn[]; conversations: ConversationRef[]; conversationId: number | null; selectedTurnId: number | null; artifact: Artifact | null; presentation: PresentationDocument | null; isGenerating: boolean; error: string; period: string; hasOlderTurns: boolean; loadingOlderTurns: boolean }>()
+const emit = defineEmits<{ submit: [prompt: string, patch?: QueryPatch]; followup: [turnId: number, artifactId: number | undefined, prompt: string, patch?: QueryPatch]; selectTurn: [id: number, artifactId?: number]; loadConversation: [id: number]; loadOlderTurns: []; newConversation: []; cancel: [operationId: number]; openSource: [id: number]; changeFilters: [filters: KpiFilters]; changePeriod: [period: string] }>()
 const prompt = ref(''), composer = ref<HTMLTextAreaElement>(), transcript = ref<HTMLDivElement>(), table = ref(false), chartKind = ref<'bar' | 'line' | 'area'>('bar'), showFilters = ref(false)
 const scope = ref<KpiFilters>({ currency: 'KZT' }), directory = ref<Directory>({ teams: [], profiles: [], projects: [] })
 const projectPage = ref(1), projectSearch = ref(''), projectCache = ref<DirectoryProject[]>([]), directoryLoading = ref(false), directoryError = ref('')

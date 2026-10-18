@@ -318,6 +318,7 @@
                   <p class="text-[11px] text-indigo-400 hover:underline">Перейти к поддиалогу →</p>
                 </div>
               </div>
+              <button v-if="detail.children_next_cursor" class="btn text-xs" :disabled="detailLoading" @click="loadMoreDetail('children')">{{ detailLoading ? 'Загрузка…' : 'Загрузить ещё поддиалоги' }}</button>
             </section>
 
             <!-- Выявленные факты и обязательства из этого диалога -->
@@ -367,6 +368,7 @@
                   </div>
                 </article>
               </div>
+              <button v-if="detail.facts_next_cursor" class="btn text-xs" :disabled="detailLoading" @click="loadMoreDetail('facts')">{{ detailLoading ? 'Загрузка…' : 'Загрузить ещё факты' }}</button>
             </section>
 
             <!-- Хронологическая переписка WhatsApp -->
@@ -409,6 +411,7 @@
                   <p v-if="message.assignment_method" class="text-[11px] text-slate-500">Принадлежность к теме: {{ message.assignment_method === 'laya' ? 'LAYA' : 'LLM' }}</p>
                 </article>
               </div>
+              <button v-if="detail.messages_next_cursor" class="btn text-xs" :disabled="detailLoading" @click="loadMoreDetail('messages')">{{ detailLoading ? 'Загрузка…' : 'Загрузить ещё сообщения' }}</button>
             </section>
           </article>
         </template>
@@ -455,6 +458,7 @@ const totalPages = computed(() => Math.max(1, Math.ceil(totalCount.value / 10)))
 const next = ref(false)
 const prev = ref(false)
 const loading = ref(false)
+const detailLoading = ref(false)
 const error = ref('')
 
 const serverStats = ref<{ total: number; open: number; ready: number; commitments?: number }>({
@@ -673,6 +677,23 @@ async function open(id: number) {
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Тема недоступна'
   }
+}
+
+async function loadMoreDetail(section: 'children' | 'facts' | 'messages') {
+  const current = detail.value
+  if (!current || detailLoading.value) return
+  const cursor = section === 'children' ? current.children_next_cursor : section === 'facts' ? current.facts_next_cursor : current.messages_next_cursor
+  if (!cursor) return
+  detailLoading.value = true
+  try {
+    const query = new URLSearchParams({ page_size: '50', [`${section}_cursor`]: cursor })
+    const page = await api<DialogueThread>(`/threads/${current.id}/?${query}`)
+    if (detail.value?.id !== current.id) return
+    if (section === 'children') { current.children = [...(current.children || []), ...(page.children || [])]; current.children_next_cursor = page.children_next_cursor }
+    else if (section === 'facts') { current.facts = [...(current.facts || []), ...(page.facts || [])]; current.facts_next_cursor = page.facts_next_cursor }
+    else { current.messages = [...current.messages, ...page.messages]; current.messages_next_cursor = page.messages_next_cursor }
+  } catch (e) { error.value = e instanceof Error ? e.message : 'Не удалось загрузить следующую страницу темы' }
+  finally { detailLoading.value = false }
 }
 
 async function toggleSubscription() {

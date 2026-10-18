@@ -14,7 +14,7 @@ const {
   activeWidget, activePresentation, hasChatResponse, chatResponseText,
   fetchKpiData, handlePromptSubmit, error, quotes, cancel, changeKpiFilters,
   turns, conversations, conversationId, selectedTurnId, selectedArtifact,
-  selectTurn, followup, loadConversation, newConversation, restoreConversations,
+  selectTurn, followup, loadConversation, loadOlderTurns, hasOlderTurns, loadingOlderTurns, newConversation, restoreConversations,
 } = useChat()
 
 const sourceDialog = ref<HTMLDialogElement>()
@@ -40,8 +40,9 @@ onMounted(() => { fetchKpiData(); restoreConversations() })
       :turns="turns" :conversations="conversations" :conversation-id="conversationId"
       :selected-turn-id="selectedTurnId" :artifact="selectedArtifact" :presentation="activePresentation"
       :is-generating="isGenerating" :error="error" :period="selectedPeriod"
+      :has-older-turns="hasOlderTurns" :loading-older-turns="loadingOlderTurns"
       @submit="handlePromptSubmit" @select-turn="selectTurn" @followup="followup"
-      @load-conversation="loadConversation" @new-conversation="newConversation" @cancel="cancel"
+      @load-conversation="loadConversation" @load-older-turns="loadOlderTurns" @new-conversation="newConversation" @cancel="cancel"
       @open-source="openQuote" @change-filters="changeKpiFilters" @change-period="fetchKpiData"
     />
     <template v-else>

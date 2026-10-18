@@ -14,6 +14,7 @@ export function useChat() {
   const kpiData = ref<KpiDashboardData | null>(null), selectedPeriod = ref<Period>('this_month')
   const filters = ref<KpiFilters>({ currency: 'KZT' })
   const turns = ref<AnalyticsTurn[]>([]), conversations = ref<ConversationRef[]>([])
+  const turnsNextCursor = ref<string | null>(null), loadingOlderTurns = ref(false)
   const conversationId = ref<number | null>(null), selectedTurnId = ref<number | null>(null), selectedArtifact = ref<Artifact | null>(null)
   const posting = ref(0)
   const isGenerating = computed(() => posting.value > 0 || turns.value.some(t => ['queued', 'running'].includes(t.state)))
@@ -24,11 +25,12 @@ export function useChat() {
   let scopeChanged = false
   let clearFilters: ('team_id' | 'manager_id' | 'project_id')[] = []
   let refreshRevision = 0
+  let turnsCursorLoaded = false
   let generation = 0, selectionRevision = 0, creating: Promise<number> | null = null, timer: ReturnType<typeof setInterval> | undefined
   const storageKey = () => `mazory-conversation-${currentUser.value?.id}`
   function clear() {
     generation++; selectionRevision++; controllers.forEach(c => c.abort()); controllers.clear(); creating = null
-    turns.value = []; conversationId.value = null; selectedTurnId.value = null; selectedArtifact.value = null
+    turns.value = []; turnsNextCursor.value = null; turnsCursorLoaded = false; loadingOlderTurns.value = false; conversationId.value = null; selectedTurnId.value = null; selectedArtifact.value = null
     activeWidget.value = null; activePresentation.value = null; chatResponseText.value = ''; quotes.value = []; error.value = ''; hasChatResponse.value = false; posting.value = 0
   }
   watch(sessionVersion, () => { clear(); filters.value = { currency: 'KZT' }; selectedPeriod.value = 'this_month'; scopeChanged = false; conversations.value = []; kpiData.value = null; currentView.value = 'welcome' })
@@ -44,7 +46,10 @@ export function useChat() {
     if (id === null) return
     const conversation = await api<Conversation>(`/chat/conversations/${id}/`)
     if (generation !== ownGeneration || conversationId.value !== id || revision !== refreshRevision) return
-    turns.value = conversation.turns
+    const merged = new Map(turns.value.map(turn => [turn.id, turn]))
+    conversation.turns.forEach(turn => merged.set(turn.id, turn))
+    turns.value = [...merged.values()].sort((left, right) => left.sequence - right.sequence)
+    if (!turnsCursorLoaded) { turnsNextCursor.value = conversation.turns_next_cursor; turnsCursorLoaded = true }
     const summary = conversations.value.find(c => c.id === id)
     if (summary) summary.title = conversation.title
     // Revoked or expired numerical snapshots must disappear from the workspace as well.
@@ -53,6 +58,23 @@ export function useChat() {
       const displayed = selectedArtifact.value && turns.value.flatMap(t => t.artifacts).find(a => a.id === selectedArtifact.value?.id)
       if (selected?.state === 'expired' || (selectedArtifact.value && !displayed?.available)) { activePresentation.value = null; selectedArtifact.value = null; chatResponseText.value = '' }
     }
+  }
+  async function loadOlderTurns() {
+    const id = conversationId.value, cursor = turnsNextCursor.value, ownGeneration = generation
+    if (id === null || !cursor || loadingOlderTurns.value) return
+    loadingOlderTurns.value = true
+    try {
+      const query = new URLSearchParams({ cursor })
+      const page = await api<Conversation>(`/chat/conversations/${id}/?${query}`)
+      if (generation !== ownGeneration || conversationId.value !== id) return
+      const merged = new Map(turns.value.map(turn => [turn.id, turn]))
+      page.turns.forEach(turn => merged.set(turn.id, turn))
+      turns.value = [...merged.values()].sort((left, right) => left.sequence - right.sequence)
+      turnsNextCursor.value = page.turns_next_cursor
+      turnsCursorLoaded = true
+    } catch (e) {
+      if (generation === ownGeneration) error.value = e instanceof Error ? e.message : 'Не удалось загрузить предыдущие запросы'
+    } finally { loadingOlderTurns.value = false }
   }
   async function selectTurn(id: number, artifactId?: number, automatically = false) {
     const turn = turns.value.find(t => t.id === id)
@@ -154,5 +176,5 @@ export function useChat() {
   onMounted(() => { timer = setInterval(() => { if (conversationId.value !== null) void refreshConversation().catch(() => undefined) }, 2500) })
   onBeforeUnmount(() => { if (timer) clearInterval(timer); controllers.forEach(c => c.abort()) })
   return { currentView, isGenerating, activeWidget, activePresentation, hasChatResponse, chatResponseText, quotes, error, welcomeSuggestions, dashboardSuggestions, selectedPeriod, kpiData, fetchKpiData, handlePromptSubmit, goHome, cancel, changeKpiFilters,
-    turns, conversations, conversationId, selectedTurnId, selectedArtifact, selectTurn, followup, loadConversation, newConversation, restoreConversations }
+    turns, conversations, conversationId, selectedTurnId, selectedArtifact, selectTurn, followup, loadConversation, loadOlderTurns, hasOlderTurns: computed(() => turnsNextCursor.value !== null), loadingOlderTurns, newConversation, restoreConversations }
 }

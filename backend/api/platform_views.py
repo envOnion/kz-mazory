@@ -481,20 +481,73 @@ class ProjectHistoryView(APIView):
 
     def get(self, request, pk):
         p = get_object_or_404(access.projects_for(request.user), pk=pk)
-        return Response(
-            {
-                "revisions": list(
-                    p.revisions.order_by("-version").values(
-                        "version", "snapshot", "approved_at", "approved_by_id", "source"
-                    )
-                ),
-                "events": list(
-                    AuditEvent.objects.filter(
-                        target_type="Project", target_id=pk
-                    ).values("id", "action", "created_at", "before_after")[:100]
-                ),
-            }
-        )
+        include = request.query_params.get("include", "revisions,events")
+        sections = {item.strip() for item in include.split(",") if item.strip()}
+        if not sections or not sections <= {"revisions", "events"}:
+            raise ValidationError({"error": "Параметр include принимает revisions и/или events."})
+        try:
+            limit = max(1, min(100, int(request.query_params.get("limit", 50))))
+        except (TypeError, ValueError):
+            limit = 50
+
+        response = {"project_id": p.pk}
+        for section in sections:
+            cursor_key = f"{section}_cursor"
+            cursor_value = request.query_params.get(cursor_key)
+            anchor = None
+            if cursor_value:
+                try:
+                    payload = signing.loads(cursor_value, salt="project-history-v1", max_age=60 * 60 * 24 * 30)
+                except signing.BadSignature as exc:
+                    raise ValidationError({"error": "Курсор истории недействителен или устарел."}) from exc
+                if payload.get("user") != request.user.pk or payload.get("project") != p.pk or payload.get("kind") != section:
+                    raise ValidationError({"error": "Курсор истории относится к другому запросу."})
+                anchor = payload.get("anchor")
+
+            if section == "revisions":
+                if anchor is not None:
+                    if type(anchor) is not int or anchor <= 0:
+                        raise ValidationError({"error": "Некорректный курсор версий."})
+                    queryset = p.revisions.filter(version__lt=anchor)
+                else:
+                    queryset = p.revisions.all()
+                rows = list(queryset.order_by("-version").values("version", "approved_at", "approved_by_id", "source")[:limit + 1])
+                has_more = len(rows) > limit
+                rows = rows[:limit]
+                response["revisions"] = [{**row, "snapshot_available": True} for row in rows]
+                response["revisions_next_cursor"] = signing.dumps(
+                    {"user": request.user.pk, "project": p.pk, "kind": section, "anchor": rows[-1]["version"]},
+                    salt="project-history-v1", compress=True,
+                ) if has_more and rows else None
+            else:
+                if anchor is not None:
+                    if type(anchor) is not int or anchor <= 0:
+                        raise ValidationError({"error": "Некорректный курсор событий."})
+                    queryset = AuditEvent.objects.filter(target_type="Project", target_id=pk, pk__lt=anchor)
+                else:
+                    queryset = AuditEvent.objects.filter(target_type="Project", target_id=pk)
+                rows = list(queryset.order_by("-id").values("id", "action", "created_at", "before_after")[:limit + 1])
+                has_more = len(rows) > limit
+                rows = rows[:limit]
+                response["events"] = rows
+                response["events_next_cursor"] = signing.dumps(
+                    {"user": request.user.pk, "project": p.pk, "kind": section, "anchor": rows[-1]["id"]},
+                    salt="project-history-v1", compress=True,
+                ) if has_more and rows else None
+
+        version = request.query_params.get("revision_version")
+        if version is not None:
+            try:
+                version_number = int(version)
+            except (TypeError, ValueError):
+                raise ValidationError({"error": "Версия проекта должна быть числом."})
+            revision = p.revisions.filter(version=version_number).values(
+                "version", "snapshot", "approved_at", "approved_by_id", "source"
+            ).first()
+            if revision is None:
+                raise ValidationError({"error": "Версия проекта не найдена."})
+            response["revision_detail"] = revision
+        return Response(response)
 
 
 class ExportInput(Filters):
