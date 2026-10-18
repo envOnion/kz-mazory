@@ -1,11 +1,12 @@
 """Scoped operations, metrics and CRM history for the messenger shell."""
-from datetime import timedelta
+from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
 from django.conf import settings
 from django.db.models import Count, F, Q, Window
 from django.db.models.functions import RowNumber, TruncDate
 from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -101,17 +102,35 @@ def bitrix_object_url(kind, external_id, config, assignee=None):
 def _cursor_filter(qs, cursor, source, field='updated_at'):
     if not cursor:
         return qs
-    moment, ident, anchor_source = cursor.get('t'), cursor.get('i'), cursor.get('s')
-    if not isinstance(moment, str) or type(ident) is not int or not isinstance(anchor_source, str):
+    if not isinstance(cursor, dict):
         raise ValidationError({'error': 'Некорректный курсор.'})
-    condition = Q(**{field + '__lt': moment}) | Q(**{field: moment, 'id__lt': ident})
+    moment, ident, anchor_source = cursor.get('t'), cursor.get('i'), cursor.get('s')
+    if 't' not in cursor or (moment is not None and not isinstance(moment, str)) or type(ident) is not int or not isinstance(anchor_source, str):
+        raise ValidationError({'error': 'Некорректный курсор.'})
+    if moment is None:
+        condition = Q(**{field + '__isnull': True, 'id__lt': ident})
+        if source < anchor_source:
+            condition |= Q(**{field + '__isnull': True, 'id': ident})
+        return qs.filter(condition)
+    try:
+        parsed = parse_datetime(moment)
+    except ValueError:
+        parsed = None
+    if parsed is None or timezone.is_naive(parsed):
+        raise ValidationError({'error': 'Некорректный курсор.'})
+    condition = (Q(**{field + '__lt': parsed}) | Q(**{field: parsed, 'id__lt': ident})
+                 | Q(**{field + '__isnull': True}))
     if source < anchor_source:
-        condition |= Q(**{field: moment, 'id': ident})
+        condition |= Q(**{field: parsed, 'id': ident})
     return qs.filter(condition)
 
 
+def _iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
 def _page(items, limit):
-    items.sort(key=lambda row: (row['updated_at'], row['id'], row['source']), reverse=True)
+    items.sort(key=lambda row: (row['updated_at'] is not None, row['updated_at'] or '', row['id'], row['source']), reverse=True)
     more = len(items) > limit
     items = items[:limit]
     last = items[-1] if items else None
@@ -210,7 +229,7 @@ class ProcessingJobsView(APIView):
                 qs = qs.filter(lease_until__lt=now).exclude(state__in=['pending','done','completed','error','failed'])
             elif state:
                 qs = qs.filter(state=state)
-            for row in qs.order_by('-updated_at','-id')[:limit+1]:
+            for row in qs.order_by(F('updated_at').desc(nulls_last=True),'-id')[:limit+1]:
                 stale = row.lease_until and row.lease_until < now and row.state not in ('pending','done','completed','error','failed')
                 record = records_scope(request.user).filter(raw_message_id=row.raw_message_id).first()
                 items.append({'queue':'ai', 'source':'source_work', 'id':row.pk, 'type':'source_work',
@@ -218,7 +237,7 @@ class ProcessingJobsView(APIView):
                     'processing_version':row.processing_version, 'error_code':sanitize_body(row.error_code) or None,
                     'lease_until':row.lease_until.isoformat() if row.lease_until else None,
                     'can_retry':False, 'record_href':record_href(record) if record else None,
-                    'created_at':row.created_at.isoformat(), 'updated_at':row.updated_at.isoformat()})
+                    'created_at':_iso(row.created_at), 'updated_at':_iso(row.updated_at)})
         if source != 'source_work':
             types = {'all':DELIVERY_TYPES+HISTORY_TYPES+CRM_TYPES+AI_TYPES, 'ai':AI_TYPES,
                      'delivery':DELIVERY_TYPES, 'history':HISTORY_TYPES, 'crm':CRM_TYPES}[queue]
@@ -230,7 +249,7 @@ class ProcessingJobsView(APIView):
                 qs = qs.filter(state__in=['enqueued','processing'], lease_until__lt=now)
             elif state:
                 qs = qs.filter(state=state)
-            for row in qs.order_by('-updated_at','-id')[:limit+1]:
+            for row in qs.order_by(F('updated_at').desc(nulls_last=True),'-id')[:limit+1]:
                 tag = 'delivery' if row.event_type in DELIVERY_TYPES else 'history' if row.event_type in HISTORY_TYPES else 'ai' if row.event_type in AI_TYPES else 'crm'
                 raw_id = row.payload.get('raw_id')
                 # SourceWorkItem is the canonical logical AI work when present.
@@ -242,7 +261,7 @@ class ProcessingJobsView(APIView):
                     'lease_until':row.lease_until.isoformat() if row.lease_until else None,
                     'can_retry':access.integration_allowed(request.user) and row.state in ('failed','unknown') and tag != 'ai' and row.event_type not in ('otp','waha_control'),
                     'requires_delivery_confirmation':row.event_type == 'notification' and row.state == 'unknown',
-                    'created_at':row.created_at.isoformat(), 'updated_at':row.updated_at.isoformat()})
+                    'created_at':_iso(row.created_at), 'updated_at':_iso(row.updated_at)})
         return Response({**_page(items, limit),'teams':_teams(request.user)})
 
 
@@ -299,7 +318,7 @@ class CrmChangesView(APIView):
         qs = _cursor_filter(_window(qs, 'updated_at', period), cursor, 'delivery')
         logs = _cursor_filter(_window(logs, 'updated_at', period), cursor, 'journal')
         items = []
-        deliveries = list(qs.order_by('-updated_at','-id')[:limit+1])
+        deliveries = list(qs.order_by(F('updated_at').desc(nulls_last=True),'-id')[:limit+1])
         config = BitrixSettings.objects.filter(is_active=True).first()
         task_owners = dict(Commitment.objects.filter(pk__in=[row.external_object_link.local_id for row in deliveries
             if row.external_object_link.object_type == 'task']).values_list('id','manager__bitrix_user_id'))
@@ -340,8 +359,8 @@ class CrmChangesView(APIView):
                 'before':baseline if isinstance(baseline, dict) else None, 'after':row.patch or None,
                 'fact_event_id':row.fact_event_id, 'outbox_event_id':row.outbox_event_id,
                 'record_href':record_href(record) if record else None,
-                'created_at':row.created_at.isoformat(), 'updated_at':row.updated_at.isoformat()})
-        for row in logs.order_by('-updated_at','-id')[:limit+1]:
+                'created_at':_iso(row.created_at), 'updated_at':_iso(row.updated_at)})
+        for row in logs.order_by(F('updated_at').desc(nulls_last=True),'-id')[:limit+1]:
             payload = row.payload if isinstance(row.payload, dict) else {}
             items.append({'id':row.pk, 'source':'journal', 'object_type':row.object_type,
                 'team_id':row.project.team_id if row.project_id else None, 'actor_kind':None,'actor_label':'Автор не сохранён',
@@ -351,7 +370,7 @@ class CrmChangesView(APIView):
                 'error_code':sanitize_body(row.error_message) or None, 'before':None,
                 'after':payload.get('fields'), 'fact_event_id':None, 'outbox_event_id':None,
                 'reconstructed':row.reconstructed, 'record_href':None,
-                'created_at':row.created_at.isoformat(), 'updated_at':row.updated_at.isoformat()})
+                'created_at':_iso(row.created_at), 'updated_at':_iso(row.updated_at)})
         # These URLs are constructed above from a public origin and numeric
         # object/assignee IDs, never copied from payloads. The generic opaque
         # token regex also matches long URL paths; keep this validated field.

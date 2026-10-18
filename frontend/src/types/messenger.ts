@@ -75,7 +75,7 @@ export interface ChangeRow extends RecordBrief { type:string; record_id?:number;
 
 export interface TraceRow {
   id: number
-  created_at: string
+  created_at: string | null
   attempt_no: number
   status: string
   pipeline_action: string
@@ -138,8 +138,8 @@ export interface QueueJob {
   error_code: string | null
   next_attempt_at?: string | null
   lease_until?: string | null
-  created_at: string
-  updated_at: string
+  created_at: string | null
+  updated_at: string | null
 }
 
 export interface CrmChangeRow {
@@ -163,8 +163,8 @@ export interface CrmChangeRow {
   after: unknown
   fact_event_id: number | null
   outbox_event_id: number | null
-  created_at: string
-  updated_at: string
+  created_at: string | null
+  updated_at: string | null
 }
 
 export interface ThreadRow {

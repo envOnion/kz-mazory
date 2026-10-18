@@ -209,7 +209,7 @@ class SettingsAIView(APIView):
         rows = serializer_for(AISettings, SAFE_AI_FIELDS)(cfgs, many=True).data
         for row, cfg in zip(rows, cfgs):
             row['keys'] = {'chat': cfg.has_chat_api_key, 'embedding': cfg.has_embedding_api_key}
-            row['updated_at'] = cfg.updated_at.isoformat()
+            row['updated_at'] = cfg.updated_at.isoformat() if cfg.updated_at else None
         defaults = dict(serializer_for(AISettings, SAFE_AI_FIELDS)(AISettings(is_active=False)).data)
         defaults['id'] = 0
         return Response({'items': rows, 'fields': schema_for(AISettings, SAFE_AI_FIELDS), 'defaults': defaults, 'can_change': request.user.has_perm('api.change_' + cfgs.model._meta.model_name)})
@@ -231,7 +231,7 @@ class SettingsAIDetailView(APIView):
         require_integration(request, AISettings, write=request.method != 'GET')
         cfg = get_object_or_404(AISettings.objects.select_for_update(), pk=pk)
         update_model(request, cfg, SAFE_AI_FIELDS)
-        return Response({'id': cfg.id, 'updated_at': cfg.updated_at.isoformat()})
+        return Response({'id': cfg.id, 'updated_at': cfg.updated_at.isoformat() if cfg.updated_at else None})
 
     @transaction.atomic
     @sensitive_variables()
@@ -272,7 +272,7 @@ class SettingsWhatsAppView(APIView):
         rows = serializer_for(WhatsAppConfig, SAFE_WHATSAPP_FIELDS)(cfgs, many=True).data
         from .waha_admin_views import control_state
         for row, cfg in zip(rows, cfgs):
-            row.update(status=cfg.status, updated_at=cfg.updated_at.isoformat(), control=control_state(cfg), qr_image=None)
+            row.update(status=cfg.status, updated_at=cfg.updated_at.isoformat() if cfg.updated_at else None, control=control_state(cfg), qr_image=None)
             if cfg.status == 'SCAN_QR_CODE' and cfg.last_qr_code:
                 import base64
                 import qrcode
