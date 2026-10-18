@@ -64,8 +64,6 @@ test('router settings, cross-worker quota, persisted wait and local upstream 429
   expect(proof().usage).toHaveLength(3)
   expect(proof().usage.every(row => row.model_name === 'fixture/routed-model:free')).toBe(true)
   expect(providerCalls()).toHaveLength(3)
-  const session: { access: string } = JSON.parse(readFileSync(join(directory, 'session.json'), 'utf8'))
-  const headers = { Authorization: `Bearer ${session.access}` }
   const operationResponse = await request.post('/api/chat/query/', { headers, data: { prompt: 'Привет', idempotency_key: 'router-quota-operation' } })
   expect(operationResponse.status()).toBe(202)
   const operation: { operation_id: number; status_url: string } = await operationResponse.json()
