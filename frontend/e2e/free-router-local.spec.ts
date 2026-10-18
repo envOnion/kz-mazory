@@ -3,6 +3,7 @@ import { test, expect } from '@playwright/test'
 import { writeFileSync, existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHmac } from 'node:crypto'
+import type { SettingsPage } from '../src/types/settings'
 
 test.skip(process.env.MAZORY_E2E_ROUTER !== '1', 'Requires the isolated router stack')
 test.setTimeout(240000)
@@ -21,24 +22,40 @@ const proof = (): Proof => JSON.parse(readFileSync(join(directory, 'router-proof
 interface ProviderCall { at: number; provider: { require_parameters: boolean }; model: string; status: number; has_tools: boolean; response_format?: string; invalid_schema: boolean }
 const providerCalls = (): ProviderCall[] => readFileSync(join(directory, 'router-provider.jsonl'), 'utf8').trim().split('\n').map(line => JSON.parse(line))
 
-test('router settings, cross-worker quota, persisted wait and local upstream 429 use real browser/API/DB/Q2', async ({ page, request }) => {
-  await page.goto('/admin/login/')
-  await page.locator('#id_username').fill('79990000001')
-  await page.locator('#id_password').fill('local-e2e-only')
-  await page.locator('button[type=submit], input[type=submit]').click()
-  await page.goto('/admin/api/aisettings/1/change/')
-  await page.locator('#id_chat_api_format').selectOption('openai_compatible')
-  await page.getByRole('heading', { name: 'Расширенные настройки контекста (OpenAI-compatible)', exact: true }).click()
+test('router settings, cross-worker quota, persisted wait and local upstream 429 use real browser/API/DB/Q2', async ({ page, request, context }) => {
+  const session: { access: string; refresh: string; cookie_name: string } = JSON.parse(readFileSync(join(directory, 'session.json'), 'utf8'))
+  await context.addCookies([{ name: session.cookie_name, value: session.refresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
+  await page.goto('/settings?section=ai')
+  await expect(page).toHaveURL(/\/settings\?section=ai/)
+  await expect(page.getByRole('heading', { name: 'Настройки', exact: true })).toBeVisible()
+  const headers = { Authorization: `Bearer ${session.access}` }
+  const current: SettingsPage = await (await request.get('/api/settings/ai/', { headers })).json()
+  const config = current.items[0]!
+  if (config.keys?.chat) {
+    expect((await request.post(`/api/settings/ai/${config.id}/`, { headers, data: { key: 'chat', clear: true } })).ok()).toBe(true)
+  }
+  await page.reload()
+  const fieldLabel = (name: string) => current.fields.find(field => field.name === name)!.label
+  await page.getByLabel(fieldLabel('chat_api_format'), { exact: true }).first().selectOption('openai_compatible')
   for (const [field, value] of Object.entries({
-    chat_model_name: 'openrouter/free', chat_provider_url: 'https://localhost', new_chat_api_key: 'fixture-key',
-    tokenizer_id: 'openrouter/free', tokenizer_revision: 'router-utf8-bound-v1', context_window_tokens: '200000',
-    analysis_input_token_limit: '65536', daily_request_limit: '1000', minute_request_limit: '3',
-  })) await page.locator(`#id_${field}`).fill(value)
-  await page.locator('button[name=_save], input[name=_save]').click()
-  await expect(page.locator('.errorlist')).toHaveCount(0)
+    chat_model_name: 'openrouter/free', chat_provider_url: 'https://localhost',
+    tokenizer_id: 'openrouter/free', tokenizer_revision: 'router-utf8-bound-v1', context_window_tokens: 200000,
+    analysis_input_token_limit: 65536, daily_request_limit: 1000, minute_request_limit: 3,
+  })) await page.getByLabel(fieldLabel(field), { exact: true }).first().fill(String(value))
+  const settingsSaved = page.waitForResponse(response => response.url().includes(`/api/settings/ai/${config.id}/`) && response.request().method() === 'PATCH')
+  await page.getByRole('button', { name: 'Сохранить настройки', exact: true }).first().click()
+  expect((await settingsSaved).status()).toBe(200)
+  await page.getByRole('button', { name: 'Заменить', exact: true }).first().click()
+  await page.getByLabel('Новое значение · Ключ диалога', { exact: true }).fill('fixture-key')
+  const keySaved = page.waitForResponse(response => response.url().includes(`/api/settings/ai/${config.id}/`) && response.request().method() === 'POST')
+  await page.getByRole('button', { name: 'Сохранить новое значение', exact: true }).first().click()
+  expect((await keySaved).status()).toBe(200)
+  const formatLabel = fieldLabel('chat_api_format')
+  const limitLabel = fieldLabel('minute_request_limit')
+  await page.reload()
+  await expect(page.getByLabel(formatLabel, { exact: true }).first()).toHaveValue('openai_compatible')
+  await expect(page.getByLabel(limitLabel, { exact: true }).first()).toHaveValue('3')
   await expect.poll(() => proof().settings[0]).toMatchObject({ minute_request_limit: 3, daily_request_limit: 1000, chat_model_name: 'openrouter/free', autonomous_enabled: false })
-  await page.goto('/admin/api/aisettings/1/change/')
-  await expect(page.locator('#id_minute_request_limit')).toHaveValue('3')
   writeFileSync(join(directory, 'router-burst'), 'go')
   await expect.poll(() => proof().probes.length).toBe(12)
   expect(proof().probes.filter(row => row.status === 'ok')).toHaveLength(3)
@@ -72,9 +89,11 @@ test('router settings, cross-worker quota, persisted wait and local upstream 429
   await expect.poll(async () => (await (await request.get(operation.status_url, { headers })).json()).status, { timeout: 90000 }).toBe('succeeded')
   const operationResult = await (await request.get(operation.status_url, { headers })).json()
   expect(operationResult.result.text).toContain('Привет!')
-  await page.goto('/admin/api/aisettings/1/change/')
-  await page.locator('#id_minute_request_limit').fill('0')
-  await page.locator('button[name=_save], input[name=_save]').click()
+  await page.getByLabel(limitLabel, { exact: true }).first().fill('0')
+  const limitSaved = page.waitForResponse(response => response.url().includes(`/api/settings/ai/${config.id}/`) && response.request().method() === 'PATCH')
+  await page.getByRole('button', { name: 'Сохранить настройки', exact: true }).first().click()
+  expect((await limitSaved).status()).toBe(200)
+  await expect(page.getByLabel(limitLabel, { exact: true }).first()).toHaveValue('0')
   await expect.poll(() => proof().settings[0]?.minute_request_limit).toBe(0)
   const control = JSON.parse(readFileSync(join(directory, 'provider-state.json'), 'utf8')) as Record<string, unknown>
   writeFileSync(join(directory, 'router-control.tmp'), JSON.stringify({ ...control, router_429_once: true, router_invalid_schema_once: true }))
@@ -104,5 +123,5 @@ test('router settings, cross-worker quota, persisted wait and local upstream 429
   expect(limited).toBeGreaterThanOrEqual(0)
   expect(calls[limited + 1]!.status).toBe(200)
   expect(calls[limited + 1]!.at - calls[limited]!.at).toBeGreaterThanOrEqual(2)
-  await page.screenshot({ path: join(directory, 'playwright/router-admin.png'), fullPage: true })
+  await page.screenshot({ path: join(directory, 'playwright/router-settings.png'), fullPage: true })
 })
