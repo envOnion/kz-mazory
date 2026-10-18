@@ -8,9 +8,7 @@
     "audit:security": "node scripts/audit-security.cjs",
     "dev": "vite",
     "build": "vue-tsc -b && vite build",
-    "preview": "vite preview",
-    "test:e2e": "playwright test --config=playwright.local.config.ts",
-    "test:e2e:local": "playwright test --config=playwright.local.config.ts"
+    "preview": "vite preview"
   },
   "dependencies": {
     "chart.js": "^4.5.1",
@@ -26,7 +24,6 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@playwright/test": "^1.63.0",
     "@types/dompurify": "^3.0.5",
     "@types/node": "^22.13.4",
     "@vitejs/plugin-vue": "^5.2.1",

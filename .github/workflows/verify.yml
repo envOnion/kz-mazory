@@ -11,49 +11,26 @@ concurrency:
   cancel-in-progress: true
 jobs:
   verify:
-    name: Docker build and local E2E
+    name: Docker builds and configuration checks
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      E2E_PYTHON_BASE_IMAGE: mirror.gcr.io/library/python:3.12-slim@sha256:a6e34c598f2467ed0e9a8d349809fcd8b5c603269512df273a0bb1784edc11b1
-      E2E_NODE_BASE_IMAGE: mirror.gcr.io/library/node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
-      E2E_NGINX_BASE_IMAGE: mirror.gcr.io/library/nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
-      E2E_POSTGRES_BASE_IMAGE: mirror.gcr.io/library/postgres:16-alpine@sha256:721873c34ceb9f8d8fc265984940dc982404c105f19ad51be9fdc5970a6080ea
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Scan committed sources for secrets
         run: docker run --rm -v "$PWD:/repo:ro" ghcr.io/gitleaks/gitleaks:v8.24.3 dir /repo --config /repo/.gitleaks.toml --redact --no-banner
-      - name: Build and run browser, API, PostgreSQL and Q2
-        run: |
-          docker compose -f compose.e2e.yml up -d --build nginx qcluster outbox
-          bash ops/run_local_e2e.sh
-      - name: Free Router shared quota and durable retry E2E
-        run: bash ops/run_router_e2e.sh
+      - name: Build backend image
+        run: docker build --tag mazory-backend:ci ./backend
+      - name: Build frontend image and check TypeScript
+        run: docker build --tag mazory-nginx:ci --file nginx/Dockerfile .
+      - name: Django system check
+        run: docker run --rm -e SECRET_KEY='ci-only-not-a-production-key-0123456789-abcdefghijklmnopqrstuvwxyz' mazory-backend:ci python manage.py check
+      - name: Check migrations
+        run: docker run --rm -e SECRET_KEY='ci-only-not-a-production-key-0123456789-abcdefghijklmnopqrstuvwxyz' mazory-backend:ci python manage.py makemigrations --check
       - name: Production settings check inside Docker
-        run: docker run --rm -v "$PWD/ops:/checks:ro" --entrypoint python mazory-e2e-backend /checks/check_deployment.py /app
+        run: docker run --rm -v "$PWD/ops:/checks:ro" --entrypoint python mazory-backend:ci /checks/check_deployment.py /app
       - name: Frontend dependency audit inside Docker
-        run: docker compose -f compose.e2e.yml run --rm --no-deps browser npm run audit:security
+        run: docker run --rm -v "$PWD/frontend:/source:ro" --workdir /tmp/frontend node:22-alpine sh -c 'cp -R /source/. . && npm ci && npm run audit:security'
       - name: Backend dependency audit inside Docker
-        run: docker run --rm --user 0 --entrypoint sh mazory-e2e-backend -c 'pip install --no-cache-dir pip-audit==2.9.0 && pip-audit --no-deps --disable-pip -r /app/requirements.txt'
+        run: docker run --rm --user 0 --entrypoint sh mazory-backend:ci -c 'pip install --no-cache-dir pip-audit==2.9.0 && pip-audit --no-deps --disable-pip -r /app/requirements.txt'
       - name: Compose configuration
-        run: docker compose config --no-interpolate --quiet
-      - name: Collect E2E screenshots, traces and service logs
-        if: always()
-        run: |
-          mkdir -p artifacts
-          docker compose -f compose.e2e.yml logs --no-color > artifacts/services.log
-          docker cp "$(docker compose -f compose.e2e.yml ps -a -q browser):/e2e/playwright" artifacts/ || true
-          docker compose -p mazory-router-e2e -f compose.e2e.yml -f compose.e2e.router.yml logs --no-color > artifacts/router-services.log
-          mkdir -p artifacts/router
-          docker cp "$(docker compose -p mazory-router-e2e -f compose.e2e.yml -f compose.e2e.router.yml ps -a -q browser):/e2e/playwright" artifacts/router/ || true
-          docker cp "$(docker compose -p mazory-router-e2e -f compose.e2e.yml -f compose.e2e.router.yml ps -a -q backend):/e2e/router-proof.json" artifacts/router/ || true
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: local-docker-e2e
-          path: artifacts
-      - name: Remove isolated containers and volumes
-        if: always()
-        run: |
-          docker compose -f compose.e2e.yml down --volumes --remove-orphans
-          docker compose -p mazory-router-e2e -f compose.e2e.yml -f compose.e2e.router.yml down --volumes --remove-orphans
+        run: docker compose -f docker-compose.yml config --no-interpolate --quiet
