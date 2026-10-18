@@ -6,7 +6,7 @@ from django.db.models.functions import Coalesce
 
 from . import access
 from .datamart import ZERO, formatted, project_row, scoped_projects
-from .models import FactEvent, FinancialRecord, Project
+from .models import FactEvent, FinancialRecord, Project, ProjectAlias, ProjectParty
 
 
 class ProjectFilters(serializers.Serializer):
@@ -23,7 +23,19 @@ class ProjectFilters(serializers.Serializer):
 def workspace_projects(user, filters):
     qs, _ = scoped_projects(user, filters)
     if filters.get('search'):
-        qs = qs.filter(Q(name__icontains=filters['search']) | Q(company__name__icontains=filters['search']) | Q(aliases__normalized_name__icontains=filters['search']) | Q(parties__company__name__icontains=filters['search']))
+        search = filters['search']
+        alias_match = ProjectAlias.objects.filter(
+            project_id=OuterRef('pk'), normalized_name__icontains=search
+        )
+        party_match = ProjectParty.objects.filter(
+            project_id=OuterRef('pk'), company__name__icontains=search
+        )
+        qs = qs.filter(
+            Q(name__icontains=search)
+            | Q(company__name__icontains=search)
+            | Exists(alias_match)
+            | Exists(party_match)
+        )
     if filters.get('stage'):
         qs = qs.filter(status=filters['stage'])
     records = FinancialRecord.objects.filter(project_id=OuterRef("pk"), is_verified=True, status="received")
@@ -55,15 +67,34 @@ def workspace_rows(user, projects):
     """Read explanations in batches, using only explicitly linked accessible sources."""
     projects = list(projects)
     ids = [p.id for p in projects]
-    candidates = list(access.candidates_for(user).filter(project_id__in=ids).filter(Q(fact_type='payment') | Q(fact_type='project', proposed_changes__has_key='contract_amount')).select_related('trace__raw_message'))
+    candidates = list(
+        access.candidates_for(user)
+        .filter(project_id__in=ids)
+        .filter(
+            Q(fact_type='payment')
+            | Q(fact_type='project', proposed_changes__has_key='contract_amount')
+        )
+        .select_related('trace__raw_message')
+        .only(
+            'id', 'project_id', 'fact_type', 'proposed_changes', 'status',
+            'review_reason', 'trace_id', 'trace__status',
+            'trace__raw_message_id', 'trace__raw_message__source',
+        )
+    )
     source_ids = {c.trace.raw_message_id for c in candidates}
-    sources = list(access.messages_for(user).filter(Q(project_id__in=ids) | Q(id__in=source_ids)))
-    accessible = {r.id for r in sources}
+    allowed_sources = set(
+        access.messages_for(user).filter(id__in=source_ids).values_list('id', flat=True)
+    ) if source_ids else set()
     by_project = {pk: [] for pk in ids}
     for c in candidates:
-        if c.trace.raw_message_id in accessible and c.trace.raw_message.source != 'bitrix':
+        if c.trace.raw_message_id in allowed_sources and c.trace.raw_message.source != 'bitrix':
             by_project[c.project_id].append(c)
-    errors = {r.project_id for r in sources if r.project_id in ids and r.processing_state == 'failed'}
+    errors = set(
+        access.messages_for(user)
+        .filter(project_id__in=ids, processing_state='failed')
+        .values_list('project_id', flat=True)
+        .distinct()
+    )
     rows = []
     for p in projects:
         row = project_row(p, paid_total=p.workspace_paid_total or ZERO, payments_known=bool(p.workspace_payment_count))
