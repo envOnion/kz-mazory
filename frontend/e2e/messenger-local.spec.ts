@@ -218,13 +218,14 @@ function totp() {
 }
 test('JWT settings and WAHA commands preserve MFA and reject replay in a different browser session', async ({request,browser}) => {
   const h = headers(fixture.mfa)
+  const code = totp()
   expect((await request.get('/api/settings/ai/',{headers:h})).status()).toBe(403)
   expect((await request.post('/api/whatsapp/restart/',{headers:h,data:{config_id:fixture.config_id}})).status()).toBe(403)
-  expect((await request.post('/api/settings/access/',{headers:h,data:{code:totp()}})).ok()).toBe(true)
+  expect((await request.post('/api/settings/access/',{headers:h,data:{code}})).ok()).toBe(true)
   expect((await request.get('/api/settings/ai/',{headers:h})).ok()).toBe(true)
   const isolated = await browser.newContext()
   expect((await isolated.request.get('/api/settings/ai/',{headers:h})).status()).toBe(403)
-  expect((await isolated.request.post('/api/settings/access/',{headers:h,data:{code:totp()}})).status()).toBe(400)
+  expect((await isolated.request.post('/api/settings/access/',{headers:h,data:{code}})).status()).toBe(400)
   await isolated.close()
 })
 
