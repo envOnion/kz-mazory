@@ -1,6 +1,7 @@
+import { readFileSync } from './helpers/files'
 import { test, expect, type APIRequestContext } from '@playwright/test'
 import { createHmac, randomUUID } from 'node:crypto'
-import { readFileSync, writeFileSync, renameSync, chmodSync, existsSync } from 'node:fs'
+import { writeFileSync, renameSync, chmodSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 
 const dir = process.env.MAZORY_E2E_DIR!

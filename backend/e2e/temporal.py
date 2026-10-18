@@ -23,6 +23,7 @@ def seed():
     _,access,refresh=create_session(user)
     (Path(settings.E2E_DIR)/'temporal-session.json').write_text(json.dumps({'access':access,'refresh':refresh,'cookie_name':settings.AUTH_REFRESH_COOKIE,'user_id':user.id}))
     company=Company.objects.create(name='Temporal timestamp fixture')
+    company.refresh_from_db()
     created,updated=company.created_at,company.updated_at
     Company.objects.filter(id=company.id).update(name='Temporal timestamp changed')
     company.refresh_from_db()

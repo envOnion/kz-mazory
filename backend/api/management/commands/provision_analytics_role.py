@@ -116,10 +116,14 @@ class Command(BaseCommand):
                     )
                     c.execute(
                         sql.SQL(
-                            "GRANT SELECT (id, is_active, team_id) ON api_whatsappconfig TO {}"
+                            "GRANT SELECT (id, is_active, team_id, group_jid) ON api_whatsappconfig TO {}"
                         ).format(sql.Identifier(role))
                     )
                     c.execute(sql.SQL('GRANT SELECT (id,raw_message_id) ON api_messageprocessingtrace TO {}').format(sql.Identifier(role)))
+                    # messages_for checks the transport namespace and explicit
+                    # private recipient even when executed on the read-only DB.
+                    # Do not grant journal bodies or configuration credentials.
+                    c.execute(sql.SQL('GRANT SELECT (raw_message_id,recipient_id) ON api_communicationrecord TO {}').format(sql.Identifier(role)))
                     c.execute(
                         sql.SQL(
                             "ALTER ROLE {} SET default_transaction_read_only=on"

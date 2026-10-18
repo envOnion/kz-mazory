@@ -1,5 +1,6 @@
+import { readFileSync } from './helpers/files'
 import { test, expect } from '@playwright/test'
-import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
+import { writeFileSync, existsSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHmac } from 'node:crypto'
 

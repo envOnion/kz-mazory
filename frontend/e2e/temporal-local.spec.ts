@@ -1,5 +1,5 @@
+import { readFileSync } from './helpers/files'
 import { test, expect } from '@playwright/test'
-import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Conversation, Artifact } from '../src/types/dialogue'
 test.setTimeout(180000)
@@ -25,7 +25,7 @@ test('projects over the full explicit year reject payments and allow date-axis r
   expect(operation.ok()).toBe(true)
   expect(await operation.json()).toMatchObject({ status: 'succeeded', error_code: '' })
   await context.addCookies([{ name: session.cookie_name, value: session.refresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
-  await page.goto('/')
+  await page.goto('/analytics')
   await page.getByTestId('nav-kpi-dashboard').waitFor()
   const input = page.getByPlaceholder('Спросите Mazory...')
   await input.fill('шкала X месяцы в году 2026, шкала Y количество проектов, нарисуй график зависимости, что бы видеть сколько проектов больше или меньше пришло за какой месяц')

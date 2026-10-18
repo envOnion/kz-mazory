@@ -1,5 +1,6 @@
+import { readFileSync } from './helpers/files'
 import { test, expect } from '@playwright/test'
-import { readFileSync, writeFileSync, existsSync, renameSync, unlinkSync } from 'node:fs'
+import { writeFileSync, existsSync, renameSync, unlinkSync } from 'node:fs'
 import { createHmac, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { DialogueThread } from '../src/types/factReview'
@@ -87,8 +88,7 @@ test('LLM topics, real LAYA assignment, durable extraction, shadow, outage and s
   expect((await route(stale)).reason_code).toBe('stale_snapshot')
   await processed(stale)
   await applied({mode:'laya'})
-  await page.goto('/')
-  await page.getByRole('button',{name:'Рабочий кабинет',exact:true}).click()
+  await page.goto('/analytics?view=projects')
   await page.getByRole('button',{name:'Темы переписки',exact:true}).click()
   await page.getByPlaceholder('Поиск по теме, компании, сделке...').fill('101')
   await page.getByRole('button',{name:'Найти',exact:true}).click()

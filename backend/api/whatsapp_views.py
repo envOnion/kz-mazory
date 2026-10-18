@@ -7,6 +7,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 from .models import WhatsAppConfig
 from .access import integration_allowed
+from .mfa import require_privileged_mfa
 from .waha_control import enqueue_control as queue_control
 
 
@@ -17,6 +18,7 @@ class ConfigForm(forms.Form):
 def config_for(request):
     if not integration_allowed(request.user):
         raise PermissionDenied()
+    require_privileged_mfa(request)
     form = ConfigForm(
         request.data if request.method == "POST" else request.query_params
     )

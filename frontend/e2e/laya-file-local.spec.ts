@@ -1,5 +1,6 @@
+import { readFileSync } from './helpers/files'
 import { test, expect } from '@playwright/test'
-import { readFileSync, writeFileSync, mkdirSync, unlinkSync, renameSync } from 'node:fs'
+import { writeFileSync, mkdirSync, unlinkSync, renameSync } from 'node:fs'
 import { createHmac, createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { Candidate, Page } from '../src/types/platform'
@@ -133,8 +134,7 @@ test('five original file examples pass through the browser, genuine API and Q2 w
       expect.soft(fulfilled[0]?.proposed_changes.deadline_precision, input.id).toBe('date')
       expect.soft(facts.some(c => c.fact_type === 'payment' && c.proposed_changes.payment_kind === 'increment'), input.id).toBe(false)
     }
-    await page.goto('/')
-    await page.getByRole('button', { name: 'Рабочий кабинет', exact: true }).click()
+    await page.goto('/analytics?view=projects')
     await page.getByRole('button', { name: 'Темы переписки', exact: true }).click()
     await page.getByPlaceholder('Поиск по теме, компании, сделке...').fill(selected[0]?.topic || input.title)
     await page.getByRole('button', { name: 'Найти', exact: true }).click()

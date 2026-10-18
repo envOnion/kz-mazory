@@ -1,5 +1,6 @@
+import { readFileSync } from './helpers/files'
 import { test, expect, type BrowserContext, type Page, type APIRequestContext } from '@playwright/test'
-import { readFileSync, writeFileSync, renameSync } from 'node:fs'
+import { writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import type { Conversation, TurnReceipt, Artifact } from '../src/types/dialogue'
@@ -26,7 +27,7 @@ async function submit(page: Page, prompt: string) {
   else { const input = page.getByPlaceholder('Спросите Mazory...'); await input.fill(prompt); await input.press('Enter') }
 }
 async function startDialogue(page: Page) {
-  await page.goto('/'); await page.getByTestId('nav-kpi-dashboard').waitFor()
+  await page.goto('/analytics'); await page.getByTestId('nav-kpi-dashboard').waitFor()
   const button = page.getByRole('button', { name: 'Новый диалог', exact: true })
   if (await button.count()) await button.click()
 }
@@ -95,7 +96,7 @@ test('large overdue records use provider token counts, compact previews and reta
 })
 
 test('analytical dialogue: real facts, controls, plan/fact, history, mobile and selectors', async ({ page, context, request }) => {
-  await authenticate(context); await page.goto('/'); await page.getByTestId('nav-kpi-dashboard').waitFor()
+  await authenticate(context); await page.goto('/analytics'); await page.getByTestId('nav-kpi-dashboard').waitFor()
   await submit(page, 'Йо')
   await expect(page.getByTestId('chat-response')).toContainText('Привет!')
   await expect(page.getByTestId('chat-response').locator('strong')).toContainText('Помогу с аналитикой.')
@@ -137,14 +138,18 @@ test('analytical dialogue: real facts, controls, plan/fact, history, mobile and 
   expect(combinedDs.rows.filter(r => r.series === 'Поступления').map(r => r.value)).toEqual(['100.00', '190.00'])
   expect(combinedDs.rows.filter(r => r.series === 'План').map(r => r.value)).toEqual(['150.00', '250.00'])
   await page.reload(); await expect(page.getByTestId('chat-turn-5')).toBeVisible()
-  const secondTab = await context.newPage(); await secondTab.goto('/'); await expect(secondTab.getByTestId('chat-turn-5')).toBeVisible(); await secondTab.close()
+  const secondTab = await context.newPage(); await secondTab.goto('/analytics'); await expect(secondTab.getByTestId('chat-turn-5')).toBeVisible(); await secondTab.close()
   await page.getByTestId('chat-turn-1').getByRole('button', { name: 'Поступления', exact: true }).click()
   await expect(page.getByTestId('presentation')).toBeVisible()
   for (const width of [320, 390, 736, 1024, 1280]) {
     await page.setViewportSize({ width, height: 960 })
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     const columns = await page.locator('.workspace-layout').evaluate(el => getComputedStyle(el).gridTemplateColumns.split(' ').length)
-    expect(columns).toBe(width < 1024 ? 1 : 2)
+    const containerWidth = await page.locator('.chat-shell').evaluate(el => {
+      const style = getComputedStyle(el)
+      return el.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight)
+    })
+    expect(columns).toBe(containerWidth < 960 ? 1 : 2)
     const inset = await page.getByLabel('Группировка', { exact: true }).evaluate(el => {
       const wrapper = el.parentElement!, arrow = wrapper.querySelector('svg')!
       return wrapper.getBoundingClientRect().right - arrow.getBoundingClientRect().right
@@ -250,7 +255,7 @@ test('full totals before top-N, safe Markdown and revoked or expired history', a
   await expect(page.getByTestId('presentation')).toHaveCount(0)
   control({ analytics_revoke: false })
   await expect.poll(async () => (await (await request.get(`/api/chat/artifacts/${artifact.id}/`, { headers })).json()).available).toBe(true)
-  await authenticate(context); await page.goto('/')
+  await authenticate(context); await page.goto('/analytics')
   await expect(page.getByTestId('presentation')).toHaveCount(1)
   await page.getByTestId('chat-turn-2').getByRole('button', { name: 'Продолжить этот ответ', exact: true }).click()
   control({ analytics_expire: true })

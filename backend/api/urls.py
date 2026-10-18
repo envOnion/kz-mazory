@@ -31,6 +31,9 @@ from .notification_views import (
     NotificationActionView,
 )
 from .whatsapp_views import WhatsAppStatusView, WhatsAppQrView, WhatsAppRestartView
+from .settings_api import (SettingsAIView, SettingsAIDetailView, SettingsBitrixView,
+    SettingsWhatsAppView, SettingsAccessView, SettingsWhatsAppDetailView,
+    SettingsHistoryView, SettingsDiagnosticsView, SettingsGrantsView)
 from .messenger_api import (
     ChangesView,
     DialogsView,
@@ -38,6 +41,7 @@ from .messenger_api import (
     RecordDetailView,
     RecordsView,
     RecordTracesView,
+    RecordTraceContextView,
     ReanalyzeView,
 )
 from .operations_api import (
@@ -144,8 +148,18 @@ urlpatterns = [
     path("messenger/records/<int:pk>/", RecordDetailView.as_view()),
     path("messenger/records/<int:pk>/chain/", RecordChainView.as_view()),
     path("messenger/records/<int:pk>/traces/", RecordTracesView.as_view()),
+    path("messenger/records/<int:pk>/traces/<int:trace_pk>/context/", RecordTraceContextView.as_view()),
     path("messenger/records/<int:pk>/reanalyze/", ReanalyzeView.as_view()),
     path("messenger/changes/", ChangesView.as_view()),
+    path("settings/whatsapp/", SettingsWhatsAppView.as_view()),
+    path("settings/access/", SettingsAccessView.as_view()),
+    path("settings/access/grants/", SettingsGrantsView.as_view()),
+    path("settings/whatsapp/<int:pk>/", SettingsWhatsAppDetailView.as_view()),
+    path("settings/whatsapp/<int:pk>/history/", SettingsHistoryView.as_view()),
+    path("settings/diagnostics/", SettingsDiagnosticsView.as_view()),
+    path("settings/ai/", SettingsAIView.as_view()),
+    path("settings/ai/<int:pk>/", SettingsAIDetailView.as_view()),
+    path("settings/bitrix/", SettingsBitrixView.as_view()),
     # Операционные разделы новой оболочки.
     path("analytics/operations/", AnalyticsOperationsView.as_view()),
     path("processing/jobs/", ProcessingJobsView.as_view()),

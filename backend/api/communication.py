@@ -37,6 +37,8 @@ BODY_LIMIT = 4000
 OTP_SAFE_PHRASE = "Отправлен код входа"
 
 _SECRET_PATTERNS = [
+    re.compile(r"(?i)\b(?:otp(?: code)?|код(?: входа| подтверждения)?(?: Mazory)?|verification code)\s*[:=]?\s*\d{4,8}"),
+    re.compile(r"(?i)https?://[^\s\"'<>]+/rest/[0-9]+/[A-Za-z0-9_-]+/?"),
     re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._\-]{10,}"),
     re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9._\-]{5,}"),  # JWT-like
     re.compile(r"(?i)\b(api[_\-]?key|token|secret|password)\b(\s*[:=]\s*)\S+"),
@@ -45,14 +47,27 @@ _SECRET_PATTERNS = [
 ]
 
 
-def sanitize_body(text: str) -> str:
+def sanitize_body(text: str, *, limit=BODY_LIMIT) -> str:
     """Server-side redaction applied before anything is stored or displayed."""
     if not text:
         return ""
-    body = text[:BODY_LIMIT]
+    body = text if limit is None else text[:limit]
     for pattern in _SECRET_PATTERNS:
         body = pattern.sub("[скрыто]", body)
     return body
+
+
+def sanitize_data(value):
+    """One recursive sanitizer for trace, CRM diff and copied JSON."""
+    if isinstance(value, dict):
+        return {str(key): '[скрыто]' if re.search(
+            r'(?i)(api_?key|password|secret|authorization|cookie|otp|access_token|refresh_token|webhook_url)', str(key)
+        ) else sanitize_data(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitize_data(item) for item in value]
+    if isinstance(value, str):
+        return sanitize_body(value)
+    return value
 
 
 def _safe_metadata(meta: dict) -> dict:
@@ -215,6 +230,8 @@ def on_notification_created(sender, instance, created, **kwargs):
 
 
 def journal_otp(outbox):
+    if outbox.event_type != "otp":
+        return None
     user_id = (outbox.payload or {}).get("user_id")
     record, _ = get_or_create_record(
         f"otp:{outbox.pk}",
@@ -243,6 +260,8 @@ def _capture_state(sender, instance, **kwargs):
     if state_field and instance.pk:
         try:
             instance._journal_prev_state = sender.objects.filter(pk=instance.pk).values_list(state_field, flat=True).first()
+            if sender is MessageProcessingTrace:
+                instance._journal_prev_action = sender.objects.filter(pk=instance.pk).values_list('pipeline_action', flat=True).first()
         except Exception:  # pragma: no cover - defensive
             instance._journal_prev_state = None
 
@@ -334,6 +353,11 @@ def on_clarification_saved(sender, instance, created, **kwargs):
 
 @receiver(post_save, sender=ClarificationReply)
 def on_reply_saved(sender, instance, created, **kwargs):
+    if instance.raw_message_id:
+        # The explicit question recipient owns this private inbound reply.
+        # Team membership cannot grant access to somebody else's answer.
+        CommunicationRecord.objects.filter(raw_message_id=instance.raw_message_id).update(
+            recipient_id=instance.question.recipient_id, category="private", purpose="reply")
     record = CommunicationRecord.objects.filter(notification_id=instance.question.notification_id).first() if instance.question.notification_id else None
     if record is None:
         return
@@ -350,14 +374,18 @@ def on_reply_saved(sender, instance, created, **kwargs):
 
 @receiver(post_save, sender=MessageProcessingTrace)
 def on_trace_saved(sender, instance, created, **kwargs):
-    if not created:
+    if not created and getattr(instance, '_journal_prev_state', None) == instance.status and getattr(instance, '_journal_prev_action', None) == instance.pipeline_action:
         return
     record = CommunicationRecord.objects.filter(raw_message_id=instance.raw_message_id).first()
     if record is None:
         return
-    kind = "analysis_error" if instance.status in ("error", "failed", "provider_error") else "analysis_finished"
-    add_event(record, kind=kind, state=instance.status,
-              event_key=("trace", instance.pk, instance.status, instance.attempt_no),
+    noncommercial = instance.pipeline_action == 'non_commercial'
+    failed = instance.status in ('error', 'failed', 'provider_error')
+    finished = instance.status == 'success' or noncommercial
+    kind = 'analysis_error' if failed else 'analysis_finished' if finished else 'dispatch'
+    state = 'no_crm_actions' if noncommercial else instance.status if failed or finished else 'queued'
+    add_event(record, kind=kind, state=state,
+              event_key=("trace", instance.pk, instance.status, instance.pipeline_action, instance.attempt_no),
               trace=instance,
               parent_event=CommunicationEvent.objects.filter(event_key=f"raw:{instance.raw_message_id}:received").first(),
               safe_metadata={"model": getattr(instance, "model_id", None),

@@ -1,5 +1,6 @@
+import { readFileSync } from './helpers/files'
 import { test, expect } from '@playwright/test'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Profile } from '../src/types/platform'
 

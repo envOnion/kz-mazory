@@ -424,6 +424,16 @@ def router_extraction(value):
 class ProviderHandler(BaseHTTPRequestHandler):
     control = None
 
+    def read_control(self):
+        deadline = fixture_time.monotonic() + 2
+        while True:
+            try:
+                return json.loads(self.control.read_text())
+            except (FileNotFoundError, json.JSONDecodeError):
+                if fixture_time.monotonic() >= deadline:
+                    raise
+                fixture_time.sleep(0.02)
+
     def save_control(self, state):
         temporary = self.control.with_suffix(f".{uuid.uuid4().hex}.tmp")
         temporary.write_text(json.dumps(state))
@@ -436,6 +446,19 @@ class ProviderHandler(BaseHTTPRequestHandler):
         self.handle_request({})
 
     def do_POST(self):
+        if self.path == '/e2e-ocr':
+            import hashlib
+            from email.parser import BytesParser
+            from email.policy import default
+            payload = self.rfile.read(int(self.headers.get('Content-Length',0)))
+            envelope = BytesParser(policy=default).parsebytes(
+                ('Content-Type: '+self.headers.get('Content-Type','')+'\r\n\r\n').encode()+payload)
+            files = [part.get_payload(decode=True) for part in envelope.iter_attachments()]
+            if len(files)!=1 or not files[0]:
+                return self.respond({'error':'Expected one real file'},400)
+            with (self.control.parent/'media-provider-requests.jsonl').open('a') as stream:
+                stream.write(json.dumps({'bytes':len(files[0]),'sha256':hashlib.sha256(files[0]).hexdigest()})+'\n')
+            return self.respond({'text':'Документ E2E: переданы проверенные оригиналы вложения.'})
         body = json.loads(
             self.rfile.read(int(self.headers.get("Content-Length", 0))) or "{}"
         )
@@ -483,13 +506,13 @@ class ProviderHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             return self.respond({"status": "ok"})
         if self.path == '/api/sendText':
-            state = json.loads(self.control.read_text())
+            state = self.read_control()
             ident = 'true_' + body['chatId'] + '_' + uuid.uuid4().hex
             state.setdefault('waha_messages', []).append({'id': ident, 'timestamp':fixture_time.time(), **body})
             self.save_control(state)
             return self.respond({} if state.get('waha_missing_send_id') else {'id': ident})
         if self.path.startswith('/api/default/chats/') and urlsplit(self.path).path.endswith('/messages'):
-            state = json.loads(self.control.read_text())
+            state = self.read_control()
             chat = unquote(urlsplit(self.path).path.split('/')[4])
             history = state.get('sale_clarification_history', {})
             if history.get('chat_id') == chat:
@@ -501,7 +524,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
             return self.respond([{'id':row['id'],'body':row['text'],'timestamp':row['timestamp'],'fromMe':True}
                 for row in state.get('waha_messages',[]) if row['chatId']==chat])
         if self.path.startswith('/api/default/groups/'):
-            history = json.loads(self.control.read_text()).get('sale_clarification_history', {})
+            history = self.read_control().get('sale_clarification_history', {})
             if history.get('chat_id') == unquote(urlsplit(self.path).path.rsplit('/', 1)[-1]):
                 return self.respond({'id': history['chat_id'], 'subject': 'Sale clarification E2E'})
         if self.path == '/v1/systemone' and body.get('model') == 'e2e-whatsapp-v1':
@@ -527,7 +550,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
         if "/rest/" in self.path:
             with (self.control.parent / "crm-requests.jsonl").open("a") as stream:
                 stream.write(json.dumps({"method": self.path.rsplit("/", 1)[-1]}) + "\n")
-            state = json.loads(self.control.read_text())
+            state = self.read_control()
             if state.get("crm_error"):
                 return self.respond({"error": "CRM temporarily unavailable"}, 503)
             if self.path.endswith("crm.deal.get.json"):
@@ -643,7 +666,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 return self.respond({'result': True})
             return self.respond({"result": True})
         if self.path.endswith("/messages/count_tokens"):
-            state = json.loads(self.control.read_text())
+            state = self.read_control()
             if state.get('bounded_token_floor'):
                 try:
                     value = json.loads(body['messages'][-1]['content'])
@@ -661,7 +684,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 {"input_tokens": max(1, len(json.dumps(body, ensure_ascii=False)) // 4)}
             )
         if self.path.endswith('/chat/completions') and body.get('model') == 'openrouter/free':
-            state = json.loads(self.control.read_text())
+            state = self.read_control()
             with (self.control.parent / 'router-provider.jsonl').open('a') as stream:
                 stream.write(json.dumps({'at':fixture_time.time(), 'provider':body.get('provider'), 'model':body['model'],
                     'status':429 if state.get('router_429_once') else 200, 'has_tools':bool(body.get('tools')),
@@ -690,7 +713,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 'usage':{'prompt_tokens':100,'completion_tokens':30,'cost':0}})
         if self.path.endswith("/v1/messages") and any(t.get("name") == "query_dataset" for t in body.get("tools", [])):
             import time
-            state = json.loads(self.control.read_text())
+            state = self.read_control()
             if state.get('analytics_delay'):
                 time.sleep(state['analytics_delay'])
             if state.get('analytics_narrative_error') and any(
@@ -711,7 +734,7 @@ class ProviderHandler(BaseHTTPRequestHandler):
                 with (self.control.parent/'thread-provider.jsonl').open('a') as stream:
                     stream.write(json.dumps(entry)+'\n')
             result = classify(value)
-            state = json.loads(self.control.read_text())
+            state = self.read_control()
             if state.get('bounded_schema_error_once') and value['target_message_id'] == state.get('bounded_target_id'):
                 state['bounded_schema_error_once'] = False
                 state['bounded_failed_target_id'] = value['target_message_id']

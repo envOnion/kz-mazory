@@ -1,5 +1,6 @@
+import { readFileSync } from './helpers/files'
 import { test, expect, type APIRequestContext, type BrowserContext } from '@playwright/test'
-import { readFileSync, writeFileSync, renameSync } from 'node:fs'
+import { writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHmac, randomUUID } from 'node:crypto'
 import type { Candidate, Directory, Health, Page } from '../src/types/platform'
@@ -114,29 +115,24 @@ test('incoming WhatsApp message automatically creates a named silent employee th
   }, { timeout: 20000 }).toBe('done')
   const repeated: Directory = await (await request.get('/api/directory/', { headers })).json()
   expect(repeated.participants!.map(row => row.id)).toEqual(data.participants!.map(row => row.id))
-  await page.goto('/')
-  await page.getByTestId('nav-workspace').click()
+  await page.goto('/analytics?view=projects')
   await page.getByRole('button', { name: 'Сотрудники', exact: true }).click()
   await expect(page.getByTestId(`participant-${person.id}`)).toContainText('Тихий участник')
   await expect(page.getByTestId(`participant-${person.id}`)).toContainText('+79990000003')
   await expect(page.getByTestId(`participant-${person.id}`)).toContainText('Доступ не предоставлен')
-  await page.goto('/admin/login/?next=/admin/auth/user/')
-  await page.locator('#id_username').fill('79990000001')
-  await page.locator('#id_password').fill('local-e2e-only')
-  await page.locator('button[type="submit"], input[type="submit"]').click()
-  await page.goto(`/admin/auth/user/${person.user_id}/change/`)
-  await expect(page.locator('#id_first_name')).toHaveValue('Тихий участник')
-  await expect(page.locator('#id_last_name')).toHaveValue('')
+  // The migrated participant directory reads the actual persisted user name.
+  const participant: Directory = await (await request.get('/api/directory/', {headers})).json()
+  expect(participant.participants?.find(row => row.user_id === person.user_id)?.display_name).toBe('Тихий участник')
+
 })
 
 test('CRM catalog, incomplete thought, interleaved themes and review through real Q2', async ({ page, context, request }) => {
   await authenticate(context)
-  await page.goto('/')
-  await page.getByRole('button', { name: 'Рабочий кабинет', exact: true }).click()
+  await page.goto('/analytics?view=projects')
   await page.getByRole('button', { name: 'Проверка фактов', exact: true }).click()
   await expect.poll(async () => {
     const response = await request.get('/api/directory/', { headers }); const value: Directory = await response.json(); return value.projects_count
-  }).toBe(5)
+  }).toBe(6) // Two CRM objects, three analytical fixtures and one client project.
   await page.getByRole('button', { name: 'Обновить справочник', exact: true }).click()
   await expect(page.getByText('Справочник CRM загружен', { exact: false })).toBeVisible()
   await message(request, 'north-request', 'БЦ Север: подготовь смету')
@@ -187,7 +183,7 @@ test('CRM error is shown separately and retry preserves imported identities', as
   expect((await request.post('/api/directory/crm-sync/', { headers, data: { team_id: 1 } })).status()).toBe(202)
   await expect.poll(async () => { const response = await request.get('/api/directory/', { headers }); const value: Directory = await response.json(); return value.crm_catalog?.[0]?.state }).toBe('succeeded')
   const response = await request.get('/api/directory/', { headers }); const value: Directory = await response.json()
-  expect(value.projects_count).toBe(5)
+  expect(value.projects_count).toBe(6)
 })
 
 test('general obligation needs no project and survives another topic', async ({ request }) => {
@@ -217,13 +213,13 @@ test('new project requires completed CRM search and sends identity without fabri
   expect(fields.TITLE).toBe('БЦ Восток')
   expect(fields.OPPORTUNITY).toBeUndefined()
   const catalog: Directory = await (await request.get('/api/directory/', { headers })).json()
-  expect(catalog.projects_count).toBe(6)
+  expect(catalog.projects_count).toBe(7)
 })
 
 test('full flow from WhatsApp messages to KPI plan/fact, timeline and forecasts', async ({ page, context, request }) => {
   await authenticate(context)
-  await page.goto('/')
-  await expect(page.getByRole('button', { name: 'KPI и чат', exact: true })).toBeVisible()
+  await page.goto('/analytics')
+  await expect(page.getByTestId('nav-kpi-dashboard')).toBeVisible()
 
   // 1. Ensure CRM catalog is synced (with ТОО «Север Холдинг» / БЦ Север and ТОО «Юг Групп» / БЦ Южный).
   await expect.poll(async () => {
@@ -313,10 +309,14 @@ test('full flow from WhatsApp messages to KPI plan/fact, timeline and forecasts'
 
   // 4. Verify KPI Dashboard:
   //    Navigate to `/` -> Click 'KPI и чат'.
-  await page.goto('/')
-  await page.getByRole('button', { name: 'KPI и чат', exact: true }).click()
+  await page.goto('/analytics')
+  await expect(page.getByTestId('nav-kpi-dashboard')).toBeVisible()
 
   //    Fetch or wait for KPI data:
+  // Other acceptance fixtures own separate teams. Select this scenario's
+  // actual cohort rather than treating their missing plans as zero.
+  const localTeam = dir.teams.find(team => team.name === 'Локальная команда')!
+  await page.getByLabel('Команда', {exact:true}).selectOption(String(localTeam.id))
   //    - Expect summary metrics: 50 000 000 ₸ fact, 100 000 000 ₸ target/plan, 50% KPI completion.
   await expect(page.getByTestId('kpi-metric-received')).toContainText('50 000 000')
   await expect(page.getByTestId('kpi-metric-plan')).toContainText('100 000 000')
@@ -362,8 +362,7 @@ test('autonomous WhatsApp receipt reaches CRM and reports without a review click
   await message(request, 'south-auto-payment', 'БЦ Южный: оплата 20 000 000 ₸ поступила сегодня', true)
   await expect.poll(() => JSON.parse(readFileSync(stateFile, 'utf8')).comments?.some((row: { COMMENT: string }) => row.COMMENT.includes('20 000 000'))).toBe(true)
   await authenticate(context)
-  await page.goto('/')
-  await page.getByRole('button', { name: 'Рабочий кабинет', exact: true }).click()
+  await page.goto('/analytics?view=projects')
   await page.getByRole('button', { name: 'Отчеты по WhatsApp', exact: true }).click()
   await expect(page.getByText('Автоматическая обработка WhatsApp включена', { exact: true })).toBeVisible()
   await expect(page.getByText('70 000 290', { exact: true }).first()).toBeVisible()

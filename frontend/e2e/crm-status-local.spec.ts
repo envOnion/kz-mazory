@@ -1,5 +1,7 @@
+import { readFileSync } from './helpers/files'
+import { authenticateShell } from './helpers/session'
 import { test, expect } from '@playwright/test'
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { existsSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AutonomousOverview, CrmDisabledReason } from '../src/types/autonomous'
 import type { Directory } from '../src/types/platform'
@@ -34,11 +36,9 @@ function crmRequests(): string {
 test('cabinet and admin distinguish integration and automatic WhatsApp writes using real settings', async ({ page, context, request }) => {
   test.setTimeout(120000)
   await context.addCookies([{ name: session.cookie_name, value: session.refresh, url: `${process.env.MAZORY_E2E_URL}/api/auth/`, httpOnly: true, sameSite: 'Lax' }])
-  await page.goto('/admin/login/?next=/admin/api/bitrixsettings/')
-  await page.locator('#id_username').fill('79990000001')
-  await page.locator('#id_password').fill('local-e2e-only')
-  await page.locator('button[type="submit"], input[type="submit"]').click()
-  await expect(page.locator('#result_list')).toBeVisible()
+  await authenticateShell(context)
+  await page.goto('/settings?section=bitrix')
+  await expect(page.getByTestId('crm-settings-status')).toBeVisible()
   expect((await request.get('/api/autonomous/overview/')).status()).toBe(401)
   // Opening the workspace also starts its independent initial CRM catalog import.
   // Finish that real Q2 operation before measuring side effects of status reads.
@@ -74,8 +74,7 @@ test('cabinet and admin distinguish integration and automatic WhatsApp writes us
       expect(overview.enabled).toBe(item.aiActive && item.processing)
       expect(overview.crm_enabled).toBe(item.aiActive && item.writing)
       expect(overview.crm_status).toEqual({ integration_enabled: item.integration, webhook_configured: item.webhook, autonomous_write_allowed: item.aiActive && item.writing, effective_autonomous_write_enabled: item.reason === null, disabled_reason: item.reason })
-      await page.goto('/')
-      await page.getByTestId('nav-workspace').click()
+      await page.goto('/analytics?view=projects')
       await page.getByRole('button', { name: 'Отчеты по WhatsApp', exact: true }).click()
       const modes = page.getByRole('region', { name: 'Режимы обработки и интеграции' })
       await expect(modes.getByText(`Автоматическая обработка WhatsApp ${overview.enabled ? 'включена' : 'выключена'}`, { exact: true })).toBeVisible()
@@ -85,14 +84,14 @@ test('cabinet and admin distinguish integration and automatic WhatsApp writes us
       await page.getByRole('button', { name: 'Обновить', exact: true }).click()
       await expect(page.getByRole('button', { name: 'Обновить', exact: true })).toBeEnabled()
       if (item.name === 'write_paused') await page.screenshot({ path: join(directory, 'crm-status-cabinet.png'), fullPage: true })
-      await page.goto('/admin/api/bitrixsettings/')
-      const row = page.locator('#result_list tbody tr').first()
+      await page.goto('/settings?section=bitrix')
+      const row = page.getByTestId('crm-settings-status').first()
       await expect(row.getByText(`Интеграция: ${item.integration ? 'включена' : 'выключена'}`, { exact: true })).toBeVisible()
       await expect(row.getByText(`Автоматическая запись WhatsApp: ${item.reason === null ? 'включена' : 'выключена'}`, { exact: true })).toBeVisible()
       await expect(row.getByText('Создание сделок: вкл.', { exact: true })).toBeVisible()
       if (item.reason) await expect(row.getByText(reasons[item.reason], { exact: true })).toBeVisible()
       const link = row.getByRole('link', { name: 'Настройки записи WhatsApp →', exact: true })
-      if (item.aiActive) await expect(link).toHaveAttribute('href', `/admin/api/aisettings/${before.ai_id}/change/`)
+      if (item.aiActive) await expect(link).toHaveAttribute('href', '/settings?section=ai')
       else await expect(link).toHaveCount(0)
       if (item.name === 'write_paused') await page.screenshot({ path: join(directory, 'crm-status-admin.png'), fullPage: true })
       await expect.poll(() => proof().observed_at).not.toBe(before.observed_at)
@@ -102,17 +101,15 @@ test('cabinet and admin distinguish integration and automatic WhatsApp writes us
     }
     setCase('write_paused')
     await expect.poll(() => proof().case).toBe('write_paused')
-    const viewer = await page.context().browser()!.newContext({ baseURL: process.env.MAZORY_E2E_URL })
-    try {
-      const viewerPage = await viewer.newPage()
-      await viewerPage.goto('/admin/login/?next=/admin/api/bitrixsettings/')
-      await viewerPage.locator('#id_username').fill('crm-status-viewer')
-      await viewerPage.locator('#id_password').fill('local-e2e-only')
-      await viewerPage.locator('button[type="submit"], input[type="submit"]').click()
-      await expect(viewerPage.locator('#result_list')).toBeVisible()
-      await expect(viewerPage.getByText('Автоматическая запись WhatsApp: выключена', { exact: true })).toBeVisible()
-      await expect(viewerPage.getByRole('link', { name: 'Настройки записи WhatsApp →', exact: true })).toHaveCount(0)
-    } finally { await viewer.close() }
+    const integrator = JSON.parse(readFileSync(join(directory, 'messenger-session.json'),'utf8')) as {integrator:{access:string};viewer:{access:string}}
+    const viewHeaders = {Authorization:`Bearer ${integrator.viewer.access}`}
+    const readOnly = await request.get('/api/settings/bitrix/', {headers:viewHeaders})
+    expect(readOnly.status()).toBe(200)
+    const viewData = await readOnly.json() as {items:{ai_settings_href:string|null}[]}
+    expect(viewData.items[0]!.ai_settings_href).toBeNull()
+    expect((await request.patch('/api/settings/bitrix/',{headers:viewHeaders,data:{is_active:true}})).status()).toBe(403)
+    expect((await request.get('/api/settings/ai/', {headers:{Authorization:`Bearer ${integrator.integrator.access}`}})).status()).toBe(403)
+
   } finally {
     setCase('restore')
     await expect.poll(() => proof().case).toBe('restore')

@@ -24,3 +24,5 @@ nginx/*
 !frontend/playwright.local.config.ts
 !frontend/e2e
 !frontend/e2e/**
+
+.e2e-runtime/

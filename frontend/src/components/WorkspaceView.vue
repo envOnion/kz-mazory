@@ -115,19 +115,23 @@
 <script setup lang="ts">
 import AutonomousReports from './AutonomousReports.vue'
 import ThreadBrowser from './review/ThreadBrowser.vue'
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import FactSummary from './review/FactSummary.vue'
 import FactConversation from './review/FactConversation.vue'
 import FactCorrectionForm from './review/FactCorrectionForm.vue'
 import { roles as roleLabels, statusLabels, crmErrors, crmReasons } from './review/presentation'
 import { api, post } from '../composables/api'
+import { useRoute } from 'vue-router'
+import { routeId } from '../utils/routeId'
 import { currentUser } from '../composables/session'
 import { useNotifications } from '../composables/useNotifications'
 import type { Page, Candidate, CrmMatchState, Directory } from '../types/platform'
 import type { ManagerProjectSummary, ProjectWorkspaceSummary, CommitmentData, CommitmentItem } from '../types/chat'
 const roles = computed(() => currentUser.value?.roles || [])
 const client = computed(() => roles.value.includes('client')), lead = computed(() => roles.value.includes('team_lead')), financeRole = computed(() => roles.value.includes('finance'))
-const tab = ref('projects'), loading = ref(false), busy = ref(false), error = ref(''), notice = ref('')
+const route = useRoute()
+const props = defineProps<{ initialTab?: string }>()
+const tab = ref(props.initialTab || 'projects'), loading = ref(false), busy = ref(false), error = ref(''), notice = ref('')
 const tabs = computed(() => [
   { id: 'projects', label: 'Проекты' },
   ...(lead.value || financeRole.value ? [{ id: 'people', label: 'Сотрудники' }] : []),
@@ -226,7 +230,9 @@ async function load() {
     if (tab.value === 'review') {
       await refreshDirectory()
       const page = await api<Page<Candidate>>(`/candidates/?status=${candidateStatus.value}&page=${candidatePage.value}${candidateFactType.value ? `&fact_type=${candidateFactType.value}` : ''}${candidateProject.value ? `&project_id=${candidateProject.value}` : ''}`)
-      candidates.value = page.results; candidateCount.value = page.count; candidateNext.value = Boolean(page.next)
+      const specific = routeId(route.query.candidate)
+      candidates.value = specific ? [await api<Candidate>(`/candidates/${specific}/`)] : page.results
+      candidateCount.value = specific ? 1 : page.count; candidateNext.value = !specific && Boolean(page.next)
       crmSelections.value = {}
       for (const candidate of candidates.value) {
         const selected = candidate.crm_resolution.options.find(option => option.selection_state === 'selected')
@@ -261,6 +267,7 @@ async function retryCrm(teamId: number, candidateId?: number) {
   }, () => `В очередь поиска CRM добавлено: ${queued}. Пропущено без доступного источника или признаков объекта/компании: ${skipped}. Обновите список после обработки.`)
 }
 async function selectTab(value: string) { tab.value = value; notice.value = ''; await load() }
+watch(() => props.initialTab, value => { if (value) void selectTab(value) })
 async function perform(work: () => Promise<unknown>, message: string | (() => string) = 'Сохранено') { busy.value = true; error.value = ''; notice.value = ''; try { await work(); notice.value = typeof message === 'function' ? message() : message; await refreshDirectory(); await load() } catch (e) { error.value = e instanceof Error ? e.message : 'Ошибка операции' } finally { busy.value = false } }
 async function reviewItem(item: Candidate, action: string) {
   await perform(async () => {

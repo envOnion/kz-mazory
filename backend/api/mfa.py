@@ -65,6 +65,17 @@ def verified(request, entry):
     )
 
 
+def require_privileged_mfa(request):
+    """Apply the administrator's existing MFA policy to JWT actions too."""
+    from rest_framework.exceptions import PermissionDenied
+
+    entry = AdminMFA.objects.filter(
+        user=request.user, confirmed_at__isnull=False
+    ).first()
+    if entry and not verified(request, entry):
+        raise PermissionDenied("Подтвердите MFA в настройках.", code="mfa_required")
+
+
 def safe_next(value):
     decoded = unquote(value or "")
     try:

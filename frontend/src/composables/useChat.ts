@@ -61,6 +61,11 @@ export function useChat() {
     const revision = automatically ? selectionRevision : ++selectionRevision, ownGeneration = generation
     const ref = artifactId === undefined ? turn?.artifacts[0] : automatically ? { id: artifactId } : turn?.artifacts.find(a => a.id === artifactId)
     if (!ref) return
+    // The controls must never target the previous artifact while this request
+    // is loading. Rapidly selecting a chart and changing its grouping used to
+    // submit a refinement against the old chart.
+    selectedArtifact.value = null
+    activePresentation.value = null
     try {
       const artifact = await api<Artifact>(`/chat/artifacts/${ref.id}/`)
       if (generation !== ownGeneration || revision !== selectionRevision) return

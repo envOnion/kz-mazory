@@ -1,5 +1,6 @@
+import { readFileSync } from './helpers/files'
 import { test, expect } from '@playwright/test'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHmac } from 'node:crypto'
 import type { Candidate, Page } from '../src/types/platform'

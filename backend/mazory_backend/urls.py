@@ -1,6 +1,7 @@
 from django.contrib import admin
 from api.mfa import mfa_view, security_view
 from django.urls import path, include
+from api.admin_shell import operator_entry
 from django.conf import settings
 from django.conf.urls.static import static
 from api.waha_admin_views import waha_dashboard_view, waha_action_view, waha_state_view
@@ -23,7 +24,12 @@ admin.site.get_urls = _custom_admin_get_urls
 urlpatterns = [
     path("admin/security/", security_view, name="admin-security"),
     path("admin/security/mfa/", mfa_view, name="admin-mfa"),
-    # Standard Admin
+    # Technical authentication/MFA endpoints remain; all operator pages use Vue.
+    path("admin/login/", admin.site.login),
+    path("admin/logout/", admin.site.logout),
+    path("admin/", operator_entry),
+    path("admin/<path:path>", operator_entry),
+    # Keep namespace reverse lookups used by technical authentication templates.
     path("admin/", admin.site.urls),
     # API endpoints
     path("api/", include("api.urls")),

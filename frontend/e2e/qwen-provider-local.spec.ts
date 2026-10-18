@@ -1,5 +1,6 @@
+import { readFileSync } from './helpers/files'
 import { test, expect, type BrowserContext } from '@playwright/test'
-import { readFileSync, writeFileSync, renameSync } from 'node:fs'
+import { writeFileSync, renameSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHmac, randomUUID } from 'node:crypto'
 import type { Candidate, Page } from '../src/types/platform'
@@ -69,8 +70,8 @@ test('two actions in one original stay distinct, repetition is deduplicated and 
   const facts: Page<Candidate> = await (await request.get('/api/candidates/?status=approved', { headers })).json()
   expect(facts.results.filter(c => c.chat_name === 'LAYA synthetic routing' && c.fact_type === 'payment')).toHaveLength(0)
   await authenticate(context, session, 'laya-session.json', headers)
-  await page.goto('/')
-  await page.getByRole('button', { name: 'Рабочий кабинет', exact: true }).click()
+  await page.goto('/analytics')
+  await page.goto('/analytics?view=projects')
   await page.getByRole('button', { name: 'Обязательства', exact: true }).click()
   await expect(page.getByText(offer.commitment_text, { exact: true })).toBeVisible()
   await expect(page.getByText(table.commitment_text, { exact: true })).toBeVisible()
@@ -95,7 +96,7 @@ test('real reasoning and tool token counts survive provider restart, and the bro
   const session: { access: string; refresh: string; cookie_name: string; user_id: number } = JSON.parse(readFileSync(join(dir, 'analytics-session.json'), 'utf8'))
   const headers = { Authorization: `Bearer ${session.access}` }
   await authenticate(context, session, 'analytics-session.json', headers)
-  await page.goto('/')
+  await page.goto('/analytics')
   await page.getByTestId('nav-kpi-dashboard').waitFor()
   const newDialogue = page.getByRole('button', { name: 'Новый диалог', exact: true })
   if (await newDialogue.count()) await newDialogue.click()
@@ -150,8 +151,8 @@ test('two explicitly separate receipts with the same company, date and amount st
   expect(facts).toHaveLength(2)
   expect(facts.every(c=>c.proposed_changes.amount==='500000.00' && c.proposed_changes.currency==='KZT' && c.proposed_changes.payment_date==='2026-08-23')).toBe(true)
   await authenticate(context, session, 'laya-session.json', headers)
-  await page.goto('/')
-  await page.getByRole('button',{name:'Рабочий кабинет',exact:true}).click()
+  await page.goto('/analytics')
+  await page.goto('/analytics?view=projects')
   await page.getByRole('button',{name:/^(Проверка фактов|Решения системы)$/}).click()
   await expect(page.getByRole('heading',{name:'LAYA synthetic baseline · 2 на этой странице',exact:true})).toBeVisible()
   await expect(page.getByRole('heading',{name:'Платёж',exact:true})).toHaveCount(2)

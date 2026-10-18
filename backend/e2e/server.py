@@ -2,6 +2,7 @@
 import datetime
 import json
 import ssl
+import os
 from pathlib import Path
 from http.server import ThreadingHTTPServer
 from cryptography import x509
@@ -14,7 +15,13 @@ from .providers import ProviderHandler
 def main():
     directory = Path('/e2e')
     directory.mkdir(exist_ok=True)
-    directory.chmod(0o777)
+    # virtiofs mount roots can be writable while rejecting chmod. The host
+    # runner prepares permissions before starting the Socktainer stack.
+    try:
+        directory.chmod(0o777)
+    except PermissionError:
+        if not os.access(directory, os.W_OK):
+            raise
     (directory / 'isolated-e2e.marker').touch()
     control = directory / 'provider-state.json'
     control.write_text('{}'); control.chmod(0o666)

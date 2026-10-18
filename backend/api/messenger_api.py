@@ -7,10 +7,13 @@
 import base64
 import binascii
 import json
+import re
+from .communication import sanitize_body, sanitize_data
+from urllib.parse import urlencode
 
-from django.db import transaction
-from django.db.models import Exists, F, Max, OuterRef, Q, Window
-from django.db.models.functions import RowNumber
+from django.db.models import Case, CharField, Exists, F, Max, OuterRef, Q, Subquery, Value, When, Window
+from django.db.models.functions import Coalesce, RowNumber
+from rest_framework.exceptions import ValidationError
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -18,7 +21,6 @@ from rest_framework.views import APIView
 
 from . import access
 from .models import (
-    AuditEvent,
     ClarificationReply,
     CommunicationEvent,
     CommunicationRecord,
@@ -29,7 +31,6 @@ from .models import (
     OutboxEvent,
     SourceWorkItem,
 )
-from .thread_routing import incoming_event_type
 
 PAGE_DEFAULT = 50
 PAGE_MAX = 100
@@ -111,13 +112,18 @@ def records_scope(user):
     if access.is_client(user):
         # Клиенту — только собственные личные записи (уведомления по своим проектам).
         return qs.filter(recipient=user)
-    config_ids = list(access.configs_for(user).values_list("id", flat=True))
-    teams = list(access.team_ids(user))
     return qs.filter(
-        (Q(category="group", config_id__in=config_ids)
-         | Q(team_id__in=teams)
-         | Q(recipient=user))
+        Q(category="group", config__in=access.configs_for(user))
+        | Q(recipient=user)
+        | Q(raw_message__in=access.messages_for(user).exclude(source="waha"))
     ).distinct()
+
+
+def record_href(record, **extra):
+    return '/messenger?' + urlencode({
+        's': record.session_name, 'c': record.chat_id, 'cat': record.category,
+        't': record.team_id or '', 'record': record.pk, **extra,
+    })
 
 
 def trace_allowed(user, record):
@@ -135,7 +141,7 @@ def trace_allowed(user, record):
 def _latest_by(rows, key):
     out = {}
     for row in rows:
-        out.setdefault(row[key], row)
+        out.setdefault(getattr(row, key), row)
     return out
 
 
@@ -148,6 +154,11 @@ def _axis_from_trace(trace, work, clar_state):
         if trace.status in ("sending", "accepted", "unknown"):
             return "analyzing"
         if trace.pipeline_action == "non_commercial":
+            state = (trace.context_metadata or {}).get('request_state')
+            if state == 'not_sent':
+                return 'queued'
+            if state in ('prepared', 'sent'):
+                return 'analyzing'
             return "no_crm_actions"
         return "analyzed"
     if work is not None:
@@ -155,6 +166,8 @@ def _axis_from_trace(trace, work, clar_state):
             return "error"
         if work.state == "pending":
             return "queued"
+        if work.state in ("done", "completed"):
+            return "analyzed"
         return "analyzing"
     return "received"
 
@@ -168,7 +181,7 @@ def _delivery_axis(delivery, otp_outbox):
         }.get(delivery.state, "unknown")
     if otp_outbox is not None:
         return {
-            "pending": "queued", "processing": "sending", "done": "delivered",
+            "pending": "queued", "enqueued": "queued", "processing": "sending", "done": "sent",
             "failed": "failed",
         }.get(otp_outbox.state, "unknown")
     return "not_applicable"
@@ -191,8 +204,8 @@ def _clarification_axis(clar, delivery_axis):
 def _crm_axis(deliveries):
     if not deliveries:
         return "not_required"
-    states = {d.state for d in deliveries}
-    for code in ("unknown", "unavailable", "failed", "sending", "accepted", "confirmed"):
+    states = {"confirmed" if d.state == "delivered" else d.state for d in deliveries}
+    for code in ("unknown", "unavailable", "failed", "blocked", "partial", "sending", "accepted", "confirmed"):
         if code in states:
             return code
     return "queued"
@@ -205,11 +218,13 @@ def axes_for_records(records):
     otp_ids = [r.otp_outbox_id for r in records if r.otp_outbox_id]
 
     works = _latest_by(
-        SourceWorkItem.objects.filter(raw_message_id__in=raw_ids).order_by("raw_message_id", "-id"),
+        SourceWorkItem.objects.filter(raw_message_id__in=raw_ids).order_by("raw_message_id", "-id")
+        .distinct('raw_message_id').only('id', 'raw_message_id', 'state', 'error_code'),
         "raw_message_id",
     )
     traces = _latest_by(
-        MessageProcessingTrace.objects.filter(raw_message_id__in=raw_ids).order_by("raw_message_id", "-id"),
+        MessageProcessingTrace.objects.filter(raw_message_id__in=raw_ids).order_by("raw_message_id", "-id")
+        .distinct('raw_message_id').only('id','raw_message_id','status','pipeline_action','context_metadata'),
         "raw_message_id",
     )
     trace_ids = [t.id for t in traces.values()]
@@ -220,7 +235,7 @@ def axes_for_records(records):
     }
     trace_to_raw = {t.id: t.raw_message_id for t in traces.values()}
     clars_by_raw = {}
-    for clar in FactClarification.objects.filter(candidate__trace_id__in=trace_ids):
+    for clar in FactClarification.objects.filter(candidate__trace_id__in=trace_ids).select_related('candidate').order_by('id'):
         raw_id = trace_to_raw.get(clar.candidate.trace_id)
         if raw_id is not None:
             clars_by_raw.setdefault(raw_id, clar)
@@ -275,6 +290,53 @@ def axes_for_records(records):
     return result
 
 
+def filter_record_statuses(request, qs):
+    """Drill down into the same message cohort, never into work-attempt states."""
+    if request.query_params.get('cohort') == 'source':
+        qs = qs.filter(direction='inbound',purpose='source')
+    state = request.query_params.get('analysis')
+    attention = request.query_params.get('attention') == '1'
+    if not state and not attention:
+        return qs
+    if state and state not in ANALYSIS_LABELS:
+        raise ValidationError({'error':'Неизвестное состояние анализа.'})
+    traces = MessageProcessingTrace.objects.filter(raw_message_id=OuterRef('raw_message_id')).order_by('-id')
+    works = SourceWorkItem.objects.filter(raw_message_id=OuterRef('raw_message_id')).order_by('-id')
+    delivery = NotificationDelivery.objects.filter(notification_id=OuterRef('notification_id')).order_by('-attempt_no','-id')
+    qs = qs.annotate(_trace_id=Subquery(traces.values('id')[:1]),
+        _trace_status=Subquery(traces.values('status')[:1]), _action=Subquery(traces.values('pipeline_action')[:1]),
+        _request_state=Subquery(traces.values('context_metadata__request_state')[:1]),
+        _work_state=Subquery(works.values('state')[:1]), _work_error=Subquery(works.values('error_code')[:1]),
+        _delivery=Subquery(delivery.values('state')[:1]))
+    qs = qs.annotate(_clar=Coalesce(
+        Subquery(FactClarification.objects.filter(notification_id=OuterRef('notification_id')).order_by('id').values('state')[:1]),
+        Subquery(FactClarification.objects.filter(candidate__trace_id=OuterRef('_trace_id')).order_by('id').values('state')[:1]),
+        output_field=CharField()))
+    qs = qs.annotate(_analysis=Case(
+        When(_clar='awaiting',then=Value('need_context')),
+        When(_trace_status='error',then=Value('error')),
+        When(_trace_status__in=['sending','accepted','unknown'],then=Value('analyzing')),
+        When(_action='non_commercial',_request_state='not_sent',then=Value('queued')),
+        When(_action='non_commercial',_request_state__in=['prepared','sent'],then=Value('analyzing')),
+        When(_action='non_commercial',then=Value('no_crm_actions')),
+        When(_trace_id__isnull=False,then=Value('analyzed')),
+        When(Q(_work_state='error') | (Q(_work_error__isnull=False)&~Q(_work_error='')),then=Value('error')),
+        When(_work_state='pending',then=Value('queued')),
+        When(_work_state__in=['done','completed'],then=Value('analyzed')),
+        When(_work_state__isnull=False,then=Value('analyzing')),
+        default=Value('received'),output_field=CharField()))
+    if state:
+        qs = qs.filter(_analysis=state)
+    if attention:
+        qs = qs.annotate(_bad_crm=Exists(CrmDelivery.objects.filter(
+            fact_event__decision__candidate__trace_id=OuterRef('_trace_id'),state__in=['failed','unknown','unavailable'])))
+        qs = qs.filter(Q(_analysis='error') | Q(_delivery__in=['failed','error','unknown']) |
+            Q(otp_outbox__state='failed') | Q(_bad_crm=True) |
+            Q(_clar__in=['awaiting','expired','unconfirmed']) |
+            Q(_clar='queued',_delivery__in=['sent','delivered','ack']))
+    return qs
+
+
 def _active_bad_events():
     """Плохие события, для которых нет более нового успешного того же рода."""
     newer_good = CommunicationEvent.objects.filter(
@@ -302,6 +364,7 @@ def serialize_record_brief(record, axes):
         "direction": record.direction,
         "purpose": record.purpose,
         "body": record.sanitized_body[:600],
+        "sender_name": sanitize_body(record.raw_message.sender_name) if record.raw_message_id else '',
         "occurred_at": when.isoformat() if when else None,
         "time_is_estimated": record.time_is_estimated,
         "statuses": axis,
@@ -323,7 +386,7 @@ def _dialog_filter(dialogs):
 
 def _name_for(record):
     if record.category == "group":
-        return record.session_name or record.chat_id
+        return record.config.name if record.config_id else record.chat_id
     if record.recipient_id:
         return record.recipient.get_full_name() or record.recipient.username
     return "Система"
@@ -335,29 +398,58 @@ class DialogsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = records_scope(request.user)
+        qs = filter_record_statuses(request, records_scope(request.user))
         category = request.query_params.get("category") or "all"
         if category in ("group", "private", "system"):
             qs = qs.filter(category=category)
         q = (request.query_params.get("q") or "").strip()
         if q:
             qs = qs.filter(Q(session_name__icontains=q) | Q(chat_id__icontains=q)
-                           | Q(sanitized_body__icontains=q))
+                           | Q(config__name__icontains=q) | Q(raw_message__sender_name__icontains=q)
+                           | Q(raw_message__sender_phone__icontains=q) | Q(sanitized_body__icontains=q))
 
-        dialogs = list(
-            qs.values("session_name", "chat_id", "category", "team_id")
-            .annotate(last_at=Max("occurred_at"))
-            .order_by("-last_at")[:DIALOG_PAGE]
-        )
+        grouped = qs.values("session_name", "chat_id", "category", "team_id").annotate(
+            last_at=Max("occurred_at"), last_id=Max("id"))
+        cursor = decode_cursor(request.query_params.get('cursor'))
+        if cursor:
+            if not isinstance(cursor, dict) or type(cursor.get('i')) is not int:
+                raise ValidationError({'error':'Некорректный курсор диалогов.'})
+            moment, ident = cursor.get('t'), cursor['i']
+            if moment:
+                grouped = grouped.filter(Q(last_at__lt=moment) | Q(last_at=moment,last_id__lt=ident) | Q(last_at__isnull=True))
+            else:
+                grouped = grouped.filter(last_at__isnull=True,last_id__lt=ident)
+        limit = page_size(request, DIALOG_PAGE)
+        dialogs = list(grouped.order_by(F('last_at').desc(nulls_last=True),'-last_id')[:limit+1])
+        has_more = len(dialogs) > limit
+        dialogs = dialogs[:limit]
+        next_cursor = encode_cursor({'t':dialogs[-1]['last_at'],'i':dialogs[-1]['last_id']}) if has_more else None
         attention_counts = {}
-        for row in (_active_bad_events()
-                    .filter(record__in=qs)
-                    .values("record__session_name", "record__chat_id", "record__category",
-                            "record__team_id", "record_id")
-                    .distinct()):
-            key = (row["record__session_name"], row["record__chat_id"],
-                   row["record__category"], row["record__team_id"])
-            attention_counts[key] = attention_counts.get(key, 0) + 1
+        batch = []
+        def count_attention(rows):
+            axes = axes_for_records(rows)
+            for record in rows:
+                if axes[record.pk]['attention']:
+                    key = (record.session_name, record.chat_id, record.category, record.team_id)
+                    attention_counts[key] = attention_counts.get(key, 0) + 1
+        # Only possible problems need the canonical adapter. A healthy history
+        # must not deserialize every message/trace to render 200 dialog rows.
+        possible_attention = qs.filter(_dialog_filter(dialogs)).filter(
+            Q(raw_message_id__in=MessageProcessingTrace.objects.filter(status='error').values('raw_message_id')) |
+            Q(raw_message_id__in=SourceWorkItem.objects.filter(Q(state='error') | ~Q(error_code='')).values('raw_message_id')) |
+            Q(raw_message_id__in=FactClarification.objects.filter(state__in=['awaiting','expired','unconfirmed']).values('candidate__trace__raw_message_id')) |
+            Q(notification_id__in=FactClarification.objects.filter(state__in=['queued','awaiting','expired','unconfirmed']).values('notification_id')) |
+            Q(notification_id__in=NotificationDelivery.objects.filter(state__in=['failed','error','unknown']).values('notification_id')) |
+            Q(otp_outbox_id__in=OutboxEvent.objects.filter(state='failed').values('id')) |
+            Q(raw_message_id__in=CrmDelivery.objects.filter(state__in=['failed','unknown','unavailable']).values('fact_event__decision__candidate__trace__raw_message_id'))
+        )
+        for record in possible_attention.order_by('id').iterator(chunk_size=1000):
+            batch.append(record)
+            if len(batch) == 1000:
+                count_attention(batch)
+                batch = []
+        if batch:
+            count_attention(batch)
 
         previews = {}
         if dialogs:
@@ -367,7 +459,7 @@ class DialogsView(APIView):
                     partition_by=[F("session_name"), F("chat_id"), F("category"), F("team_id")],
                     order_by=[F("occurred_at").desc(nulls_last=True), F("id").desc()],
                 ),
-            ).filter(rn=1).select_related("recipient")
+            ).filter(rn=1).select_related("recipient","config")
             for record in ranked:
                 previews[(record.session_name, record.chat_id, record.category, record.team_id)] = record
 
@@ -386,13 +478,14 @@ class DialogsView(APIView):
                 "last_at": dialog["last_at"].isoformat() if dialog["last_at"] else None,
                 "last_preview": preview.sanitized_body[:120] if preview is not None else "",
                 "last_direction": preview.direction if preview is not None else None,
+                "match_record_id": preview.pk if q and preview is not None else None,
                 "attention_count": attention_counts.get(key, 0),
             })
         if request.query_params.get("attention") == "1":
             items = [item for item in items if item["attention_count"] > 0]
         return Response({
             "items": items,
-            "next_cursor": None,
+            "next_cursor": next_cursor,
             "as_of": timezone.now().isoformat(),
             "coverage": "scoped",
         })
@@ -411,24 +504,31 @@ def _records_feed(request, qs):
     order = [F("occurred_at").desc(nulls_last=True), F("id").desc()]
     if around:
         try:
-            anchor = CommunicationRecord.objects.get(pk=int(around))
+            anchor = qs.get(pk=int(around))
         except (CommunicationRecord.DoesNotExist, TypeError, ValueError):
             return [], None
         half = max(1, limit // 2)
-        before = qs.filter(Q(occurred_at__lt=anchor.occurred_at) | Q(
+        if anchor.occurred_at is None:
+            qs = qs.filter(occurred_at__isnull=True, id__lte=anchor.id)
+            around = None
+        else:
+            before = qs.filter(Q(occurred_at__lt=anchor.occurred_at) | Q(
             occurred_at=anchor.occurred_at, id__lte=anchor.id) | Q(
             occurred_at__isnull=True)).order_by(*order)[:half]
-        after = qs.filter(occurred_at__gt=anchor.occurred_at).order_by(
-            *order)[: limit - half]
-        ids = sorted({row.pk for row in before} | {row.pk for row in after} | {anchor.pk})
-        return list(qs.filter(pk__in=ids).order_by(*order)), None
+            after = qs.filter(Q(occurred_at__gt=anchor.occurred_at) | Q(
+                occurred_at=anchor.occurred_at, id__gt=anchor.id)).order_by('occurred_at', 'id')[:limit-half]
+            ids = {row.pk for row in before} | {row.pk for row in after} | {anchor.pk}
+            rows = list(qs.filter(pk__in=ids).order_by(*order))
+            last = rows[-1]
+            next_cursor = encode_cursor({'t': last.occurred_at.isoformat() if last.occurred_at else None, 'i': last.pk})
+            return rows, next_cursor
     if cursor:
         moment, ident = cursor.get("t"), cursor.get("i")
         if moment and ident is not None:
             qs = qs.filter(Q(occurred_at__lt=moment) | Q(occurred_at=moment, id__lt=ident)
                            | Q(occurred_at__isnull=True))
         elif ident is not None:
-            qs = qs.filter(id__lt=ident)
+            qs = qs.filter(occurred_at__isnull=True, id__lt=ident)
     rows = list(qs.order_by(*order)[: limit + 1])
     has_more = len(rows) > limit
     rows = rows[:limit]
@@ -446,7 +546,10 @@ class RecordsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = records_scope(request.user)
+        qs = filter_record_statuses(request, records_scope(request.user))
+        raw_id = request.query_params.get("raw_message_id")
+        if raw_id and raw_id.isdecimal():
+            qs = qs.filter(raw_message_id=int(raw_id))
         category = request.query_params.get("category")
         if category in ("group", "private", "system"):
             qs = qs.filter(category=category)
@@ -461,7 +564,7 @@ class RecordsView(APIView):
         if q:
             qs = qs.filter(sanitized_body__icontains=q)
 
-        rows, next_cursor = _records_feed(request, qs)
+        rows, next_cursor = _records_feed(request, qs.select_related('raw_message'))
         axes = axes_for_records(rows) if rows else {}
         return Response({
             "items": [serialize_record_brief(row, axes) for row in rows],
@@ -492,13 +595,15 @@ class RecordDetailView(APIView):
         axes = axes_for_records([record])
         payload = serialize_record_brief(record, axes)
         raw = record.raw_message
+        from .communication import sanitize_body
+        payload['body'] = sanitize_body(raw.content, limit=None) if raw else record.sanitized_body
         payload.update({
             "origin": {
                 "kind": "raw_message" if raw else ("notification" if record.notification_id else
                                                    "otp_outbox" if record.otp_outbox_id else "internal"),
                 "raw_message_id": raw.pk if raw else None,
-                "sender_name": raw.sender_name if raw else None,
-                "sender_phone_masked": None,
+                "sender_name": sanitize_body(raw.sender_name) if raw else None,
+                "sender_phone_masked": (raw.sender_phone[:3] + '•••' + raw.sender_phone[-2:]) if raw and re.fullmatch(r'\+?[0-9]{10,15}',raw.sender_phone) else None,
                 "sent_at_known": raw.sent_at_known if raw else True,
                 "source_time": raw.timestamp.isoformat() if raw else None,
                 "event_type": record.otp_outbox.event_type if record.otp_outbox_id else None,
@@ -515,14 +620,16 @@ class RecordDetailView(APIView):
 
 
 def _can_reanalyze(user, record):
-    if record.raw_message_id is None:
+    if not record.raw_message_id:
         return False
-    if user.is_superuser:
-        return True
-    team_id = record.team_id or (record.config.team_id if record.config_id else None)
-    if team_id is None:
+    from .processing_attempts import require_reanalysis
+    from .providers import ProviderUnavailable
+    from rest_framework.exceptions import PermissionDenied
+    try:
+        require_reanalysis(user, record.raw_message)
+    except (PermissionDenied, ProviderUnavailable):
         return False
-    return access.memberships(user).filter(team_id=team_id, role__in=["team_lead"]).exists()
+    return True
 
 
 class RecordChainView(APIView):
@@ -543,25 +650,44 @@ class RecordChainView(APIView):
                 nodes.append(node)
             return node
 
-        add_node("record", record.pk, "Сообщение", record.purpose, href=f"/messenger?record={record.pk}")
+        add_node("record", record.pk, "Сообщение", record.purpose, href=record_href(record))
 
         raw = record.raw_message
         if raw is not None:
-            for trace in MessageProcessingTrace.objects.filter(raw_message=raw).order_by("attempt_no"):
+            traces = list(MessageProcessingTrace.objects.filter(raw_message=raw).only('id','attempt_no','status').order_by("attempt_no"))
+            candidates = {}
+            for candidate in access.candidates_for(request.user).filter(trace_id__in=[t.pk for t in traces]).only('id','trace_id','status'):
+                candidates.setdefault(candidate.trace_id, []).append(candidate)
+            for trace in traces:
                 add_node("trace", trace.pk, f"Попытка анализа №{trace.attempt_no}", trace.status,
                          allowed=trace_allowed(request.user, record),
-                         href=f"/messenger/records/{record.pk}/traces")
-                for candidate in trace.candidates.all():
-                    add_node("candidate", candidate.pk, "Предложенное изменение", candidate.status)
+                         href=record_href(record, tab='trace'))
+                for candidate in candidates.get(trace.pk, []):
+                    add_node("candidate", candidate.pk, "Предложенное изменение", candidate.status,
+                             href=f"/analytics?view=review&candidate={candidate.pk}")
+            questions = FactClarification.objects.filter(
+                Q(candidate__trace__raw_message=raw) | Q(candidates__trace__raw_message=raw)
+            ).distinct()
+            for question in questions:
+                target = scope.filter(notification_id=question.notification_id).first()
+                if target:
+                    add_node("record", target.pk, "Личное уточнение", question.state, href=record_href(target))
+            for reply in ClarificationReply.objects.filter(raw_message=raw).select_related("question__candidate__trace"):
+                target = scope.filter(notification_id=reply.question.notification_id).first()
+                if target:
+                    add_node("record", target.pk, "Вопрос к этому ответу", reply.question.state, href=record_href(target))
         if record.notification_id:
             clar = FactClarification.objects.filter(notification_id=record.notification_id).first()
             if clar is not None:
                 add_node("clarification", clar.pk, "Уточнение", clar.state)
+                target = scope.filter(raw_message_id=clar.candidate.trace.raw_message_id).first() if clar.candidate.trace_id else None
+                if target:
+                    add_node("record", target.pk, "Исходное сообщение группы", "source", href=record_href(target))
                 for reply in ClarificationReply.objects.filter(question=clar).select_related("raw_message"):
                     reply_record = scope.filter(raw_message=reply.raw_message).first() if reply.raw_message_id else None
                     add_node("reply", reply.pk, "Ответ на уточнение", reply.state,
                              allowed=reply_record is not None,
-                             href=f"/messenger?record={reply_record.pk}" if reply_record else None)
+                             href=record_href(reply_record) if reply_record else None)
         if record.notification_id:
             deliveries = list(NotificationDelivery.objects.filter(
                 notification_id=record.notification_id).order_by("attempt_no"))
@@ -577,7 +703,13 @@ class RecordChainView(APIView):
                          f"Изменение CRM ({link.object_type if link else 'объект'})", delivery.state)
         # События журнала дают хронологию и связи родитель→ребёнок.
         limit = page_size(request, CHAIN_PAGE_MAX)
-        events = list(CommunicationEvent.objects.filter(record=record).order_by("occurred_at", "id")[:limit])
+        cursor = decode_cursor(request.query_params.get('cursor')) or {}
+        events_query = CommunicationEvent.objects.filter(record=record).order_by('id')
+        if type(cursor.get('i')) is int:
+            events_query = events_query.filter(id__gt=cursor['i'])
+        events = list(events_query[:limit+1])
+        has_more = len(events) > limit
+        events = events[:limit]
         timeline = []
         for event in events:
             timeline.append({
@@ -594,7 +726,7 @@ class RecordChainView(APIView):
             "nodes": nodes,
             "edges": edges,
             "timeline": timeline,
-            "next_cursor": None,
+            "next_cursor": encode_cursor({'i':events[-1].pk}) if has_more else None,
             "as_of": timezone.now().isoformat(),
             "coverage": "scoped",
         })
@@ -619,17 +751,83 @@ class RecordTracesView(APIView):
         raw = record.raw_message
         traces = MessageProcessingTrace.objects.filter(raw_message=raw).order_by("attempt_no") if raw else []
         items = []
+        limit = page_size(request)
+        cursor = decode_cursor(request.query_params.get('cursor')) or {}
+        if raw:
+            traces = MessageProcessingTrace.objects.filter(raw_message=raw).order_by('-id')
+            if type(cursor.get('i')) is int:
+                traces = traces.filter(pk__lt=cursor['i'])
+            traces = list(traces[:limit+1])
+        has_more = len(traces) > limit
+        traces = traces[:limit]
         for trace in traces:
             row = {"id": trace.pk, "created_at": trace.created_at.isoformat()}
             for field in SAFE_TRACE_FIELDS:
                 value = getattr(trace, field, None)
                 row[field] = str(value) if hasattr(value, "as_text") or field == "bitrix_deal_stage" else value
-            row["ai_extracted_facts"] = trace.ai_extracted_facts
-            row["context_metadata"] = trace.context_metadata
+            row["ai_extracted_facts"] = sanitize_data(trace.ai_extracted_facts)
+            metadata = trace.context_metadata or {}
+            row['context_metadata'] = sanitize_data({key: metadata[key] for key in (
+                'source', 'request_state', 'analysis_policy', 'model', 'input_tokens_preflight',
+                'provider_input_tokens', 'output_tokens', 'history_complete_in_request',
+                'analysis_chunk_input_limit', 'max_completion_tokens', 'available_messages_count',
+                'fully_included_messages_count', 'partial_messages_count', 'omitted_messages_count',
+                'reduction_reason', 'retry',
+                'output_retry_generation', 'schema_repairs', 'repair_reason',
+                'timings_ms', 'token_breakdown', 'completion_reserve_tokens',
+                'input_tokens_actual', 'provider', 'api_format', 'schema_version',
+                'policy_version', 'window_tokens', 'history_budget_tokens',
+            ) if key in metadata})
+            if isinstance(metadata.get('full_history'), dict):
+                row['context_metadata']['full_history'] = {key: value for key, value in metadata['full_history'].items()
+                    if key in ('total','read','validated_read','phase','complete','stage','reconciliation_page','reconciliation_pages')}
+            for name in ('segment_diagnostics','response_diagnostics'):
+                if isinstance(metadata.get(name),dict):
+                    row['context_metadata'][name] = sanitize_data({key:value for key,value in metadata[name].items()
+                        if key in ('finish_reason','output_tokens','response_characters','provider_stop_reason','reasoning_characters')})
+            row['has_context'] = bool(trace.earlier_messages_context)
             row["has_raw_payload"] = bool(trace.whatsapp_raw_payload)
-            items.append(row)
-        return Response({"items": items, "next_cursor": None,
+            items.append(sanitize_data(row))
+        return Response({"items": items, "next_cursor": encode_cursor({"i": traces[-1].pk}) if has_more else None,
                          "as_of": timezone.now().isoformat(), "coverage": "scoped"})
+
+
+class RecordTraceContextView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk, trace_pk):
+        from django.shortcuts import get_object_or_404
+        from rest_framework.exceptions import PermissionDenied
+        from .communication import sanitize_body
+        record = _get_record(request, pk)
+        if record is None:
+            return Response({'error':'Запись недоступна.'},status=404)
+        if not trace_allowed(request.user, record):
+            raise PermissionDenied('Нет права на диагностику ИИ.')
+        trace = get_object_or_404(MessageProcessingTrace,pk=trace_pk,raw_message_id=record.raw_message_id)
+        snapshots = [row for row in (trace.earlier_messages_context or []) if isinstance(row,dict) and type(row.get('raw_message_id')) is int]
+        ids = [row['raw_message_id'] for row in snapshots]
+        allowed = set(records_scope(request.user).filter(raw_message_id__in=ids).values_list('raw_message_id',flat=True))
+        visible = [row for row in snapshots if row['raw_message_id'] in allowed]
+        cursor = decode_cursor(request.query_params.get('cursor')) or {}
+        offset = cursor.get('o',0)
+        if type(offset) is not int or offset < 0:
+            return Response({'error':'Некорректный курсор.'},status=400)
+        limit = min(page_size(request),25)
+        page = visible[offset:offset+limit]
+        records = {row.raw_message_id:row for row in records_scope(request.user).filter(raw_message_id__in=[row['raw_message_id'] for row in page])}
+        items = []
+        for row in page:
+            body = row.get('content') if isinstance(row.get('content'),str) else row.get('text','')
+            body = body if isinstance(body, str) else ''
+            sender = row.get('sender_name')
+            target = records.get(row['raw_message_id'])
+            items.append({'raw_message_id':row['raw_message_id'], 'body':sanitize_body(body),
+                'sender':sanitize_body(sender if isinstance(sender,str) else ''), 'time':row.get('timestamp'),
+                'partial':bool(row.get('partial')) or len(body)>4000,
+                'href':record_href(target) if target else None})
+        return Response({'items':items, 'next_cursor':encode_cursor({'o':offset+limit}) if offset+limit < len(visible) else None,
+            'as_of':timezone.now().isoformat(),'coverage':'scoped'})
 
 
 # ---------------------------------------------------------------- changes
@@ -641,6 +839,13 @@ class ChangesView(APIView):
 
     def get(self, request):
         scope = records_scope(request.user)
+        if not request.query_params.get("cursor"):
+            # Establish a high-water mark before the initial feed load. Events
+            # to old records after this snapshot still advance the event cursor.
+            return Response({"items": [], "next_cursor": encode_cursor({
+                "r": scope.aggregate(n=Max('id'))['n'] or 0,
+                "e": CommunicationEvent.objects.filter(record__in=scope).aggregate(n=Max('id'))['n'] or 0,
+            }), "as_of": timezone.now().isoformat(), "coverage": "scoped"})
         cursor = decode_cursor(request.query_params.get("cursor")) or {}
         try:
             after_record = int(cursor.get("r") or 0)
@@ -649,7 +854,7 @@ class ChangesView(APIView):
             after_record = after_event = 0
         limit = page_size(request)
 
-        records = list(scope.filter(id__gt=after_record).order_by("id")[:limit])
+        records = list(scope.filter(id__gt=after_record).select_related('raw_message').order_by("id")[:limit])
         events = list(
             CommunicationEvent.objects.filter(record__in=scope, id__gt=after_event)
             .order_by("id")[:limit]
@@ -689,32 +894,20 @@ class ReanalyzeView(APIView):
             return Response({"error": "Запись недоступна."}, status=404)
         if not _can_reanalyze(request.user, record):
             return Response({"error": "Недостаточно прав для повторного анализа."}, status=403)
-        idempotency_key = (request.data.get("idempotency_key") or "").strip()
-        if not idempotency_key:
-            return Response({"error": "Требуется idempotency_key."}, status=400)
-        raw = record.raw_message
-        config = record.config
-        event_type = incoming_event_type(config)
-        deduplication_key = f"reanalyze:{raw.pk}:{idempotency_key}"[:191]
-        with transaction.atomic():
-            existing = OutboxEvent.objects.filter(deduplication_key=deduplication_key).first()
-            if existing is None:
-                existing = OutboxEvent.objects.create(
-                    event_type=event_type,
-                    payload={
-                        "raw_message_id": raw.pk,
-                        "config_id": config.pk if config else None,
-                        "session_name": record.session_name,
-                        "chat_id": record.chat_id,
-                        "reanalyze": True,
-                    },
-                    deduplication_key=deduplication_key,
-                )
-            AuditEvent.objects.create(
-                actor=request.user,
-                target_type="communication_record",
-                target_id=record.pk,
-                action="messenger_reanalyze",
-                before_after={"outbox_event_id": existing.pk, "event_type": event_type},
-            )
-        return Response({"operation_id": existing.pk, "state": existing.state}, status=202)
+        from .processing_attempts import schedule_reanalysis, require_reanalysis
+        from .providers import ProviderUnavailable
+        from .mfa import require_privileged_mfa
+        from rest_framework import serializers
+        class Input(serializers.Serializer):
+            idempotency_key = serializers.UUIDField()
+        schema = Input(data=request.data)
+        schema.is_valid(raise_exception=True)
+        require_privileged_mfa(request)
+        require_reanalysis(request.user, record.raw_message)
+        try:
+            trace = schedule_reanalysis(record.raw_message_id, request.user,
+                str(schema.validated_data['idempotency_key']))
+        except ProviderUnavailable:
+            return Response({'error': 'Для сообщения уже выполняется анализ. Дождитесь результата.'}, status=409)
+        event = OutboxEvent.objects.get(deduplication_key=trace.operation_key)
+        return Response({'operation_id': event.pk, 'trace_id': trace.pk, 'state': event.state}, status=202)

@@ -1,6 +1,8 @@
+import { readFileSync } from './helpers/files'
+import { authenticateShell } from './helpers/session'
 import { test, expect, type APIRequestContext } from '@playwright/test'
 import { createHmac, randomUUID } from 'node:crypto'
-import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 const dir = process.env.MAZORY_E2E_DIR!
@@ -152,11 +154,9 @@ test('missing sale price is asked in WhatsApp, answered once, delivered with rea
   expect(Object.keys(delivery.patch).sort()).toEqual(['CURRENCY_ID', 'OPPORTUNITY'])
   const receipt = () => proof().journal.filter(row => row.method === 'crm.deal.update' && row.status === 'accepted' && row.external_id === project(name)?.bitrix_id && row.payload.fields?.OPPORTUNITY === '50000000.00').at(-1)
   await expect.poll(() => receipt()?.delivery_id).toBe(delivery.id)
-  await page.goto(`/admin/login/?next=/admin/api/bitrixdealchangelog/${receipt()!.id}/change/`)
-  await page.getByLabel('Имя пользователя').fill('79990000001')
-  await page.getByLabel('Пароль').fill('local-e2e-only')
-  await page.getByRole('button', { name: /Войти/ }).click()
-  await expect(page.locator('pre').filter({ hasText: 'OPPORTUNITY' })).toContainText('50000000.00')
+  await authenticateShell(page.context())
+  await page.goto(`/crm-changes?receipt=${receipt()!.id}`)
+  await expect(page.locator('[data-crm-id]').filter({ hasText: 'OPPORTUNITY' }).first()).toContainText('50000000.00')
   await page.screenshot({ path: join(dir, 'sale-clarification-journal.png'), fullPage: true })
   const repeated = await answer(request, q, 'resolved-repeat', '51 млн тенге')
   await expect.poll(() => reply(repeated)?.error_code).toBe('clarification_stale')

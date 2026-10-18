@@ -1,5 +1,7 @@
+import { readFileSync } from './helpers/files'
+import { authenticateShell } from './helpers/session'
 import { test, expect, type APIRequestContext } from '@playwright/test'
-import { readFileSync, writeFileSync, renameSync, existsSync, chmodSync } from 'node:fs'
+import { writeFileSync, renameSync, existsSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHmac, randomUUID } from 'node:crypto'
 import type { Candidate, Page as ApiPage } from '../src/types/platform'
@@ -274,17 +276,15 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   await expect.poll(() => proof().messages.find(row => row.message_id === 'continuous-reclassified-context')?.processed).toBe(true)
   const retained: ApiPage<Candidate> = await candidates(request, headers, 'pending')
   expect(retained.results.filter(row => row.proposed_changes.evidence_message_id === retainedRaw())).toHaveLength(2)
-  await page.goto('/')
-  await page.getByRole('button', { name: 'Рабочий кабинет', exact: true }).click()
+  await page.goto('/analytics?view=projects')
   await page.getByRole('button', { name: 'Отчеты по WhatsApp', exact: true }).click()
   await expect(page.getByText('Автоматическая обработка WhatsApp включена', { exact: true })).toBeVisible()
   await page.screenshot({ path: join(dir, 'continuous-delivery.png'), fullPage: true })
-  await page.goto('/admin/login/?next=/admin/api/bitrixdealchangelog/')
-  await page.getByLabel('Имя пользователя').fill('79990000001')
-  await page.getByLabel('Пароль').fill('local-e2e-only')
-  await page.getByRole('button', {name:/Войти/}).click()
-  await expect(page.locator('#result_list')).toContainText('crm.deal.add')
-  await expect(page.locator('#result_list')).toContainText('tasks.task.add')
+  await authenticateShell(page.context())
+  await page.goto('/crm-changes')
+  await expect(page.getByRole('region',{name:'Изменения CRM',exact:true})).toContainText('crm.deal.add')
+  await page.getByLabel('Тип объекта CRM',{exact:true}).selectOption('task')
+  await expect(page.getByRole('region',{name:'Изменения CRM',exact:true})).toContainText('tasks.task.add')
   await control({action:'journal_prepare'})
   await expect.poll(() => proof().journal_fixture?.success).toBe(true)
   const fixture = proof().journal_fixture!.result
@@ -314,8 +314,8 @@ test('continuous CRM confirms readback, retries a discarded write, and quarantin
   expect(provider().comments?.length).toBe(beforeHistoryComments)
   expect(mutations()).toBe(beforeHistoryMutations)
   await page.reload()
-  await expect(page.locator('#result_list')).toContainText('Восстановленная доставка')
-  const taskLink=page.locator(`#result_list a[href$="/tasks/task/view/${task.id}/"]`).first()
+  await expect(page.getByRole('region',{name:'Изменения CRM',exact:true})).toContainText('Восстановленная доставка')
+  const taskLink=page.locator(`[data-crm-id] a[href$="/tasks/task/view/${task.id}/"]`).first()
   await expect(taskLink).toBeVisible()
   await expect(taskLink).toHaveAttribute('href',new RegExp(`/company/personal/user/7/tasks/task/view/${task.id}/$`))
   await page.screenshot({path:join(dir,'bitrix-journal-history.png'),fullPage:true})
@@ -345,4 +345,28 @@ test('continuous reconciliation restores lost thread extraction without competin
   await expect.poll(() => proof().messages.find(row => row.id === raw.id)?.processed).toBe(true)
   await message(request, group, 'continuous-routed', 'БЦ Север: оплата 50 000 000 ₸ поступила сегодня')
   expect(proof().messages.filter(row => row.id === raw.id)).toHaveLength(1)
+})
+
+// A read-only continuation against the actual state created by the delivery
+// scenario, used after fixing a journal presentation error without replaying writes.
+test('persisted reconstructed task link uses the actual readback owner and keeps its public URL', async ({page,context,request}) => {
+  test.skip(process.env.MAZORY_E2E_JOURNAL_READBACK !== '1','Requires the completed persisted delivery fixture')
+  const task=Object.values(provider().tasks || {}).find(row=>row.responsibleId === '7')!
+  expect(task).toBeDefined()
+  const session=JSON.parse(readFileSync(join(dir,'continuous-session.json'),'utf8')) as {access:string}
+  const headers={Authorization:`Bearer ${session.access}`}
+  const mutations=()=>readFileSync(join(dir,'crm-requests.jsonl'),'utf8').trim().split('\n').filter(Boolean).map(line=>JSON.parse(line) as {method:string}).filter(row=>/\.(add|update|delete|complete|defer)\.json$/.test(row.method)).length
+  const before=mutations()
+  const result=await (await request.get('/api/crm/changes/?object_type=task',{headers})).json() as {items:{external_id:string|null;external_url:string|null;reconstructed?:boolean}[]}
+  const row=result.items.find(item=>item.external_id===task.id && item.reconstructed)!
+  expect(row).toBeDefined()
+  expect(row.external_url).toBe(`https://localhost/company/personal/user/${task.responsibleId}/tasks/task/view/${task.id}/`)
+  expect(row.external_url).not.toContain('[скрыто]')
+  await authenticateShell(context)
+  await page.goto('/crm-changes?object_type=task')
+  await expect(page.getByRole('region',{name:'Изменения CRM',exact:true})).toContainText('Восстановленная доставка')
+  const link=page.locator(`[data-crm-id] a[href$="/tasks/task/view/${task.id}/"]`).first()
+  await expect(link).toBeVisible()
+  await expect(link).toHaveAttribute('href',row.external_url!)
+  expect(mutations()).toBe(before)
 })

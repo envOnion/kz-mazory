@@ -1,5 +1,7 @@
-import { test, expect } from '@playwright/test'
-import { readFileSync, writeFileSync, renameSync, existsSync, unlinkSync } from 'node:fs'
+import { readFileSync } from './helpers/files'
+import { authenticateShell } from './helpers/session'
+import { test, expect, type APIRequestContext } from '@playwright/test'
+import { writeFileSync, renameSync, existsSync, unlinkSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { Candidate, Page } from '../src/types/platform'
@@ -11,9 +13,17 @@ interface ProviderCall { target_id: number; source_ids: number[]; phase: string;
 let session: Session
 test.describe.configure({ mode: 'serial' })
 test.setTimeout(180000)
-function control(value: Record<string, unknown>) {
+async function control(request:APIRequestContext, value: Record<string, unknown>) {
   const target = join(directory, 'provider-state.json'), temporary = `${target}.${randomUUID()}`
   writeFileSync(temporary, JSON.stringify(value)); renameSync(temporary, target)
+  // Wait for the real dispatcher to apply the requested model window before
+  // HTTP freezes the new attempt's configuration. A file write is not an ACK.
+  if(typeof value.thread_window === 'number') await expect.poll(async()=>{
+    const response=await request.get('/api/settings/ai/',{headers:{Authorization:`Bearer ${session.access}`}})
+    if(!response.ok()) return false
+    const configs=await response.json() as {items:{context_window_tokens:number;autonomous_enabled:boolean}[]}
+    return configs.items.length>0 && configs.items.every(row=>row.context_window_tokens===value.thread_window && !row.autonomous_enabled)
+  }).toBe(true)
 }
 function calls(id: number): ProviderCall[] {
   const path = join(directory, 'thread-provider.jsonl')
@@ -29,35 +39,35 @@ for (const kind of ['whole', 'chunks', 'cancel', 'restart', 'pages', 'repair', '
     const errorMarker = join(directory, `thread-error-${fixture.raw_id}`)
     if (existsSync(errorMarker)) unlinkSync(errorMarker)
     for (const suffix of ['first', 'later']) if (existsSync(`${errorMarker}-${suffix}`)) unlinkSync(`${errorMarker}-${suffix}`)
-    control({ thread_window: ['whole','repair','output'].includes(kind) ? 131072 : 12000,
+    await control(request, { thread_window: ['whole','repair','output'].includes(kind) ? 131072 : 12000,
               ...(kind === 'restart' ? { pause_thread_after_stage: 1 } : {}),
               ...(kind === 'repair' ? { thread_schema_error_once: true } : {}),
               ...(kind === 'chunks' ? { thread_schema_error_per_stage: true } : {}),
               ...(kind === 'output' ? { thread_output_errors: 2 } : {}) })
-    await page.goto('/admin/login/?next=/admin/auth/user/')
-    await page.getByLabel('Имя пользователя').fill('79990000001')
-    await page.getByLabel('Пароль').fill('local-e2e-only')
-    await page.getByRole('button', { name: 'Войти' }).click()
-    await page.goto(`/admin/api/messageprocessingtrace/${fixture.trace_id}/change/`)
-    const form = page.locator('form[action$="/reanalyse/"]')
-    const replayForm = { request_key: await form.locator('input[name="request_key"]').inputValue(),
-                         csrfmiddlewaretoken: await form.locator('input[name="csrfmiddlewaretoken"]').inputValue() }
-    await page.getByRole('button', { name: 'Повторить анализ с полной историей' }).click()
-    await expect(page).toHaveURL(/messageprocessingtrace\/\d+\/change\//)
-    const submittedTrace = Number(new URL(page.url()).pathname.match(/messageprocessingtrace\/(\d+)\//)![1])
+    await authenticateShell(page.context())
+    const headers = { Authorization: `Bearer ${session.access}` }
+    const records: {items:{id:number}[]} = await (await request.get(`/api/messenger/records/?raw_message_id=${fixture.raw_id}`,{headers})).json()
+    const recordId = records.items[0]!.id
+    await page.goto(`/messenger?record=${recordId}&tab=trace`)
+    await page.getByRole('button',{name:'Повторить анализ',exact:true}).click()
+    const queued = page.waitForResponse(r => r.url().endsWith(`/messenger/records/${recordId}/reanalyze/`) && r.request().method() === 'POST')
+    await page.getByRole('button',{name:'Подтвердите повтор',exact:true}).click()
+    const queuedResponse = await queued
+    expect(queuedResponse.status()).toBe(202)
+    const replayForm = queuedResponse.request().postDataJSON() as {idempotency_key:string}
+    const submittedTrace = (await queuedResponse.json() as {trace_id:number}).trace_id
     if (kind === 'restart') {
       await expect.poll(() => existsSync(join(directory, 'thread-paused.json'))).toBe(true)
       const pause: { trace_id: number; state: { stage_trace_ids: number[] } } = JSON.parse(readFileSync(join(directory, 'thread-paused.json'), 'utf8'))
       expect(pause.state.stage_trace_ids).toHaveLength(1)
       writeFileSync(join(directory, 'thread-restart-required'), 'ready')
       await expect.poll(() => existsSync(join(directory, 'thread-restart-done')), { timeout: 60000 }).toBe(true)
-      control({ thread_window: 12000 })
+      await control(request, { thread_window: 12000 })
     }
     const completed = join(directory, 'thread-completed.json')
     await expect.poll(() => existsSync(completed) ?
       (JSON.parse(readFileSync(completed, 'utf8'))[String(fixture.raw_id)] ?? 0) : 0,
       { timeout: kind === 'pages' ? 240000 : 120000 }).toBeGreaterThanOrEqual(submittedTrace)
-    const headers = { Authorization: `Bearer ${session.access}` }
     let fact: Candidate | undefined
     await expect.poll(async () => {
       const response = await request.get('/api/candidates/?status=pending', { headers })
@@ -97,16 +107,22 @@ for (const kind of ['whole', 'chunks', 'cancel', 'restart', 'pages', 'repair', '
     }
     // The final candidate links to the final, genuinely published trace.
     const traceId: number = JSON.parse(readFileSync(completed, 'utf8'))[String(fixture.raw_id)]
-    await page.goto(`/admin/api/messageprocessingtrace/${traceId}/context/`)
-    await expect(page.getByTestId('history-progress')).toContainText(`Прочитано ${fixture.total} из ${fixture.total}`)
-    await expect(page.getByText('Полный разбор завершён: все оригиналы прочитаны и итог сверен.', { exact: true })).toBeVisible()
-    if (kind === 'output') await expect(page.getByText(/Очередная часть уменьшена для размера ответа:/)).toBeVisible()
-    expect((await request.get('/static/mazory/css/admin_trace.css')).ok()).toBe(true)
-    await page.getByTestId('history-progress').scrollIntoViewIfNeeded()
+    await page.goto(`/messenger?record=${recordId}&tab=trace`)
+    const finalTrace = page.locator(`[data-trace-id="${traceId}"]`)
+    await expect(finalTrace.getByTestId('history-progress')).toContainText(`Прочитано ${fixture.total} из ${fixture.total}`)
+    await expect(finalTrace.getByText('Полный разбор завершён: все оригиналы прочитаны и итог сверен.', { exact: true })).toBeVisible()
+    if (kind === 'output') await expect(finalTrace).toContainText('output')
+    await finalTrace.getByTestId('history-progress').scrollIntoViewIfNeeded()
     await page.screenshot({ path: join(directory, `thread-${kind}.png`) })
     if (kind === 'whole') {
-      const repeated = await page.request.post(`/admin/api/messageprocessingtrace/${fixture.trace_id}/reanalyse/`,
-        { form: replayForm, headers: { Referer: `${process.env.MAZORY_E2E_URL}/admin/` } })
+      await finalTrace.getByRole('button',{name:'Показать использованный контекст',exact:true}).click()
+      await expect(finalTrace).toContainText('Полный разбор: подготовь смету Альфа')
+      const snapshot = await request.get(`/api/messenger/records/${recordId}/traces/${traceId}/context/`,{headers})
+      expect(snapshot.ok()).toBe(true)
+      const contextPage=await snapshot.json() as {items:{raw_message_id:number;body:string}[]}
+      expect(contextPage.items.length).toBeGreaterThan(0)
+      expect(contextPage.items.every(row=>typeof row.raw_message_id==='number' && typeof row.body==='string')).toBe(true)
+      const repeated = await request.post(`/api/messenger/records/${recordId}/reanalyze/`, {data:replayForm,headers})
       expect(repeated.ok()).toBe(true)
       expect(calls(fixture.raw_id)).toHaveLength(initialCalls + 1)
       const value: Page<Candidate> = await (await request.get('/api/candidates/?status=pending', { headers })).json()
@@ -118,20 +134,17 @@ for (const kind of ['whole', 'chunks', 'cancel', 'restart', 'pages', 'repair', '
 test('cancelling a run between chunks preserves progress and publishes no incomplete facts', async ({ page, request }) => {
   const fixture = session.fixtures.stop!
   if (existsSync(join(directory, 'thread-paused.json'))) unlinkSync(join(directory, 'thread-paused.json'))
-  control({ thread_window: 12000, pause_thread_after_stage: 1 })
-  await page.goto('/admin/login/?next=/admin/auth/user/')
-  await page.getByLabel('Имя пользователя').fill('79990000001')
-  await page.getByLabel('Пароль').fill('local-e2e-only')
-  await page.getByRole('button', { name: 'Войти' }).click()
-  await page.goto(`/admin/api/whatsapphistoryrun/${fixture.run_id}/change/`)
-  await page.getByRole('button', { name: 'Переанализировать сохранённые сообщения' }).click()
+  await control(request, { thread_window: 12000, pause_thread_after_stage: 1 })
+  await authenticateShell(page.context())
+  await page.goto(`/settings?section=whatsapp&config=${fixture.config_id}`)
+  await page.locator(`[data-run-id="${fixture.run_id}"]`).getByRole('button',{name:'Повторить анализ',exact:true}).click()
   await expect.poll(() => existsSync(join(directory, 'thread-paused.json'))).toBe(true)
   const paused: { history_run_id: number; state: { stage_trace_ids: number[] } } = JSON.parse(readFileSync(join(directory, 'thread-paused.json'), 'utf8'))
   expect(paused.state.stage_trace_ids).toHaveLength(1)
-  await page.goto(`/admin/api/whatsapphistoryrun/${paused.history_run_id}/change/`)
-  await page.getByRole('button', { name: 'Отменить запуск' }).click()
-  await expect(page.getByTestId('history-progress')).toHaveAttribute('data-state', 'cancelled')
-  control({ thread_window: 12000 })
+  await page.goto(`/settings?section=whatsapp&config=${fixture.config_id}`)
+  await page.locator(`[data-run-id="${paused.history_run_id}"]`).getByRole('button',{name:'Отменить',exact:true}).click()
+  await expect(page.locator(`[data-run-id="${paused.history_run_id}"]`)).toHaveAttribute('data-state', 'cancelled')
+  await control(request, { thread_window: 12000 })
   const before = calls(fixture.raw_id).length
   const headers = { Authorization: `Bearer ${session.access}` }
   await expect.poll(async () => {
@@ -139,6 +152,6 @@ test('cancelling a run between chunks preserves progress and publishes no incomp
     return result.results.filter(row => row.proposed_changes.promise_message_id === fixture.raw_id).length
   }).toBe(0)
   await page.reload()
-  await expect(page.getByTestId('history-progress')).toHaveAttribute('data-state', 'cancelled')
+  await expect(page.locator(`[data-run-id="${paused.history_run_id}"]`)).toHaveAttribute('data-state', 'cancelled')
   expect(calls(fixture.raw_id)).toHaveLength(before)
 })

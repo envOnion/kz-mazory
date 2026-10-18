@@ -8,6 +8,8 @@ x-environment: &environment
   MAZORY_E2E_PROVIDER_HOST: provider
   REQUESTS_CA_BUNDLE: /e2e/localhost.crt
   POSTGRES_HOST: postgres
+  REDIS_HOST: redis
+  REDIS_PORT: '6379'
   POSTGRES_DB: mazory_e2e
   POSTGRES_USER: mazory_e2e
   POSTGRES_PASSWORD: isolated-writer-fixture
@@ -26,6 +28,16 @@ x-backend: &backend
   volumes: [fixtures:/e2e, static:/app/staticfiles, avatars:/app/avatars]
   networks: [isolated]
 services:
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --save, '', --appendonly, 'no']
+    tmpfs: [/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks: [isolated]
   postgres:
     build:
       context: ./backend
@@ -53,6 +65,7 @@ services:
     <<: *backend
     command: [sh, -c, 'python manage.py migrate --noinput && python manage.py check && python manage.py makemigrations --check && python manage.py provision_analytics_role && python manage.py collectstatic --noinput && python manage.py shell -c "from e2e.seed import seed; seed()"']
     depends_on:
+      redis: {condition: service_healthy}
       postgres: {condition: service_healthy}
       provider: {condition: service_healthy}
   backend:
@@ -79,6 +92,8 @@ services:
       args:
         NODE_BASE_IMAGE: ${E2E_NODE_BASE_IMAGE:-node:22-alpine}
         NGINX_BASE_IMAGE: ${E2E_NGINX_BASE_IMAGE:-nginx:1.27-alpine}
+        AUTH_REQUEST_RATE: 100r/s
+        API_REQUEST_RATE: 500r/s
     depends_on: {backend: {condition: service_healthy}}
     networks: [isolated]
     volumes: [static:/staticfiles:ro, avatars:/avatars:ro]
@@ -88,7 +103,7 @@ services:
       dockerfile: frontend/e2e/Dockerfile
       args:
         NODE_BASE_IMAGE: ${E2E_NODE_BASE_IMAGE:-node:22-alpine}
-    environment: {MAZORY_E2E_DIR: /e2e, MAZORY_E2E_URL: 'http://nginx', MAZORY_E2E_OUTPUT: /e2e/playwright}
+    environment: {MAZORY_E2E_DIR: /e2e, MAZORY_E2E_URL: 'http://nginx', MAZORY_E2E_OUTPUT: '${E2E_BROWSER_OUTPUT:-/e2e/playwright}', MAZORY_E2E_RUN_ID: '${E2E_RUN_ID:-manual}'}
     volumes: [fixtures:/e2e]
     depends_on: {nginx: {condition: service_started}, qcluster: {condition: service_started}, outbox: {condition: service_started}}
     ipc: host

@@ -7,10 +7,10 @@
       </select>
     </div>
     <div class="flex flex-wrap gap-3 text-sm">
-      <label>Команда <select class="field" v-model="filters.team_id"><option :value="undefined">Все доступные</option><option v-for="team in directory.teams" :key="team.id" :value="team.id">{{ team.name }}</option></select></label>
-      <label>Менеджер <select class="field" v-model="filters.manager_id"><option :value="undefined">Все доступные</option><option v-for="profile in directory.profiles" :key="profile.id" :value="profile.id">{{ profile.full_name }}</option></select></label>
-      <label>Проект <select class="field" v-model="filters.project_id"><option :value="undefined">Все доступные</option><option v-for="project in directory.projects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label>
-      <label>Валюта <select class="field" v-model="filters.currency"><option>KZT</option><option>USD</option><option>EUR</option><option>RUB</option></select></label>
+      <label>Команда <select aria-label="Команда" class="field" v-model="filters.team_id"><option :value="undefined">Все доступные</option><option v-for="team in directory.teams" :key="team.id" :value="team.id">{{ team.name }}</option></select></label>
+      <label>Менеджер <select aria-label="Менеджер" class="field" v-model="filters.manager_id"><option :value="undefined">Все доступные</option><option v-for="profile in directory.profiles" :key="profile.id" :value="profile.id">{{ profile.full_name }}</option></select></label>
+      <label>Проект <select aria-label="Проект" class="field" v-model="filters.project_id"><option :value="undefined">Все доступные</option><option v-for="project in directory.projects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label>
+      <label>Валюта <select aria-label="Валюта" class="field" v-model="filters.currency"><option>KZT</option><option>USD</option><option>EUR</option><option>RUB</option></select></label>
     </div>
     <p v-if="isLoading" role="status" class="panel animate-pulse">Обрабатываю запрос…</p>
     <p v-if="responseText" class="panel whitespace-pre-wrap" data-testid="chat-response">{{ responseText }}</p>

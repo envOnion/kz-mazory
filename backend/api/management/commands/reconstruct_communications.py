@@ -81,9 +81,10 @@ class Command(BaseCommand):
             if wanted and name not in wanted:
                 continue
             cursor = points.get(name, 0)
+            source_rows = model.objects.filter(event_type="otp") if name == "otp" else model.objects.all()
             total = 0
             while True:
-                ids = list(model.objects.filter(pk__gt=cursor).order_by("pk").values_list("pk", flat=True)[:batch])
+                ids = list(source_rows.filter(pk__gt=cursor).order_by("pk").values_list("pk", flat=True)[:batch])
                 if not ids:
                     break
                 # One replay per row inside its own small transaction: a bad row

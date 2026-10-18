@@ -1,5 +1,7 @@
+import { readFileSync } from './helpers/files'
+import { authenticateShell } from './helpers/session'
 import { test, expect, type APIRequestContext } from '@playwright/test'
-import { chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, renameSync, writeFileSync } from 'node:fs'
 import { createHmac, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { Candidate } from '../src/types/platform'
@@ -175,11 +177,9 @@ test('reported sale and own quotation update Bitrix without a signed contract, p
   // The real journal UI exposes the final request after Q2 and readback finish.
   const receipt = () => proof().journal.find(row => row.method === 'crm.deal.update' && row.status === 'accepted' && row.external_id === deal(amber)?.ID && row.payload.fields?.OPPORTUNITY === '26000000.00')
   await expect.poll(() => receipt()?.id).toBeTruthy()
-  await page.goto(`/admin/login/?next=/admin/api/bitrixdealchangelog/${receipt()!.id}/change/`)
-  await page.getByLabel('Имя пользователя').fill('79990000001')
-  await page.getByLabel('Пароль').fill('local-e2e-only')
-  await page.getByRole('button', { name: /Войти/ }).click()
-  await expect(page.locator('pre').filter({ hasText: 'OPPORTUNITY' })).toContainText('26000000.00')
+  await authenticateShell(page.context())
+  await page.goto(`/crm-changes?receipt=${receipt()!.id}`)
+  await expect(page.locator('[data-crm-id]').filter({ hasText: 'OPPORTUNITY' }).first()).toContainText('26000000.00')
   await expect(page.getByText('crm.deal.update', { exact: true })).toBeVisible()
   await page.screenshot({ path: join(dir, 'sale-amount-journal.png'), fullPage: true })
 })

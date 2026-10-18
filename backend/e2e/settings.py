@@ -13,7 +13,10 @@ if not (E2E_DIR / "isolated-e2e.marker").exists():
     raise RuntimeError("Missing isolated database marker")
 # Writer and read-only analytical credentials are configured by compose.e2e.yml.
 # Production OperationContext reads the real PostgreSQL alias without a fallback.
-CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
+# OTP, MFA attempts and shared limits must cross the actual HTTP/Q2 processes.
+CACHES = {"default": {"BACKEND": "django.core.cache.backends.redis.RedisCache",
+                      "LOCATION": f"redis://{REDIS_HOST}:{REDIS_PORT}/1"}}
+OCR_URL = 'https://localhost/e2e-ocr'
 Q_CLUSTER = {
     "name": "local_e2e",
     "workers": 1,
