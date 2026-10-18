@@ -57,10 +57,10 @@ class CandidateContextView(APIView):
         )
         schema = ContextInput(data=request.query_params)
         schema.is_valid(raise_exception=True)
-        return Response(candidate_context(candidate, request.user, schema.validated_data))
+        return Response(candidate_context(candidate, request.user, schema.validated_data, request=request))
 
 
-def candidate_context(candidate, user, params):
+def candidate_context(candidate, user, params, request=None):
     trace = candidate.trace
     visible = access.messages_for(user)
     source = visible.filter(pk=trace.raw_message_id).first()
@@ -202,12 +202,12 @@ def candidate_context(candidate, user, params):
         from .thread_views import thread_data, visible_threads
         revision = candidate.thread_revision
         if visible_threads(user).filter(pk=revision.thread_id).exists():
-            thread = thread_data(revision.thread, user, revision)
+            thread = thread_data(revision.thread, user, revision, request=request)
     if thread is None and not candidate.thread_revision_id:
         from .thread_views import thread_data, visible_threads
         fallback = visible_threads(user).filter(message_links__raw_message=source).distinct()
         if fallback.count() == 1:
-            thread = thread_data(fallback.get(), user)
+            thread = thread_data(fallback.get(), user, request=request)
     return (
         {
             "thread": thread,

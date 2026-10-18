@@ -3,6 +3,7 @@ from datetime import timedelta
 from decimal import Decimal
 from copy import deepcopy
 from django.db import transaction
+from django.db.models import Prefetch
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers
@@ -30,15 +31,23 @@ def require_analyst(user):
         raise PermissionDenied()
 
 
-def usable(artifact, user):
-    return artifact.expires_at > timezone.now() and artifact.access_fingerprint == access.fingerprint(user)
+def cleanup_expired_conversations():
+    """Delete conversations after their existing 30-day availability window."""
+    cutoff = timezone.now() - timedelta(days=30)
+    return AnalyticsConversation.objects.filter(updated_at__lt=cutoff).delete()[0]
 
 
-def serialized_turn(turn, user):
+def usable(artifact, user, fingerprint=None):
+    fingerprint = fingerprint if fingerprint is not None else access.fingerprint(user)
+    return artifact.expires_at > timezone.now() and artifact.access_fingerprint == fingerprint
+
+
+def serialized_turn(turn, user, fingerprint=None):
+    fingerprint = fingerprint if fingerprint is not None else access.fingerprint(user)
     op = turn.operation
     state = turn.state if turn.state == 'succeeded' else op.status if op else turn.state
     artifacts = list(turn.artifacts.all())
-    available = bool(op and op.access_fingerprint == access.fingerprint(user)) and all(usable(a, user) for a in artifacts)
+    available = bool(op and op.access_fingerprint == fingerprint) and all(usable(a, user, fingerprint) for a in artifacts)
     if state == 'succeeded' and not artifacts:
         available = available and turn.created_at > timezone.now() - timedelta(hours=24)
     if state == 'succeeded' and not available:
@@ -48,7 +57,7 @@ def serialized_turn(turn, user):
             'answer_document': turn.answer_document if state == 'succeeded' else None,
             'error': ERRORS.get(op.error_code if op else '', 'Не удалось выполнить запрос. Уточните условия и попробуйте ещё раз.') if state in ['failed', 'cancelled', 'expired'] else '',
             'artifacts': [{'id': a.id, 'parent_artifact_id': a.parent_artifact_id, 'title': a.presentation.get('title', 'Результат'),
-                           'available': usable(a, user), 'generated_at': a.generated_at} for a in artifacts],
+                           'available': usable(a, user, fingerprint), 'generated_at': a.generated_at} for a in artifacts],
             'created_at': turn.created_at}
 
 
@@ -62,7 +71,6 @@ class ConversationList(APIView):
 
     def get(self, request):
         require_analyst(request.user)
-        AnalyticsConversation.objects.filter(owner=request.user, updated_at__lt=timezone.now()-timedelta(days=30)).delete()
         return Response(list(AnalyticsConversation.objects.filter(owner=request.user).order_by('-updated_at').values('id', 'title', 'updated_at')[:50]))
 
     def post(self, request):
@@ -78,9 +86,40 @@ class ConversationDetail(APIView):
 
     def get(self, request, pk):
         conversation = conversation_for(request.user, pk)
-        turns = conversation.turns.select_related('operation').prefetch_related('artifacts')
+        try:
+            limit = max(1, min(100, int(request.query_params.get('limit', 50))))
+        except (TypeError, ValueError):
+            limit = 50
+        cursor = request.query_params.get('cursor')
+        before = None
+        if cursor:
+            from ..messenger_api import decode_cursor
+            payload = decode_cursor(cursor) or {}
+            before = payload.get('sequence') if payload.get('conversation') == conversation.pk else None
+            if type(before) is not int or before <= 0:
+                raise serializers.ValidationError({'error': 'Некорректный курсор истории диалога.'})
+        artifact_fields = ('id', 'turn_id', 'parent_artifact_id', 'presentation', 'generated_at', 'expires_at', 'access_fingerprint')
+        turns_qs = conversation.turns.select_related('operation').prefetch_related(
+            Prefetch('artifacts', queryset=AnalyticsArtifact.objects.only(*artifact_fields))
+        )
+        if before is not None:
+            turns_qs = turns_qs.filter(sequence__lt=before)
+        rows = list(turns_qs.only(
+            'id', 'conversation_id', 'parent_turn_id', 'operation_id', 'sequence', 'user_text',
+            'answer_document', 'state', 'created_at', 'operation__id', 'operation__status',
+            'operation__access_fingerprint', 'operation__error_code',
+        ).order_by('-sequence')[:limit + 1])
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        next_cursor = None
+        if has_more and rows:
+            from ..messenger_api import encode_cursor
+            next_cursor = encode_cursor({'conversation': conversation.pk, 'sequence': rows[-1].sequence})
+        rows.reverse()
+        fingerprint = access.fingerprint(request.user)
         return Response({'id': conversation.id, 'title': conversation.title, 'default_scope': conversation.default_scope,
-                         'turns': [serialized_turn(t, request.user) for t in turns]})
+                         'turns': [serialized_turn(t, request.user, fingerprint) for t in rows],
+                         'turns_next_cursor': next_cursor})
 
 
 class QueryPatch(serializers.Serializer):
@@ -111,6 +150,7 @@ class TurnList(APIView):
             type(request.user).objects.select_for_update().get(pk=request.user.pk)
             conversation = conversation_for(request.user, pk)
             conversation = AnalyticsConversation.objects.select_for_update().get(pk=conversation.id)
+            fingerprint = access.fingerprint(request.user)
             existing = AnalyticsTurn.objects.filter(conversation=conversation, operation__idempotency_key=values['idempotency_key']).select_related('operation').first()
             if existing:
                 if existing.operation.request.get('input') != values:
@@ -126,9 +166,9 @@ class TurnList(APIView):
                 parent = get_object_or_404(conversation.turns.select_related('operation'), pk=values['parent_turn_id'])
             if values.get('artifact_id'):
                 artifact = get_object_or_404(AnalyticsArtifact.objects.select_related('turn__operation'), pk=values['artifact_id'], turn__conversation=conversation)
-                if not usable(artifact, request.user):
+                if not usable(artifact, request.user, fingerprint):
                     # Recalculation uses the normalized plan, never expired numerical snapshots.
-                    if artifact.access_fingerprint != access.fingerprint(request.user):
+                    if artifact.access_fingerprint != fingerprint:
                         raise Conflict('Доступ изменился. Начните новый расчёт с текущими фильтрами.')
                 if parent and artifact.turn_id != parent.id:
                     raise Conflict('Уточнение и результат относятся к разным сообщениям.')
@@ -140,7 +180,7 @@ class TurnList(APIView):
             if parent:
                 if parent.operation is None:
                     raise Conflict('Исходный запрос недоступен. Начните новый расчёт.')
-                if parent.operation.access_fingerprint != access.fingerprint(request.user):
+                if parent.operation.access_fingerprint != fingerprint:
                     raise Conflict('Доступ изменился. Начните новый расчёт.')
                 if parent.state != 'succeeded' and parent.operation.status in ['failed', 'cancelled', 'expired']:
                     raise Conflict('Исходный запрос недоступен. Выберите готовый результат.')
@@ -151,7 +191,7 @@ class TurnList(APIView):
             op = AsyncOperation.objects.create(requested_by=request.user, operation_type='chat',
                 request={**scope, 'prompt': values['prompt'], 'idempotency_key': values['idempotency_key'],
                          'input': values, 'dialogue': True, 'artifact_id': artifact.id if artifact else None},
-                idempotency_key=values['idempotency_key'], expires_at=timezone.now()+timedelta(hours=1), access_fingerprint=access.fingerprint(request.user))
+                idempotency_key=values['idempotency_key'], expires_at=timezone.now()+timedelta(hours=1), access_fingerprint=fingerprint)
             turn = AnalyticsTurn.objects.create(conversation=conversation, parent_turn=parent, operation=op, sequence=sequence,
                 user_text=values['prompt'], effective_scope=scope, resolved_intent={'kind': 'refine' if parent else 'new_analysis', 'patch': values.get('patch', {})})
             if not parent or parent.state == 'succeeded' or parent.operation.status == 'succeeded':

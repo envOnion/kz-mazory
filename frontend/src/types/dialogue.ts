@@ -6,7 +6,7 @@ export interface AnswerDocument { version: '1.0'; kind: 'text' | 'analysis' | 'c
 export interface ArtifactRef { id: number; parent_artifact_id: number | null; title: string; available: boolean; generated_at: string }
 export interface AnalyticsTurn { id: number; sequence: number; parent_turn_id: number | null; operation_id: number | null; user_text: string; state: 'queued' | 'running' | 'succeeded' | 'failed' | 'expired' | 'cancelled'; answer_document: AnswerDocument | null; error: string; artifacts: ArtifactRef[]; created_at: string }
 export interface ConversationRef { id: number; title: string; updated_at?: string }
-export interface Conversation extends ConversationRef { default_scope: KpiFilters & { period: Period }; turns: AnalyticsTurn[] }
+export interface Conversation extends ConversationRef { default_scope: KpiFilters & { period: Period }; turns: AnalyticsTurn[]; turns_next_cursor: string | null }
 export interface Artifact { id: number; available: boolean; presentation?: PresentationDocument; query_plan?: { title: string; blocks: { query: Record<string, unknown>; block: Record<string, unknown> }[] }; parent_artifact_id?: number | null; message?: string; expires_at?: string }
 export interface QueryPatch { date_axis?: string; grouping?: 'day' | 'week' | 'month' | 'quarter' | 'year' | 'manager' | 'status' | 'project'; sort?: 'date_asc' | 'date_desc' | 'value_asc' | 'value_desc' }
 export interface TurnReceipt { turn_id: number; operation_id: number; status: string }

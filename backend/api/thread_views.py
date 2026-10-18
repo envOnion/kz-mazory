@@ -10,8 +10,10 @@ from django.db.models import (
     IntegerField,
     Exists,
     OuterRef,
+    Subquery,
 )
 from django.shortcuts import get_object_or_404
+from django.db.models.functions import Coalesce
 from rest_framework import serializers
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -19,7 +21,8 @@ from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
 from . import access
 from .candidate_context import message_data
-from .models import DialogueThread, FactCandidate, ThreadRevision, ThreadSubscription
+from .models import DialogueThread, FactCandidate, ThreadMessage, ThreadRevision, ThreadSubscription
+from .messenger_api import decode_cursor, encode_cursor
 
 
 def visible_threads(user):
@@ -42,7 +45,36 @@ def parse_amount(val):
         return Decimal(0)
 
 
-def thread_data(thread, user, revision=None):
+def _detail_cursor(request, thread, kind, revision=None):
+    token = request.query_params.get(f"{kind}_cursor")
+    if not token:
+        return None
+    payload = decode_cursor(token) or {}
+    if not isinstance(payload, dict):
+        from rest_framework.exceptions import ValidationError
+        raise ValidationError({"error": "Некорректный курсор темы."})
+    expected_revision = revision.pk if revision else None
+    if payload.get("thread") != thread.pk or payload.get("user") != user_id(request.user) or payload.get("kind") != kind or payload.get("revision") != expected_revision:
+        from rest_framework.exceptions import ValidationError
+        raise ValidationError({"error": "Курсор относится к другой теме или разделу."})
+    return payload
+
+
+def user_id(user):
+    return user.pk
+
+
+def _detail_next(request, thread, kind, marker, revision=None):
+    return encode_cursor({"thread": thread.pk, "user": user_id(request.user), "kind": kind, "revision": revision.pk if revision else None, **marker})
+
+
+def thread_data(thread, user, revision=None, request=None):
+    limit = 50
+    if request:
+        try:
+            limit = max(1, min(100, int(request.query_params.get("page_size", 50))))
+        except (TypeError, ValueError):
+            limit = 50
     has_project_access = (
         bool(thread.project_id)
         and access.projects_for(user).filter(pk=thread.project_id).exists()
@@ -59,6 +91,16 @@ def thread_data(thread, user, revision=None):
         .filter(parent=thread)
         .order_by("id")
     )
+    children_cursor = _detail_cursor(request, thread, "children", revision) if request else None
+    if children_cursor:
+        if type(children_cursor.get("id")) is not int or children_cursor["id"] <= 0:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"error": "Некорректный курсор поддиалогов."})
+        children_qs = children_qs.filter(pk__gt=children_cursor["id"])
+    children_rows = list(children_qs[:limit + 1] if request else children_qs)
+    children_more = request is not None and len(children_rows) > limit
+    if children_more:
+        children_rows = children_rows[:limit]
     children = [
         {
             "id": child.id,
@@ -67,11 +109,17 @@ def thread_data(thread, user, revision=None):
             "version": child.version,
             "updated_at": child.updated_at,
         }
-        for child in children_qs
+        for child in children_rows
     ]
+    children_next_cursor = _detail_next(request, thread, "children", {"id": children_rows[-1].id}, revision) if children_more and children_rows else None
 
+    latest_revision = revision
+    if request and latest_revision is None:
+        latest_revision = thread.revisions.only("id", "state", "version").order_by("-version").first()
     if revision:
         candidates = FactCandidate.objects.filter(thread_revision=revision).order_by("id")
+    elif request and latest_revision:
+        candidates = FactCandidate.objects.filter(thread_revision=latest_revision).exclude(status="superseded").order_by("id")
     else:
         candidates = (
             FactCandidate.objects.filter(thread_revision__thread=thread)
@@ -84,7 +132,21 @@ def thread_data(thread, user, revision=None):
             if latest_rev:
                 candidates = latest_rev.candidates.order_by("id")
 
-    if candidates.exists():
+    facts_cursor = _detail_cursor(request, thread, "facts", revision) if request else None
+    facts_offset = 0
+    if facts_cursor:
+        if type(facts_cursor.get("id")) is int and facts_cursor["id"] > 0:
+            candidates = candidates.filter(pk__gt=facts_cursor["id"])
+        elif type(facts_cursor.get("offset")) is int and facts_cursor["offset"] >= 0:
+            facts_offset = facts_cursor["offset"]
+        else:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"error": "Некорректный курсор фактов."})
+    candidate_page = list(candidates.select_related("thread_revision")[:limit + 1] if request else candidates.select_related("thread_revision"))
+    facts_more = request is not None and len(candidate_page) > limit
+    if facts_more:
+        candidate_page = candidate_page[:limit]
+    if candidate_page:
         facts = [
             {
                 "id": c.id,
@@ -101,14 +163,23 @@ def thread_data(thread, user, revision=None):
                     or (revision.state == "open" if revision else thread.state == "open")
                 ),
             }
-            for c in candidates
+            for c in candidate_page
         ]
     else:
-        rev = revision or thread.revisions.order_by("-version").first()
-        if rev and rev.extraction:
+        rev = latest_revision or revision or thread.revisions.order_by("-version").first()
+        if request and latest_revision and (facts_cursor is None or "offset" in facts_cursor):
+            latest_revision = ThreadRevision.objects.only("id", "state", "extraction", "version").get(pk=latest_revision.pk)
+            rev = latest_revision
+        if (not facts_cursor or "offset" in facts_cursor) and rev and rev.extraction:
+            facts_offset = facts_cursor.get("offset", 0) if facts_cursor else 0
+            extraction = [item for item in rev.extraction if isinstance(item, dict)]
+            extraction_page = extraction[facts_offset:facts_offset + limit + 1] if request else extraction
+            facts_more = request is not None and len(extraction_page) > limit
+            if facts_more:
+                extraction_page = extraction_page[:limit]
             facts = [
                 {
-                    "id": idx + 1,
+                    "id": facts_offset + idx + 1,
                     "fact_type": item.get("fact_type", "commitment"),
                     "status": "pending",
                     "proposed_changes": item,
@@ -118,11 +189,15 @@ def thread_data(thread, user, revision=None):
                         or (thread.state == "open")
                     ),
                 }
-                for idx, item in enumerate(rev.extraction)
-                if isinstance(item, dict)
+                for idx, item in enumerate(extraction_page)
             ]
         else:
             facts = []
+    facts_next_cursor = None
+    if facts_more and candidate_page:
+        facts_next_cursor = _detail_next(request, thread, "facts", {"id": candidate_page[-1].pk}, revision)
+    elif facts_more:
+        facts_next_cursor = _detail_next(request, thread, "facts", {"offset": facts_offset + len(facts)}, revision)
 
     parent_id = (
         thread.parent_id
@@ -147,14 +222,40 @@ def thread_data(thread, user, revision=None):
     if not counterparty:
         counterparty = chat_name
 
+    messages_cursor = _detail_cursor(request, thread, "messages", revision) if request else None
+    snapshot = None
     if revision:
         snapshot = {link["raw_message_id"]: link for link in revision.message_snapshot}
-        rows = (
+        rows_qs = (
             access.messages_for(user)
             .filter(pk__in=snapshot)
             .select_related("config")
             .order_by("timestamp", "id")
         )
+    else:
+        rows_qs = None
+    links_qs = (
+        thread.message_links.filter(raw_message__in=access.messages_for(user))
+        .select_related("raw_message__config", "routing_attempt")
+        .order_by("raw_message__timestamp", "raw_message_id")
+    )
+    if not revision:
+        rows_qs = access.messages_for(user).filter(pk__in=links_qs.values("raw_message_id")).select_related("config").order_by("timestamp", "id")
+    if messages_cursor:
+        from django.db.models import Q
+        from django.utils.dateparse import parse_datetime
+        marker_time = parse_datetime(messages_cursor.get("t", ""))
+        marker_id = messages_cursor.get("i")
+        if marker_time is None or type(marker_id) is not int or marker_id <= 0:
+            from rest_framework.exceptions import ValidationError
+            raise ValidationError({"error": "Некорректный курсор сообщений."})
+        rows_qs = rows_qs.filter(Q(timestamp__gt=marker_time) | Q(timestamp=marker_time, pk__gt=marker_id))
+    rows = list(rows_qs[:limit + 1] if request else rows_qs)
+    messages_more = request is not None and len(rows) > limit
+    if messages_more:
+        rows = rows[:limit]
+    messages_next_cursor = _detail_next(request, thread, "messages", {"t": rows[-1].timestamp.isoformat(), "i": rows[-1].pk}, revision) if messages_more and rows else None
+    if revision:
         return {
             **routing_data(thread),
             "id": thread.id,
@@ -162,6 +263,7 @@ def thread_data(thread, user, revision=None):
             "summary": revision.summary,
             "state": revision.state,
             "version": revision.version,
+            "revision_id": revision.pk,
             "parent_id": parent_id,
             "project_id": project_id,
             "project_name": project_name,
@@ -171,7 +273,9 @@ def thread_data(thread, user, revision=None):
             "counterparty": counterparty,
             "is_subscribed": is_subscribed,
             "children": children,
+            "children_next_cursor": children_next_cursor,
             "facts": facts,
+            "facts_next_cursor": facts_next_cursor,
             "messages": [
                 {
                     **message_data(row, 0, set()),
@@ -183,12 +287,9 @@ def thread_data(thread, user, revision=None):
                 }
                 for row in rows
             ],
+            "messages_next_cursor": messages_next_cursor,
         }
-    links = (
-        thread.message_links.filter(raw_message__in=access.messages_for(user))
-        .select_related("raw_message__config", "routing_attempt")
-        .order_by("raw_message__timestamp", "raw_message_id")
-    )
+    links = {link.raw_message_id: link for link in links_qs.filter(raw_message_id__in=[row.id for row in rows])}
     return {
         **routing_data(thread),
         "id": thread.id,
@@ -205,19 +306,22 @@ def thread_data(thread, user, revision=None):
         "is_subscribed": is_subscribed,
         "summary": thread.summary,
         "children": children,
+        "children_next_cursor": children_next_cursor,
         "facts": facts,
+        "facts_next_cursor": facts_next_cursor,
         "messages": [
             {
-                **message_data(link.raw_message, 0, set()),
-                "thought_state": link.thought_state,
-                "relation": link.relation,
-                "rationale": link.rationale,
-                "assignment_method": link.assignment_method,
-                "routing_reason": link.routing_attempt.reason_code if link.routing_attempt_id else "",
-                "routing_latency_ms": link.routing_attempt.latency_ms if link.routing_attempt_id else None,
+                **message_data(row, 0, set()),
+                "thought_state": links[row.id].thought_state,
+                "relation": links[row.id].relation,
+                "rationale": links[row.id].rationale,
+                "assignment_method": links[row.id].assignment_method,
+                "routing_reason": links[row.id].routing_attempt.reason_code if links[row.id].routing_attempt_id else "",
+                "routing_latency_ms": links[row.id].routing_attempt.latency_ms if links[row.id].routing_attempt_id else None,
             }
-            for link in links
+            for row in rows
         ],
+        "messages_next_cursor": messages_next_cursor,
     }
 
 
@@ -322,15 +426,13 @@ class ThreadListView(APIView):
             ).exclude(status="superseded")
         )
 
+        child_counts = DialogueThread.objects.filter(parent_id=OuterRef("pk")).exclude(state="superseded").order_by().values("parent_id").annotate(total=Count("id")).values("total")[:1]
+        message_counts = ThreadMessage.objects.filter(thread_id=OuterRef("pk")).order_by().values("thread_id").annotate(total=Count("id")).values("total")[:1]
         qs = (
             qs.select_related("project__company", "config")
             .annotate(
-                children_count=Count(
-                    "children",
-                    filter=~Q(children__state="superseded"),
-                    distinct=True,
-                ),
-                messages_count=Count("message_links", distinct=True),
+                children_count=Coalesce(Subquery(child_counts, output_field=IntegerField()), Value(0), output_field=IntegerField()),
+                messages_count=Coalesce(Subquery(message_counts, output_field=IntegerField()), Value(0), output_field=IntegerField()),
                 priority=Case(
                     When(state="ready", then=Value(2)),
                     When(has_candidate, then=Value(1)),
@@ -350,29 +452,35 @@ class ThreadListView(APIView):
                 user=request.user, thread_id__in=thread_ids
             ).values_list("thread_id", flat=True)
         )
+        latest_revisions = list(
+            ThreadRevision.objects.filter(thread_id__in=thread_ids)
+            .only("id", "thread_id", "version", "state")
+            .order_by("thread_id", "-version")
+            .distinct("thread_id")
+        )
+        revisions_by_thread = {}
+        for rev in latest_revisions:
+            revisions_by_thread.setdefault(rev.thread_id, rev)
+        latest_revision_ids = [rev.id for rev in revisions_by_thread.values()]
         candidates = (
-            FactCandidate.objects.filter(
-                thread_revision__thread_id__in=thread_ids
-            )
+            FactCandidate.objects.filter(thread_revision_id__in=latest_revision_ids)
             .exclude(status="superseded")
             .select_related("thread_revision")
+            .only("id", "thread_revision_id", "fact_type", "status", "proposed_changes", "thread_revision__state")
         )
         candidates_by_thread = {}
         for c in candidates:
             candidates_by_thread.setdefault(c.thread_revision.thread_id, []).append(c)
+        fallback_revision_ids = [
+            rev.id for thread_id, rev in revisions_by_thread.items()
+            if thread_id not in candidates_by_thread
+        ]
+        for rev in ThreadRevision.objects.filter(pk__in=fallback_revision_ids).only("id", "thread_id", "state", "extraction"):
+            revisions_by_thread[rev.thread_id] = rev
 
-        revisions_by_thread = {}
-        missing_ids = [tid for tid in thread_ids if tid not in candidates_by_thread]
-        if missing_ids:
-            for rev in (
-                ThreadRevision.objects.filter(thread_id__in=missing_ids)
-                .order_by("thread_id", "-version")
-            ):
-                if rev.thread_id not in revisions_by_thread:
-                    revisions_by_thread[rev.thread_id] = rev
-
+        page_project_ids = {item.project_id for item in page if item.project_id}
         accessible_project_ids = set(
-            access.projects_for(request.user).values_list("id", flat=True)
+            access.projects_for(request.user).filter(pk__in=page_project_ids).values_list("id", flat=True)
         )
 
         results = []
@@ -488,8 +596,21 @@ class ThreadDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, pk):
-        thread = get_object_or_404(visible_threads(request.user), pk=pk)
-        return Response(thread_data(thread, request.user))
+        thread = get_object_or_404(visible_threads(request.user).select_related("project__company", "config"), pk=pk)
+        revision = None
+        revision_id = request.query_params.get("revision_id")
+        if not revision_id:
+            for cursor_name in ("messages_cursor", "facts_cursor", "children_cursor"):
+                payload = decode_cursor(request.query_params.get(cursor_name)) or {}
+                if payload.get("revision"):
+                    revision_id = str(payload["revision"])
+                    break
+        if revision_id:
+            from rest_framework.exceptions import ValidationError
+            if not revision_id.isascii() or not revision_id.isdigit() or int(revision_id) <= 0:
+                raise ValidationError({"error": "revision_id должен быть положительным числовым ID."})
+            revision = get_object_or_404(ThreadRevision.objects.filter(thread=thread), pk=int(revision_id))
+        return Response(thread_data(thread, request.user, revision=revision, request=request))
 
 
 class BackfillInput(serializers.Serializer):

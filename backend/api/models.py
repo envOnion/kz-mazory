@@ -1875,6 +1875,7 @@ class AuditEvent(TimestampedModel):
         verbose_name_plural = "Журнал действий"
         ordering = ["-created_at"]
         default_permissions = ("view",)
+        indexes = [models.Index(fields=["target_type", "target_id", "-id"], name="audit_target_order_idx")]
 
 
 class PrivateAttachment(TimestampedModel):
