@@ -621,21 +621,49 @@ def reconcile(limit=100):
         decide(candidate.id)
     if candidates:
         AISettings.objects.filter(pk=cfg.pk).update(autonomous_reconcile_cursor=candidates[-1].pk)
-    from .thread_routing import ANALYSIS_EVENTS, incoming_event_type, schedule_extraction
+    from .thread_routing import ANALYSIS_EVENTS, schedule_extraction
     from .models import DialogueThread
+    raw_rows = list(RawMessage.objects.select_related("config").filter(
+        processed=False, team__is_active=True
+    ).exclude(processing_state__in=["export_staged", "deduplication_ambiguous", "superseded", "deleted", "routed"]).only(
+        "id", "team_id", "config_id", "processing_state", "processed", "config__id",
+        "config__thread_routing_enabled",
+    ).order_by("id")[:limit])
+    work_items = list(SourceWorkItem.objects.filter(
+        processing_version=cfg.autonomous_policy_version, state="pending"
+    ).select_related("raw_message").only(
+        "id", "raw_message_id", "raw_message__processing_state"
+    ).order_by("id")[:limit])
+    tracked_ids = {raw.id for raw in raw_rows}
+    tracked_ids.update(item.raw_message_id for item in work_items)
     active_ids = set()
-    for payload in OutboxEvent.objects.filter(event_type__in=ANALYSIS_EVENTS, state__in=("pending", "enqueued", "processing")).values_list("payload", flat=True):
-        active_ids.add(payload.get("raw_id"))
-        active_ids.update(payload.get("batch_ids", []))
+    if tracked_ids:
+        from django.db.models import Q
+        ownership = Q(payload__raw_id__in=tracked_ids)
+        for raw_id in tracked_ids:
+            ownership |= Q(payload__batch_ids__contains=[raw_id])
+        active_rows = OutboxEvent.objects.filter(
+            event_type__in=ANALYSIS_EVENTS,
+            state__in=("pending", "enqueued", "processing"),
+        ).filter(ownership).values_list("payload__raw_id", "payload__batch_ids")
+        for raw_id, batch_ids in active_rows:
+            if raw_id in tracked_ids:
+                active_ids.add(raw_id)
+            active_ids.update(set(batch_ids or ()) & tracked_ids)
     # A routed message belongs to durable thread extraction. Recover that job,
     # without creating a competing full-history extraction for the same source.
     for thread in DialogueThread.objects.filter(config__is_active=True, team__is_active=True, message_links__raw_message__processed=False, message_links__raw_message__processing_state="routed").exclude(state="superseded").distinct().order_by("id")[:limit]:
         schedule_extraction(thread)
-    for raw in RawMessage.objects.select_related("config").filter(processed=False, team__is_active=True).exclude(processing_state__in=["export_staged", "deduplication_ambiguous", "superseded", "deleted", "routed"]).order_by("id")[:limit]:
-        if raw.id not in active_ids and not OutboxEvent.objects.filter(event_type__in=ANALYSIS_EVENTS, payload__raw_id=raw.id, state="failed").exists():
-            OutboxEvent.objects.get_or_create(deduplication_key=f"recover:{raw.id}:{cfg.autonomous_policy_version}", defaults={"event_type": incoming_event_type(raw.config), "payload": {"raw_id": raw.id}})
+    failed_ids = set(OutboxEvent.objects.filter(
+        event_type__in=ANALYSIS_EVENTS, payload__raw_id__in=[raw.id for raw in raw_rows], state="failed"
+    ).values_list("payload__raw_id", flat=True))
+    routing_enabled = cfg.thread_routing_mode != "llm"
+    for raw in raw_rows:
+        if raw.id not in active_ids and raw.id not in failed_ids:
+            event_type = "route_message" if raw.config_id and raw.config.thread_routing_enabled and routing_enabled else "extract_message"
+            OutboxEvent.objects.get_or_create(deduplication_key=f"recover:{raw.id}:{cfg.autonomous_policy_version}", defaults={"event_type": event_type, "payload": {"raw_id": raw.id}})
             active_ids.add(raw.id)
-    for item in SourceWorkItem.objects.filter(processing_version=cfg.autonomous_policy_version, state="pending").order_by("id")[:limit]:
+    for item in work_items:
         if item.raw_message_id in active_ids or item.raw_message.processing_state == "routed":
             continue
         OutboxEvent.objects.get_or_create(deduplication_key=f"work-recover:{item.id}:{cfg.autonomous_policy_version}", defaults={"event_type": "extract_message", "payload": {"raw_id": item.raw_message_id, "reanalyze": True, "batch_ids": [item.raw_message_id], "priority": "history"}})
@@ -646,8 +674,10 @@ def reconcile(limit=100):
     OutboxEvent.objects.filter(state="failed", event_type="extract_message", error_code__in=transient, next_attempt_at__lt=timezone.now() - timedelta(hours=1)).update(state="pending", attempt_count=0, next_attempt_at=timezone.now(), lease_until=None)
     from django.conf import settings
     from .models import CrmDelivery
-    for delivery in CrmDelivery.objects.filter(error_code="crm_stage_mapping_missing", outbox_event__state="failed").select_related("external_object_link", "outbox_event")[:limit]:
-        project = Project.objects.filter(pk=delivery.external_object_link.local_id).first()
+    deliveries = list(CrmDelivery.objects.filter(error_code="crm_stage_mapping_missing", outbox_event__state="failed").select_related("external_object_link", "outbox_event")[:limit])
+    projects = Project.objects.filter(pk__in={delivery.external_object_link.local_id for delivery in deliveries}).only("id", "status").in_bulk()
+    for delivery in deliveries:
+        project = projects.get(delivery.external_object_link.local_id)
         if project and settings.BITRIX_STAGE_MAP.get(project.status):
             OutboxEvent.objects.filter(pk=delivery.outbox_event_id).update(state="pending", attempt_count=0, next_attempt_at=timezone.now(), lease_until=None)
     Commitment.objects.filter(is_verified=True, status="pending", deadline_at__lt=timezone.now()).update(status="overdue")

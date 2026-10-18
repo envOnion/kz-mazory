@@ -11,6 +11,7 @@ from .providers import ProviderUnavailable
 
 ANALYSIS_CONFIG_FIELDS = ('chat_model_name', 'chat_api_format', 'chat_provider_url', 'context_window_tokens',
                           'context_safety_tokens', 'max_completion_tokens', 'tokenizer_id', 'tokenizer_revision')
+_UNSET = object()
 
 def require_reanalysis(user, raw):
     if not user.is_active or not access.messages_for(user).filter(pk=raw.pk).exists():
@@ -22,17 +23,20 @@ def require_reanalysis(user, raw):
     source_scope(raw)
 
 
-def reserve_attempt(raw, operation_key):
+def reserve_attempt(raw, operation_key, *, cfg=None, snapshot_max_id=None,
+                    existing=_UNSET, latest_attempt_no=None):
     """Caller holds the source row lock; the unique constraint is the final guard."""
     if raw.processing_state == 'clarification_reply':
         raise ProviderUnavailable('clarification_reply_not_model_input')
-    existing = MessageProcessingTrace.objects.filter(
-        operation_key=operation_key
-    ).first()
+    if existing is _UNSET:
+        existing = MessageProcessingTrace.objects.filter(
+            operation_key=operation_key
+        ).first()
     if existing:
         return existing
-    attempt = (raw.traces.aggregate(last=Max("attempt_no"))["last"] or 0) + 1
-    cfg = AISettings.get_active()
+    attempt = (latest_attempt_no if latest_attempt_no is not None else
+               raw.traces.aggregate(last=Max("attempt_no"))["last"] or 0) + 1
+    cfg = cfg or AISettings.get_active()
     return MessageProcessingTrace.objects.create(
         raw_message=raw,
         operation_key=operation_key,
@@ -56,8 +60,8 @@ def reserve_attempt(raw, operation_key):
             "policy_version": POLICY,
             "source": "chat_history",
             "request_state": "not_sent",
-            "snapshot_max_id": RawMessage.objects.aggregate(last=Max("id"))["last"]
-            or raw.id,
+            "snapshot_max_id": snapshot_max_id if snapshot_max_id is not None else
+            (RawMessage.objects.aggregate(last=Max("id"))["last"] or raw.id),
         },
     )
 

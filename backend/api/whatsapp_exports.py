@@ -3,16 +3,51 @@ import hashlib
 import json
 import uuid
 from collections import Counter,defaultdict
+from datetime import timedelta
 from pathlib import PurePath
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Exists,OuterRef,Q,Max
+from django.db.models import Count,Exists,OuterRef,Q,Max
 from django.conf import settings
 from django.utils import timezone
-from .models import AISettings,AuditEvent,HISTORY_ACTIVE_STATES,HistoryAnalysisItem,RawMessage,WhatsAppConfig,WhatsAppExportEntry,WhatsAppExportUpload,WhatsAppHistoryJob,WhatsAppHistoryRun
+from .models import AISettings,AuditEvent,HISTORY_ACTIVE_STATES,HistoryAnalysisItem,RawMessage,WhatsAppConfig,WhatsAppExportEntry,WhatsAppExportUpload,WhatsAppHistoryJob,WhatsAppHistoryRun,WhatsAppMessageAlias
 from .history_jobs import enqueue_step,source,finish
 from .whatsapp_export_parser import MAX_BYTES,ExportError,export_zone,parse_export
-from .whatsapp_identity import alias,matching_originals,temporal_originals,whatsapp_scope
+from .whatsapp_identity import alias,whatsapp_scope
+
+
+def _original_filter(row, *, with_content):
+    if row.precision == 'minute':
+        start=row.sent_at.replace(second=0,microsecond=0)
+        query=Q(timestamp__gte=start,timestamp__lt=start+timedelta(minutes=1))
+    else:
+        query=Q(timestamp=row.sent_at)
+    if row.phone:
+        query &= (Q(sender_phone__in=[row.phone,row.phone.lstrip('+')])
+                  | Q(sender_phone='',sender_name=row.sender))
+    elif row.sender:
+        query &= Q(sender_name=row.sender)
+    else:
+        return Q(pk__in=[])
+    if with_content:
+        query &= Q(content=row.content)
+    return query
+
+
+def _same_original(candidate, row, *, with_content):
+    if row.precision == 'minute':
+        start=row.sent_at.replace(second=0,microsecond=0)
+        if not start <= candidate['timestamp'] < start+timedelta(minutes=1):
+            return False
+    elif candidate['timestamp'] != row.sent_at:
+        return False
+    if row.phone:
+        same_author=candidate['sender_phone'] in [row.phone,row.phone.lstrip('+')] or (
+            not candidate['sender_phone'] and candidate['sender_name']==row.sender
+        )
+    else:
+        same_author=bool(row.sender) and candidate['sender_name']==row.sender
+    return same_author and (not with_content or candidate['content']==row.content)
 
 
 @transaction.atomic
@@ -73,38 +108,104 @@ def _entries(upload,records,run):
     groups=defaultdict(list)
     for row in records:
         if row.kind=='text':groups[row.fingerprint].append(row.ordinal)
-    done=set(upload.entries.values_list('ordinal',flat=True))
-    for row in records[run.offset:run.offset+100]:
+    page = records[run.offset:run.offset+100]
+    done=set(upload.entries.filter(ordinal__in=[row.ordinal for row in page]).values_list('ordinal',flat=True))
+    export_keys = {
+        row.ordinal: (
+            hashlib.sha256(json.dumps([upload.source_key,upload.sha256,upload.timezone,upload.date_order,row.ordinal]).encode()).hexdigest(),
+            hashlib.sha256(row.content.encode()).hexdigest(),
+        )
+        for row in page if row.kind == 'text'
+    }
+    aliases = {
+        (item['external_id'], item['source_revision']): item['raw_message_id']
+        for item in WhatsAppMessageAlias.objects.filter(
+            config=run.job.config, session_name=run.job.config.session_name,
+            chat_id=run.job.config.group_jid, namespace='export',
+            external_id__in=[value[0] for value in export_keys.values()],
+        ).values('external_id','source_revision','raw_message_id')
+    }
+    resolve_rows=[row for row in page if row.kind=='text' and row.ordinal not in done
+                  and (export_keys[row.ordinal][0],export_keys[row.ordinal][1]) not in aliases]
+    exact_filter=Q(pk__in=[])
+    for row in resolve_rows:
+        exact_filter |= _original_filter(row,with_content=True)
+    original_scope=whatsapp_scope(run.job.config,include_staged=True).filter(
+        Q(raw_payload__export_upload_id__isnull=True)|~Q(raw_payload__export_upload_id=upload.id)
+    )
+    originals=list(original_scope.filter(exact_filter).values(
+        'id','timestamp','sender_name','sender_phone','content'
+    )) if resolve_rows else []
+    exact_by_ordinal={row.ordinal:sorted(
+        [candidate for candidate in originals if _same_original(candidate,row,with_content=True)],
+        key=lambda candidate:(candidate['timestamp'],candidate['id']),
+    ) for row in resolve_rows}
+    temporal_rows=[row for row in resolve_rows if not exact_by_ordinal[row.ordinal]]
+    temporal_filter=Q(pk__in=[])
+    for row in temporal_rows:
+        temporal_filter |= _original_filter(row,with_content=False)
+    temporal_originals=list(original_scope.filter(temporal_filter).values(
+        'timestamp','sender_name','sender_phone','content'
+    )) if temporal_rows else []
+    temporal_by_ordinal={row.ordinal:any(
+        _same_original(candidate,row,with_content=False) for candidate in temporal_originals
+    ) for row in temporal_rows}
+    entries_to_create=[]
+    aliases_to_create=[]
+    alias_expectations=[]
+    for row in page:
         if row.ordinal in done:continue
         values=dict(upload=upload,ordinal=row.ordinal,line_start=row.line_start,line_end=row.line_end,sent_at=row.sent_at,time_precision=row.precision,kind=row.kind,fingerprint=row.fingerprint)
         if row.kind!='text':
             reason='export_system' if row.kind=='system' else 'export_media_unavailable'
-            WhatsAppExportEntry.objects.create(**values,resolution_state='excluded',reason_code=reason,reason_description='Служебное событие WhatsApp, не бизнес-факт.' if row.kind=='system' else 'В TXT отсутствует содержимое вложения; основание для бизнес-факта недоступно.')
+            entries_to_create.append(WhatsAppExportEntry(**values,resolution_state='excluded',reason_code=reason,reason_description='Служебное событие WhatsApp, не бизнес-факт.' if row.kind=='system' else 'В TXT отсутствует содержимое вложения; основание для бизнес-факта недоступно.'))
             continue
-        revision=hashlib.sha256(row.content.encode()).hexdigest();external=hashlib.sha256(json.dumps([upload.source_key,upload.sha256,upload.timezone,upload.date_order,row.ordinal]).encode()).hexdigest()
-        known=alias(run.job.config,'export',external,revision)
-        raw=known.raw_message if known else None
-        matched=bool(raw)
-        if not raw:
-            candidates=list(matching_originals(run.job.config,row.sent_at,row.precision,row.sender,row.phone,row.content).filter(Q(raw_payload__export_upload_id__isnull=True)|~Q(raw_payload__export_upload_id=upload.id)))
+        external,revision=export_keys[row.ordinal]
+        known=aliases.get((external,revision))
+        raw_message_id=known
+        matched=bool(raw_message_id)
+        if not raw_message_id:
+            candidates=exact_by_ordinal.get(row.ordinal,[])
             if candidates:
                 if len(candidates)==len(groups[row.fingerprint]):
-                    raw=candidates[groups[row.fingerprint].index(row.ordinal)];matched=True
+                    raw_message_id=candidates[groups[row.fingerprint].index(row.ordinal)]['id'];matched=True
                 else:
-                    WhatsAppExportEntry.objects.create(**values,resolution_state='blocked',reason_code='deduplication_ambiguous',reason_description='Число одинаковых сообщений с этим автором и временем не совпадает; TXT не содержит WhatsApp ID для однозначного сопоставления.')
+                    entries_to_create.append(WhatsAppExportEntry(**values,resolution_state='blocked',reason_code='deduplication_ambiguous',reason_description='Число одинаковых сообщений с этим автором и временем не совпадает; TXT не содержит WhatsApp ID для однозначного сопоставления.'))
                     continue
-            elif temporal_originals(run.job.config,row.sent_at,row.precision,row.sender,row.phone).filter(Q(raw_payload__export_upload_id__isnull=True)|~Q(raw_payload__export_upload_id=upload.id)).exists():
-                WhatsAppExportEntry.objects.create(**values,resolution_state='blocked',reason_code='deduplication_ambiguous',reason_description='У этого автора и времени сохранён другой текст; TXT не позволяет отличить редакцию от отдельной реплики. Старые данные сохранены.')
+            elif temporal_by_ordinal.get(row.ordinal,False):
+                entries_to_create.append(WhatsAppExportEntry(**values,resolution_state='blocked',reason_code='deduplication_ambiguous',reason_description='У этого автора и времени сохранён другой текст; TXT не позволяет отличить редакцию от отдельной реплики. Старые данные сохранены.'))
                 continue
             else:
                 raw=RawMessage.objects.create(source='whatsapp_export',session_name=run.source_snapshot['session_name'],config_id=run.source_snapshot['config_id'],team_id=run.source_snapshot['team_id'],chat_id=run.source_snapshot['chat_id'],message_id='export:'+hashlib.sha256(external.encode()).hexdigest(),source_revision=revision,processing_state='export_staged',timestamp=row.sent_at,sent_at_known=True,sender_name=row.sender,sender_phone=row.phone,content=row.content,raw_payload={'event':'export.import','export_upload_id':upload.id,'export_timezone':upload.timezone,'export_time_precision':row.precision,'export_line_start':row.line_start,'export_line_end':row.line_end})
-            alias(run.job.config,'export',external,revision,raw)
-        WhatsAppExportEntry.objects.create(**values,raw_message=raw,resolution_state='matched' if matched else 'created',reason_code='exact_original_match' if matched else 'export_new_message',reason_description='Однозначное совпадение текста, автора, времени и количества реплик выбранного чата.' if matched else 'Новый оригинал из TXT-экспорта; сохранены строки источника.')
+                raw_message_id=raw.id
+            if not known:
+                aliases_to_create.append(WhatsAppMessageAlias(config=run.job.config,raw_message_id=raw_message_id,session_name=run.job.config.session_name,chat_id=run.job.config.group_jid,namespace='export',external_id=external,source_revision=revision))
+                alias_expectations.append((external,revision,raw_message_id))
+        entries_to_create.append(WhatsAppExportEntry(**values,raw_message_id=raw_message_id,resolution_state='matched' if matched else 'created',reason_code='exact_original_match' if matched else 'export_new_message',reason_description='Однозначное совпадение текста, автора, времени и количества реплик выбранного чата.' if matched else 'Новый оригинал из TXT-экспорта; сохранены строки источника.'))
+    if aliases_to_create:
+        created_at=timezone.now()
+        for item in aliases_to_create:
+            item.created_at=item.updated_at=created_at
+        WhatsAppMessageAlias.objects.bulk_create(aliases_to_create,ignore_conflicts=True,batch_size=100)
+        saved={(item['external_id'],item['source_revision']):item['raw_message_id'] for item in WhatsAppMessageAlias.objects.filter(
+            config=run.job.config,session_name=run.job.config.session_name,chat_id=run.job.config.group_jid,
+            namespace='export',external_id__in=[key for key,_,_ in alias_expectations],
+        ).values('external_id','source_revision','raw_message_id')}
+        if any(saved.get((external,revision))!=raw_id for external,revision,raw_id in alias_expectations):
+            raise ValueError('whatsapp_alias_conflict')
+    created_at=timezone.now()
+    for item in entries_to_create:
+        item.created_at=item.updated_at=created_at
+    WhatsAppExportEntry.objects.bulk_create(entries_to_create,batch_size=100)
     run.offset=min(len(records),run.offset+100)
     run.fetched_count=run.offset
     baseline=run.settings_snapshot.get('existing_entry_ordinal',0)
-    run.imported_count=upload.entries.filter(resolution_state='created',ordinal__gt=baseline).count()
-    run.existing_count=upload.entries.exclude(raw_message=None).filter(Q(ordinal__lte=baseline)|Q(resolution_state='matched')).count()
+    totals=upload.entries.aggregate(
+        imported=Count('id',filter=Q(resolution_state='created',ordinal__gt=baseline)),
+        existing=Count('id',filter=~Q(raw_message_id=None)&(Q(ordinal__lte=baseline)|Q(resolution_state='matched'))),
+    )
+    run.imported_count=totals['imported']
+    run.existing_count=totals['existing']
     run.status_message=f'Разобрано {run.offset} / {len(records)} записей TXT. Новых сообщений: {run.imported_count}; сопоставлено: {run.existing_count}.'
     run.save()
 
