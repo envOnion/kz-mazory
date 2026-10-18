@@ -761,7 +761,7 @@ class RecordTracesView(APIView):
         has_more = len(traces) > limit
         traces = traces[:limit]
         for trace in traces:
-            row = {"id": trace.pk, "created_at": trace.created_at.isoformat()}
+            row = {"id": trace.pk, "created_at": trace.created_at.isoformat() if trace.created_at else None}
             for field in SAFE_TRACE_FIELDS:
                 value = getattr(trace, field, None)
                 row[field] = str(value) if hasattr(value, "as_text") or field == "bitrix_deal_stage" else value
