@@ -11,6 +11,7 @@ from django.contrib.auth.hashers import make_password
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.db.models import F, Prefetch, Q
 from django.utils import timezone
 
 from .models import (
@@ -342,12 +343,28 @@ def link_export_names(config, self_jid=""):
                 target.user_profile.save(update_fields=["full_name"])
 
 
-def directory_participants(user):
+def directory_people(user):
     from . import access
-    people = Participant.objects.filter(team__is_active=True).select_related("team", "user_profile__user").prefetch_related("identities").order_by("display_name", "id")
+    people = Participant.objects.filter(team__is_active=True)
     if not user.is_superuser:
         people = people.filter(team_id__in=access.team_ids(user, ["team_lead", "finance"]))
-    memberships = {(row.user_id, row.team_id): row.status for row in TeamMembership.objects.filter(status="active", team_id__in=people.values("team_id"))}
+    return people
+
+
+def directory_participants(people):
+    """Serialize only the selected page and its related identities/memberships."""
+    from django.db.models import prefetch_related_objects
+    people = list(people)
+    prefetch_related_objects(people, Prefetch(
+        "identities", queryset=ParticipantIdentity.objects.only("id", "participant_id", "resolution_state", "namespace", "value"),
+    ))
+    profile_pairs = {(person.user_profile.user_id, person.team_id) for person in people if person.user_profile_id}
+    member_filter = Q()
+    for user_id, team_id in profile_pairs:
+        member_filter |= Q(user_id=user_id, team_id=team_id)
+    memberships = set(TeamMembership.objects.filter(
+        member_filter, status="active",
+    ).values_list("user_id", "team_id")) if profile_pairs else set()
     result = []
     for person in people:
         profile = person.user_profile
@@ -363,13 +380,30 @@ def directory_participants(user):
     return result
 
 
-def directory_sync_status(user):
+def directory_sync_configs(user):
     from . import access
     configs = WhatsAppConfig.objects.filter(is_active=True, team__is_active=True)
     if not user.is_superuser:
         configs = configs.filter(team_id__in=access.team_ids(user, ["team_lead", "finance"]))
-    result = []
+    return configs
+
+
+def directory_sync_status(configs):
+    """Read latest events only for the exact source identities in this page."""
+    configs = list(configs)
+    if not configs:
+        return []
+    sources = Q()
     for config in configs:
-        event = OutboxEvent.objects.filter(event_type="whatsapp_participants", payload__config_id=config.id, payload__team_id=config.team_id, payload__session_name=config.session_name, payload__chat_id=config.group_jid).order_by("-id").first()
-        result.append({"config_id": config.id, "chat_name": config.name, "state": event.state if event else "not_started", "error_code": event.error_code if event else "", "summary": config.snapshot.get("participant_sync")})
-    return result
+        sources |= Q(payload__config_id=config.id, payload__team_id=config.team_id,
+                     payload__session_name=config.session_name, payload__chat_id=config.group_jid)
+    events = OutboxEvent.objects.filter(sources, event_type="whatsapp_participants").annotate(
+        directory_config_id=F("payload__config_id"),
+    ).order_by("directory_config_id", "-id").distinct("directory_config_id").values(
+        "directory_config_id", "state", "error_code",
+    )
+    latest = {row["directory_config_id"]: row for row in events}
+    return [{"config_id": config.id, "chat_name": config.name,
+             "state": latest[config.id]["state"] if config.id in latest else "not_started",
+             "error_code": latest[config.id]["error_code"] if config.id in latest else "",
+             "summary": config.directory_sync_summary} for config in configs]

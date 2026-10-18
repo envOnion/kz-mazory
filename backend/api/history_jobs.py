@@ -8,7 +8,7 @@ from urllib.parse import quote, urlencode
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, Exists, Func, JSONField, OuterRef, Q, Subquery, Value
 from django.utils import timezone
 
 from .models import (
@@ -281,39 +281,73 @@ def schedule_due_jobs():
             )
 
 
-def progress(run):
-    if run.settings_snapshot.get("analysis_policy"):
-        from .history_analysis import counts
-        return counts(run)
-    total = run.messages.count()
-    if run.settings_snapshot.get("analysis_mode") == "reprocess_all":
+def progress_many(runs):
+    """Batch the HTTP history list while retaining the singleton worker API."""
+    runs = list(runs)
+    current = [run for run in runs if run.settings_snapshot.get("analysis_policy")]
+    legacy = [run for run in runs if not run.settings_snapshot.get("analysis_policy")]
+    from .history_analysis import counts_many
+    result = counts_many(current)
+    if not legacy:
+        return result
+
+    reprocessed = {run.pk for run in legacy if run.settings_snapshot.get("analysis_mode") == "reprocess_all"}
+    rows = WhatsAppHistoryRun.objects.filter(pk__in=[run.pk for run in legacy]).order_by().annotate(
+        progress_total=Count("messages"),
+        progress_processed=Count("messages", filter=Q(messages__processed=True)),
+        progress_errors=Count("messages", filter=Q(messages__processing_state="failed")),
+        progress_answers=Count("messages", filter=Q(messages__processing_state="clarification_reply")
+                               & ~Q(messages__content__regex=r"^\s*$")),
+    ).values("pk", "progress_total", "progress_processed", "progress_errors", "progress_answers")
+    totals = {row["pk"]: row for row in rows}
+    replay = {}
+    if reprocessed:
         events = OutboxEvent.objects.filter(
             event_type="extract_message",
-            payload__history_run_id=run.id,
+            payload__history_run_id=Func(OuterRef("pk"), function="to_jsonb", output_field=JSONField()),
+        )
+        successful_operation = MessageProcessingTrace.objects.filter(
+            operation_key=OuterRef("deduplication_key"), status="success",
+        )
+        failed = events.filter(state__in=["failed", "unknown", "done", "cancelled"]).annotate(
+            progress_success=Exists(successful_operation),
+        ).filter(progress_success=False)
+        # The event lookup sits inside a trace subquery, hence the two-level ref.
+        trace_events = OutboxEvent.objects.filter(
+            event_type="extract_message",
+            payload__history_run_id=Func(
+                OuterRef(OuterRef("pk")), function="to_jsonb", output_field=JSONField(),
+            ),
         )
         successful = MessageProcessingTrace.objects.filter(
-            operation_key__in=events.values("deduplication_key"), status="success",
+            operation_key__in=trace_events.values("deduplication_key"), status="success",
+            raw_message__history_import_runs=OuterRef("pk"),
+        ).exclude(raw_message__content__regex=r"^\s*$").exclude(
+            raw_message__processing_state="clarification_reply",
         )
-        errors = events.filter(state__in=["failed", "unknown", "done", "cancelled"]).exclude(
-            deduplication_key__in=successful.values("operation_key"),
-        ).count()
-        processed = successful.filter(
-            raw_message_id__in=run.messages.exclude(content__regex=r"^\s*$").exclude(processing_state='clarification_reply').values("id"),
-        ).values("raw_message_id").distinct().count() + run.no_text_count + run.messages.filter(processing_state='clarification_reply').exclude(content__regex=r"^\s*$").count()
-        return {
-            "total": total,
-            "processed": processed,
-            "errors": errors,
-            "pending": max(0, total - processed - errors),
-        }
-    processed = run.messages.filter(processed=True).count()
-    errors = run.messages.filter(processing_state="failed").count()
-    return {
-        "total": total,
-        "processed": processed,
-        "errors": errors,
-        "pending": max(0, total - processed - errors),
-    }
+
+        def count_query(query, field="pk", distinct=False):
+            return query.order_by().annotate(progress_group=Value(1)).values("progress_group").annotate(
+                progress_count=Count(field, distinct=distinct),
+            ).values("progress_count")[:1]
+
+        replay = {row["pk"]: row for row in WhatsAppHistoryRun.objects.filter(pk__in=reprocessed).order_by().annotate(
+            progress_errors=Subquery(count_query(failed)),
+            progress_processed=Subquery(count_query(successful, "raw_message_id", distinct=True)),
+        ).values("pk", "progress_errors", "progress_processed")}
+    for run in legacy:
+        row = totals[run.pk]
+        total, processed, errors = row["progress_total"], row["progress_processed"], row["progress_errors"]
+        if run.pk in reprocessed:
+            processed = (replay[run.pk]["progress_processed"] or 0) + run.no_text_count + row["progress_answers"]
+            errors = replay[run.pk]["progress_errors"] or 0
+        result[run.pk] = {"total": total, "processed": processed, "errors": errors,
+                          "pending": max(0, total - processed - errors)}
+    return result
+
+
+def progress(run):
+    return progress_many([run])[run.pk]
 
 
 def fail_run(payload, code):

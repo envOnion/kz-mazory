@@ -1,6 +1,7 @@
 import uuid
 from django.contrib.auth.models import User
 from django.db import transaction
+from django.db.models import Count, Prefetch, Q
 from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.views import APIView
@@ -13,7 +14,7 @@ from .notifications import (
     serialize_notification,
     create_notification,
 )
-from .models import Project, AuditEvent
+from .models import AuditEvent, NotificationDelivery, Project
 from . import access
 
 
@@ -77,14 +78,24 @@ class NotificationListView(APIView):
 
         pagination = PageNumberPagination()
         pagination.page_size = 50
-        qs = visible_notifications(request.user).prefetch_related("deliveries")
+        qs = visible_notifications(request.user).select_related("clarification").prefetch_related(
+            Prefetch(
+                "deliveries",
+                queryset=NotificationDelivery.objects.only(
+                    "id", "notification_id", "state", "channel", "updated_at", "error_code"
+                ),
+            )
+        )
         page = pagination.paginate_queryset(qs, request)
+        unread_count = qs.aggregate(
+            unread=Count("id", filter=Q(read_at__isnull=True))
+        )["unread"]
         return Response(
             {
                 "notifications": [serialize_notification(n) for n in page],
-                "count": qs.count(),
+                "count": pagination.page.paginator.count,
                 "next": pagination.get_next_link(),
-                "unread_count": qs.filter(read_at__isnull=True).count(),
+                "unread_count": unread_count,
             }
         )
 

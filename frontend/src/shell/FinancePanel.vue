@@ -2,24 +2,42 @@
 import { computed, onMounted, ref } from 'vue'
 import { requestKey } from '../utils/requestKey'
 import { api, post, pollOperation } from '../composables/api'
+import { loadDirectory } from '../composables/directory'
 import { currentUser } from '../composables/session'
-import type { Directory } from '../types/platform'
+import type { Directory, DirectoryProject } from '../types/platform'
 import type { FinanceData } from '../types/finance'
 import { ErrorState, Skeleton } from './bits'
 const data = ref<FinanceData | null>(null), directory = ref<Directory | null>(null)
 const error = ref(''), notice = ref(''), busy = ref(false), period = ref('this_month')
+const projectSearch = ref(''), profileSearch = ref('')
+const projectPage = ref(1), projectNames = ref<Record<number, string>>({}), projectCache = ref<DirectoryProject[]>([])
 const finance = computed(() => currentUser.value?.roles.some(role => role === 'finance' || role === 'admin'))
 const lead = computed(() => currentUser.value?.roles.some(role => ['finance','team_lead','admin'].includes(role)))
 const schedule = ref({project_id:null as number|null,due_date:'',amount:''})
 const allocation = ref({payment_id:null as number|null,schedule_id:null as number|null,amount:''})
 const target = ref({team_id:null as number|null,profile_id:null as number|null,month:'',amount:'',currency:'KZT'})
+const matchingProfiles = computed(() => (directory.value?.profiles ?? []).filter(profile => profile.full_name.toLocaleLowerCase('ru').includes(profileSearch.value.trim().toLocaleLowerCase('ru'))))
+const projectOptions = computed(() => {
+  const current = directory.value?.projects ?? []
+  const selected = projectCache.value.find(project => project.id === schedule.value.project_id)
+  return selected && !current.some(project => project.id === selected.id) ? [...current, selected] : current
+})
 async function load() {
   error.value = ''
   try {
-    const [summary, catalog] = await Promise.all([api<FinanceData>(`/finance/?period=${period.value}`), api<Directory>('/directory/')])
+    const [summary, catalog] = await Promise.all([api<FinanceData>(`/finance/?period=${period.value}`), loadDirectory({ collections: ['teams', 'profiles'], includeProjects: true, projectPage: projectPage.value, projectSearch: projectSearch.value })])
     data.value = summary; directory.value = catalog
+    const cache = new Map<number, DirectoryProject>()
+    for (const project of projectCache.value) cache.set(project.id, project)
+    for (const project of catalog.projects) {
+      cache.set(project.id, project)
+      projectNames.value[project.id] = project.name
+    }
+    projectCache.value = [...cache.values()]
   } catch (e) { error.value = e instanceof Error ? e.message : 'Не удалось загрузить финансы' }
 }
+async function searchProjects() { projectPage.value = 1; await load() }
+async function changeProjectPage(delta: number) { projectPage.value += delta; await load() }
 async function command(fn:()=>Promise<unknown>) {
   busy.value = true; notice.value = ''; error.value = ''
   try { await fn(); await load(); notice.value = 'Изменения сохранены' }
@@ -41,21 +59,23 @@ async function exportPayments() {
   } catch (e) { error.value = e instanceof Error ? e.message : 'Экспорт не выполнен' }
   finally { busy.value = false }
 }
-const projectName = (id:number) => directory.value?.projects.find(p => p.id === id)?.name ?? `Проект #${id}`
+const projectName = (id:number) => projectNames.value[id] ?? `Проект #${id}`
 onMounted(load)
 </script>
 <template>
   <div class="p-4 space-y-4">
-    <div class="flex flex-wrap gap-2 items-center"><h2 class="text-lg font-semibold">Финансы и оплаты</h2><select v-model="period" class="mx-select !w-auto" aria-label="Период финансов" @change="load"><option value="this_month">Этот месяц</option><option value="last_month">Прошлый месяц</option><option value="quarter">Квартал</option><option value="year">Год</option></select><button class="mx-btn" :disabled="busy" @click="exportPayments">Экспорт оплат в CSV</button></div>
+      <div class="flex flex-wrap gap-2 items-center"><h2 class="text-lg font-semibold">Финансы и оплаты</h2><select v-model="period" class="mx-select !w-auto" aria-label="Период финансов" @change="load"><option value="this_month">Этот месяц</option><option value="last_month">Прошлый месяц</option><option value="quarter">Квартал</option><option value="year">Год</option></select><button class="mx-btn" :disabled="busy" @click="exportPayments">Экспорт оплат в CSV</button></div>
+      <div class="grid gap-3 sm:grid-cols-2"><form class="flex items-end gap-2" @submit.prevent="searchProjects"><label class="mx-muted flex-1">Поиск проекта<input v-model="projectSearch" class="mx-input block mt-1 w-full" placeholder="Название проекта или компании" /></label><button class="mx-btn">Найти</button></form><label class="mx-muted">Поиск сотрудника<input v-model="profileSearch" class="mx-input block mt-1 w-full" placeholder="Имя сотрудника" /></label></div>
+      <div v-if="directory" class="flex flex-wrap items-center gap-3 text-sm"><span>Проекты: {{ directory.projects_count ?? directory.projects.length }} · Страница {{ projectPage }}</span><button class="mx-btn" :disabled="busy || projectPage === 1" @click="changeProjectPage(-1)">Предыдущая</button><button class="mx-btn" :disabled="busy || !directory.projects_next_page" @click="changeProjectPage(1)">Следующая</button></div>
     <ErrorState v-if="error" :text="error" :on-retry="load" /><p v-if="notice" role="status" class="text-emerald-300">{{ notice }}</p><Skeleton v-if="!data && !error" />
     <template v-if="data">
       <div class="mx-card p-4"><p>Просрочено по графикам: {{ data.receivables.overdue }} {{ data.receivables.currency }}</p><p class="mx-muted">Проектов без подтверждённого графика: {{ data.receivables.unknown_schedule_projects }}. Отсутствие графика не означает отсутствие долга.</p></div>
       <div class="mx-card p-4 overflow-x-auto"><h3 class="font-semibold mb-2">Подтверждённые оплаты</h3><table class="mx-table"><thead><tr><th>Дата</th><th>Проект</th><th>Сумма</th></tr></thead><tbody><tr v-for="payment in data.payments" :key="payment.id"><td>{{ payment.payment_date }}</td><td>{{ projectName(payment.project_id) }}</td><td>{{ payment.amount }} {{ payment.currency }}</td></tr></tbody></table><p v-if="!data.payments.length" class="mx-muted">Оплат нет</p></div>
       <div class="mx-card p-4 overflow-x-auto"><h3 class="font-semibold mb-2">Графики оплат</h3><table class="mx-table"><thead><tr><th>Срок</th><th>Проект</th><th>Сумма</th></tr></thead><tbody><tr v-for="item in data.schedules" :key="item.id"><td>{{ item.due_date }}</td><td>{{ projectName(item.project_id) }}</td><td>{{ item.amount }} {{ item.currency }}</td></tr></tbody></table></div>
-      <div v-if="finance" class="grid md:grid-cols-2 gap-3"><form class="mx-card p-4 space-y-2" @submit.prevent="command(() => post('/finance/schedules/',schedule))"><h3 class="font-semibold">Добавить срок оплаты</h3><label class="block">Проект<select aria-label="Проект" v-model="schedule.project_id" class="mx-select" required><option v-for="p in directory?.projects" :key="p.id" :value="p.id">{{ p.name }}</option></select></label><label class="block">Срок<input v-model="schedule.due_date" type="date" class="mx-input" required /></label><label class="block">Сумма<input v-model="schedule.amount" inputmode="decimal" class="mx-input" required /></label><button class="mx-btn" :disabled="busy">Добавить срок</button></form>
+      <div v-if="finance" class="grid md:grid-cols-2 gap-3"><form class="mx-card p-4 space-y-2" @submit.prevent="command(() => post('/finance/schedules/',schedule))"><h3 class="font-semibold">Добавить срок оплаты</h3><label class="block">Проект<select aria-label="Проект" v-model="schedule.project_id" class="mx-select" required><option v-for="p in projectOptions" :key="p.id" :value="p.id">{{ p.name }}</option></select></label><label class="block">Срок<input v-model="schedule.due_date" type="date" class="mx-input" required /></label><label class="block">Сумма<input v-model="schedule.amount" inputmode="decimal" class="mx-input" required /></label><button class="mx-btn" :disabled="busy">Добавить срок</button></form>
       <form class="mx-card p-4 space-y-2" @submit.prevent="command(() => post('/finance/allocations/',allocation))"><h3 class="font-semibold">Распределить оплату</h3><label class="block">Оплата<select aria-label="Оплата" v-model="allocation.payment_id" class="mx-select" required><option v-for="p in data.payments" :key="p.id" :value="p.id">#{{ p.id }} · {{ projectName(p.project_id) }} · {{ p.amount }}</option></select></label><label class="block">Срок графика<select aria-label="Срок графика" v-model="allocation.schedule_id" class="mx-select" required><option v-for="s in data.schedules" :key="s.id" :value="s.id">#{{ s.id }} · {{ projectName(s.project_id) }} · {{ s.due_date }}</option></select></label><label class="block">Сумма<input v-model="allocation.amount" inputmode="decimal" class="mx-input" required /></label><button class="mx-btn" :disabled="busy">Распределить</button></form></div>
       <article class="mx-card p-4 overflow-x-auto"><h3 class="font-semibold mb-2">Планы продаж</h3><table class="mx-table"><thead><tr><th>Месяц</th><th>Сотрудник</th><th>План</th><th>Версия</th></tr></thead><tbody><tr v-for="item in data.targets" :key="item.id"><td>{{ item.month }}</td><td>{{ directory?.profiles.find(p => p.id === item.profile_id)?.full_name }}</td><td>{{ item.amount }} {{ item.currency }}</td><td>{{ item.version }}</td></tr></tbody></table></article>
-      <form v-if="lead" class="mx-card p-4 grid sm:grid-cols-2 gap-3" @submit.prevent="command(saveTarget)"><h3 class="font-semibold sm:col-span-2">Утвердить новую версию плана</h3><label>Команда<select v-model="target.team_id" class="mx-select" required><option v-for="t in directory?.teams" :key="t.id" :value="t.id">{{ t.name }}</option></select></label><label>Сотрудник<select v-model="target.profile_id" class="mx-select" required><option v-for="p in directory?.profiles" :key="p.id" :value="p.id">{{ p.full_name }}</option></select></label><label>Первый день месяца<input v-model="target.month" type="date" class="mx-input" required /></label><label>План<input v-model="target.amount" class="mx-input" inputmode="decimal" required /></label><label>Валюта<select v-model="target.currency" class="mx-select"><option v-for="c in ['KZT','USD','EUR','RUB']" :key="c">{{ c }}</option></select></label><button class="mx-btn self-end justify-self-start" :disabled="busy">Утвердить план</button></form>
+      <form v-if="lead" class="mx-card p-4 grid sm:grid-cols-2 gap-3" @submit.prevent="command(saveTarget)"><h3 class="font-semibold sm:col-span-2">Утвердить новую версию плана</h3><label>Команда<select v-model="target.team_id" class="mx-select" required><option v-for="t in directory?.teams" :key="t.id" :value="t.id">{{ t.name }}</option></select></label><label>Сотрудник<select v-model="target.profile_id" class="mx-select" required><option v-for="p in matchingProfiles" :key="p.id" :value="p.id">{{ p.full_name }}</option></select></label><label>Первый день месяца<input v-model="target.month" type="date" class="mx-input" required /></label><label>План<input v-model="target.amount" class="mx-input" inputmode="decimal" required /></label><label>Валюта<select v-model="target.currency" class="mx-select"><option v-for="c in ['KZT','USD','EUR','RUB']" :key="c">{{ c }}</option></select></label><button class="mx-btn self-end justify-self-start" :disabled="busy">Утвердить план</button></form>
     </template>
   </div>
 </template>

@@ -9,10 +9,11 @@
     <div v-if="showFilters" class="scope-grid">
       <label>Команда<span class="select-wrap"><select v-model="scope.team_id" aria-label="Команда"><option :value="undefined">Все доступные</option><option v-for="t in directory.teams" :key="t.id" :value="t.id">{{ t.name }}</option></select><ChevronDown :size="16" /></span></label>
       <label>Менеджер<span class="select-wrap"><select v-model="scope.manager_id" aria-label="Менеджер"><option :value="undefined">Все доступные</option><option v-for="p in directory.profiles" :key="p.id" :value="p.id">{{ p.full_name }}</option></select><ChevronDown :size="16" /></span></label>
-      <label>Проект<span class="select-wrap"><select v-model="scope.project_id" aria-label="Проект"><option :value="undefined">Все доступные</option><option v-for="p in directory.projects" :key="p.id" :value="p.id">{{ p.name }}</option></select><ChevronDown :size="16" /></span></label>
+      <label>Проект<span class="select-wrap"><select v-model="scope.project_id" aria-label="Проект"><option :value="undefined">Все доступные</option><option v-for="p in projectOptions" :key="p.id" :value="p.id">{{ p.name }}</option></select><ChevronDown :size="16" /></span></label>
       <label>Период<span class="select-wrap"><select :value="period" aria-label="Период нового запроса" @change="$emit('changePeriod', ($event.target as HTMLSelectElement).value)"><option value="this_month">Текущий месяц</option><option value="last_month">Прошлый месяц</option><option value="quarter">Квартал</option><option value="year">Год</option></select><ChevronDown :size="16" /></span></label>
       <label>Валюта<span class="select-wrap"><select v-model="scope.currency" aria-label="Валюта"><option>KZT</option><option>USD</option><option>EUR</option><option>RUB</option></select><ChevronDown :size="16" /></span></label>
     </div>
+    <div v-if="showFilters" class="flex flex-wrap items-center gap-2"><label class="muted">Поиск проекта<input v-model="projectSearch" class="field ml-2" placeholder="Название или компания" /></label><button class="chat-button" :disabled="directoryLoading" @click="searchProjects">Найти</button><button class="chat-button" :disabled="projectPage === 1 || directoryLoading" @click="changeProjectPage(-1)">Предыдущая</button><span class="muted">Проектов найдено: {{ directory.projects_count ?? directory.projects.length }} · Страница {{ projectPage }}</span><button class="chat-button" :disabled="!directory.projects_next_page || directoryLoading" @click="changeProjectPage(1)">Следующая</button><p v-if="directoryError" role="alert" class="turn-error">{{ directoryError }}</p></div>
     <div class="workspace-layout">
       <div class="dialogue-column">
         <h2>Диалог <span class="muted">{{ turns.length ? `${turns.length} запросов` : '' }}</span></h2>
@@ -56,16 +57,35 @@ import { ref, computed, watch, onMounted, nextTick } from 'vue'
 import { ChevronDown, Plus, SlidersHorizontal, Sparkles, ArrowUpRight, ArrowUp, ChartNoAxesCombined, Table2, LoaderCircle } from 'lucide-vue-next'
 import type { AnalyticsTurn, ConversationRef, Artifact, QueryPatch } from '../types/dialogue'
 import type { PresentationDocument } from '../types/presentation'
-import type { KpiFilters, Directory } from '../types/platform'
-import { api } from '../composables/api'
+import type { KpiFilters, Directory, DirectoryProject } from '../types/platform'
+import { loadDirectory } from '../composables/directory'
 import AnswerMarkdown from './AnswerMarkdown.vue'
 import PresentationRenderer from '../presentation/PresentationRenderer.vue'
 const props = defineProps<{ turns: AnalyticsTurn[]; conversations: ConversationRef[]; conversationId: number | null; selectedTurnId: number | null; artifact: Artifact | null; presentation: PresentationDocument | null; isGenerating: boolean; error: string; period: string }>()
 const emit = defineEmits<{ submit: [prompt: string, patch?: QueryPatch]; followup: [turnId: number, artifactId: number | undefined, prompt: string, patch?: QueryPatch]; selectTurn: [id: number, artifactId?: number]; loadConversation: [id: number]; newConversation: []; cancel: [operationId: number]; openSource: [id: number]; changeFilters: [filters: KpiFilters]; changePeriod: [period: string] }>()
 const prompt = ref(''), composer = ref<HTMLTextAreaElement>(), transcript = ref<HTMLDivElement>(), table = ref(false), chartKind = ref<'bar' | 'line' | 'area'>('bar'), showFilters = ref(false)
 const scope = ref<KpiFilters>({ currency: 'KZT' }), directory = ref<Directory>({ teams: [], profiles: [], projects: [] })
+const projectPage = ref(1), projectSearch = ref(''), projectCache = ref<DirectoryProject[]>([]), directoryLoading = ref(false), directoryError = ref('')
+const projectOptions = computed(() => {
+  const current = directory.value.projects
+  const selected = projectCache.value.find(project => project.id === scope.value.project_id)
+  return selected && !current.some(project => project.id === selected.id) ? [...current, selected] : current
+})
 const initialPrompts = ['Покажи поступления по месяцам', 'Покажи сделки CRM по стадиям', 'Какие обещания просрочены?']
-onMounted(async () => { try { directory.value = await api<Directory>('/directory/') } catch { /* API reports access errors. */ } })
+async function loadDirectoryPage() {
+  directoryLoading.value = true; directoryError.value = ''
+  try {
+    directory.value = await loadDirectory({ collections: ['teams', 'profiles'], includeProjects: true, projectPage: projectPage.value, projectSearch: projectSearch.value })
+    const cache = new Map<number, DirectoryProject>()
+    for (const project of projectCache.value) cache.set(project.id, project)
+    for (const project of directory.value.projects) cache.set(project.id, project)
+    projectCache.value = [...cache.values()]
+  } catch (e) { directoryError.value = e instanceof Error ? e.message : 'Не удалось загрузить проекты' }
+  finally { directoryLoading.value = false }
+}
+async function searchProjects() { projectPage.value = 1; await loadDirectoryPage() }
+async function changeProjectPage(delta: number) { projectPage.value += delta; await loadDirectoryPage() }
+onMounted(loadDirectoryPage)
 watch(scope, value => emit('changeFilters', { ...value }), { deep: true })
 watch(() => props.turns.length, async () => { await nextTick(); if (transcript.value) transcript.value.scrollTop = transcript.value.scrollHeight })
 watch(() => props.presentation, doc => { table.value = false; const kind = doc?.blocks[0]?.kind; chartKind.value = kind === 'line' || kind === 'area' ? kind : 'bar' })

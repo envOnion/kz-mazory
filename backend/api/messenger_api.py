@@ -11,8 +11,10 @@ import re
 from .communication import sanitize_body, sanitize_data
 from urllib.parse import urlencode
 
-from django.db.models import Case, CharField, Count, Exists, F, Max, OuterRef, Q, Subquery, Value, When, Window
-from django.db.models.functions import Coalesce, RowNumber
+from django.db import connection
+from django.db.models import BigIntegerField, BooleanField, Count, Exists, F, JSONField, Max, OuterRef, Q, Subquery, Window
+from django.db.models.functions import RowNumber
+from django.db.models.expressions import RawSQL
 from rest_framework.exceptions import ValidationError
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
@@ -25,6 +27,9 @@ from .models import (
     CommunicationEvent,
     CommunicationRecord,
     CrmDelivery,
+    FactCandidate,
+    FactDecision,
+    FactEvent,
     FactClarification,
     MessageProcessingTrace,
     NotificationDelivery,
@@ -234,7 +239,8 @@ def axes_for_records(records):
 
     clars_by_notif = {
         c.notification_id: c
-        for c in FactClarification.objects.filter(notification_id__in=notif_ids).only('id','notification_id','state')
+        for c in FactClarification.objects.filter(notification_id__in=notif_ids)
+        .only('id','notification_id','state').order_by('id')
     }
     trace_to_raw = {t.id: t.raw_message_id for t in traces.values()}
     clars_by_raw = {}
@@ -323,6 +329,157 @@ def _attention_batches(qs):
         yield batch, axes_for_records(batch)
 
 
+def _analysis_match_ids(qs, state=None, *, attention=False):
+    """Filter states from one materialized latest-state relation in PostgreSQL."""
+    trace_fields = MessageProcessingTrace._meta
+    work_fields = SourceWorkItem._meta
+    clarification_fields = FactClarification._meta
+    delivery_fields = NotificationDelivery._meta
+    outbox_fields = OutboxEvent._meta
+    crm_fields = CrmDelivery._meta
+    fact_event_fields = FactEvent._meta
+    decision_fields = FactDecision._meta
+    candidate_fields = FactCandidate._meta
+    trace_table = connection.ops.quote_name(trace_fields.db_table)
+    work_table = connection.ops.quote_name(work_fields.db_table)
+    clarification_table = connection.ops.quote_name(clarification_fields.db_table)
+    delivery_table = connection.ops.quote_name(delivery_fields.db_table)
+    outbox_table = connection.ops.quote_name(outbox_fields.db_table)
+    crm_table = connection.ops.quote_name(crm_fields.db_table)
+    fact_event_table = connection.ops.quote_name(fact_event_fields.db_table)
+    decision_table = connection.ops.quote_name(decision_fields.db_table)
+    candidate_table = connection.ops.quote_name(FactCandidate._meta.db_table)
+
+    def column(model_fields, name):
+        return connection.ops.quote_name(model_fields.get_field(name).column)
+
+    scoped_sql, scoped_params = qs.order_by().values(
+        'id', 'raw_message_id', 'notification_id', 'otp_outbox_id'
+    ).query.sql_with_params()
+    trace_raw_id = column(trace_fields, 'raw_message')
+    trace_status = column(trace_fields, 'status')
+    trace_action = column(trace_fields, 'pipeline_action')
+    trace_metadata = column(trace_fields, 'context_metadata')
+    work_raw_id = column(work_fields, 'raw_message')
+    work_state = column(work_fields, 'state')
+    work_error = column(work_fields, 'error_code')
+    clarification_notification = column(clarification_fields, 'notification')
+    clarification_candidate = column(clarification_fields, 'candidate')
+    clarification_state = column(clarification_fields, 'state')
+    delivery_notification = column(delivery_fields, 'notification')
+    delivery_state = column(delivery_fields, 'state')
+    delivery_attempt = column(delivery_fields, 'attempt_no')
+    outbox_state = column(outbox_fields, 'state')
+    crm_fact_event = column(crm_fields, 'fact_event')
+    crm_state = column(crm_fields, 'state')
+    event_decision = column(fact_event_fields, 'decision')
+    decision_candidate = column(decision_fields, 'candidate')
+    candidate_trace = column(candidate_fields, 'trace')
+
+    state_filter = "AND analysis = %s" if state else ""
+    attention_filter = "AND has_attention" if attention else ""
+
+    sql = f"""
+        WITH scoped_records AS MATERIALIZED ({scoped_sql}),
+        current_axes AS MATERIALIZED (
+            SELECT scoped.id,
+                CASE
+                    WHEN COALESCE(notification_clar.state, trace_clar.state) = 'awaiting' THEN 'need_context'
+                    WHEN latest_trace.id IS NOT NULL AND latest_trace.status = 'error' THEN 'error'
+                    WHEN latest_trace.status IN ('sending', 'accepted', 'unknown') THEN 'analyzing'
+                    WHEN latest_trace.pipeline_action = 'non_commercial'
+                         AND latest_trace.request_state = 'not_sent' THEN 'queued'
+                    WHEN latest_trace.pipeline_action = 'non_commercial'
+                         AND latest_trace.request_state IN ('prepared', 'sent') THEN 'analyzing'
+                    WHEN latest_trace.pipeline_action = 'non_commercial' THEN 'no_crm_actions'
+                    WHEN latest_trace.id IS NOT NULL THEN 'analyzed'
+                    WHEN latest_work.id IS NOT NULL
+                         AND (latest_work.state = 'error' OR COALESCE(latest_work.error_code, '') <> '') THEN 'error'
+                    WHEN latest_work.state = 'pending' THEN 'queued'
+                    WHEN latest_work.state IN ('done', 'completed') THEN 'analyzed'
+                    WHEN latest_work.id IS NOT NULL THEN 'analyzing'
+                    ELSE 'received'
+                END AS analysis,
+                (
+                    CASE
+                        WHEN COALESCE(notification_clar.state, trace_clar.state) IN ('awaiting', 'expired', 'unconfirmed')
+                            THEN TRUE
+                        WHEN latest_trace.status = 'error' THEN TRUE
+                        WHEN latest_trace.id IS NULL AND latest_work.id IS NOT NULL AND (
+                            latest_work.state = 'error' OR COALESCE(latest_work.error_code, '') <> ''
+                        ) THEN TRUE
+                        WHEN latest_delivery.id IS NOT NULL AND latest_delivery.state NOT IN (
+                            'queued', 'pending', 'sending', 'sent', 'delivered', 'ack'
+                        ) THEN TRUE
+                        WHEN latest_delivery.id IS NULL AND otp.id IS NOT NULL AND otp.state NOT IN (
+                            'pending', 'enqueued', 'processing', 'done'
+                        ) THEN TRUE
+                        WHEN latest_trace.id IS NOT NULL AND EXISTS (
+                            SELECT 1 FROM {crm_table} AS crm
+                            INNER JOIN {fact_event_table} AS fact_event
+                                ON fact_event.id = crm.{crm_fact_event}
+                            INNER JOIN {decision_table} AS decision
+                                ON decision.id = fact_event.{event_decision}
+                            INNER JOIN {candidate_table} AS candidate
+                                ON candidate.id = decision.{decision_candidate}
+                            WHERE candidate.{candidate_trace} = latest_trace.id
+                              AND crm.{crm_state} IN ('failed', 'unknown', 'unavailable')
+                        ) THEN TRUE
+                        ELSE FALSE
+                    END
+                ) AS has_attention
+            FROM scoped_records AS scoped
+            LEFT JOIN LATERAL (
+                SELECT trace.id, trace.{trace_status} AS status,
+                       trace.{trace_action} AS pipeline_action,
+                       trace.{trace_metadata}->>'request_state' AS request_state
+                FROM {trace_table} AS trace
+                WHERE trace.{trace_raw_id} = scoped.raw_message_id
+                ORDER BY trace.id DESC LIMIT 1
+            ) AS latest_trace ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT work.id, work.{work_state} AS state, work.{work_error} AS error_code
+                FROM {work_table} AS work
+                WHERE work.{work_raw_id} = scoped.raw_message_id
+                ORDER BY work.id DESC LIMIT 1
+            ) AS latest_work ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT clarification.{clarification_state} AS state
+                FROM {clarification_table} AS clarification
+                WHERE clarification.{clarification_notification} = scoped.notification_id
+                  AND scoped.notification_id IS NOT NULL
+                ORDER BY clarification.id DESC LIMIT 1
+            ) AS notification_clar ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT clarification.{clarification_state} AS state
+                FROM {clarification_table} AS clarification
+                INNER JOIN {candidate_table} AS candidate
+                    ON candidate.id = clarification.{clarification_candidate}
+                WHERE candidate.trace_id = latest_trace.id
+                ORDER BY clarification.id ASC LIMIT 1
+            ) AS trace_clar ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT delivery.id, delivery.{delivery_state} AS state
+                FROM {delivery_table} AS delivery
+                WHERE delivery.{delivery_notification} = scoped.notification_id
+                  AND scoped.notification_id IS NOT NULL
+                ORDER BY delivery.{delivery_attempt} DESC, delivery.id DESC LIMIT 1
+            ) AS latest_delivery ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT outbox.id, outbox.{outbox_state} AS state
+                FROM {outbox_table} AS outbox
+                WHERE outbox.id = scoped.otp_outbox_id
+                LIMIT 1
+            ) AS otp ON TRUE
+        )
+        SELECT id FROM current_axes WHERE TRUE {state_filter} {attention_filter}
+    """
+    params = [*scoped_params]
+    if state:
+        params.append(state)
+    return RawSQL(sql, params, output_field=BigIntegerField())
+
+
 def filter_record_statuses(request, qs):
     """Drill down into the same message cohort, never into work-attempt states."""
     if request.query_params.get('cohort') == 'source':
@@ -334,38 +491,9 @@ def filter_record_statuses(request, qs):
     if state and state not in ANALYSIS_LABELS:
         raise ValidationError({'error':'Неизвестное состояние анализа.'})
     if attention:
-        # Do not inline latest-state subqueries repeatedly into GROUP BY,
-        # window previews and every OR branch. Reuse the displayed status axes.
-        matches = []
-        for rows, axes in _attention_batches(qs):
-            matches.extend(record.pk for record in rows if axes[record.pk]['attention']
-                           and (not state or axes[record.pk]['analysis'] == state))
-        return qs.filter(pk__in=matches)
-    traces = MessageProcessingTrace.objects.filter(raw_message_id=OuterRef('raw_message_id')).order_by('-id')
-    works = SourceWorkItem.objects.filter(raw_message_id=OuterRef('raw_message_id')).order_by('-id')
-    qs = qs.annotate(_trace_id=Subquery(traces.values('id')[:1]),
-        _trace_status=Subquery(traces.values('status')[:1]), _action=Subquery(traces.values('pipeline_action')[:1]),
-        _request_state=Subquery(traces.values('context_metadata__request_state')[:1]),
-        _work_state=Subquery(works.values('state')[:1]), _work_error=Subquery(works.values('error_code')[:1]))
-    qs = qs.annotate(_clar=Coalesce(
-        Subquery(FactClarification.objects.filter(notification_id=OuterRef('notification_id')).order_by('id').values('state')[:1]),
-        Subquery(FactClarification.objects.filter(candidate__trace_id=OuterRef('_trace_id')).order_by('id').values('state')[:1]),
-        output_field=CharField()))
-    qs = qs.annotate(_analysis=Case(
-        When(_clar='awaiting',then=Value('need_context')),
-        When(_trace_status='error',then=Value('error')),
-        When(_trace_status__in=['sending','accepted','unknown'],then=Value('analyzing')),
-        When(_action='non_commercial',_request_state='not_sent',then=Value('queued')),
-        When(_action='non_commercial',_request_state__in=['prepared','sent'],then=Value('analyzing')),
-        When(_action='non_commercial',then=Value('no_crm_actions')),
-        When(_trace_id__isnull=False,then=Value('analyzed')),
-        When(Q(_work_state='error') | (Q(_work_error__isnull=False)&~Q(_work_error='')),then=Value('error')),
-        When(_work_state='pending',then=Value('queued')),
-        When(_work_state__in=['done','completed'],then=Value('analyzed')),
-        When(_work_state__isnull=False,then=Value('analyzing')),
-        default=Value('received'),output_field=CharField()))
+        return qs.filter(pk__in=_analysis_match_ids(qs, state, attention=True))
     if state:
-        qs = qs.filter(_analysis=state)
+        qs = qs.filter(pk__in=_analysis_match_ids(qs, state))
     return qs
 
 
@@ -675,36 +803,70 @@ class RecordChainView(APIView):
         raw = record.raw_message
         if raw is not None:
             traces = list(MessageProcessingTrace.objects.filter(raw_message=raw).only('id','attempt_no','status').order_by("attempt_no"))
+            can_trace = trace_allowed(request.user, record)
             candidates = {}
             for candidate in access.candidates_for(request.user).filter(trace_id__in=[t.pk for t in traces]).only('id','trace_id','status'):
                 candidates.setdefault(candidate.trace_id, []).append(candidate)
             for trace in traces:
                 add_node("trace", trace.pk, f"Попытка анализа №{trace.attempt_no}", trace.status,
-                         allowed=trace_allowed(request.user, record),
+                         allowed=can_trace,
                          href=record_href(record, tab='trace'))
                 for candidate in candidates.get(trace.pk, []):
                     add_node("candidate", candidate.pk, "Предложенное изменение", candidate.status,
                              href=f"/analytics?view=review&candidate={candidate.pk}")
-            questions = FactClarification.objects.filter(
+            questions = list(FactClarification.objects.filter(
                 Q(candidate__trace__raw_message=raw) | Q(candidates__trace__raw_message=raw)
-            ).distinct()
+            ).distinct().only('id', 'notification_id', 'state').order_by('id'))
+            replies = list(ClarificationReply.objects.filter(raw_message=raw)
+                           .select_related('question').only(
+                               'id', 'question_id', 'state', 'question__state', 'question__notification_id'
+                           ).order_by('id'))
+            notification_ids = {
+                question.notification_id for question in questions if question.notification_id
+            }
+            notification_ids.update(
+                reply.question.notification_id for reply in replies if reply.question.notification_id
+            )
+            related_records = scope.filter(notification_id__in=notification_ids).only(
+                'id', 'notification_id', 'session_name', 'chat_id', 'category', 'team_id'
+            ).order_by('id')
+            record_by_notification = {}
+            for target in related_records:
+                record_by_notification.setdefault(target.notification_id, target)
             for question in questions:
-                target = scope.filter(notification_id=question.notification_id).first()
+                target = record_by_notification.get(question.notification_id)
                 if target:
                     add_node("record", target.pk, "Личное уточнение", question.state, href=record_href(target))
-            for reply in ClarificationReply.objects.filter(raw_message=raw).select_related("question__candidate__trace"):
-                target = scope.filter(notification_id=reply.question.notification_id).first()
+            for reply in replies:
+                target = record_by_notification.get(reply.question.notification_id)
                 if target:
                     add_node("record", target.pk, "Вопрос к этому ответу", reply.question.state, href=record_href(target))
         if record.notification_id:
-            clar = FactClarification.objects.filter(notification_id=record.notification_id).first()
+            clar = FactClarification.objects.filter(notification_id=record.notification_id).select_related(
+                'candidate__trace'
+            ).only('id', 'state', 'candidate__trace_id', 'candidate__trace__raw_message_id').first()
             if clar is not None:
                 add_node("clarification", clar.pk, "Уточнение", clar.state)
-                target = scope.filter(raw_message_id=clar.candidate.trace.raw_message_id).first() if clar.candidate.trace_id else None
+                source_raw_id = clar.candidate.trace.raw_message_id if clar.candidate.trace_id else None
+                target = None
+                if source_raw_id:
+                    target = scope.filter(raw_message_id=source_raw_id).only(
+                        'id', 'raw_message_id', 'session_name', 'chat_id', 'category', 'team_id'
+                    ).order_by('id').first()
                 if target:
                     add_node("record", target.pk, "Исходное сообщение группы", "source", href=record_href(target))
-                for reply in ClarificationReply.objects.filter(question=clar).select_related("raw_message"):
-                    reply_record = scope.filter(raw_message=reply.raw_message).first() if reply.raw_message_id else None
+                clarification_replies = ClarificationReply.objects.filter(question=clar).only(
+                    'id', 'raw_message_id', 'state'
+                ).order_by('id')
+                reply_raw_ids = [reply.raw_message_id for reply in clarification_replies if reply.raw_message_id]
+                reply_records = scope.filter(raw_message_id__in=reply_raw_ids).only(
+                    'id', 'raw_message_id', 'session_name', 'chat_id', 'category', 'team_id'
+                ).order_by('id')
+                reply_record_by_raw_id = {}
+                for reply_record in reply_records:
+                    reply_record_by_raw_id.setdefault(reply_record.raw_message_id, reply_record)
+                for reply in clarification_replies:
+                    reply_record = reply_record_by_raw_id.get(reply.raw_message_id)
                     add_node("reply", reply.pk, "Ответ на уточнение", reply.state,
                              allowed=reply_record is not None,
                              href=record_href(reply_record) if reply_record else None)
@@ -713,7 +875,7 @@ class RecordChainView(APIView):
                 notification_id=record.notification_id).order_by("attempt_no"))
             for delivery in deliveries:
                 add_node("delivery", delivery.pk, f"Попытка доставки №{delivery.attempt_no}", delivery.state)
-        trace_row = MessageProcessingTrace.objects.filter(raw_message=raw).order_by("-id").first() if raw else None
+        trace_row = MessageProcessingTrace.objects.filter(raw_message=raw).order_by("-id").only('id').first() if raw else None
         if trace_row is not None:
             crm_rows = CrmDelivery.objects.filter(
                 fact_event__decision__candidate__trace=trace_row).select_related("external_object_link")
@@ -774,7 +936,40 @@ class RecordTracesView(APIView):
         limit = page_size(request)
         cursor = decode_cursor(request.query_params.get('cursor')) or {}
         if raw:
-            traces = MessageProcessingTrace.objects.filter(raw_message=raw).order_by('-id')
+            metadata_keys = [
+                'source', 'request_state', 'analysis_policy', 'model', 'input_tokens_preflight',
+                'provider_input_tokens', 'output_tokens', 'history_complete_in_request',
+                'analysis_chunk_input_limit', 'max_completion_tokens', 'available_messages_count',
+                'fully_included_messages_count', 'partial_messages_count', 'omitted_messages_count',
+                'reduction_reason', 'retry', 'output_retry_generation', 'schema_repairs',
+                'repair_reason', 'timings_ms', 'token_breakdown', 'completion_reserve_tokens',
+                'input_tokens_actual', 'provider', 'api_format', 'schema_version', 'policy_version',
+                'window_tokens', 'history_budget_tokens', 'full_history',
+                'segment_diagnostics', 'response_diagnostics',
+            ]
+            traces = MessageProcessingTrace.objects.filter(raw_message=raw).only(
+                'id', 'created_at', *SAFE_TRACE_FIELDS, 'ai_extracted_facts'
+            ).annotate(
+                _context_metadata_projection=RawSQL(
+                    "CASE WHEN jsonb_typeof(context_metadata) = 'object' THEN "
+                    "(SELECT COALESCE(jsonb_object_agg(key, value), '{}'::jsonb) "
+                    "FROM jsonb_each(context_metadata) WHERE key = ANY(%s)) "
+                    "ELSE '{}'::jsonb END",
+                    [metadata_keys], output_field=JSONField(),
+                ),
+                _has_context=RawSQL(
+                    "CASE WHEN jsonb_typeof(earlier_messages_context) = 'array' "
+                    "THEN jsonb_array_length(earlier_messages_context) > 0 ELSE FALSE END",
+                    [], output_field=BooleanField(),
+                ),
+                _has_raw_payload=RawSQL(
+                    "CASE WHEN jsonb_typeof(whatsapp_raw_payload) = 'object' "
+                    "THEN jsonb_object_length(whatsapp_raw_payload) > 0 "
+                    "WHEN jsonb_typeof(whatsapp_raw_payload) = 'array' "
+                    "THEN jsonb_array_length(whatsapp_raw_payload) > 0 ELSE FALSE END",
+                    [], output_field=BooleanField(),
+                ),
+            ).order_by('-id')
             if type(cursor.get('i')) is int:
                 traces = traces.filter(pk__lt=cursor['i'])
             traces = list(traces[:limit+1])
@@ -786,7 +981,7 @@ class RecordTracesView(APIView):
                 value = getattr(trace, field, None)
                 row[field] = str(value) if hasattr(value, "as_text") or field == "bitrix_deal_stage" else value
             row["ai_extracted_facts"] = sanitize_data(trace.ai_extracted_facts)
-            metadata = trace.context_metadata or {}
+            metadata = trace._context_metadata_projection or {}
             row['context_metadata'] = sanitize_data({key: metadata[key] for key in (
                 'source', 'request_state', 'analysis_policy', 'model', 'input_tokens_preflight',
                 'provider_input_tokens', 'output_tokens', 'history_complete_in_request',
@@ -805,8 +1000,8 @@ class RecordTracesView(APIView):
                 if isinstance(metadata.get(name),dict):
                     row['context_metadata'][name] = sanitize_data({key:value for key,value in metadata[name].items()
                         if key in ('finish_reason','output_tokens','response_characters','provider_stop_reason','reasoning_characters')})
-            row['has_context'] = bool(trace.earlier_messages_context)
-            row["has_raw_payload"] = bool(trace.whatsapp_raw_payload)
+            row['has_context'] = trace._has_context
+            row["has_raw_payload"] = trace._has_raw_payload
             items.append(sanitize_data(row))
         return Response({"items": items, "next_cursor": encode_cursor({"i": traces[-1].pk}) if has_more else None,
                          "as_of": timezone.now().isoformat(), "coverage": "scoped"})
@@ -824,25 +1019,77 @@ class RecordTraceContextView(APIView):
             return Response({'error':'Запись недоступна.'},status=404)
         if not trace_allowed(request.user, record):
             raise PermissionDenied('Нет права на диагностику ИИ.')
-        trace = get_object_or_404(MessageProcessingTrace,pk=trace_pk,raw_message_id=record.raw_message_id)
-        snapshots = [row for row in (trace.earlier_messages_context or []) if isinstance(row,dict) and type(row.get('raw_message_id')) is int]
-        ids = [row['raw_message_id'] for row in snapshots]
-        allowed = set(records_scope(request.user).filter(raw_message_id__in=ids).values_list('raw_message_id',flat=True))
-        visible = [row for row in snapshots if row['raw_message_id'] in allowed]
+        trace = get_object_or_404(
+            MessageProcessingTrace.objects.only('id', 'raw_message_id'),
+            pk=trace_pk, raw_message_id=record.raw_message_id,
+        )
+        table = connection.ops.quote_name(MessageProcessingTrace._meta.db_table)
+        pk_column = connection.ops.quote_name(MessageProcessingTrace._meta.pk.column)
+        context_column = connection.ops.quote_name(
+            MessageProcessingTrace._meta.get_field('earlier_messages_context').column
+        )
+        # Read only the raw IDs needed to enforce per-message access. The large
+        # historical JSON array stays inside PostgreSQL until its requested page.
+        with connection.cursor() as db_cursor:
+            db_cursor.execute(
+                f"SELECT element.ordinality, (element.value->>'raw_message_id')::bigint "
+                f"FROM {table} AS trace CROSS JOIN LATERAL "
+                f"jsonb_array_elements(CASE WHEN jsonb_typeof(trace.{context_column}) = 'array' "
+                f"THEN trace.{context_column} ELSE '[]'::jsonb END) WITH ORDINALITY "
+                f"AS element(value, ordinality) WHERE trace.{pk_column} = %s "
+                "AND jsonb_typeof(element.value) = 'object' "
+                "AND jsonb_typeof(element.value->'raw_message_id') = 'number' "
+                "AND (element.value->>'raw_message_id') ~ '^(0|[1-9][0-9]*)$' "
+                "ORDER BY element.ordinality",
+                [trace.pk],
+            )
+            snapshot_ids = list(db_cursor.fetchall())
+        allowed = set(records_scope(request.user).filter(
+            raw_message_id__in=[raw_id for _, raw_id in snapshot_ids]
+        ).values_list('raw_message_id', flat=True))
+        visible = [(ordinal, raw_id) for ordinal, raw_id in snapshot_ids if raw_id in allowed]
         cursor = decode_cursor(request.query_params.get('cursor')) or {}
         offset = cursor.get('o',0)
         if type(offset) is not int or offset < 0:
             return Response({'error':'Некорректный курсор.'},status=400)
         limit = min(page_size(request),25)
         page = visible[offset:offset+limit]
-        records = {row.raw_message_id:row for row in records_scope(request.user).filter(raw_message_id__in=[row['raw_message_id'] for row in page])}
+        page_ids = [raw_id for _, raw_id in page]
+        records = {}
+        for row in records_scope(request.user).filter(raw_message_id__in=page_ids).only(
+            'id', 'raw_message_id', 'session_name', 'chat_id', 'category', 'team_id'
+        ).order_by('id'):
+            records.setdefault(row.raw_message_id, row)
+        positions = [ordinal for ordinal, _ in page]
+        snapshots_by_position = {}
+        if positions:
+            placeholders = ', '.join(['%s'] * len(positions))
+            with connection.cursor() as db_cursor:
+                db_cursor.execute(
+                    f"SELECT element.ordinality, element.value FROM {table} AS trace "
+                    f"CROSS JOIN LATERAL jsonb_array_elements(CASE WHEN jsonb_typeof(trace.{context_column}) = 'array' "
+                    f"THEN trace.{context_column} ELSE '[]'::jsonb END) WITH ORDINALITY "
+                    f"AS element(value, ordinality) WHERE trace.{pk_column} = %s "
+                    f"AND element.ordinality IN ({placeholders}) ORDER BY element.ordinality",
+                    [trace.pk, *positions],
+                )
+                snapshots_by_position = dict(db_cursor.fetchall())
+        page_rows = []
+        for ordinal, raw_id in page:
+            snapshot = snapshots_by_position.get(ordinal)
+            if isinstance(snapshot, str):
+                snapshot = json.loads(snapshot)
+            if (isinstance(snapshot, dict)
+                    and type(snapshot.get('raw_message_id')) is int
+                    and snapshot['raw_message_id'] == raw_id):
+                page_rows.append((snapshot, raw_id))
         items = []
-        for row in page:
+        for row, raw_id in page_rows:
             body = row.get('content') if isinstance(row.get('content'),str) else row.get('text','')
             body = body if isinstance(body, str) else ''
             sender = row.get('sender_name')
-            target = records.get(row['raw_message_id'])
-            items.append({'raw_message_id':row['raw_message_id'], 'body':sanitize_body(body),
+            target = records.get(raw_id)
+            items.append({'raw_message_id':raw_id, 'body':sanitize_body(body),
                 'sender':sanitize_body(sender if isinstance(sender,str) else ''), 'time':row.get('timestamp'),
                 'partial':bool(row.get('partial')) or len(body)>4000,
                 'href':record_href(target) if target else None})

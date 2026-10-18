@@ -3,8 +3,9 @@ from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
 from django.conf import settings
-from django.db.models import Count, F, Q, Window
-from django.db.models.functions import RowNumber, TruncDate
+from django.db.models import BooleanField, Case, CharField, Count, Exists, F, Func, OuterRef, Q, Value, When, Window
+from django.db.models.fields.json import KeyTextTransform, KeyTransform
+from django.db.models.functions import Cast, RowNumber, TruncDate
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework.exceptions import ValidationError
@@ -229,9 +230,19 @@ class ProcessingJobsView(APIView):
                 qs = qs.filter(lease_until__lt=now).exclude(state__in=['pending','done','completed','error','failed'])
             elif state:
                 qs = qs.filter(state=state)
-            for row in qs.order_by(F('updated_at').desc(nulls_last=True),'-id')[:limit+1]:
+            rows = list(qs.only('id', 'raw_message_id', 'processing_version', 'error_code',
+                                'lease_until', 'state', 'created_at', 'updated_at')
+                        .order_by(F('updated_at').desc(nulls_last=True),'-id')[:limit+1])
+            raw_ids = {row.raw_message_id for row in rows if row.raw_message_id}
+            records = records_scope(request.user).filter(raw_message_id__in=raw_ids).only(
+                'id', 'raw_message_id', 'session_name', 'chat_id', 'category', 'team_id'
+            ).order_by('id')
+            records_by_raw_id = {}
+            for record in records:
+                records_by_raw_id.setdefault(record.raw_message_id, record)
+            for row in rows:
                 stale = row.lease_until and row.lease_until < now and row.state not in ('pending','done','completed','error','failed')
-                record = records_scope(request.user).filter(raw_message_id=row.raw_message_id).first()
+                record = records_by_raw_id.get(row.raw_message_id)
                 items.append({'queue':'ai', 'source':'source_work', 'id':row.pk, 'type':'source_work',
                     'state':'stale' if stale else row.state, 'raw_message_id':row.raw_message_id,
                     'processing_version':row.processing_version, 'error_code':sanitize_body(row.error_code) or None,
@@ -249,19 +260,38 @@ class ProcessingJobsView(APIView):
                 qs = qs.filter(state__in=['enqueued','processing'], lease_until__lt=now)
             elif state:
                 qs = qs.filter(state=state)
-            for row in qs.order_by(F('updated_at').desc(nulls_last=True),'-id')[:limit+1]:
-                tag = 'delivery' if row.event_type in DELIVERY_TYPES else 'history' if row.event_type in HISTORY_TYPES else 'ai' if row.event_type in AI_TYPES else 'crm'
-                raw_id = row.payload.get('raw_id')
-                # SourceWorkItem is the canonical logical AI work when present.
-                if tag == 'ai' and raw_id and SourceWorkItem.objects.filter(raw_message_id=raw_id).exists():
-                    continue
-                items.append({'queue':tag, 'source':'outbox', 'id':row.pk, 'type':row.event_type, 'state':row.state,
-                    'attempt_count':row.attempt_count, 'error_code':sanitize_body(row.error_code) or None,
-                    'next_attempt_at':row.next_attempt_at.isoformat() if row.next_attempt_at else None,
-                    'lease_until':row.lease_until.isoformat() if row.lease_until else None,
-                    'can_retry':access.integration_allowed(request.user) and row.state in ('failed','unknown') and tag != 'ai' and row.event_type not in ('otp','waha_control'),
-                    'requires_delivery_confirmation':row.event_type == 'notification' and row.state == 'unknown',
-                    'created_at':_iso(row.created_at), 'updated_at':_iso(row.updated_at)})
+            # Filter duplicate logical AI jobs before slicing so skipped rows cannot
+            # shorten a page or push its cursor past unseen records.
+            source_work = SourceWorkItem.objects.annotate(
+                _raw_message_id_text=Cast('raw_message_id', CharField()),
+            ).filter(
+                _raw_message_id_text=KeyTextTransform('raw_id', OuterRef('payload')),
+            )
+            qs = qs.annotate(
+                _payload_raw_id_type=Func(
+                    KeyTransform('raw_id', F('payload')),
+                    function='jsonb_typeof', output_field=CharField(),
+                ),
+            ).annotate(
+                _has_source_work=Case(
+                    When(_payload_raw_id_type='number', then=Exists(source_work)),
+                    default=Value(False), output_field=BooleanField(),
+                ),
+            ).exclude(event_type__in=AI_TYPES, _has_source_work=True)
+            rows = qs.order_by(F('updated_at').desc(nulls_last=True),'-id').values(
+                'id', 'event_type', 'state', 'attempt_count', 'error_code',
+                'next_attempt_at', 'lease_until', 'created_at', 'updated_at',
+            )[:limit+1]
+            integration_allowed = access.integration_allowed(request.user)
+            for row in rows:
+                tag = 'delivery' if row['event_type'] in DELIVERY_TYPES else 'history' if row['event_type'] in HISTORY_TYPES else 'ai' if row['event_type'] in AI_TYPES else 'crm'
+                items.append({'queue':tag, 'source':'outbox', 'id':row['id'], 'type':row['event_type'], 'state':row['state'],
+                    'attempt_count':row['attempt_count'], 'error_code':sanitize_body(row['error_code']) or None,
+                    'next_attempt_at':row['next_attempt_at'].isoformat() if row['next_attempt_at'] else None,
+                    'lease_until':row['lease_until'].isoformat() if row['lease_until'] else None,
+                    'can_retry':integration_allowed and row['state'] in ('failed','unknown') and tag != 'ai' and row['event_type'] not in ('otp','waha_control'),
+                    'requires_delivery_confirmation':row['event_type'] == 'notification' and row['state'] == 'unknown',
+                    'created_at':_iso(row['created_at']), 'updated_at':_iso(row['updated_at'])})
         return Response({**_page(items, limit),'teams':_teams(request.user)})
 
 
@@ -270,8 +300,36 @@ class CrmChangesView(APIView):
 
     def get(self, request):
         limit, cursor, period = page_size(request), decode_cursor(request.query_params.get('cursor')), _period(request)
-        qs = crm_scope(request.user).select_related('external_object_link','fact_event__decision__candidate__trace','fact_event__decision__candidate__reviewed_by','outbox_event')
-        logs = BitrixDealChangeLog.objects.select_related('project')
+        qs = crm_scope(request.user).select_related(
+            'external_object_link', 'fact_event__decision__candidate__trace',
+            'fact_event__decision__candidate__reviewed_by', 'outbox_event',
+        ).only(
+            'id', 'external_object_link_id', 'fact_event_id', 'outbox_event_id', 'state',
+            'error_code', 'patch', 'created_at', 'updated_at',
+            'external_object_link__id', 'external_object_link__team_id',
+            'external_object_link__object_type', 'external_object_link__local_id',
+            'external_object_link__external_id',
+            'fact_event__id', 'fact_event__event_type', 'fact_event__decision_id',
+            'fact_event__decision__id', 'fact_event__decision__actor_kind',
+            'fact_event__decision__candidate_id', 'fact_event__decision__candidate__id',
+            'fact_event__decision__candidate__trace_id',
+            'fact_event__decision__candidate__reviewed_by_id',
+            'fact_event__decision__candidate__trace__id',
+            'fact_event__decision__candidate__trace__raw_message_id',
+            'fact_event__decision__candidate__reviewed_by__id',
+            'fact_event__decision__candidate__reviewed_by__first_name',
+            'fact_event__decision__candidate__reviewed_by__last_name',
+            'outbox_event__id',
+        ).annotate(_crm_baseline=F('outbox_event__payload__crm_baseline'))
+        logs = BitrixDealChangeLog.objects.annotate(
+            _journal_fields=F('payload__fields'),
+            _journal_proof=F('response_data__proof'),
+            _journal_team_id=F('project__team_id'),
+        ).only(
+            'id', 'project_id', 'source_project_id', 'object_type', 'external_id',
+            'bitrix_deal_id', 'action', 'method', 'status', 'error_message',
+            'reconstructed', 'created_at', 'updated_at',
+        )
         if not request.user.is_superuser:
             projects = access.projects_for(request.user)
             logs = logs.filter(Q(project__in=projects) | Q(source_project_id__in=projects.values('id')))
@@ -319,14 +377,20 @@ class CrmChangesView(APIView):
         logs = _cursor_filter(_window(logs, 'updated_at', period), cursor, 'journal')
         items = []
         deliveries = list(qs.order_by(F('updated_at').desc(nulls_last=True),'-id')[:limit+1])
-        config = BitrixSettings.objects.filter(is_active=True).first()
+        config = BitrixSettings.objects.filter(is_active=True).only('id', 'webhook_url').first()
         task_owners = dict(Commitment.objects.filter(pk__in=[row.external_object_link.local_id for row in deliveries
             if row.external_object_link.object_type == 'task']).values_list('id','manager__bitrix_user_id'))
         raw_ids = [row.fact_event.decision.candidate.trace.raw_message_id for row in deliveries
             if row.fact_event_id and row.fact_event.decision_id and row.fact_event.decision.candidate.trace_id]
-        records = {record.raw_message_id:record for record in records_scope(request.user).filter(raw_message_id__in=raw_ids)}
+        records = {record.raw_message_id:record for record in records_scope(request.user).filter(
+            raw_message_id__in=raw_ids
+        ).only('id', 'raw_message_id', 'session_name', 'chat_id', 'category', 'team_id')}
         receipts, methods, reconstructed = {}, {}, set()
-        for receipt in BitrixDealChangeLog.objects.filter(delivery_id__in=[row.pk for row in deliveries]).only('id','delivery_id','method','reconstructed','response_data').order_by('-id'):
+        for receipt in BitrixDealChangeLog.objects.filter(
+            delivery_id__in=[row.pk for row in deliveries]
+        ).only('id','delivery_id','method','reconstructed').annotate(
+            _receipt_proof=F('response_data__proof')
+        ).order_by('-id'):
             receipts.setdefault(receipt.delivery_id,receipt)
             if receipt.method:
                 methods.setdefault(receipt.delivery_id,set()).add(receipt.method)
@@ -340,9 +404,9 @@ class CrmChangesView(APIView):
             candidate = row.fact_event.decision.candidate if row.fact_event_id and row.fact_event.decision_id else None
             if candidate and candidate.trace_id:
                 record = records.get(candidate.trace.raw_message_id)
-            baseline = row.outbox_event.payload.get('crm_baseline')
+            baseline = row._crm_baseline
             receipt = receipts.get(row.pk)
-            proof = receipt.response_data.get('proof') if receipt and isinstance(receipt.response_data,dict) else None
+            proof = receipt._receipt_proof if receipt else None
             observed_owner = proof.get('responsibleId') if isinstance(proof,dict) else None
             owner = observed_owner if isinstance(observed_owner,str) and observed_owner.isdecimal() else task_owners.get(link.local_id)
             actor = row.fact_event.decision.actor_kind if row.fact_event_id and row.fact_event.decision_id else None
@@ -361,14 +425,15 @@ class CrmChangesView(APIView):
                 'record_href':record_href(record) if record else None,
                 'created_at':_iso(row.created_at), 'updated_at':_iso(row.updated_at)})
         for row in logs.order_by(F('updated_at').desc(nulls_last=True),'-id')[:limit+1]:
-            payload = row.payload if isinstance(row.payload, dict) else {}
+            fields = row._journal_fields if isinstance(row._journal_fields, dict) else {}
+            proof = row._journal_proof if isinstance(row._journal_proof, dict) else {}
             items.append({'id':row.pk, 'source':'journal', 'object_type':row.object_type,
-                'team_id':row.project.team_id if row.project_id else None, 'actor_kind':None,'actor_label':'Автор не сохранён',
+                'team_id':row._journal_team_id if row.project_id else None, 'actor_kind':None,'actor_label':'Автор не сохранён',
                 'external_id':row.external_id or row.bitrix_deal_id or None,
-                'external_url':bitrix_object_url(row.object_type, row.external_id or row.bitrix_deal_id, config,assignee=(row.response_data.get('proof') or {}).get('responsibleId')),
+                'external_url':bitrix_object_url(row.object_type, row.external_id or row.bitrix_deal_id, config,assignee=proof.get('responsibleId')),
                 'local_id':row.project_id, 'action':row.action, 'method':row.method, 'state':CRM_STATES.get(row.status,row.status),
                 'error_code':sanitize_body(row.error_message) or None, 'before':None,
-                'after':payload.get('fields'), 'fact_event_id':None, 'outbox_event_id':None,
+                'after':fields.get('fields'), 'fact_event_id':None, 'outbox_event_id':None,
                 'reconstructed':row.reconstructed, 'record_href':None,
                 'created_at':_iso(row.created_at), 'updated_at':_iso(row.updated_at)})
         # These URLs are constructed above from a public origin and numeric

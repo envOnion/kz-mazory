@@ -33,16 +33,18 @@
     </header>
 
     <!-- Панель управления и запуска разбора для руководителя -->
-    <section v-if="lead && chats.length" class="panel flex flex-wrap items-center justify-between gap-3 text-sm">
+    <section v-if="lead" class="panel flex flex-wrap items-center justify-between gap-3 text-sm">
       <div class="flex items-center gap-2">
+        <form class="flex items-center gap-2" @submit.prevent="loadChats"><label class="sr-only" for="thread-chat-search">Поиск чата</label><input id="thread-chat-search" v-model="chatSearch" class="field py-1" placeholder="Найти чат" /><button class="btn text-xs py-1.5" :disabled="chatsLoading">Найти</button></form>
         <label class="text-slate-300 font-medium">Чат WhatsApp:</label>
-        <select v-model="chatId" class="field py-1">
+        <select v-model="chatId" class="field py-1" :disabled="chatsLoading">
           <option v-for="chat in chats" :key="chat.id" :value="chat.id">{{ chat.name }}</option>
         </select>
-        <button class="btn text-xs py-1.5" :disabled="loading || !chatId" @click="rebuild">
+        <button class="btn text-xs py-1.5" :disabled="loading || chatsLoading || !chatId" @click="rebuild">
           Разобрать историю по темам
         </button>
       </div>
+      <p v-if="!chats.length" class="text-slate-400">По этому запросу чатов не найдено.</p>
       <p v-if="notice" role="status" class="text-xs text-emerald-300 font-medium">{{ notice }}</p>
     </section>
 
@@ -429,6 +431,7 @@ import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { routeId } from '../../utils/routeId'
 import { api, post } from '../../composables/api'
+import { loadDirectory } from '../../composables/directory'
 import { currentUser } from '../../composables/session'
 import { requestKey } from '../../utils/requestKey'
 import type { Page, Directory } from '../../types/platform'
@@ -439,6 +442,8 @@ type ThreadSummary = Omit<DialogueThread, 'messages'>
 
 const chats = ref<NonNullable<Directory['chats']>>([])
 const chatId = ref<number | null>(null)
+const chatSearch = ref('')
+const chatsLoading = ref(false)
 const notice = ref('')
 const lead = computed(() => currentUser.value?.roles.includes('team_lead'))
 
@@ -712,13 +717,24 @@ async function rebuild() {
 }
 
 watch(() => route.query.thread, value => { const id = routeId(value); if (id && id !== detail.value?.id) void open(id) })
+async function loadChats() {
+  chatsLoading.value = true
+  try {
+    const directory = await loadDirectory({ collections: ['chats'], searches: { chats: chatSearch.value } })
+    chats.value = directory.chats ?? []
+    if (!chats.value.some(chat => chat.id === chatId.value)) chatId.value = chats.value[0]?.id ?? null
+    error.value = ''
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : 'Не удалось загрузить чаты'
+  } finally {
+    chatsLoading.value = false
+  }
+}
 onMounted(async () => {
   await load(1)
   const initial = routeId(route.query.thread); if (initial) await open(initial)
   try {
-    const directory = await api<Directory>('/directory/')
-    chats.value = directory.chats || []
-    chatId.value = chats.value[0]?.id || null
+    await loadChats()
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Не удалось загрузить чаты'
   }
