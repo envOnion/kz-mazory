@@ -105,8 +105,11 @@ function matchesCohort(record:RecordBrief) {
 }
 
 async function loadDialogs(showLoading = true, append = false) {
+  if (!showLoading && dialogsRequest) return
   dialogsRequest?.abort()
   const request = new AbortController(); dialogsRequest = request
+  let timedOut = false
+  const timeout = window.setTimeout(() => { timedOut = true; request.abort() }, 20000)
   if (showLoading) dialogsLoading.value = true
   dialogsError.value = ''
   if (showLoading && !append) dialogsPages = 1
@@ -131,8 +134,14 @@ async function loadDialogs(showLoading = true, append = false) {
     }
     if (!request.signal.aborted) { dialogs.value = [...rows.values()]; dialogsNext.value = cursor; if(append) dialogsPages++ }
   } catch (error) {
-    if (!request.signal.aborted) dialogsError.value = error instanceof Error ? error.message : 'Ошибка сети'
-  } finally { if (!request.signal.aborted) dialogsLoading.value = false }
+    if (dialogsRequest === request) {
+      if (timedOut) dialogsError.value = 'Не удалось загрузить диалоги за 20 секунд. Повторите запрос.'
+      else if (!request.signal.aborted) dialogsError.value = error instanceof Error ? error.message : 'Ошибка сети'
+    }
+  } finally {
+    clearTimeout(timeout)
+    if (dialogsRequest === request) { dialogsRequest = null; dialogsLoading.value = false }
+  }
 }
 
 // ---- выбранный диалог ----
@@ -415,24 +424,23 @@ watch(searchInput, () => {
   if (searchTimer) clearTimeout(searchTimer)
   searchTimer = window.setTimeout(() => { patchQuery({q:searchInput.value.trim() || null}); void loadDialogs() }, 300)
 })
-watch([category, attentionOnly], () => void loadDialogs())
-watch([() => route.query.analysis,() => route.query.cohort,() => route.query.attention], () => {void loadDialogs();void loadFeed(selectedId.value)})
+watch([category, attentionOnly, () => route.query.analysis, () => route.query.cohort], () => void loadDialogs())
+watch([() => route.query.analysis,() => route.query.cohort,() => route.query.attention], () => void loadFeed(selectedId.value))
 
 function setCategory(value: string) {
   patchQuery({ cat2: value === 'all' ? null : value })
 }
 
-onMounted(async () => {
+onMounted(() => {
   window.addEventListener('resize', onResize)
   window.addEventListener('keydown', onKeydown)
   document.addEventListener('visibilitychange', onVisibility)
   onResize()
   attentionOnly.value = route.query.attention === '1'
-  await pollChanges(true)
   void loadDialogs()
   void loadFeed(selectedId.value)
   if (selectedId.value) void loadDetail()
-  schedulePoll()
+  startChanges(true)
 })
 onBeforeUnmount(() => {
   stopped = true; dialogsRequest?.abort(); feedRequest?.abort(); detailRequest?.abort(); tabRequest?.abort()

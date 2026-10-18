@@ -11,7 +11,7 @@ import re
 from .communication import sanitize_body, sanitize_data
 from urllib.parse import urlencode
 
-from django.db.models import Case, CharField, Exists, F, Max, OuterRef, Q, Subquery, Value, When, Window
+from django.db.models import Case, CharField, Count, Exists, F, Max, OuterRef, Q, Subquery, Value, When, Window
 from django.db.models.functions import Coalesce, RowNumber
 from rest_framework.exceptions import ValidationError
 from django.utils import timezone
@@ -154,7 +154,7 @@ def _axis_from_trace(trace, work, clar_state):
         if trace.status in ("sending", "accepted", "unknown"):
             return "analyzing"
         if trace.pipeline_action == "non_commercial":
-            state = (trace.context_metadata or {}).get('request_state')
+            state = trace.axis_request_state
             if state == 'not_sent':
                 return 'queued'
             if state in ('prepared', 'sent'):
@@ -222,38 +222,42 @@ def axes_for_records(records):
         .distinct('raw_message_id').only('id', 'raw_message_id', 'state', 'error_code'),
         "raw_message_id",
     )
+    latest_traces = MessageProcessingTrace.objects.filter(raw_message_id__in=raw_ids).order_by(
+        'raw_message_id', '-id').distinct('raw_message_id').values('id')
     traces = _latest_by(
-        MessageProcessingTrace.objects.filter(raw_message_id__in=raw_ids).order_by("raw_message_id", "-id")
-        .distinct('raw_message_id').only('id','raw_message_id','status','pipeline_action','context_metadata'),
+        MessageProcessingTrace.objects.filter(pk__in=Subquery(latest_traces))
+        .only('id','raw_message_id','status','pipeline_action')
+        .annotate(axis_request_state=F('context_metadata__request_state')),
         "raw_message_id",
     )
     trace_ids = [t.id for t in traces.values()]
 
     clars_by_notif = {
         c.notification_id: c
-        for c in FactClarification.objects.filter(notification_id__in=notif_ids)
+        for c in FactClarification.objects.filter(notification_id__in=notif_ids).only('id','notification_id','state')
     }
     trace_to_raw = {t.id: t.raw_message_id for t in traces.values()}
     clars_by_raw = {}
-    for clar in FactClarification.objects.filter(candidate__trace_id__in=trace_ids).select_related('candidate').order_by('id'):
-        raw_id = trace_to_raw.get(clar.candidate.trace_id)
+    for clar in FactClarification.objects.filter(candidate__trace_id__in=trace_ids).only('id','state').annotate(
+            axis_trace_id=F('candidate__trace_id')).order_by('id'):
+        raw_id = trace_to_raw.get(clar.axis_trace_id)
         if raw_id is not None:
             clars_by_raw.setdefault(raw_id, clar)
 
     deliveries = _latest_by(
         NotificationDelivery.objects.filter(notification_id__in=notif_ids)
-        .order_by("notification_id", "-attempt_no", "-id"),
+        .only('id','notification_id','state').order_by("notification_id", "-attempt_no", "-id"),
         "notification_id",
     )
-    otps = {o.pk: o for o in OutboxEvent.objects.filter(pk__in=otp_ids)}
+    otps = {o.pk: o for o in OutboxEvent.objects.filter(pk__in=otp_ids).only('id','state')}
 
     crm_by_trace = {}
     crm_rows = CrmDelivery.objects.filter(
         fact_event__decision__candidate__trace_id__in=trace_ids,
-    ).select_related("fact_event__decision__candidate").order_by(
+    ).only('id','state').annotate(axis_trace_id=F('fact_event__decision__candidate__trace_id')).order_by(
         "fact_event__decision__candidate__trace_id", "-id")
     for row in crm_rows:
-        crm_by_trace.setdefault(row.fact_event.decision.candidate.trace_id, []).append(row)
+        crm_by_trace.setdefault(row.axis_trace_id, []).append(row)
 
     result = {}
     for record in records:
@@ -290,6 +294,35 @@ def axes_for_records(records):
     return result
 
 
+def _possible_attention(qs):
+    """Broad candidates only; historical failures need canonical rechecking."""
+    return qs.filter(
+        Q(raw_message_id__in=MessageProcessingTrace.objects.filter(status='error').values('raw_message_id')) |
+        Q(raw_message_id__in=SourceWorkItem.objects.filter(Q(state='error') | ~Q(error_code='')).values('raw_message_id')) |
+        Q(raw_message_id__in=FactClarification.objects.filter(state__in=['awaiting','expired','unconfirmed']).values('candidate__trace__raw_message_id')) |
+        Q(notification_id__in=FactClarification.objects.filter(state__in=['queued','awaiting','expired','unconfirmed']).values('notification_id')) |
+        Q(notification_id__in=NotificationDelivery.objects.exclude(state__in=['queued','pending','sending','sent','delivered','ack']).values('notification_id')) |
+        Q(otp_outbox_id__in=OutboxEvent.objects.exclude(state__in=['pending','enqueued','processing','done']).values('id')) |
+        Q(raw_message_id__in=CrmDelivery.objects.filter(state__in=['failed','unknown','unavailable']).values('fact_event__decision__candidate__trace__raw_message_id'))
+    )
+
+
+def _attention_batches(qs):
+    # Only source links and dialog keys are needed, never message bodies.
+    candidates = _possible_attention(qs).only(
+        'id', 'raw_message_id', 'notification_id', 'otp_outbox_id',
+        'session_name', 'chat_id', 'category', 'team_id',
+    ).order_by('id')
+    batch = []
+    for record in candidates.iterator(chunk_size=1000):
+        batch.append(record)
+        if len(batch) == 1000:
+            yield batch, axes_for_records(batch)
+            batch = []
+    if batch:
+        yield batch, axes_for_records(batch)
+
+
 def filter_record_statuses(request, qs):
     """Drill down into the same message cohort, never into work-attempt states."""
     if request.query_params.get('cohort') == 'source':
@@ -300,14 +333,20 @@ def filter_record_statuses(request, qs):
         return qs
     if state and state not in ANALYSIS_LABELS:
         raise ValidationError({'error':'Неизвестное состояние анализа.'})
+    if attention:
+        # Do not inline latest-state subqueries repeatedly into GROUP BY,
+        # window previews and every OR branch. Reuse the displayed status axes.
+        matches = []
+        for rows, axes in _attention_batches(qs):
+            matches.extend(record.pk for record in rows if axes[record.pk]['attention']
+                           and (not state or axes[record.pk]['analysis'] == state))
+        return qs.filter(pk__in=matches)
     traces = MessageProcessingTrace.objects.filter(raw_message_id=OuterRef('raw_message_id')).order_by('-id')
     works = SourceWorkItem.objects.filter(raw_message_id=OuterRef('raw_message_id')).order_by('-id')
-    delivery = NotificationDelivery.objects.filter(notification_id=OuterRef('notification_id')).order_by('-attempt_no','-id')
     qs = qs.annotate(_trace_id=Subquery(traces.values('id')[:1]),
         _trace_status=Subquery(traces.values('status')[:1]), _action=Subquery(traces.values('pipeline_action')[:1]),
         _request_state=Subquery(traces.values('context_metadata__request_state')[:1]),
-        _work_state=Subquery(works.values('state')[:1]), _work_error=Subquery(works.values('error_code')[:1]),
-        _delivery=Subquery(delivery.values('state')[:1]))
+        _work_state=Subquery(works.values('state')[:1]), _work_error=Subquery(works.values('error_code')[:1]))
     qs = qs.annotate(_clar=Coalesce(
         Subquery(FactClarification.objects.filter(notification_id=OuterRef('notification_id')).order_by('id').values('state')[:1]),
         Subquery(FactClarification.objects.filter(candidate__trace_id=OuterRef('_trace_id')).order_by('id').values('state')[:1]),
@@ -327,13 +366,6 @@ def filter_record_statuses(request, qs):
         default=Value('received'),output_field=CharField()))
     if state:
         qs = qs.filter(_analysis=state)
-    if attention:
-        qs = qs.annotate(_bad_crm=Exists(CrmDelivery.objects.filter(
-            fact_event__decision__candidate__trace_id=OuterRef('_trace_id'),state__in=['failed','unknown','unavailable'])))
-        qs = qs.filter(Q(_analysis='error') | Q(_delivery__in=['failed','error','unknown']) |
-            Q(otp_outbox__state='failed') | Q(_bad_crm=True) |
-            Q(_clar__in=['awaiting','expired','unconfirmed']) |
-            Q(_clar='queued',_delivery__in=['sent','delivered','ack']))
     return qs
 
 
@@ -398,7 +430,7 @@ class DialogsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = filter_record_statuses(request, records_scope(request.user))
+        qs = records_scope(request.user)
         category = request.query_params.get("category") or "all"
         if category in ("group", "private", "system"):
             qs = qs.filter(category=category)
@@ -408,8 +440,12 @@ class DialogsView(APIView):
                            | Q(config__name__icontains=q) | Q(raw_message__sender_name__icontains=q)
                            | Q(raw_message__sender_phone__icontains=q) | Q(sanitized_body__icontains=q))
 
+        qs = filter_record_statuses(request, qs)
         grouped = qs.values("session_name", "chat_id", "category", "team_id").annotate(
             last_at=Max("occurred_at"), last_id=Max("id"))
+        attention_only = request.query_params.get('attention') == '1'
+        if attention_only:
+            grouped = grouped.annotate(attention_count=Count('pk'))
         cursor = decode_cursor(request.query_params.get('cursor'))
         if cursor:
             if not isinstance(cursor, dict) or type(cursor.get('i')) is not int:
@@ -425,31 +461,14 @@ class DialogsView(APIView):
         dialogs = dialogs[:limit]
         next_cursor = encode_cursor({'t':dialogs[-1]['last_at'],'i':dialogs[-1]['last_id']}) if has_more else None
         attention_counts = {}
-        batch = []
-        def count_attention(rows):
-            axes = axes_for_records(rows)
-            for record in rows:
-                if axes[record.pk]['attention']:
-                    key = (record.session_name, record.chat_id, record.category, record.team_id)
-                    attention_counts[key] = attention_counts.get(key, 0) + 1
-        # Only possible problems need the canonical adapter. A healthy history
-        # must not deserialize every message/trace to render 200 dialog rows.
-        possible_attention = qs.filter(_dialog_filter(dialogs)).filter(
-            Q(raw_message_id__in=MessageProcessingTrace.objects.filter(status='error').values('raw_message_id')) |
-            Q(raw_message_id__in=SourceWorkItem.objects.filter(Q(state='error') | ~Q(error_code='')).values('raw_message_id')) |
-            Q(raw_message_id__in=FactClarification.objects.filter(state__in=['awaiting','expired','unconfirmed']).values('candidate__trace__raw_message_id')) |
-            Q(notification_id__in=FactClarification.objects.filter(state__in=['queued','awaiting','expired','unconfirmed']).values('notification_id')) |
-            Q(notification_id__in=NotificationDelivery.objects.filter(state__in=['failed','error','unknown']).values('notification_id')) |
-            Q(otp_outbox_id__in=OutboxEvent.objects.filter(state='failed').values('id')) |
-            Q(raw_message_id__in=CrmDelivery.objects.filter(state__in=['failed','unknown','unavailable']).values('fact_event__decision__candidate__trace__raw_message_id'))
-        )
-        for record in possible_attention.order_by('id').iterator(chunk_size=1000):
-            batch.append(record)
-            if len(batch) == 1000:
-                count_attention(batch)
-                batch = []
-        if batch:
-            count_attention(batch)
+        if attention_only:
+            attention_counts = {_dialog_key(row): row['attention_count'] for row in dialogs}
+        else:
+            for rows, axes in _attention_batches(qs.filter(_dialog_filter(dialogs))):
+                for record in rows:
+                    if axes[record.pk]['attention']:
+                        key = (record.session_name, record.chat_id, record.category, record.team_id)
+                        attention_counts[key] = attention_counts.get(key, 0) + 1
 
         previews = {}
         if dialogs:
@@ -546,7 +565,7 @@ class RecordsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        qs = filter_record_statuses(request, records_scope(request.user))
+        qs = records_scope(request.user)
         raw_id = request.query_params.get("raw_message_id")
         if raw_id and raw_id.isdecimal():
             qs = qs.filter(raw_message_id=int(raw_id))
@@ -564,6 +583,7 @@ class RecordsView(APIView):
         if q:
             qs = qs.filter(sanitized_body__icontains=q)
 
+        qs = filter_record_statuses(request, qs)
         rows, next_cursor = _records_feed(request, qs.select_related('raw_message'))
         axes = axes_for_records(rows) if rows else {}
         return Response({

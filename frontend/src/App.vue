@@ -18,16 +18,20 @@ const booted = ref(false)
 const attention = ref(0)
 const attentionStale = ref(false)
 let attentionTimer: number | null = null
+let attentionBusy = false
 
 const staff = computed(() => Boolean(currentUser.value) && !isClient())
 
 async function refreshAttention() {
   if (!staff.value) { attention.value = 0; attentionStale.value = false; return }
+  if (attentionBusy) return
+  attentionBusy = true
   try {
-    const page = await api<{ items: DialogSummary[] }>('/messenger/dialogs/?attention=1')
+    const page = await api<{ items: DialogSummary[] }>('/messenger/dialogs/?attention=1', {signal: AbortSignal.timeout(20000)})
     attention.value = page.items.reduce((total, dialog) => total + dialog.attention_count, 0)
     attentionStale.value = false
   } catch { attentionStale.value = true }
+  finally { attentionBusy = false }
 }
 
 onMounted(async () => {
