@@ -13,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
 from .message_time import source_metadata
+from .models import PaymentAllocation
 from . import access
 from .dialogue_threads import lock_candidate_source
 from .models import (
@@ -300,7 +301,7 @@ class FinanceView(APIView):
     def get(self, request):
         filters = filters_for(request)
         qs, currency = scoped_projects(request.user, filters)
-        return Response(
+        return Response(json_value(
             {
                 "receivables": datamart.receivables(request.user, filters),
                 "payments": list(
@@ -332,8 +333,14 @@ class FinanceView(APIView):
                         "version",
                     )
                 ),
+                "schedules": list(PaymentScheduleItem.objects.filter(
+                    project__in=qs, is_verified=True).order_by('due_date', 'id').values(
+                        'id', 'project_id', 'due_date', 'amount', 'currency')[:500]),
+                "allocations": list(PaymentAllocation.objects.filter(
+                    financial_record__project__in=qs).order_by('id').values(
+                        'id', 'financial_record_id', 'schedule_item_id', 'amount')[:1000]),
             }
-        )
+        ))
 
 
 class ScheduleInput(serializers.Serializer):
@@ -688,6 +695,8 @@ class AccessAdminView(APIView):
     def get(self, request):
         if not request.user.is_superuser:
             raise PermissionDenied()
+        from .mfa import require_privileged_mfa
+        require_privileged_mfa(request)
         return Response(
             {
                 "memberships": list(
@@ -707,6 +716,8 @@ class AccessAdminView(APIView):
     def post(self, request):
         if not request.user.is_superuser:
             raise PermissionDenied()
+        from .mfa import require_privileged_mfa
+        require_privileged_mfa(request)
         schema = AccessInput(data=request.data)
         schema.is_valid(raise_exception=True)
         values = schema.validated_data
@@ -1028,12 +1039,15 @@ class RetryOutboxView(APIView):
     def post(self, request, pk):
         if not access.integration_allowed(request.user):
             raise PermissionDenied()
+        from .mfa import require_privileged_mfa
+        from .operation_scopes import outbox_scope
+        require_privileged_mfa(request)
         schema = RetryInput(data=request.data)
         schema.is_valid(raise_exception=True)
         values = schema.validated_data
         with transaction.atomic():
             event = get_object_or_404(
-                OutboxEvent.objects.select_for_update(),
+                OutboxEvent.objects.select_for_update().filter(pk__in=outbox_scope(request.user).values('id')),
                 pk=pk,
                 state__in=["failed", "unknown"],
             )

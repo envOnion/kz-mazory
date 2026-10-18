@@ -31,6 +31,24 @@ from .notification_views import (
     NotificationActionView,
 )
 from .whatsapp_views import WhatsAppStatusView, WhatsAppQrView, WhatsAppRestartView
+from .settings_api import (SettingsAIView, SettingsAIDetailView, SettingsBitrixView,
+    SettingsWhatsAppView, SettingsAccessView, SettingsWhatsAppDetailView,
+    SettingsHistoryView, SettingsDiagnosticsView, SettingsGrantsView)
+from .messenger_api import (
+    ChangesView,
+    DialogsView,
+    RecordChainView,
+    RecordDetailView,
+    RecordsView,
+    RecordTracesView,
+    RecordTraceContextView,
+    ReanalyzeView,
+)
+from .operations_api import (
+    AnalyticsOperationsView,
+    CrmChangesView,
+    ProcessingJobsView,
+)
 from .platform_views import (
     CandidateListView,
     CandidateReviewView,
@@ -124,4 +142,26 @@ urlpatterns = [
     path("mcp/tokens/", McpTokenView.as_view()),
     path("mcp/connection/", McpConnectionView.as_view()),
     path("candidates/crm-retry/", CandidateCrmRetryView.as_view()),
+    # Messenger: единая лента коммуникаций, цепочки причинности, дельты.
+    path("messenger/dialogs/", DialogsView.as_view()),
+    path("messenger/records/", RecordsView.as_view()),
+    path("messenger/records/<int:pk>/", RecordDetailView.as_view()),
+    path("messenger/records/<int:pk>/chain/", RecordChainView.as_view()),
+    path("messenger/records/<int:pk>/traces/", RecordTracesView.as_view()),
+    path("messenger/records/<int:pk>/traces/<int:trace_pk>/context/", RecordTraceContextView.as_view()),
+    path("messenger/records/<int:pk>/reanalyze/", ReanalyzeView.as_view()),
+    path("messenger/changes/", ChangesView.as_view()),
+    path("settings/whatsapp/", SettingsWhatsAppView.as_view()),
+    path("settings/access/", SettingsAccessView.as_view()),
+    path("settings/access/grants/", SettingsGrantsView.as_view()),
+    path("settings/whatsapp/<int:pk>/", SettingsWhatsAppDetailView.as_view()),
+    path("settings/whatsapp/<int:pk>/history/", SettingsHistoryView.as_view()),
+    path("settings/diagnostics/", SettingsDiagnosticsView.as_view()),
+    path("settings/ai/", SettingsAIView.as_view()),
+    path("settings/ai/<int:pk>/", SettingsAIDetailView.as_view()),
+    path("settings/bitrix/", SettingsBitrixView.as_view()),
+    # Операционные разделы новой оболочки.
+    path("analytics/operations/", AnalyticsOperationsView.as_view()),
+    path("processing/jobs/", ProcessingJobsView.as_view()),
+    path("crm/changes/", CrmChangesView.as_view()),
 ]

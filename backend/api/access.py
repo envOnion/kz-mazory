@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from django.db.models import Q
+from django.db.models import F, Q
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied
 from .models import (
@@ -114,7 +114,8 @@ def messages_for(user):
     if user.is_superuser:
         return RawMessage.objects.all()
     return RawMessage.objects.filter(
-        Q(config__in=configs_for(user))
+        (Q(config__in=configs_for(user), chat_id=F('config__group_jid')) & ~Q(processing_state='clarification_reply'))
+        | Q(communication_record__recipient=user)
         | Q(
             source__in=["bitrix", "attachment", "manual"],
             project__in=projects_for(user),

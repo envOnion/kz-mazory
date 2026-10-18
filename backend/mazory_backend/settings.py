@@ -314,7 +314,9 @@ UNFOLD = {
     ],
     "SIDEBAR": {
         "show_search": True,
-        "show_all_applications": True,
+        # Автоматический список всех моделей недоступен как пользовательская
+        # навигация: пункты формируются явным списком ниже.
+        "show_all_applications": False,
         "navigation": [
             {
                 "title": "Управление продажами",

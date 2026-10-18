@@ -425,13 +425,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { routeId } from '../../utils/routeId'
 import { api, post } from '../../composables/api'
 import { currentUser } from '../../composables/session'
 import { requestKey } from '../../utils/requestKey'
 import type { Page, Directory } from '../../types/platform'
 import type { DialogueThread } from '../../types/factReview'
 
+const route = useRoute(), router = useRouter()
 type ThreadSummary = Omit<DialogueThread, 'messages'>
 
 const chats = ref<NonNullable<Directory['chats']>>([])
@@ -661,6 +664,7 @@ async function load(number: number) {
 async function open(id: number) {
   try {
     detail.value = await api<DialogueThread>(`/threads/${id}/`)
+    if (route.path === '/threads' && routeId(route.query.thread) !== id) await router.replace({path:'/threads',query:{...route.query,thread:String(id)}})
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Тема недоступна'
   }
@@ -707,8 +711,10 @@ async function rebuild() {
   }
 }
 
+watch(() => route.query.thread, value => { const id = routeId(value); if (id && id !== detail.value?.id) void open(id) })
 onMounted(async () => {
   await load(1)
+  const initial = routeId(route.query.thread); if (initial) await open(initial)
   try {
     const directory = await api<Directory>('/directory/')
     chats.value = directory.chats || []

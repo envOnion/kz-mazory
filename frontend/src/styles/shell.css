@@ -1,0 +1,131 @@
+/* Mazory Messenger Premium — токены финального прототипа (§3.2).
+   Компоненты используют классы mx-*; фон страницы задаёт AppShell. */
+
+:root {
+  --mx-bg: #090e16;
+  --mx-rail: #0b101a;
+  --mx-list: #0e1420;
+  --mx-main: #0d1420;
+  --mx-inspector: #0e1521;
+  --mx-card: #141e2d;
+  --mx-card-2: #192536;
+  --mx-card-3: #202d40;
+  --mx-border: #233044;
+  --mx-border-2: #2c3b50;
+  --mx-text: #ebf0f8;
+  --mx-muted: #8492a9;
+  --mx-accent: #987eff;
+  --mx-accent-2: #b2a2ff;
+  --mx-ok: #40d3ab;
+  --mx-warn: #ffbe73;
+  --mx-err: #ff8296;
+  --mx-info: #82b5ff;
+  --mx-radius: 16px;
+  --mx-shadow: 0 14px 36px rgba(0, 0, 0, 0.24);
+  --mx-rail-w: 80px;
+  --mx-list-w: 328px;
+  --mx-inspector-w: 356px;
+}
+@media (min-width: 1850px) {
+  :root { --mx-list-w: 362px; --mx-inspector-w: 395px; }
+}
+@media (max-width: 1370px) {
+  :root { --mx-rail-w: 68px; --mx-list-w: 287px; --mx-inspector-w: 320px; }
+}
+@media (max-width: 520px) {
+  :root { --mx-rail-w: 51px; }
+}
+
+.mx-app {
+  height: 100dvh;
+  background: var(--mx-bg);
+  color: var(--mx-text);
+  font-size: 13px;
+  display: flex;
+  overflow: hidden;
+}
+.mx-panel-list { width: var(--mx-list-w); flex-shrink: 0; max-width: calc(100vw - var(--mx-rail-w)); background: var(--mx-list); border-right: 1px solid var(--mx-border); overflow-y: auto; }
+.mx-panel-main { flex: 1; min-width: 0; background: var(--mx-main); overflow-y: auto; }
+.mx-panel-inspector { width: var(--mx-inspector-w); flex-shrink: 0; background: var(--mx-inspector); border-left: 1px solid var(--mx-border); overflow-y: auto; }
+
+/* До 1130px инспектор — оверлей справа; до 760px список — оверлей слева. */
+@media (max-width: 1130px) {
+  .mx-panel-inspector { position: fixed; right: 0; top: 0; bottom: 0; width: min(var(--mx-inspector-w), calc(100vw - var(--mx-rail-w))); z-index: 40; box-shadow: var(--mx-shadow); }
+  .mx-inspector-hidden { display: none; }
+}
+@media (max-width: 760px) {
+  .mx-panel-list { position: fixed; left: var(--mx-rail-w); top: 0; bottom: 0; z-index: 40; box-shadow: var(--mx-shadow); }
+  .mx-list-hidden { display: none; }
+}
+
+.mx-card { background: var(--mx-card); border: 1px solid var(--mx-border); border-radius: var(--mx-radius); }
+.mx-muted { color: var(--mx-muted); }
+.mx-accent { color: var(--mx-accent); }
+
+.mx-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--mx-card-2); color: var(--mx-text);
+  border: 1px solid var(--mx-border-2); border-radius: 10px;
+  padding: 8px 14px; font-size: 13px; cursor: pointer;
+  min-height: 36px;
+}
+.mx-btn:hover:not(:disabled) { background: var(--mx-card-3); }
+.mx-btn:focus-visible { outline: 2px solid var(--mx-accent); outline-offset: 2px; }
+.mx-btn:disabled { opacity: 0.5; cursor: default; }
+.mx-btn-primary { background: var(--mx-accent); color: #12101d; border-color: transparent; font-weight: 600; }
+@media (max-width: 760px) { .mx-btn { min-height: 44px; font-size: 14px; } }
+
+.mx-input, .mx-select {
+  background: var(--mx-card); color: var(--mx-text);
+  border: 1px solid var(--mx-border-2); border-radius: 10px;
+  padding: 8px 12px; font-size: 14px; width: 100%; max-width:100%;
+}
+.mx-input:focus-visible, .mx-select:focus-visible { outline: 2px solid var(--mx-accent); outline-offset: 1px; }
+
+.mx-chip {
+  display: inline-flex; align-items: center; gap: 5px;
+  border-radius: 999px; padding: 2px 10px; font-size: 12px;
+  border: 1px solid var(--mx-border-2); background: var(--mx-card);
+  min-height: 22px;
+}
+.mx-chip-ok { color: var(--mx-ok); border-color: rgba(64, 211, 171, 0.4); }
+.mx-chip-warn { color: var(--mx-warn); border-color: rgba(255, 190, 115, 0.4); }
+.mx-chip-err { color: var(--mx-err); border-color: rgba(255, 130, 150, 0.4); }
+.mx-chip-info { color: var(--mx-info); border-color: rgba(130, 181, 255, 0.4); }
+.mx-chip-muted { color: var(--mx-muted); }
+
+.mx-tab {
+  padding: 8px 12px; font-size: 13px; cursor: pointer; color: var(--mx-muted);
+  border-bottom: 2px solid transparent; background: none; border-top: 0; border-left: 0; border-right: 0;
+}
+.mx-tab:focus-visible { outline: 2px solid var(--mx-accent); outline-offset: -2px; }
+.mx-tab-active { color: var(--mx-text); border-bottom-color: var(--mx-accent); }
+
+.mx-skeleton {
+  background: linear-gradient(90deg, var(--mx-card) 25%, var(--mx-card-2) 50%, var(--mx-card) 75%);
+  background-size: 200% 100%; animation: mx-shimmer 1.4s infinite; border-radius: 8px; min-height: 14px;
+}
+@keyframes mx-shimmer { to { background-position: -200% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .mx-skeleton { animation: none; }
+  * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
+}
+
+.mx-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.mx-table th { text-align: left; color: var(--mx-muted); font-weight: 500; padding: 8px 10px; border-bottom: 1px solid var(--mx-border); }
+.mx-table td { padding: 9px 10px; border-bottom: 1px solid var(--mx-border); vertical-align: top; }
+.mx-table tr:hover td { background: rgba(152, 126, 255, 0.04); }
+
+.mx-link { color: var(--mx-accent-2); text-decoration: none; }
+.mx-link:hover { text-decoration: underline; }
+.mx-link:focus-visible { outline: 2px solid var(--mx-accent); outline-offset: 2px; border-radius: 4px; }
+
+.mx-overlay { position: fixed; inset: 0; background: rgba(4, 7, 12, 0.6); z-index: 35; }
+
+@media (max-width:520px) { nav[aria-label="Разделы"] a > span { font-size:9px; letter-spacing:-.1px; } }
+nav[aria-label="Разделы"] button[title="Уведомления"] > span:not(.absolute) { max-width:100%; overflow-wrap:anywhere; text-align:center; }
+@media (max-width:760px) {
+  .mx-app, .mx-table { font-size:14px; }
+  .mx-btn, .mx-tab, .mx-input, .mx-select { min-height:44px; font-size:14px; }
+  button.mx-chip { min-height:44px; }
+}

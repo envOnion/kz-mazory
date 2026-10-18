@@ -1,194 +1,75 @@
+<script setup lang="ts">
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import AuthModal from './components/AuthModal.vue'
+import NavigationRail from './shell/NavigationRail.vue'
+import { useAuth } from './composables/useAuth'
+import { api } from './composables/api'
+import { currentUser } from './composables/session'
+import { isClient, defaultPath } from './router'
+import type { DialogSummary } from './types/messenger'
+
+// Единая оболочка Mazory: слева навигационная полоса, справа — раздел.
+// Без fallback: при отсутствии сессии — только вход; демоданных нет.
+const { isAuthenticated, isAuthModalOpen, checkAuth } = useAuth()
+const route = useRoute()
+const router = useRouter()
+const booted = ref(false)
+const attention = ref(0)
+const attentionStale = ref(false)
+let attentionTimer: number | null = null
+
+const staff = computed(() => Boolean(currentUser.value) && !isClient())
+
+async function refreshAttention() {
+  if (!staff.value) { attention.value = 0; attentionStale.value = false; return }
+  try {
+    const page = await api<{ items: DialogSummary[] }>('/messenger/dialogs/?attention=1')
+    attention.value = page.items.reduce((total, dialog) => total + dialog.attention_count, 0)
+    attentionStale.value = false
+  } catch { attentionStale.value = true }
+}
+
+onMounted(async () => {
+  if (!isAuthenticated.value) await checkAuth()
+  await router.isReady()
+  booted.value = true
+  await refreshAttention()
+  attentionTimer = window.setInterval(refreshAttention, 30000)
+})
+onBeforeUnmount(() => { if (attentionTimer) clearInterval(attentionTimer) })
+watch(() => route.path, refreshAttention)
+watch(isAuthenticated, value => {
+  if (value) { void refreshAttention(); if (booted.value && route.path === '/') void router.replace(defaultPath()) }
+  else if (booted.value) void router.replace('/')
+})
+</script>
+
 <template>
-  <div class="relative min-h-screen w-full bg-[#060912] text-slate-100 flex flex-col justify-between selection:bg-indigo-500/30 selection:text-indigo-200 overflow-x-hidden">
-    <!-- Interactive Canvas 2D Wave Background -->
-    <WaveBackground />
+  <div v-if="!booted" class="mx-app items-center justify-center">
+    <div class="mx-skeleton" style="width:180px;height:18px" />
+  </div>
 
-    <!-- Top Navigation Header -->
-    <AppHeader
-      @go-home="goHome"
-      @open-auth="isAuthModalOpen = true"
-      @open-profile="handleOpenProfile"
-    />
+  <div v-else-if="!currentUser" class="mx-app" style="flex-direction:column;align-items:center;justify-content:center;gap:18px;text-align:center;padding:24px">
+    <div class="mx-accent" style="font-size:34px;font-weight:700">Mazory</div>
+    <p class="mx-muted" style="max-width:380px;font-size:14px">
+      Рабочее пространство операций: чаты, аналитика, очередь обработки и изменения CRM в одном интерфейсе.
+    </p>
+    <button class="mx-btn mx-btn-primary" data-testid="open-auth" @click="isAuthModalOpen = true">Войти по номеру телефона</button>
+    <AuthModal :is-open="isAuthModalOpen" @close="isAuthModalOpen = false" @success="refreshAttention" />
+  </div>
 
-    <nav v-if="isAuthenticated" class="relative z-30 max-w-6xl mx-auto w-full px-4 flex flex-wrap gap-2" aria-label="Главная навигация">
-      <button v-if="!currentUser?.roles.includes('client')" class="btn" data-testid="nav-kpi-dashboard" @click="currentView = 'dashboard'; hasChatResponse = false; fetchKpiData()">KPI и чат</button>
-      <button v-if="conversationId" class="btn" @click="currentView = 'dashboard'; hasChatResponse = true">Продолжить диалог</button>
-      <button class="btn" data-testid="nav-workspace" @click="currentView = 'workspace'">Рабочий кабинет</button>
-      <button class="btn" data-testid="nav-profile" @click="currentView = 'profile'">Настройки профиля</button>
-    </nav>
-    <!-- Main Content Area -->
-    <main class="relative z-10 flex-1 flex flex-col justify-center">
-      <!-- Transition between Welcome State, Profile State, and Dashboard State -->
-      <transition
-        mode="out-in"
-        enter-active-class="transition duration-300 ease-out"
-        enter-from-class="opacity-0 translate-y-2"
-        enter-to-class="opacity-100 translate-y-0"
-        leave-active-class="transition duration-200 ease-in"
-        leave-from-class="opacity-100 translate-y-0"
-        leave-to-class="opacity-0 -translate-y-2"
-      >
-        <!-- View 1: Welcome Screen -->
-        <WelcomeView
-          v-if="currentView === 'welcome' && !currentUser?.roles.includes('client')"
-          :suggestions="welcomeSuggestions"
-          :disabled="isGenerating"
-          @select-prompt="handlePromptSubmit"
-          @attach-file="handleAttach"
-        />
-
-        <!-- View 2: User Profile (Личный кабинет) - Only for authenticated users -->
-        <UserProfileView
-          v-else-if="currentView === 'profile' && isAuthenticated"
-          @back-to-chat="currentView = 'dashboard'"
-          @logged-out="handleLogout"
-        />
-
-        <WorkspaceView v-else-if="isAuthenticated && (currentView === 'workspace' || currentUser?.roles.includes('client'))" :key="currentUser?.id" />
-        <!-- View 3: KPI Dashboard Active Chat View -->
-        <div v-else class="flex-1 flex flex-col justify-between py-2">
-          <ChatWorkspace v-if="hasChatResponse" :turns="turns" :conversations="conversations" :conversation-id="conversationId" :selected-turn-id="selectedTurnId" :artifact="selectedArtifact" :presentation="activePresentation" :is-generating="isGenerating" :error="error" :period="selectedPeriod" @submit="handlePromptSubmit" @select-turn="selectTurn" @followup="followup" @load-conversation="loadConversation" @new-conversation="newConversation" @cancel="cancel" @open-source="openQuote" @change-filters="changeKpiFilters" @change-period="fetchKpiData" />
-          <KpiDashboardView v-else
-            :data="kpiData"
-            :widget="activeWidget"
-            :presentation="activePresentation"
-            :has-chat-response="hasChatResponse"
-            :response-text="chatResponseText"
-            :is-loading="isGenerating"
-            :period="selectedPeriod"
-            @open-source="openQuote"
-            @open-workspace="currentView = 'workspace'"
-            @change-period="fetchKpiData"
-            @change-filters="changeKpiFilters"
-            @select-prompt="handlePromptSubmit"
-          />
-
-          <div class="max-w-6xl mx-auto w-full px-4 space-y-3">
-            <p v-if="error && !hasChatResponse" role="alert" class="panel text-rose-300">{{ error }}</p>
-            <button v-if="isGenerating && !hasChatResponse" class="btn" @click="cancel()">Отменить запрос</button>
-            <dialog ref="sourceDialog" class="panel max-w-2xl backdrop:bg-black/70"><button class="btn mb-4" @click="sourceDialog?.close()">Закрыть источник</button><pre class="whitespace-pre-wrap">{{ sourceText }}</pre></dialog>
-            <blockquote v-for="quote in quotes" :key="quote.id" class="panel text-sm"><p>{{ quote.content }}</p><p class="text-xs text-slate-400">{{ quote.sender_name }} · {{ quote.sent_at }} · <button class="underline" @click="openQuote(quote.id)">Открыть источник #{{ quote.id }}</button></p></blockquote>
-          </div>
-          <!-- Bottom Docked Chat Input Bar for Dashboard View -->
-          <div v-if="!hasChatResponse" class="w-full pb-6 pt-4 mt-auto">
-            <ChatInput
-              :suggestions="dashboardSuggestions"
-              placeholder="Спросите Mazory..."
-              :disabled="isGenerating"
-              @submit="handlePromptSubmit"
-              @attach-file="handleAttach"
-            />
-          </div>
-        </div>
-      </transition>
+  <div v-else-if="staff" class="mx-app">
+    <NavigationRail :attention="attention" :attention-stale="attentionStale" />
+    <main data-main-region tabindex="-1" class="flex-1 min-w-0 flex overflow-hidden outline-none">
+      <RouterView />
     </main>
+    <AuthModal :is-open="isAuthModalOpen" @close="isAuthModalOpen = false" @success="refreshAttention" />
+  </div>
 
-    <!-- Phone / SMS Auth Modal -->
-    <AuthModal
-      :is-open="isAuthModalOpen"
-      @close="isAuthModalOpen = false"
-      @success="handleAuthSuccess"
-    />
-
-    <!-- Global Subtle Toast for Attachment Interactions -->
-    <transition
-      enter-active-class="transition duration-200 ease-out"
-      enter-from-class="opacity-0 translate-y-4"
-      enter-to-class="opacity-100 translate-y-0"
-      leave-active-class="transition duration-150 ease-in"
-      leave-from-class="opacity-100 translate-y-0"
-      leave-to-class="opacity-0 translate-y-4"
-    >
-      <div
-        v-if="toastMessage"
-        class="fixed bottom-24 right-6 z-50 px-4 py-2 rounded-xl bg-slate-900/90 border border-indigo-500/50 text-xs text-indigo-200 shadow-xl backdrop-blur-md"
-      >
-        {{ toastMessage }}
-      </div>
-    </transition>
+  <div v-else class="mx-app">
+    <main data-main-region tabindex="-1" class="flex-1 min-w-0 flex overflow-hidden outline-none">
+      <RouterView />
+    </main>
   </div>
 </template>
-
-<script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
-import WorkspaceView from './components/WorkspaceView.vue'
-import WaveBackground from './components/WaveBackground.vue'
-import AppHeader from './components/AppHeader.vue'
-import WelcomeView from './components/WelcomeView.vue'
-import KpiDashboardView from './components/KpiDashboardView.vue'
-import ChatInput from './components/ChatInput.vue'
-import ChatWorkspace from './components/ChatWorkspace.vue'
-import AuthModal from './components/AuthModal.vue'
-import UserProfileView from './components/UserProfileView.vue'
-import { api } from './composables/api'
-import type { Source } from './types/platform'
-import { useChat } from './composables/useChat'
-import { useAuth } from './composables/useAuth'
-
-const {
-  currentView,
-  isGenerating,
-  welcomeSuggestions,
-  dashboardSuggestions,
-  selectedPeriod,
-  kpiData,
-  activeWidget, activePresentation, hasChatResponse,
-  chatResponseText,
-  fetchKpiData,
-  handlePromptSubmit,
-  goHome, error, quotes, cancel, changeKpiFilters,
-  turns, conversations, conversationId, selectedTurnId, selectedArtifact, selectTurn, followup, loadConversation, newConversation, restoreConversations
-} = useChat()
-
-const { isAuthenticated, currentUser, checkAuth, isAuthModalOpen } = useAuth()
-watch(isAuthenticated, value => { if (!value) currentView.value = 'welcome' })
-const sourceDialog = ref<HTMLDialogElement>()
-const sourceText = ref('')
-async function openQuote(id: number) {
-  try { const source = await api<Source>(`/messages/${id}/`); sourceText.value = `${source.sender_name} · ${source.sent_at || 'Время неизвестно'}\n\n${source.content}`; sourceDialog.value?.showModal() }
-  catch (e) { showToast(e instanceof Error ? e.message : 'Источник недоступен') }
-}
-const toastMessage = ref('')
-let toastTimer: number | null = null
-
-onMounted(() => {
-  void checkAuth().then(ok => { if (ok) { fetchKpiData(); restoreConversations() } })
-})
-
-function showToast(msg: string) {
-  toastMessage.value = msg
-  if (toastTimer) clearTimeout(toastTimer)
-  toastTimer = window.setTimeout(() => {
-    toastMessage.value = ''
-  }, 2500)
-}
-
-function handleOpenProfile() {
-  if (isAuthenticated.value) {
-    currentView.value = 'profile'
-  } else {
-    isAuthModalOpen.value = true
-  }
-}
-
-function handleAuthSuccess() {
-  showToast('✓ Вы успешно вошли в систему')
-  fetchKpiData(); restoreConversations()
-}
-
-function handleLogout() {
-  currentView.value = 'welcome'
-  showToast('Вы вышли из системы')
-}
-
-function handleAttach() {
-  if (!isAuthenticated.value) {
-    isAuthModalOpen.value = true
-    showToast('Для прикрепления файлов необходимо войти в систему')
-    return
-  }
-  showToast('Прикрепление файлов через веб-интерфейс временно отключено')
-}
-
-
-</script>

@@ -80,6 +80,8 @@ def ingest_waha_batch(config, items):
     originals=[stored[identity] for identity in identities]
     if any(raw.config_id!=config.id or raw.chat_id!=config.group_jid for raw in originals):
         raise ValueError('whatsapp_alias_conflict')
+    from . import communication  # deferred: journal is a projection, not a dependency
+    communication.journal_raw_bulk(originals)
     WhatsAppMessageAlias.objects.bulk_create([
         WhatsAppMessageAlias(config=config,raw_message=raw,session_name=config.session_name,
             chat_id=config.group_jid,namespace='waha',external_id=raw.message_id,source_revision=raw.source_revision)
