@@ -5,7 +5,8 @@ import copy
 import json
 import re
 from datetime import datetime, timezone as datetime_timezone
-from django.db.models import Q
+from django.db.models import Q, F, Window
+from django.db.models.functions import RowNumber
 from rest_framework import serializers
 from .models import (
     DialogueThread,
@@ -82,6 +83,35 @@ def context_threads(raw):
     items = preferred + list(
         qs.exclude(pk__in=ids).order_by("-updated_at")[: 20 - len(preferred)]
     )
+    item_ids = [item.id for item in items]
+    commitments_by_thread = {thread_id: [] for thread_id in item_ids}
+    commitments = Commitment.objects.filter(
+        candidate__thread_revision__thread_id__in=item_ids,
+        status__in=["pending", "overdue"],
+        is_verified=True,
+    ).annotate(thread_rank=Window(
+        expression=RowNumber(),
+        partition_by=[F("candidate__thread_revision__thread_id")],
+        order_by=[F("deadline").asc(), F("id").asc()],
+    )).filter(thread_rank__lte=10).order_by("candidate__thread_revision__thread_id", "deadline", "id").values(
+        "candidate__thread_revision__thread_id", "id", "version", "commitment_text",
+        "responsible_name", "source_message_id", "deadline_at",
+    )
+    for task in commitments:
+        thread_id = task.pop("candidate__thread_revision__thread_id")
+        commitments_by_thread[thread_id].append(task)
+
+    messages_by_thread = {thread_id: [] for thread_id in item_ids}
+    links = ThreadMessage.objects.filter(thread_id__in=item_ids).annotate(thread_rank=Window(
+        expression=RowNumber(),
+        partition_by=[F("thread_id")],
+        order_by=[F("raw_message__timestamp").desc(), F("raw_message_id").desc()],
+    )).filter(thread_rank__lte=40).order_by(
+        "thread_id", "-raw_message__timestamp", "-raw_message_id"
+    ).values_list("thread_id", "raw_message_id")
+    for thread_id, raw_message_id in links:
+        messages_by_thread[thread_id].append(raw_message_id)
+
     return [
         {
             "id": item.id,
@@ -91,12 +121,8 @@ def context_threads(raw):
             "parent_id": item.parent_id,
             "project_id": item.project_id,
             "summary": item.summary[:600],
-            "commitments": [{**task, "deadline_at": task["deadline_at"].isoformat() if task["deadline_at"] else None} for task in Commitment.objects.filter(candidate__thread_revision__thread_id=item.id, status__in=["pending", "overdue"], is_verified=True).values("id", "version", "commitment_text", "responsible_name", "source_message_id", "deadline_at")[:10]],
-            "message_ids": list(
-                item.message_links.order_by("-raw_message__timestamp", "-raw_message_id").values_list(
-                    "raw_message_id", flat=True
-                )[:40]
-            ),
+            "commitments": [{**task, "deadline_at": task["deadline_at"].isoformat() if task["deadline_at"] else None} for task in commitments_by_thread[item.id]],
+            "message_ids": messages_by_thread[item.id],
         }
         for item in items
     ]

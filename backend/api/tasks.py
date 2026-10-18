@@ -170,13 +170,18 @@ def dispatch_outbox(limit=100):
         # split children before starting later source positions.
         order_by=[F("analysis_position").asc(nulls_last=True), F("id").asc()],
     )).filter(source_head=1)
-    if AISettings.get_active().autonomous_enabled:
+    cfg = AISettings.get_active()
+    if cfg.autonomous_enabled:
         pending = pending.annotate(work_priority=Case(When(event_type="operation", then=Value(0)), When(payload__priority="live", then=Value(1)), When(event_type="decide_fact", then=Value(2)), default=Value(3), output_field=IntegerField())).order_by("work_priority", "id")
     else:
         pending = pending.order_by("id")
-    cfg = AISettings.get_active()
     expensive = set(ANALYSIS_EVENTS) | {"index_message", "operation", "whatsapp_artifact"}
+    capacity = min(2, max(1, cfg.autonomous_max_in_flight))
     in_flight = OutboxEvent.objects.filter(event_type__in=expensive, state__in=("enqueued", "processing")).count()
+    # A saturated AI queue must not consume the bounded page ahead of delivery
+    # and CRM work. Capacity is checked again while holding the config mutex.
+    if in_flight >= capacity:
+        pending = pending.exclude(event_type__in=expensive)
     ids = list(pending.values_list("id", flat=True)[:limit])
     dispatched = 0
     for pk in ids:
@@ -198,19 +203,29 @@ def dispatch_outbox(limit=100):
             ).exclude(pk=event.pk).exists():
                 continue
             if event.event_type in expensive:
-                in_flight = OutboxEvent.objects.filter(event_type__in=expensive, state__in=["enqueued", "processing"]).count()
-                if in_flight >= min(2, max(1, cfg.autonomous_max_in_flight)):
+                # Once this invocation has filled the observed slots, avoid a
+                # global COUNT for every later event in the page. The next tick
+                # will see any worker completion that frees a slot.
+                if in_flight >= capacity:
                     continue
-                in_flight += 1
+                active_count = OutboxEvent.objects.filter(event_type__in=expensive, state__in=["enqueued", "processing"]).count()
+                if active_count >= capacity:
+                    in_flight = active_count
+                    continue
+                in_flight = active_count + 1
+            claim_generation = uuid.uuid4().hex
+            event.payload = {**event.payload, "claim_generation": claim_generation}
             event.state, event.lease_until = "enqueued", now + timedelta(minutes=5)
-            event.save(update_fields=["state", "lease_until"])
+            event.save(update_fields=["payload", "state", "lease_until"])
         try:
             async_task(
                 "api.tasks.run_outbox", pk, cluster=CLUSTERS.get(event.event_type, "ai")
             )
             dispatched += 1
         except Exception:
-            OutboxEvent.objects.filter(pk=pk, state="enqueued").update(
+            OutboxEvent.objects.filter(
+                pk=pk, state="enqueued", payload__claim_generation=claim_generation
+            ).update(
                 state="pending", error_code="broker_unavailable"
             )
     return dispatched

@@ -2,6 +2,7 @@
 
 import copy
 import hashlib
+from bisect import bisect_right
 from django.db import transaction
 from django.utils import timezone
 from .context_tokens import canonical_json, context_runtime, extraction_payload, payload_hash
@@ -121,14 +122,36 @@ def row(message, exact=False):
 
 def snapshot(raw, maximum, exact=False):
     qs, _ = history_queryset(raw, maximum, include_following=True)
-    messages = list(qs.select_related('config').order_by('order_time', 'id')) + [raw]
-    messages.sort(key=lambda m: (m.timestamp if m.sent_at_known else m.received_at, m.id))
+    messages = list(qs.select_related('config').only(
+        'id', 'message_id', 'source_revision', 'content', 'sender_name', 'timestamp',
+        'sent_at_known', 'received_at', 'raw_payload', 'source', 'config_id',
+        'config__id', 'config__snapshot',
+    ).order_by('order_time', 'id').iterator(chunk_size=1000))
+    target_key = (raw.timestamp if raw.sent_at_known else raw.received_at, raw.id)
+    position = bisect_right(
+        messages,
+        target_key,
+        key=lambda message: (
+            message.timestamp if message.sent_at_known else message.received_at,
+            message.id,
+        ),
+    )
+    messages.insert(position, raw)
     return [row(message, exact=exact) for message in messages]
 
 
 def source_hash(rows):
-    return payload_hash([[r['raw_message_id'], r['source_revision'], r['source_metadata'], r['received_at'],
-                          hashlib.sha256(r['content'].encode()).hexdigest()] for r in rows])
+    digest = hashlib.sha256()
+    digest.update(b'[')
+    for index, item in enumerate(rows):
+        if index:
+            digest.update(b',')
+        digest.update(canonical_json([
+            item['raw_message_id'], item['source_revision'], item['source_metadata'],
+            item['received_at'], hashlib.sha256(item['content'].encode()).hexdigest(),
+        ]).encode())
+    digest.update(b']')
+    return digest.hexdigest()
 
 
 def prepare(raw, cfg, known_projects, maximum, batch_ids, state):

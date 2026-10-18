@@ -4,7 +4,7 @@ from collections import Counter
 from django.db import transaction
 from django.db.models import Count, Exists, Max, OuterRef, Q, Subquery
 from django.utils import timezone
-from .models import AISettings, HistoryAnalysisItem, OutboxEvent, RawMessage
+from .models import AISettings, HistoryAnalysisItem, MessageProcessingTrace, OutboxEvent, RawMessage
 from .processing_attempts import reserve_attempt
 from .dialogue_threads import source_key, analysis_position
 
@@ -17,8 +17,28 @@ def schedule(run):
     cfg = AISettings.get_active()
     limit = run.settings_snapshot.get("analysis_target_message_limit", cfg.analysis_target_message_limit)
     items = []
-    for raw in run.messages.order_by("timestamp", "id"):
-        item, _ = HistoryAnalysisItem.objects.get_or_create(run=run, raw_message=raw)
+    raw_rows = list(run.messages.order_by("timestamp", "id"))
+    raw_ids = [raw.id for raw in raw_rows]
+    snapshot_max_id = run.settings_snapshot.get("snapshot_max_id")
+    if snapshot_max_id is None:
+        snapshot_max_id = RawMessage.objects.aggregate(last=Max("id"))["last"] or 0
+    latest_attempts = dict(MessageProcessingTrace.objects.filter(
+        raw_message_id__in=raw_ids
+    ).order_by().values("raw_message_id").annotate(last=Max("attempt_no")).values_list(
+        "raw_message_id", "last"
+    ))
+    existing_items = {item.raw_message_id: item for item in HistoryAnalysisItem.objects.filter(
+        run=run, raw_message_id__in=raw_ids
+    )}
+    missing_items = [HistoryAnalysisItem(run=run, raw_message=raw)
+                     for raw in raw_rows if raw.id not in existing_items]
+    if missing_items:
+        HistoryAnalysisItem.objects.bulk_create(missing_items, ignore_conflicts=True, batch_size=500)
+        existing_items.update({item.raw_message_id: item for item in HistoryAnalysisItem.objects.filter(
+            run=run, raw_message_id__in=[item.raw_message_id for item in missing_items]
+        )})
+    for raw in raw_rows:
+        item = existing_items[raw.id]
         if raw.processing_state == 'clarification_reply':
             item.state, item.disposition = 'succeeded', 'clarification_reply'
             item.reason_code = 'human_clarification_source'
@@ -45,9 +65,22 @@ def schedule(run):
         packet = items[offset:offset + limit]
         raw = RawMessage.objects.select_for_update().get(pk=packet[0].raw_message_id)
         operation = f"history:{run.id}:packet:{raw.id}"
+        operation_keys = [f"{operation}:target:{item.raw_message_id}" for item in packet]
+        existing_traces = MessageProcessingTrace.objects.filter(
+            operation_key__in=operation_keys
+        ).in_bulk(field_name="operation_key")
         traces = {}
         for item in packet:
-            trace = reserve_attempt(item.raw_message, f"{operation}:target:{item.raw_message_id}")
+            operation_key = f"{operation}:target:{item.raw_message_id}"
+            previous = existing_traces.get(operation_key)
+            trace = reserve_attempt(
+                item.raw_message, operation_key,
+                cfg=cfg, snapshot_max_id=snapshot_max_id,
+                existing=previous,
+                latest_attempt_no=latest_attempts.get(item.raw_message_id, 0),
+            )
+            if previous is None:
+                latest_attempts[item.raw_message_id] = trace.attempt_no
             from .processing_attempts import ANALYSIS_CONFIG_FIELDS
             trace.context_metadata.update(analysis_policy=POLICY, analysis_limits={**trace.context_metadata['analysis_limits'], **{
                 name: run.settings_snapshot.get(name, getattr(cfg, name))
