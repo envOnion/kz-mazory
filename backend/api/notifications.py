@@ -122,15 +122,21 @@ def serialize_notification(n):
         "title": n.title,
         "message": n.message,
         "type": n.category,
-        "created_at": n.created_at.isoformat(),
+        "created_at": n.created_at.isoformat() if n.created_at else None,
         "is_read": n.read_at is not None,
         "acknowledged": n.acknowledged_at is not None,
         "project_id": n.project_id,
         "commitment_id": n.commitment_id,
         "clarification": {'id': clarification.id, 'state': clarification.state} if clarification else None,
-        "deliveries": list(
-            n.deliveries.values("state", "channel", "updated_at", "error_code")
-        ),
+        "deliveries": [
+            {
+                "state": delivery.state,
+                "channel": delivery.channel,
+                "updated_at": delivery.updated_at,
+                "error_code": delivery.error_code,
+            }
+            for delivery in n.deliveries.all()
+        ],
     }
 
 
@@ -153,7 +159,7 @@ def fetch_user_notifications(phone):
     user = User.objects.filter(username=phone).first()
     if not user:
         return [], 0
-    qs = visible_notifications(user)
+    qs = visible_notifications(user).select_related("clarification").prefetch_related("deliveries")
     return [serialize_notification(n) for n in qs[:50]], qs.filter(
         read_at__isnull=True
     ).count()

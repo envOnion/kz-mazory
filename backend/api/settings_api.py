@@ -268,11 +268,16 @@ class SettingsWhatsAppView(APIView):
     def get(self, request):
         require_integration(request)
         # Integration administrators already manage all configs in the existing WAHA API.
-        cfgs = WhatsAppConfig.objects.select_related('team').order_by('id')
-        rows = serializer_for(WhatsAppConfig, SAFE_WHATSAPP_FIELDS)(cfgs, many=True).data
-        from .waha_admin_views import control_state
-        for row, cfg in zip(rows, cfgs):
-            row.update(status=cfg.status, updated_at=cfg.updated_at.isoformat() if cfg.updated_at else None, control=control_state(cfg), qr_image=None)
+        cfgs = WhatsAppConfig.objects.only(
+            'id', 'team_id', 'name', 'group_jid', 'session_name', 'is_active',
+            'thread_routing_enabled', 'status', 'updated_at', 'last_qr_code',
+        ).order_by('id')
+        config_list = list(cfgs)
+        rows = serializer_for(WhatsAppConfig, SAFE_WHATSAPP_FIELDS)(config_list, many=True).data
+        from .waha_admin_views import control_states
+        controls = control_states(config_list)
+        for row, cfg in zip(rows, config_list):
+            row.update(status=cfg.status, updated_at=cfg.updated_at.isoformat() if cfg.updated_at else None, control=controls[cfg.pk], qr_image=None)
             if cfg.status == 'SCAN_QR_CODE' and cfg.last_qr_code:
                 import base64
                 import qrcode
@@ -399,11 +404,12 @@ class SettingsHistoryView(APIView):
         require_integration(request, WhatsAppHistoryJob, write=request.method != 'GET')
         cfg = get_object_or_404(WhatsAppConfig, pk=pk)
         job = WhatsAppHistoryJob.objects.filter(config=cfg).first()
-        from .history_jobs import progress
+        from .history_jobs import progress_many
         runs = list(job.runs.order_by('-id')[:30]) if job else []
+        progress_by_run = progress_many(runs)
         return Response({'job': serializer_for(WhatsAppHistoryJob, SAFE_HISTORY_FIELDS)(job).data if job else None,
             'fields': schema_for(WhatsAppHistoryJob, SAFE_HISTORY_FIELDS),
-            'runs': [{'id': run.pk, 'state': run.state, 'progress': progress(run)} for run in runs]})
+            'runs': [{'id': run.pk, 'state': run.state, 'progress': progress_by_run[run.pk]} for run in runs]})
 
     @transaction.atomic
     def patch(self, request, pk):

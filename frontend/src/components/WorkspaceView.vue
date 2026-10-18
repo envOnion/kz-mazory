@@ -5,6 +5,7 @@
   <p v-if="error" role="alert" class="panel text-rose-300">{{ error }}</p><p v-if="notice" role="status" class="text-emerald-300">{{ notice }}</p><p v-if="loading" role="status">Загрузка…</p>
   <template v-if="tab === 'people'">
     <header class="space-y-2"><h2 class="text-xl font-semibold">Сотрудники и участники WhatsApp</h2><p class="text-sm text-slate-400">Телефон связывает участника с учётной записью. Доступ к кабинету предоставляется отдельно.</p></header>
+    <form class="panel flex flex-wrap items-end gap-3" @submit.prevent="searchPeople"><label>Поиск участника<input v-model="participantSearch" class="field block mt-1" placeholder="Имя участника" /></label><label>Поиск чата<input v-model="chatSearch" class="field block mt-1" placeholder="Название чата" /></label><button class="btn-primary" :disabled="loading">Найти по всему справочнику</button></form>
     <div class="flex gap-2 flex-wrap"><button class="btn" :disabled="busy || loading" @click="load">Обновить список</button><button v-for="chat in (lead ? directory.chats || [] : [])" :key="chat.id" class="btn" :disabled="busy" @click="syncParticipants(chat.id)">Восстановить участников · {{ chat.name }}</button></div>
     <p v-for="sync in directory.participant_sync || []" :key="sync.config_id" class="text-sm text-slate-400">{{ sync.chat_name }} · {{ participantSyncLabel(sync.state) }}<span v-if="sync.summary"> · Последняя загрузка: {{ new Date(sync.summary.synced_at).toLocaleString('ru-RU') }}</span><span v-if="sync.error_code" class="text-amber-300"> · Не удалось завершить восстановление. Обнаруженные участники сохранены; повторите загрузку.</span></p>
     <p class="text-sm text-slate-400">Участников: {{ directory.participants?.length || 0 }} · С телефоном: {{ directory.participants?.filter(person => person.phone).length || 0 }}</p>
@@ -106,7 +107,7 @@
     <p v-if="commitments && !commitments.total_count" class="panel">Подтверждённых обязательств пока нет.</p>
   </template>
   <template v-if="tab === 'notifications'">
-    <button class="btn" @click="markAllAsRead">Прочитать все</button><article v-for="item in notifications" :key="item.id" class="panel space-y-2"><h2 class="font-semibold">{{ item.title }}</h2><p>{{ item.message }}</p><p class="text-xs text-slate-400">{{ new Date(item.created_at).toLocaleString() }} · {{ item.is_read ? 'Прочитано' : 'Новое' }}</p><p v-for="(delivery, index) in item.deliveries" :key="index" class="text-xs">WhatsApp: {{ deliveryLabel(delivery.state) }}</p><button v-if="!item.acknowledged" class="btn" @click="acknowledge(item.id)">Подтвердить получение</button></article>
+    <button class="btn" @click="markAllAsRead">Прочитать все</button><article v-for="item in notifications" :key="item.id" class="panel space-y-2"><h2 class="font-semibold">{{ item.title }}</h2><p>{{ item.message }}</p><p class="text-xs text-slate-400">{{ item.created_at ? new Date(item.created_at).toLocaleString() : 'Дата не указана' }} · {{ item.is_read ? 'Прочитано' : 'Новое' }}</p><p v-for="(delivery, index) in item.deliveries" :key="index" class="text-xs">WhatsApp: {{ deliveryLabel(delivery.state) }}</p><button v-if="!item.acknowledged" class="btn" @click="acknowledge(item.id)">Подтвердить получение</button></article>
     <form v-if="lead || financeRole" @submit.prevent="sendNotice" class="panel space-y-3"><h2 class="font-semibold">Адресное уведомление</h2><label class="block max-w-sm">Получатель<select class="field block w-full truncate mt-1" v-model="noticeForm.recipient_id" required><option v-for="p in directory.profiles" :key="p.id" :value="p.user_id">{{ p.full_name }}</option></select></label><input class="field w-full" v-model="noticeForm.title" placeholder="Заголовок" required maxlength="255" /><textarea class="field w-full" v-model="noticeForm.message" placeholder="Сообщение" required maxlength="4000" /><label class="block"><input type="checkbox" v-model="noticeForm.send_whatsapp" /> Продублировать в WhatsApp</label><button class="btn-primary" :disabled="busy">Отправить уведомление</button></form>
   </template>
   <dialog ref="dialog" class="w-[min(90vw,800px)] rounded-2xl bg-slate-900 text-slate-100 border border-slate-600 p-6 backdrop:bg-black/70"><div class="flex justify-between gap-3 mb-4"><h2 class="font-semibold">{{ modalTitle }}</h2><button class="btn" @click="dialog?.close()">Закрыть</button></div><pre class="whitespace-pre-wrap break-words text-sm max-h-[65vh] overflow-auto">{{ modalText }}</pre></dialog>
@@ -121,6 +122,8 @@ import FactConversation from './review/FactConversation.vue'
 import FactCorrectionForm from './review/FactCorrectionForm.vue'
 import { roles as roleLabels, statusLabels, crmErrors, crmReasons } from './review/presentation'
 import { api, post } from '../composables/api'
+import { loadDirectory } from '../composables/directory'
+import type { DirectoryCollection, DirectoryMetadata } from '../composables/directory'
 import { useRoute } from 'vue-router'
 import { routeId } from '../utils/routeId'
 import { currentUser } from '../composables/session'
@@ -146,6 +149,7 @@ const tabs = computed(() => [
 const assignments = ref<Record<number, number>>({}), transferTasks = ref<Record<number, boolean>>({})
 const projects = ref<ProjectWorkspaceSummary[]>([]), candidates = ref<Candidate[]>([]), commitments = ref<CommitmentData | null>(null)
 const directory = ref<Directory>({ teams: [], profiles: [], projects: [] })
+const participantSearch = ref(''), chatSearch = ref('')
 const automatic = computed(() => directory.value.autonomous_enabled === true)
 const candidateProject = ref<number | null>(null), candidateProjectName = ref('')
 async function showProjectFacts(project: ProjectWorkspaceSummary) { candidateProject.value = project.id; candidateProjectName.value = project.name; candidatePage.value = 1; candidateStatus.value = 'pending'; await selectTab('review') }
@@ -246,15 +250,30 @@ async function load() {
 function catalogLabel(state: string) { return ({ idle: 'Справочник ещё не загружен', queued: 'Загрузка CRM в очереди', running: 'Загрузка CRM выполняется', succeeded: 'Справочник CRM загружен', error: 'Ошибка загрузки CRM' } as Record<string, string>)[state] || 'Состояние загрузки неизвестно' }
 function catalogError(code: string) { return ({ crm_team_mapping_required: 'Не настроена команда CRM', crm_import_disabled: 'Чтение каталога CRM отключено', crm_not_configured: 'Не настроено подключение к CRM', crm_project_scope_conflict: 'Сделка уже принадлежит другой команде' } as Record<string, string>)[code] || 'Не удалось загрузить данные; повторите загрузку' }
 async function refreshDirectory() {
-  const first = await api<Directory>('/directory/')
-  const entries = [...first.projects]
-  let next = first.projects_next_page
-  while (next) {
-    const batch = await api<Directory>(`/directory/?project_page=${next}`)
-    entries.push(...batch.projects)
-    next = batch.projects_next_page
-  }
-  directory.value = { ...first, projects: entries }
+  const collections: DirectoryCollection[] = tab.value === 'people'
+    ? ['participants', 'participant_sync', 'chats']
+    : tab.value === 'review'
+      ? ['teams', 'profiles']
+      : tab.value === 'notifications'
+        ? ['profiles']
+        : ['teams', 'profiles']
+  directory.value = await loadDirectory({
+    collections,
+    metadata: tab.value === 'review' ? ['crm_catalog', 'crm_connection', 'autonomous_enabled'] as DirectoryMetadata[] : [],
+    includeProjects: tab.value === 'review',
+    allProjectPages: tab.value === 'review',
+    searches: tab.value === 'people' ? {
+      participants: participantSearch.value,
+      chats: chatSearch.value,
+    } : undefined,
+  })
+}
+async function searchPeople() {
+  loading.value = true
+  error.value = ''
+  try { await refreshDirectory() }
+  catch (e) { error.value = e instanceof Error ? e.message : 'Не удалось найти в справочнике' }
+  finally { loading.value = false }
 }
 async function syncCatalog(teamId: number) { await perform(() => post('/directory/crm-sync/', { team_id: teamId }), 'Загрузка CRM поставлена в очередь. Обновите справочник после обработки.') }
 async function syncParticipants(configId: number) { await perform(() => post('/directory/participants-sync/', { config_id: configId }), 'Восстановление участников запущено. Обновите список после обработки.') }

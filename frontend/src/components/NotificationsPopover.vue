@@ -66,7 +66,7 @@
           <div class="flex-1 min-w-0">
             <div class="flex items-center justify-between gap-1">
               <span class="text-xs font-semibold text-white truncate">{{ item.title }}</span>
-              <span class="text-[10px] text-slate-500 shrink-0">{{ new Date(item.created_at).toLocaleString('ru-RU') }}</span>
+              <span class="text-[10px] text-slate-500 shrink-0">{{ item.created_at ? new Date(item.created_at).toLocaleString('ru-RU') : 'Дата не указана' }}</span>
             </div>
             <p class="text-[11px] text-slate-300 mt-0.5 leading-snug whitespace-pre-line">
               {{ item.message }}

@@ -2,6 +2,7 @@
 
 from collections import Counter
 from django.db import transaction
+from django.db.models import Count, Exists, Max, OuterRef, Q, Subquery
 from django.utils import timezone
 from .models import AISettings, HistoryAnalysisItem, OutboxEvent, RawMessage
 from .processing_attempts import reserve_attempt
@@ -94,36 +95,76 @@ def synchronize(event):
                      reason_description="Задание завершилось без проверенного результата сообщения.", updated_at=timezone.now())
 
 
-def counts(run):
-    rows = list(run.analysis_items.values("state", "disposition", "reason_code"))
-    states = Counter(x["state"] for x in rows)
-    outcomes = Counter(x["disposition"] for x in rows if x["state"] == "succeeded")
-    result = {"total": len(rows), "processed": states["succeeded"] - outcomes["no_text"] - outcomes["skipped_crm_delivered"],
-              "no_text": outcomes["no_text"], "errors": states["failed"],
-              "skipped_crm_delivered": outcomes["skipped_crm_delivered"], "blocked":states["blocked"],
-              "pending": sum(states[x] for x in ACTIVE), "cancelled": states["cancelled"],
-              "facts": outcomes["facts"], "no_facts": outcomes["no_facts"],
-              "human_answers": outcomes["clarification_reply"],
-              "insufficient_data": outcomes["insufficient_data"],
-              "retry_wait": states["retry_wait"], "processing": states["processing"], "queued": states["queued"]}
-    events = OutboxEvent.objects.filter(historyanalysisitem__run=run).distinct()
-    waiting = events.filter(state="pending", attempt_count__gt=0).order_by("next_attempt_at").first()
-    result["next_attempt_at"] = waiting.next_attempt_at.isoformat() if waiting else None
-    last_failed = events.filter(state__in=("failed", "unknown")).exclude(error_code="").order_by("-id").first()
-    result["last_error"] = waiting.error_code if waiting else last_failed.error_code if last_failed else ""
-    from .models import FactCandidate, ProviderUsage
-    candidates = FactCandidate.objects.filter(trace_id__in=run.analysis_items.values("trace_id"))
-    result["candidates"] = candidates.count()
-    result["accepted"] = candidates.filter(status="approved").count()
-    result["rejected"] = candidates.filter(status="rejected").count()
-    usage = ProviderUsage.objects.filter(outbox_event__in=events, operation="chat", succeeded=True).order_by("-created_at").first()
-    result["last_model_response_at"] = usage.created_at.isoformat() if usage else None
-    running = events.filter(state="processing").first()
-    result["stage"] = "processing" if running else "retry_wait" if waiting else "queued" if result["pending"] else "finished"
-    from django.db.models import Max
-    useful = run.analysis_items.filter(state="succeeded").exclude(disposition="no_text").aggregate(last=Max("updated_at"))["last"]
-    result["last_useful_at"] = useful.isoformat() if useful else None
+def counts_many(runs):
+    """Read live coverage for a bounded set of runs without loading its items."""
+    from .models import FactCandidate, ProviderUsage, WhatsAppHistoryRun
+
+    run_ids = [run.pk for run in runs]
+    if not run_ids:
+        return {}
+    states = {pk: Counter() for pk in run_ids}
+    outcomes = {pk: Counter() for pk in run_ids}
+    useful = {}
+    groups = HistoryAnalysisItem.objects.filter(run_id__in=run_ids).order_by().values(
+        "run_id", "state", "disposition",
+    ).annotate(total=Count("id"), last=Max("updated_at"))
+    for group in groups:
+        pk = group["run_id"]
+        states[pk][group["state"]] += group["total"]
+        if group["state"] == "succeeded":
+            outcomes[pk][group["disposition"]] += group["total"]
+            if group["disposition"] != "no_text" and group["last"] is not None:
+                useful[pk] = max(useful.get(pk, group["last"]), group["last"])
+
+    # A trace/event can cover several targets: count each candidate once per run.
+    candidate_counts = {
+        row["trace__historyanalysisitem__run_id"]: row
+        for row in FactCandidate.objects.filter(trace__historyanalysisitem__run_id__in=run_ids)
+        .order_by().values("trace__historyanalysisitem__run_id").annotate(
+            candidates=Count("id", distinct=True),
+            accepted=Count("id", filter=Q(status="approved"), distinct=True),
+            rejected=Count("id", filter=Q(status="rejected"), distinct=True),
+        )
+    }
+    events = OutboxEvent.objects.filter(historyanalysisitem__run_id=OuterRef("pk"))
+    waiting = events.filter(state="pending", attempt_count__gt=0).order_by("next_attempt_at", "pk")
+    failed = events.filter(state__in=("failed", "unknown")).exclude(error_code="").order_by("-id")
+    usage = ProviderUsage.objects.filter(
+        outbox_event__historyanalysisitem__run_id=OuterRef("pk"), operation="chat", succeeded=True,
+    ).order_by("-created_at")
+    details = WhatsAppHistoryRun.objects.filter(pk__in=run_ids).order_by().annotate(
+        progress_waiting=Exists(waiting),
+        progress_next_attempt=Subquery(waiting.values("next_attempt_at")[:1]),
+        progress_waiting_error=Subquery(waiting.values("error_code")[:1]),
+        progress_failed_error=Subquery(failed.values("error_code")[:1]),
+        progress_response_at=Subquery(usage.values("created_at")[:1]),
+        progress_running=Exists(events.filter(state="processing")),
+    ).values("pk", "progress_waiting", "progress_next_attempt", "progress_waiting_error",
+             "progress_failed_error", "progress_response_at", "progress_running")
+    result = {}
+    for row in details:
+        pk = row["pk"]
+        state, outcome = states[pk], outcomes[pk]
+        value = {"total": sum(state.values()),
+                 "processed": state["succeeded"] - outcome["no_text"] - outcome["skipped_crm_delivered"],
+                 "no_text": outcome["no_text"], "errors": state["failed"],
+                 "skipped_crm_delivered": outcome["skipped_crm_delivered"], "blocked": state["blocked"],
+                 "pending": sum(state[name] for name in ACTIVE), "cancelled": state["cancelled"],
+                 "facts": outcome["facts"], "no_facts": outcome["no_facts"],
+                 "human_answers": outcome["clarification_reply"], "insufficient_data": outcome["insufficient_data"],
+                 "retry_wait": state["retry_wait"], "processing": state["processing"], "queued": state["queued"]}
+        value.update({key: candidate_counts.get(pk, {}).get(key, 0) for key in ("candidates", "accepted", "rejected")})
+        value["next_attempt_at"] = row["progress_next_attempt"].isoformat() if row["progress_next_attempt"] else None
+        value["last_error"] = row["progress_waiting_error"] if row["progress_waiting"] else row["progress_failed_error"] or ""
+        value["last_model_response_at"] = row["progress_response_at"].isoformat() if row["progress_response_at"] else None
+        value["stage"] = "processing" if row["progress_running"] else "retry_wait" if row["progress_waiting"] else "queued" if value["pending"] else "finished"
+        value["last_useful_at"] = useful[pk].isoformat() if pk in useful else None
+        result[pk] = value
     return result
+
+
+def counts(run):
+    return counts_many([run])[run.pk]
 
 
 def summary(value):

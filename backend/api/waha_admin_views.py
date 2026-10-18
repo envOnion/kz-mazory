@@ -6,6 +6,8 @@ from qrcode.image.svg import SvgPathFillImage
 from django.contrib import admin, messages
 from django.contrib.admin.views.decorators import staff_member_required
 from django.core.exceptions import PermissionDenied, ValidationError
+from django.db.models import F, Window
+from django.db.models.functions import RowNumber
 from django.http import JsonResponse
 from django.shortcuts import render, redirect
 from django.urls import reverse
@@ -58,30 +60,66 @@ def selected_config(data, *, required=False):
 
 
 def control_state(config):
-    event = None
-    if config:
-        ids = WhatsAppConfig.objects.filter(
-            session_name=config.session_name
-        ).values_list("id", flat=True)
-        events = OutboxEvent.objects.filter(
-            event_type="waha_control", payload__config_id__in=list(ids)
-        ).order_by("-id")
-        event = events.filter(state__in=ACTIVE_STATES).first() or events.first()
-    return {
-        "busy": bool(event and event.state in ACTIVE_STATES),
-        "state": event.state if event else "",
-        "action": ACTION_LABELS.get(event.payload.get("action"), "Команда WAHA")
-        if event
-        else "",
-        "message": STATE_LABELS.get(event.state, event.state) if event else "",
-        "error": ERROR_LABELS.get(
-            event.error_code,
-            "WAHA не подтвердила выполнение. Проверьте доступность сервиса и обновите статус.",
-        )
-        if event and event.error_code
-        else "",
-        "error_code": event.error_code if event else "",
-    }
+    return control_states([config]).get(config.pk, _empty_control_state()) if config else _empty_control_state()
+
+
+def _empty_control_state():
+    return {"busy": False, "state": "", "action": "", "message": "", "error": "", "error_code": ""}
+
+
+def control_states(configs):
+    """Batch WAHA state by session while keeping active commands highest priority."""
+    configs = list(configs)
+    if not configs:
+        return {}
+    session_names = {config.session_name for config in configs}
+    all_configs = list(WhatsAppConfig.objects.filter(session_name__in=session_names)
+                       .values_list("id", "session_name"))
+    config_sessions = {config_id: session for config_id, session in all_configs}
+    config_ids = list(config_sessions)
+    if not config_ids:
+        return {config.pk: _empty_control_state() for config in configs}
+
+    def latest_rows(*, active_only=False):
+        events = OutboxEvent.objects.filter(event_type="waha_control", payload__config_id__in=config_ids)
+        if active_only:
+            events = events.filter(state__in=ACTIVE_STATES)
+        return events.annotate(
+            _config_id=F("payload__config_id"),
+            _action=F("payload__action"),
+            _rank=Window(
+                expression=RowNumber(),
+                partition_by=[F("payload__config_id")],
+                order_by=F("id").desc(),
+            ),
+        ).filter(_rank=1).values("id", "state", "error_code", "_config_id", "_action")
+
+    latest_by_session = {}
+    for row in latest_rows():
+        session = config_sessions.get(row["_config_id"])
+        if session and (session not in latest_by_session or row["id"] > latest_by_session[session]["id"]):
+            latest_by_session[session] = row
+    active_by_session = {}
+    for row in latest_rows(active_only=True):
+        session = config_sessions.get(row["_config_id"])
+        if session and (session not in active_by_session or row["id"] > active_by_session[session]["id"]):
+            active_by_session[session] = row
+
+    result = {}
+    for config in configs:
+        event = active_by_session.get(config.session_name) or latest_by_session.get(config.session_name)
+        result[config.pk] = {
+            "busy": bool(event and event["state"] in ACTIVE_STATES),
+            "state": event["state"] if event else "",
+            "action": ACTION_LABELS.get(event["_action"], "Команда WAHA") if event else "",
+            "message": STATE_LABELS.get(event["state"], event["state"]) if event else "",
+            "error": ERROR_LABELS.get(
+                event["error_code"],
+                "WAHA не подтвердила выполнение. Проверьте доступность сервиса и обновите статус.",
+            ) if event and event["error_code"] else "",
+            "error_code": event["error_code"] if event else "",
+        }
+    return result
 
 
 def dashboard(request, config, error="", status_code=200):

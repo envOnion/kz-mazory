@@ -9,9 +9,10 @@
     <div class="flex flex-wrap gap-3 text-sm">
       <label>Команда <select aria-label="Команда" class="field" v-model="filters.team_id"><option :value="undefined">Все доступные</option><option v-for="team in directory.teams" :key="team.id" :value="team.id">{{ team.name }}</option></select></label>
       <label>Менеджер <select aria-label="Менеджер" class="field" v-model="filters.manager_id"><option :value="undefined">Все доступные</option><option v-for="profile in directory.profiles" :key="profile.id" :value="profile.id">{{ profile.full_name }}</option></select></label>
-      <label>Проект <select aria-label="Проект" class="field" v-model="filters.project_id"><option :value="undefined">Все доступные</option><option v-for="project in directory.projects" :key="project.id" :value="project.id">{{ project.name }}</option></select></label>
+      <label>Проект <select aria-label="Проект" class="field" v-model="filters.project_id"><option :value="undefined">Все доступные</option><option v-for="project in projectOptions" :key="project.id" :value="project.id">{{ project.name }}</option></select></label>
       <label>Валюта <select aria-label="Валюта" class="field" v-model="filters.currency"><option>KZT</option><option>USD</option><option>EUR</option><option>RUB</option></select></label>
     </div>
+    <div class="flex flex-wrap items-center gap-2 text-sm"><label>Поиск проекта<input v-model="projectSearch" class="field ml-2" placeholder="Название или компания" /></label><button class="btn" :disabled="directoryLoading" @click="searchProjects">Найти</button><button class="btn" :disabled="projectPage === 1 || directoryLoading" @click="changeProjectPage(-1)">Предыдущая</button><span>Проектов найдено: {{ directory.projects_count ?? directory.projects.length }} · Страница {{ projectPage }}</span><button class="btn" :disabled="!directory.projects_next_page || directoryLoading" @click="changeProjectPage(1)">Следующая</button><p v-if="directoryError" role="alert" class="text-rose-300">{{ directoryError }}</p></div>
     <p v-if="isLoading" role="status" class="panel animate-pulse">Обрабатываю запрос…</p>
     <p v-if="responseText" class="panel whitespace-pre-wrap" data-testid="chat-response">{{ responseText }}</p>
     <PresentationRenderer v-if="presentation" :document="presentation" @open-source="$emit('openSource', $event)" />
@@ -98,8 +99,9 @@
 </template>
 <script setup lang="ts">
 import { ref, computed, reactive, watch, onMounted } from 'vue'
-import type { KpiFilters, Directory, Page, Payment } from '../types/platform'
+import type { KpiFilters, Directory, DirectoryProject, Page, Payment } from '../types/platform'
 import { api } from '../composables/api'
+import { loadDirectory } from '../composables/directory'
 import type { KpiDashboardData, ChatWidget, ChartPayload } from '../types/chat'
 import PresetChart from './presets/PresetChart.vue'
 import PresetCommitmentList from './presets/PresetCommitmentList.vue'
@@ -111,8 +113,27 @@ const props = defineProps<{ data: KpiDashboardData | null; widget: ChatWidget | 
 const emit = defineEmits<{ changePeriod: [period: string]; changeFilters: [filters: KpiFilters]; selectPrompt: [prompt: string]; openSource: [id: number]; openWorkspace: [] }>()
 const filters = reactive<KpiFilters>({ currency: 'KZT' })
 const directory = ref<Directory>({ teams: [], profiles: [], projects: [] })
+const projectPage = ref(1), projectSearch = ref(''), projectCache = ref<DirectoryProject[]>([]), directoryLoading = ref(false), directoryError = ref('')
+const projectOptions = computed(() => {
+  const current = directory.value.projects
+  const selected = projectCache.value.find(project => project.id === filters.project_id)
+  return selected && !current.some(project => project.id === selected.id) ? [...current, selected] : current
+})
 watch(filters, value => emit('changeFilters', { ...value }), { deep: true })
-onMounted(async () => { try { directory.value = await api<Directory>('/directory/') } catch { /* Global request state reports authentication errors. */ } })
+async function loadDirectoryPage() {
+  directoryLoading.value = true; directoryError.value = ''
+  try {
+    directory.value = await loadDirectory({ collections: ['teams', 'profiles'], includeProjects: true, projectPage: projectPage.value, projectSearch: projectSearch.value })
+    const cache = new Map<number, DirectoryProject>()
+    for (const project of projectCache.value) cache.set(project.id, project)
+    for (const project of directory.value.projects) cache.set(project.id, project)
+    projectCache.value = [...cache.values()]
+  } catch (e) { directoryError.value = e instanceof Error ? e.message : 'Не удалось загрузить проекты' }
+  finally { directoryLoading.value = false }
+}
+async function searchProjects() { projectPage.value = 1; await loadDirectoryPage() }
+async function changeProjectPage(delta: number) { projectPage.value += delta; await loadDirectoryPage() }
+onMounted(loadDirectoryPage)
 const detail = ref('')
 const paymentRows = ref<Payment[]>([])
 const paymentPage = ref(1)

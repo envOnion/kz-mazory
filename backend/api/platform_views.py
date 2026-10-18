@@ -2,8 +2,9 @@ from datetime import timedelta
 from decimal import Decimal
 from django.contrib.auth.models import User
 from django.conf import settings
+from django.core import signing
 from django.db import transaction
-from django.db.models import Max, Count, Sum, Avg, Q
+from django.db.models import Max, Count, Sum, Avg, Q, F
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers
@@ -576,69 +577,167 @@ class CandidateCrmRetryView(APIView):
         return Response({"queued": queued, "skipped": skipped}, status=202)
 
 
+DIRECTORY_COLLECTIONS = {
+    "teams": "name", "profiles": "full_name", "chats": "name", "companies": "name",
+    "participants": "display_name", "participant_sync": None,
+}
+DIRECTORY_INCLUDES = set(DIRECTORY_COLLECTIONS) | {
+    "projects", "crm_catalog", "crm_connection", "autonomous_enabled",
+}
+DIRECTORY_CURSOR_SALT = "api.directory.page.v1"
+
+
+def _directory_parameters(request):
+    """Validate all transport values and signed cursor fields before any ORM read."""
+    params = request.query_params
+    allowed = {"include", "project_page", "project_search"} | {
+        f"{collection}_{suffix}" for collection in DIRECTORY_COLLECTIONS for suffix in ("limit", "cursor", "search")
+    }
+    if set(params) - allowed or any(len(params.getlist(key)) != 1 for key in params):
+        raise ValidationError({"error": "Неизвестный или повторяющийся параметр справочника."})
+    include = params.get("include")
+    included = set(include.split(",")) if include is not None else DIRECTORY_INCLUDES.copy()
+    if not included or not included <= DIRECTORY_INCLUDES or "" in included:
+        raise ValidationError({"error": "Неизвестный или пустой набор справочников."})
+    schema = DirectoryQuery(data=params)
+    if not schema.is_valid():
+        raise ValidationError({"error": "Неверные параметры поиска или страницы проектов."})
+    values = schema.validated_data
+    pages = {}
+    for collection, field in DIRECTORY_COLLECTIONS.items():
+        raw_limit = params.get(f"{collection}_limit", "50")
+        if len(raw_limit) > 3 or not raw_limit.isascii() or not raw_limit.isdecimal() or not 1 <= int(raw_limit) <= 100:
+            raise ValidationError({"error": f"Неверный размер страницы {collection}."})
+        search = params.get(f"{collection}_search", "").strip()
+        if len(search) > 255:
+            raise ValidationError({"error": "Поисковая строка должна содержать не более 255 символов."})
+        filters = {"search": search}
+        if collection == "companies":
+            filters.update(project_page=values["project_page"], project_search=values["project_search"])
+        cursor = None
+        raw_cursor = params.get(f"{collection}_cursor")
+        if raw_cursor is not None:
+            try:
+                if not raw_cursor or len(raw_cursor) > 8192:
+                    raise ValueError
+                cursor = signing.loads(raw_cursor, salt=DIRECTORY_CURSOR_SALT)
+                if not isinstance(cursor, dict) or set(cursor) != {"v", "kind", "parent", "direction", "filters", "anchor"}:
+                    raise ValueError
+                if type(cursor["v"]) is not int or cursor["v"] != 1 or cursor["kind"] != collection:
+                    raise ValueError
+                if type(cursor["parent"]) is not int or cursor["parent"] != request.user.pk:
+                    raise ValueError
+                if cursor["direction"] != "forward" or cursor["filters"] != filters:
+                    raise ValueError
+                anchor = cursor["anchor"]
+                if not isinstance(anchor, list) or len(anchor) != (2 if field else 1):
+                    raise ValueError
+                if type(anchor[-1]) is not int or anchor[-1] < 1:
+                    raise ValueError
+                if field and not isinstance(anchor[0], str):
+                    raise ValueError
+            except (signing.BadSignature, TypeError, ValueError, KeyError):
+                raise ValidationError({"error": f"Некорректный курсор {collection}."}) from None
+        pages[collection] = {"limit": int(raw_limit), "filters": filters,
+                             "anchor": cursor["anchor"] if cursor else None}
+    return included, values, pages
+
+
+def _directory_page(request, queryset, collection, pages):
+    field = DIRECTORY_COLLECTIONS[collection]
+    page = pages[collection]
+    search = page["filters"]["search"]
+    if search:
+        if collection == "participants":
+            queryset = queryset.filter(
+                Q(display_name__icontains=search) | Q(user_profile__phone__icontains=search)
+            )
+        else:
+            queryset = queryset.filter(**{f"{field or 'name'}__icontains": search})
+    anchor = page["anchor"]
+    if anchor:
+        queryset = queryset.filter(
+            Q(**{f"{field}__gt": anchor[0]}) | Q(**{field: anchor[0], "id__gt": anchor[1]})
+        ) if field else queryset.filter(id__gt=anchor[0])
+    rows = list(queryset.order_by(*([field, "id"] if field else ["id"]))[:page["limit"] + 1])
+    has_more = len(rows) > page["limit"]
+    rows = rows[:page["limit"]]
+    next_cursor = None
+    if has_more:
+        last = rows[-1]
+        next_cursor = signing.dumps({
+            "v": 1, "kind": collection, "parent": request.user.pk, "direction": "forward",
+            "filters": page["filters"], "anchor": [getattr(last, field), last.pk] if field else [last.pk],
+        }, salt=DIRECTORY_CURSOR_SALT, compress=True)
+    return rows, next_cursor
+
+
 class DirectoryView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
         from .crm_catalog import available_projects
-        from .participants import directory_participants, directory_sync_status
+        from .participants import directory_people, directory_participants, directory_sync_configs, directory_sync_status
         from .models import Company
-        teams = Team.objects.filter(is_active=True)
-        if not request.user.is_superuser:
-            teams = teams.filter(pk__in=access.team_ids(request.user))
-        schema = DirectoryQuery(data=request.query_params)
-        schema.is_valid(raise_exception=True)
-        values = schema.validated_data
-        projects = available_projects(access.projects_for(request.user)).select_related("company").order_by("name", "id")
-        if values["project_search"]:
-            projects = projects.filter(
-                Q(name__icontains=values["project_search"])
-                | Q(company__name__icontains=values["project_search"])
-            )
-        count = projects.count()
-        start = (values["project_page"] - 1) * 100
-        slice_projects = projects[start:start + 100]
-        projects_data = [
-            {
-                "id": p.id,
-                "name": p.name,
-                "version": p.version,
-                "currency": p.currency,
-                "team_id": p.team_id,
-                "company_id": p.company_id,
-                "company_name": p.company.name if p.company else None,
-                "bitrix_id": p.bitrix_id,
-            }
-            for p in slice_projects
-        ]
-        company_ids = [p["company_id"] for p in projects_data if p["company_id"]]
-        companies_qs = Company.objects.filter(
-            Q(pk__in=company_ids) | Q(bitrix_company_id__isnull=False)
-        ).order_by("name")[:100]
-        companies_data = [
-            {
-                "id": c.id,
-                "bitrix_company_id": c.bitrix_company_id or "",
-                "name": c.name,
-                "client_type": c.client_type,
-                "phone": c.phone,
-            }
-            for c in companies_qs
-        ]
-        return Response({
-            "teams": list(teams.values("id", "name", "history_complete_from")),
-            "profiles": list(access.profiles_for(request.user).values("id", "user_id", "full_name")),
-            "participants": directory_participants(request.user),
-            "participant_sync": directory_sync_status(request.user),
-            "projects": projects_data,
-            "companies": companies_data,
-            "projects_count": count,
-            "projects_next_page": values["project_page"] + 1 if start + 100 < count else None,
-            "crm_catalog": catalog_status(request.user),
-            "crm_connection": crm_connection_status(),
-            "autonomous_enabled": AISettings.get_active().autonomous_enabled,
-            "chats": list(access.configs_for(request.user).values("id", "name", "team_id")),
-        })
+        included, values, pages = _directory_parameters(request)
+        response = {"as_of": timezone.now().isoformat()}
+        projects_data = []
+        if included & {"projects", "companies"}:
+            projects = available_projects(access.projects_for(request.user)).select_related("company").only(
+                "id", "name", "version", "currency", "team_id", "company_id", "company__name", "bitrix_id",
+            ).order_by("name", "id")
+            if values["project_search"]:
+                projects = projects.filter(Q(name__icontains=values["project_search"]) | Q(company__name__icontains=values["project_search"]))
+            start = (values["project_page"] - 1) * 100
+            projects_data = [{"id": p.id, "name": p.name, "version": p.version, "currency": p.currency,
+                              "team_id": p.team_id, "company_id": p.company_id,
+                              "company_name": p.company.name if p.company else None, "bitrix_id": p.bitrix_id}
+                             for p in projects[start:start + 100]]
+            if "projects" in included:
+                count = projects.count()
+                response.update(projects=projects_data, projects_count=count,
+                                projects_next_page=values["project_page"] + 1 if start + 100 < count else None)
+        for collection in DIRECTORY_COLLECTIONS:
+            if collection not in included:
+                continue
+            if collection == "teams":
+                queryset = Team.objects.filter(is_active=True)
+                if not request.user.is_superuser:
+                    queryset = queryset.filter(pk__in=access.team_ids(request.user))
+                queryset = queryset.only("id", "name", "history_complete_from")
+                serialize = lambda rows: [{"id": row.id, "name": row.name, "history_complete_from": row.history_complete_from} for row in rows]
+            elif collection == "profiles":
+                queryset = access.profiles_for(request.user).only("id", "user_id", "full_name")
+                serialize = lambda rows: [{"id": row.id, "user_id": row.user_id, "full_name": row.full_name} for row in rows]
+            elif collection == "chats":
+                queryset = access.configs_for(request.user).only("id", "name", "team_id")
+                serialize = lambda rows: [{"id": row.id, "name": row.name, "team_id": row.team_id} for row in rows]
+            elif collection == "companies":
+                queryset = Company.objects.filter(Q(pk__in=[p["company_id"] for p in projects_data if p["company_id"]])
+                                                  | Q(bitrix_company_id__isnull=False)).only("id", "bitrix_company_id", "name", "client_type", "phone")
+                serialize = lambda rows: [{"id": row.id, "bitrix_company_id": row.bitrix_company_id or "", "name": row.name,
+                                          "client_type": row.client_type, "phone": row.phone} for row in rows]
+            elif collection == "participants":
+                queryset = directory_people(request.user).select_related("team", "user_profile__user").only(
+                    "id", "team_id", "team__name", "display_name", "user_profile_id", "user_profile__user_id",
+                    "user_profile__phone", "user_profile__user__is_active",
+                )
+                serialize = directory_participants
+            else:
+                queryset = directory_sync_configs(request.user).only("id", "name", "team_id", "session_name", "group_jid").annotate(
+                    directory_sync_summary=F("snapshot__participant_sync"),
+                )
+                serialize = directory_sync_status
+            rows, next_cursor = _directory_page(request, queryset, collection, pages)
+            response[collection] = serialize(rows)
+            response[f"{collection}_next_cursor"] = next_cursor
+        if "crm_catalog" in included:
+            response["crm_catalog"] = catalog_status(request.user)
+        if "crm_connection" in included:
+            response["crm_connection"] = crm_connection_status()
+        if "autonomous_enabled" in included:
+            response["autonomous_enabled"] = AISettings.get_active().autonomous_enabled
+        return Response(response)
 
 
 class DirectoryQuery(serializers.Serializer):
