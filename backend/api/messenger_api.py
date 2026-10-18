@@ -477,6 +477,11 @@ def _current_axes_cte(qs):
 
 def _analysis_match_ids(qs, state=None, *, attention=False):
     """Filter states from one materialized latest-state relation in PostgreSQL."""
+    if attention:
+        # The canonical CTE is relatively expensive across a large cohort. Keep
+        # its input to broad candidates; has_attention below still rechecks the
+        # latest state, so stale failures cannot become false positives.
+        qs = _possible_attention(qs)
     cte_sql, params = _current_axes_cte(qs)
     state_filter = "AND analysis = %s" if state else ""
     attention_filter = "AND has_attention" if attention else ""
