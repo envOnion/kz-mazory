@@ -239,6 +239,7 @@ class AIService:
         headers=None,
         response_validator=None,
         http_method="POST",
+        config=None,
     ):
         extraction_limit = extraction_deadline.get()
         deadline = extraction_limit or analytics_deadline.get()
@@ -255,7 +256,7 @@ class AIService:
                 if isinstance(timeout, (int, float))
                 else tuple(min(t, remaining) for t in timeout)
             )
-        cfg = AISettings.get_active()
+        cfg = config if config is not None else AISettings.get_active()
         if payload.get("model") == "openrouter/free":
             from .free_router import request
             payload = request(payload, cfg.max_completion_tokens)
@@ -634,9 +635,10 @@ class AIService:
             "придумывай суммы, причины роста или недостающие источники. Указывай неполноту. "
             f"Режим: {mode}. Предлагать следующие действия: {suggest}."
         )
+        instruction = cfg.system_prompt_assistant + "\n" + instruction
         payload = {
             "model": cfg.chat_model_name,
-            "temperature": 0.1,
+            "temperature": cfg.chat_temperature,
             "messages": [
                 {"role": "system", "content": instruction},
                 {
@@ -708,9 +710,13 @@ class AIService:
 
         cfg = AIService._config()
         api_format = chat_api_format(cfg)
+        messages = [dict(message) for message in messages]
+        if cfg.system_prompt_assistant and messages and messages[0].get("role") == "system" and isinstance(messages[0].get("content"), str):
+            messages[0]["content"] = cfg.system_prompt_assistant + "\n" + messages[0]["content"]
         payload = analytics_payload(
             cfg.chat_model_name, messages, tools, cfg.max_completion_tokens, api_format
         )
+        payload["temperature"] = cfg.chat_temperature
         native = api_format == ANTHROPIC_MESSAGES
         gemma = not native and cfg.chat_model_name == "gemma4:e4b"
         from .qwen_profile import enabled as qwen_enabled, parameters

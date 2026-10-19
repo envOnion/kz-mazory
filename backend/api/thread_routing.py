@@ -16,6 +16,7 @@ from django.utils import timezone
 from .dialogue_threads import analysis_position, lock_source, source_key
 from .models import AISettings, DialogueThread, OutboxEvent, RawMessage, ThreadMessage, ThreadRoutingAttempt
 from .providers import ProviderUnavailable, checked_base_url
+from .decision_models import fingerprint
 
 ANALYSIS_EVENTS = frozenset({"extract_message", "route_message", "extract_thread"})
 
@@ -25,7 +26,7 @@ def digest(value):
 
 
 def enabled(config):
-    return bool(config and config.thread_routing_enabled and AISettings.get_active().thread_routing_mode != "llm")
+    return bool(config and config.thread_routing_enabled and AISettings.get_active().decision_enabled)
 
 
 def incoming_event_type(config):
@@ -65,52 +66,9 @@ def unsuitable(raw):
     return ""
 
 
-def predictions(raw, candidates):
-    base = checked_base_url(settings.LAYA_API_URL).rstrip("/")
-    if not settings.LAYA_API_KEY:
-        raise ProviderUnavailable("laya_not_configured")
-    result, revision = [], ""
-    for offset in range(0, len(candidates), 16):
-        batch = candidates[offset:offset + 16]
-        questions = {}
-        for i, item in enumerate(batch):
-            description = f'{item["topic"]}. {item["summary"]}'
-            if len(description.encode()) > 1100:
-                raise ProviderUnavailable("laya_descriptor_too_large")
-            questions[f"q{i}"] = {"type": "choice", "instructions": "Classify only the new message. Does it continue this concrete topic? Use B if the subject differs or evidence is insufficient.",
-                                   "criteria": {"A": description, "B": "Другая тема или недостаточно связи с этой конкретной темой."}}
-        response = requests.post(base + "/v1/systemone", json={"state": {"message": raw.content, "sender": raw.sender_name},
-            "questions": questions, "model": settings.LAYA_MODEL, "max_len": 2048, "head_max_len": 256},
-            headers={"Authorization": f"Bearer {settings.LAYA_API_KEY}"}, timeout=(2, 10), allow_redirects=False)
-        if response.status_code != 200:
-            raise ProviderUnavailable("laya_unavailable")
-        data = response.json()
-        if not isinstance(data,dict) or not isinstance(data.get('usage',{}),dict) or not isinstance(data.get('routing',{}),dict):
-            raise ProviderUnavailable('laya_invalid_response')
-        usage = data.get("usage", {})
-        if usage.get("truncated") or usage.get("state_tokens_dropped") or usage.get("truncated_questions"):
-            raise ProviderUnavailable("laya_input_truncated")
-        answers = data.get("answers")
-        if not isinstance(answers, dict) or set(answers) != set(questions):
-            raise ProviderUnavailable("laya_invalid_response")
-        for i, item in enumerate(batch):
-            if not isinstance(answers[f'q{i}'],dict) or not isinstance(answers[f'q{i}'].get('probabilities'),dict):
-                raise ProviderUnavailable('laya_invalid_response')
-            probabilities = answers[f"q{i}"].get("probabilities", {})
-            if set(probabilities) != {"A", "B"} or any(type(v) not in (float, int) or not math.isfinite(v) or not 0 <= v <= 1 for v in probabilities.values()) or abs(sum(probabilities.values()) - 1) > 0.002:
-                raise ProviderUnavailable("laya_invalid_response")
-            result.append({"thread_id": item["id"], "descriptor_version": item["version"], "probability": probabilities["A"]})
-        if data.get("routing", {}).get("model") != settings.LAYA_MODEL:
-            raise ProviderUnavailable("laya_model_changed")
-        calibration = data.get('routing',{}).get('calibration_revision') or ''
-        if settings.LAYA_CALIBRATION_REVISION and calibration!=settings.LAYA_CALIBRATION_REVISION:
-            raise ProviderUnavailable('laya_model_changed')
-        for item in result[-len(batch):]:
-            item['calibration_revision'] = calibration
-        revision = data.get('routing',{}).get('revision') or ''
-        if settings.LAYA_MODEL_REVISION and revision!=settings.LAYA_MODEL_REVISION:
-            raise ProviderUnavailable('laya_model_changed')
-    return sorted(result, key=lambda row: (-row["probability"], row["thread_id"])), revision
+def predictions(raw, candidates, cfg=None):
+    from .decision_models import predictions as predict
+    return predict(raw, candidates, cfg or AISettings.get_active())
 
 
 def schedule_extraction(thread, *, flush=False, exclude_event_id=None):
@@ -172,28 +130,24 @@ def route_message(payload):
     if raw.processed or raw.processing_state in ("deleted", "superseded", "clarification_reply"):
         return
     candidates = snapshot(raw)
-    input_hash = digest([raw.content, raw.sender_name, candidates, cfg.routing_policy_version,str(cfg.laya_match_threshold),str(cfg.laya_match_margin),settings.LAYA_MODEL,settings.LAYA_MODEL_REVISION,settings.LAYA_CALIBRATION_REVISION])
+    input_hash = digest([raw.content, raw.sender_name, candidates, cfg.routing_policy_version,str(cfg.laya_match_threshold),str(cfg.laya_match_margin),fingerprint(cfg)])
     attempt, _ = ThreadRoutingAttempt.objects.get_or_create(operation_key=f"route:{usage_event_id.get()}:{raw.id}:{raw.source_revision}:{input_hash}", defaults={
         "raw_message": raw, "source_revision": raw.source_revision, "input_hash": input_hash,
         "candidate_snapshot": candidates, "policy_version": cfg.routing_policy_version,
     })
-    if attempt.outcome == "laya":
+    if attempt.outcome in ("laya", "decision"):
         return
     if payload.get("full_history_state") or payload.get("trace_id") and attempt.outcome == "llm_pending":
         return _bootstrap(payload, attempt, attempt.reason_code)
     reason = ("routing_disabled" if not enabled(raw.config) else "") or unsuitable(raw) or ("no_prepared_topic" if not candidates else "too_many_topics" if len(candidates) > 200 else "")
-    if not reason and cfg.thread_routing_mode == "laya":
-        if (settings.LAYA_ROUTING_VALIDATED_POLICY != cfg.routing_policy_version or not settings.LAYA_MODEL_REVISION or
-            settings.LAYA_VALIDATED_MODEL != settings.LAYA_MODEL or settings.LAYA_VALIDATED_REVISION != settings.LAYA_MODEL_REVISION or
-            not settings.LAYA_CALIBRATION_REVISION or settings.LAYA_VALIDATED_CALIBRATION != settings.LAYA_CALIBRATION_REVISION or
-            cfg.laya_match_threshold < Decimal(settings.LAYA_VALIDATED_THRESHOLD) or cfg.laya_match_margin < Decimal(settings.LAYA_VALIDATED_MARGIN)):
-            reason = "quality_not_validated"
+    if not reason and cfg.thread_routing_mode != "shadow" and not cfg.decision_quality_confirmed:
+        reason = "quality_not_validated"
     if reason:
         return _bootstrap(payload, attempt, reason)
     try:
-        scores, revision = predictions(raw, candidates)
+        scores, revision = predictions(raw, candidates, cfg)
     except (ProviderUnavailable, requests.RequestException, ValueError, TypeError, KeyError) as exc:
-        return _bootstrap(payload, attempt, str(exc) if isinstance(exc, ProviderUnavailable) else "laya_unavailable")
+        return _bootstrap(payload, attempt, str(exc) if isinstance(exc, ProviderUnavailable) else "decision_unavailable")
     attempt.scores, attempt.model_revision = scores, revision
     attempt.latency_ms = round((time.monotonic() - started) * 1000)
     attempt.save(update_fields=["scores", "model_revision", "latency_ms"])
@@ -208,19 +162,19 @@ def route_message(payload):
         current_raw = RawMessage.objects.select_for_update().get(pk=raw.id)
         current = snapshot(raw)
         current_cfg = AISettings.get_active()
-        policy_changed = any(getattr(current_cfg, name)!=getattr(cfg,name) for name in ('thread_routing_mode','laya_match_threshold','laya_match_margin','routing_policy_version'))
+        policy_changed = fingerprint(current_cfg) != fingerprint(cfg)
         if current_raw.source_revision != raw.source_revision or current_raw.content != raw.content or current_raw.sender_name!=raw.sender_name or current != candidates or policy_changed or not current_raw.config.thread_routing_enabled:
             stale = True
         elif not ambiguous and not current_raw.processed:
             thread = DialogueThread.objects.select_for_update().get(pk=best["thread_id"], source_key=source_key(raw))
-            link, created = ThreadMessage.objects.get_or_create(thread=thread, raw_message=raw, defaults={"thought_state": "unknown", "relation": "discusses", "rationale": "Предварительная принадлежность; бизнес-смысл проверит LLM.", "assignment_method": "laya", "routing_attempt": attempt})
+            link, created = ThreadMessage.objects.get_or_create(thread=thread, raw_message=raw, defaults={"thought_state": "unknown", "relation": "discusses", "rationale": "Предварительная принадлежность; бизнес-смысл проверит LLM.", "assignment_method": "decision", "routing_attempt": attempt})
             if created or link.routing_attempt_id != attempt.id:
                 if not created:
-                    link.assignment_method, link.routing_attempt = "laya", attempt
+                    link.assignment_method, link.routing_attempt = "decision", attempt
                     link.save(update_fields=["assignment_method", "routing_attempt"])
                 thread.routing_generation += 1
                 thread.save(update_fields=["routing_generation"])
-            attempt.selected_thread, attempt.outcome = thread, "laya"
+            attempt.selected_thread, attempt.outcome = thread, "decision"
             attempt.save(update_fields=["selected_thread", "outcome"])
             RawMessage.objects.filter(pk=raw.id).update(processing_state="routed")
             schedule_extraction(thread)

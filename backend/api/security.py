@@ -22,6 +22,10 @@ class Unavailable(APIException):
 def api_exception_handler(exc, context):
     from rest_framework.views import exception_handler
 
+    from django.core.exceptions import RequestDataTooBig
+    if isinstance(exc, RequestDataTooBig):
+        return __import__("rest_framework.response", fromlist=["Response"]).Response(
+            {"error": "Запрос слишком большой.", "code": "body_too_large"}, status=413)
     response = exception_handler(exc, context)
     request = context.get("request")
     if response is None:
@@ -70,8 +74,11 @@ class SecurityHeadersMiddleware:
         limit = (
             settings.MAX_ATTACHMENT_SIZE + 65536
             if request.path == "/api/attachments/"
-            else settings.DATA_UPLOAD_MAX_MEMORY_SIZE
+            else settings.API_REQUEST_MAX_BYTES
         )
+        if request.method == "PATCH" and re.fullmatch(r"/api/settings/ai/[0-9]+/models/chat/", request.path):
+            from .ai_model_profiles import MAX_PROFILE_BYTES
+            limit = MAX_PROFILE_BYTES + 262144
         if request.path == "/api/profile/" and request.content_type == "multipart/form-data":
             from .avatars import MAX_AVATAR_BYTES
             limit = MAX_AVATAR_BYTES + 65536

@@ -674,7 +674,19 @@ class WhatsAppConfig(TimestampedModel):
 
 
 class AISettings(TimestampedModel):
-    thread_routing_mode = models.CharField("Распределение по темам", max_length=8, choices=[("llm", "LLM"), ("shadow", "LAYA: проверка"), ("laya", "LAYA")], default="llm")
+    decision_enabled = models.BooleanField("Использовать модель принятия решений", default=False)
+    decision_provider_url = models.CharField("Маршрут модели решений", max_length=255, blank=True, default="")
+    decision_model_name = models.CharField("Модель принятия решений", max_length=255, blank=True, default="")
+    decision_api_format = models.CharField("Протокол модели решений", max_length=32, choices=[("systemone", "SystemOne"), ("openai_compatible", "OpenAI-compatible JSON")], default="systemone")
+    decision_request_path = models.CharField("Путь метода решений", max_length=128, default="/v1/systemone")
+    decision_timeout_seconds = models.PositiveIntegerField("Таймаут решений, секунды", default=10)
+    decision_model_revision = models.CharField("Версия модели решений", max_length=128, blank=True, default="")
+    decision_calibration_revision = models.CharField("Версия калибровки", max_length=128, blank=True, default="")
+    decision_quality_confirmed = models.BooleanField("Калибровка модели проверена", default=False, help_text="Подтверждение администратором качества классификации. Проверка подключения не проверяет качество модели.")
+    decision_api_key = models.TextField(blank=True, default="", editable=False)
+    decision_api_key_encrypted = models.TextField(blank=True, default="", editable=False)
+    chat_model_profile = models.JSONField("Профиль чат-модели", default=dict, blank=True)
+    thread_routing_mode = models.CharField("Распределение по темам", max_length=8, choices=[("llm", "Только чат-модель"), ("shadow", "Наблюдение без применения"), ("decision", "Принимать решения"), ("laya", "Принимать решения (исторический режим)")], default="llm")
     laya_match_threshold = models.DecimalField("Порог принадлежности", max_digits=5, decimal_places=4, default=Decimal("0.90"))
     laya_match_margin = models.DecimalField("Разрыв между темами", max_digits=5, decimal_places=4, default=Decimal("0.15"))
     routing_policy_version = models.CharField(max_length=64, default="laya-whatsapp-v1")
@@ -815,6 +827,23 @@ class AISettings(TimestampedModel):
         from django.core.exceptions import ValidationError
 
         super().clean()
+        from .ai_model_profiles import validate_profile
+        validate_profile(self.chat_model_profile)
+        if self.decision_enabled:
+            from .providers import checked_base_url, ProviderUnavailable
+            try:
+                checked_base_url(self.decision_provider_url)
+            except ProviderUnavailable:
+                raise ValidationError({"decision_provider_url": "Укажите HTTPS URL без логина, параметров и нестандартного порта."}) from None
+            if not self.decision_model_name.strip():
+                raise ValidationError({"decision_model_name": "Укажите модель решений."})
+        if self.decision_enabled and not 1 <= self.decision_timeout_seconds <= 300:
+            raise ValidationError({"decision_timeout_seconds": "Допустимо 1–300 секунд."})
+        import re
+        if self.decision_enabled and (not re.fullmatch(r"/[A-Za-z0-9_./-]+", self.decision_request_path) or ".." in self.decision_request_path or self.decision_request_path.startswith("//")):
+            raise ValidationError({"decision_request_path": "Укажите относительный путь API, начинающийся с /."})
+        if self.decision_quality_confirmed and (not self.decision_model_revision or not self.decision_calibration_revision):
+            raise ValidationError({"decision_quality_confirmed": "Для подтверждения нужны версии модели и калибровки."})
         if not Decimal("0") < self.laya_match_threshold <= Decimal("1") or not Decimal("0") <= self.laya_match_margin <= Decimal("1"):
             raise ValidationError("Порог и разница вероятностей LAYA должны лежать в пределах 0–1.")
         if not 1 <= self.thread_extract_idle_seconds <= self.thread_extract_max_wait_seconds or not 1 <= self.thread_extract_batch_size <= 30:
@@ -897,6 +926,25 @@ class AISettings(TimestampedModel):
 
     def __str__(self):
         return f"{self.name} ({self.chat_model_name})"
+
+    @property
+    def has_decision_api_key(self):
+        return bool(self.decision_api_key_encrypted)
+
+    @sensitive_variables("value")
+    def set_decision_api_key(self, value):
+        from .ai_credentials import encrypt_credential
+        self.decision_api_key_encrypted = encrypt_credential(value, purpose="decision", api_format=self.decision_api_format)
+        self.decision_api_key = ""
+
+    @sensitive_variables("self")
+    def get_decision_api_key(self):
+        from .ai_credentials import decrypt_credential
+        return decrypt_credential(self.decision_api_key_encrypted, purpose="decision", api_format=self.decision_api_format)
+
+    def clear_decision_api_key(self):
+        self.decision_api_key_encrypted = ""
+        self.decision_api_key = ""
 
     @property
     def has_chat_api_key(self):
@@ -1414,7 +1462,7 @@ class DialogueThread(TimestampedModel):
 
 
 class ThreadMessage(TimestampedModel):
-    assignment_method = models.CharField(max_length=8, choices=[("llm", "LLM"), ("laya", "LAYA")], default="llm")
+    assignment_method = models.CharField(max_length=8, choices=[("llm", "LLM"), ("laya", "LAYA (история)"), ("decision", "Модель решений")], default="llm")
     routing_attempt = models.ForeignKey("ThreadRoutingAttempt", null=True, blank=True, on_delete=models.PROTECT, related_name="message_links")
     thread = models.ForeignKey(DialogueThread, on_delete=models.PROTECT, related_name="message_links")
     raw_message = models.ForeignKey(RawMessage, on_delete=models.PROTECT, related_name="thread_links")

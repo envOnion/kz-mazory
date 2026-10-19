@@ -470,7 +470,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 from .models import ThreadMessage, ThreadRoutingAttempt
                 for target_id in targets:
                     assigned = [revisions[key].thread_id for key,theme in themes.items() if any(link['raw_message_id']==target_id for link in theme['messages'])]
-                    moved = ThreadMessage.objects.filter(raw_message_id=target_id,assignment_method='laya').exclude(thread_id__in=assigned)
+                    moved = ThreadMessage.objects.filter(raw_message_id=target_id,assignment_method__in=['laya', 'decision']).exclude(thread_id__in=assigned)
                     attempt_ids = list(moved.values_list('routing_attempt_id',flat=True))
                     moved.delete()
                     ThreadRoutingAttempt.objects.filter(pk__in=attempt_ids).update(outcome='llm_corrected',reason_code='llm_reassigned')
