@@ -592,6 +592,9 @@ def continuation_input_limit(trace, state, plan):
     metadata = trace.context_metadata
     cap = metadata.get('analysis_chunk_input_limit')
     available = metadata.get('effective_input_budget')
+    ceiling = metadata.get('analysis_limits', {}).get('focused_context_input_ceiling')
+    if type(ceiling) is int and ceiling > 0:
+        cap = min(cap, ceiling) if type(cap) is int and cap > 0 else ceiling
     if (metadata.get('token_counter') != 'router-utf8-bound-v1'
             or type(cap) is not int or cap <= 0
             or type(available) is not int or available <= cap):
@@ -623,7 +626,7 @@ def continuation_input_limit(trace, state, plan):
             if (type(output) is not int or not 0 < output <= reserve // 2
                     or type(characters) is not int or characters <= 0):
                 return cap
-    return min(available, cap + max(512, cap // 4))
+    return min(available, cap + max(512, cap // 4), ceiling if type(ceiling) is int and ceiling > 0 else available)
 
 
 def extract(payload):
@@ -680,6 +683,11 @@ def extract(payload):
         raw = RawMessage.objects.select_for_update().get(pk=payload['raw_id'])
         following = reserve_attempt(raw, f'{current.deduplication_key}:full-stage:{len(stages)}')
         following.context_metadata.update({k: trace.context_metadata[k] for k in ['analysis_policy', 'analysis_limits', 'snapshot_max_id', 'full_history_policy', 'analysis_chunk_input_limit']})
+        # Internal retry metadata travels with limits without changing settings.
+        # A validated stage advances the checkpoint; only its retry counter resets.
+        following.context_metadata['analysis_limits'] = dict(following.context_metadata['analysis_limits'])
+        for key in ('focused_context_retry_stage', 'focused_context_retry_generation'):
+            following.context_metadata['analysis_limits'].pop(key, None)
         following.context_metadata['analysis_chunk_input_limit'] = continuation_input_limit(trace, state, plan)
         if trace.context_metadata.get('required_thread_keys'):
             following.context_metadata['required_thread_keys'] = trace.context_metadata['required_thread_keys']

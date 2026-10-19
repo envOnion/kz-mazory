@@ -90,6 +90,68 @@ def record_attempt(event, state, code="", next_at=None):
     trace.save(update_fields=["context_metadata", "status", "result_summary"])
 
 
+def _retry_focused_context(current, exc):
+    """Reselect only unvalidated fresh context; never rewrite a frozen page."""
+    if current.event_type != 'extract_message' or not current.payload.get('trace_id'):
+        return False
+    previous = MessageProcessingTrace.objects.get(pk=current.payload['trace_id'])
+    metadata = previous.context_metadata
+    state = current.payload.get('full_history_state') or {}
+    full = metadata.get('full_history', {})
+    if (metadata.get('full_history_policy') != 'thread-context-v2'
+            or metadata.get('token_counter') != 'router-utf8-bound-v1'
+            or state.get('page') or state.get('phase', 'read') != 'read'
+            or full.get('phase') != 'read'):
+        return False
+    targets = set(current.payload.get('batch_ids') or [current.payload['raw_id']])
+    focused_ids = set(exc.diagnostics.get('focused_context_ids', []))
+    before, after = state.get('ranges', {}), full.get('ranges', {})
+    fresh_ids = [item['raw_message_id'] for item in previous.earlier_messages_context
+                 if item['raw_message_id'] in focused_ids - targets
+                 and item.get('content') and not item.get('partial') and not item.get('evidence_excerpt')
+                 and after.get(str(item['raw_message_id']), 0) - before.get(str(item['raw_message_id']), 0) >= len(item['content'])]
+    if not fresh_ids:
+        return False
+    limits = dict(metadata.get('analysis_limits', {}))
+    stage = len(state.get('stage_trace_ids', []))
+    generation = limits.get('focused_context_retry_generation', 0) if limits.get('focused_context_retry_stage') == stage else 0
+    available = metadata.get('effective_input_budget')
+    cap = metadata.get('analysis_chunk_input_limit') or available
+    ceiling = limits.get('focused_context_input_ceiling')
+    if type(ceiling) is int and ceiling > 0 and type(cap) is int:
+        cap = min(cap, ceiling)
+    if (type(generation) is not int or not 0 <= generation < 4
+            or type(available) is not int or type(cap) is not int or cap <= 512):
+        return False
+    cap = max(512, min(cap, available) // 2)
+    limits.update(focused_context_input_ceiling=cap,
+                  focused_context_retry_stage=stage,
+                  focused_context_retry_generation=generation + 1)
+    from .processing_attempts import reserve_attempt
+    raw = RawMessage.objects.select_for_update().get(pk=current.payload['raw_id'])
+    trace = reserve_attempt(raw, f'{current.deduplication_key}:focused-context:{stage}:{generation + 1}:{previous.id}')
+    trace.context_metadata.update({key: metadata[key] for key in (
+        'analysis_policy', 'full_history_policy', 'snapshot_max_id', 'full_history',
+        'replace_unsent', 'required_thread_keys', 'output_retry_generation') if key in metadata})
+    trace.context_metadata.update(analysis_limits=limits, analysis_chunk_input_limit=cap,
+                                  repair_reason=str(exc), parent_trace_id=previous.id,
+                                  focused_context_retry_fresh_ids=fresh_ids)
+    trace.save(update_fields=['context_metadata'])
+    record_attempt(current, 'failed', str(exc))
+    members = [entry for entry in current.payload.get('trace_ids', []) if entry['raw_id'] != raw.id]
+    members.append({'raw_id': raw.id, 'trace_id': trace.id})
+    # full_history_state (including result, ranges and any cursor) stays exact.
+    current.payload = {**current.payload, 'trace_id': trace.id, 'trace_ids': members}
+    current.state, current.lease_until = 'pending', None
+    current.error_code, current.attempt_count = str(exc), 0
+    current.next_attempt_at = timezone.now() + timedelta(seconds=1)
+    current.save()
+    from .models import HistoryAnalysisItem
+    HistoryAnalysisItem.objects.filter(outbox_event=current, raw_message_id=raw.id).update(trace=trace)
+    record_attempt(current, 'pending', str(exc), current.next_attempt_at)
+    return True
+
+
 @transaction.atomic
 def handle_failure(event, exc):
     if event.event_type not in EVENT_TYPES or not isinstance(exc, ProviderUnavailable):
@@ -111,6 +173,8 @@ def handle_failure(event, exc):
                                "root_event_id":current.id}
             current.save(update_fields=["payload"])
     if current.payload.get("analysis_policy") == "history-packets-v1":
+        if code == 'focused_context_budget_exceeded' and _retry_focused_context(current, exc):
+            return True
         structural = {"source_revision_changed", "skipped_crm_delivered", "blocked_delivery", "projection_changed", "projection_snapshot_missing", "deduplication_ambiguous", "extraction_json_parse", "extraction_top_level_type", "extraction_facts_missing", "extraction_facts_type", "invalid_extraction_schema", "invalid_schema", "batch_classification_missing", "thread_classification_invalid", "thread_completion_unproven", "thread_sources_unavailable", "thread_source_conflict", "thread_sources_duplicate", "thread_keys_duplicate", "thread_parent_invalid", "thread_revision_conflict", "target_classification_invalid", "target_classification_conflict", "fact_thread_missing", "fact_thread_evidence_missing", "fact_thread_evidence_conflict", "provider_output_truncated", "context_batch_too_large", "context_fixed_input_too_large"}
         structural |= EVIDENCE_ERRORS
         from .history_analysis import split
