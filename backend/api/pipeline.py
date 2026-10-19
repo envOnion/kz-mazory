@@ -176,6 +176,24 @@ def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False, targ
 
 
 
+def _main_response_cache(trace, payload):
+    """Reuse only a native-success response from this immutable attempt."""
+    cache = trace.context_metadata.get('main_response_cache')
+    if cache is None:
+        return None
+    if (not isinstance(cache, dict) or cache.get('version') != 'native-main-v1'
+            or cache.get('trace_id') != trace.pk
+            or cache.get('payload_sha256') != payload_hash(payload)):
+        raise ProviderUnavailable('context_snapshot_mismatch')
+    value = cache.get('value')
+    if (not isinstance(value, list) or len(value) != 3
+            or not all(isinstance(item, dict) for item in value)
+            or not isinstance(value[0].get('facts'), list)
+            or cache.get('response_sha256') != hashlib.sha256(canonical_json(value).encode()).hexdigest()):
+        raise ProviderUnavailable('context_snapshot_mismatch')
+    return tuple(copy.deepcopy(value))
+
+
 def _restore_request(trace):
     try:
         payload = copy.deepcopy(trace.context_metadata["request_envelope"])
@@ -360,10 +378,13 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             sources.extend(offered.get('target_messages', []))
             sources.extend(item for item in offered.get('context', []) if not item.get('partial'))
             trace.context_metadata['evidence_ranges'] = {str(item['raw_message_id']): len(item['content']) for item in sources}
-        trace.context_metadata["request_state"] = "sent"
+        cache_enabled = cfg.chat_model_name == 'openrouter/free' and getattr(cfg, 'full_history_policy', None) == 'thread-context-v2'
+        cached_response = _main_response_cache(trace, payload) if cache_enabled and result_override is None else None
+        trace.context_metadata["request_state"] = "responded" if cached_response else "sent"
         trace.context_metadata.setdefault("timings_ms", {})["prepare"] = round((time.monotonic()-preparation_started)*1000)
         trace.error_code = ""
-        trace.result_summary = "Запрос с сохранённой историей отправлен в AI."
+        trace.result_summary = ("Продолжается проверка сохранённого ответа AI." if cached_response
+                                else "Запрос с сохранённой историей отправлен в AI.")
         trace.save()
         if packet:
             for member in target_traces.values():
@@ -373,7 +394,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                     member.model_version = trace.model_version
                     member.save()
         provider_started = time.monotonic()
-        result, usage, diagnostics = result_override or AIService.analyze_payload(
+        result, usage, diagnostics = result_override or cached_response or AIService.analyze_payload(
             payload,
             trace.context_metadata.get("effective_provider_url")
             or trace.context_metadata.get("provider_url"),
@@ -381,6 +402,16 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         )
         trace.context_metadata["request_state"] = "responded"
         trace.context_metadata["timings_ms"]["provider"] = round((time.monotonic()-provider_started)*1000)
+        if cache_enabled and result_override is None and cached_response is None:
+            value = copy.deepcopy([result, usage, diagnostics])
+            trace.context_metadata['main_response_cache'] = {
+                'version': 'native-main-v1', 'trace_id': trace.pk,
+                'payload_sha256': payload_hash(payload), 'value': value,
+                'response_sha256': hashlib.sha256(canonical_json(value).encode()).hexdigest(),
+                'provider_duration_ms': trace.context_metadata['timings_ms']['provider'],
+            }
+        if cached_response is not None:
+            diagnostics['main_response_cache_reused'] = True
         validation_started = time.monotonic()
         trace.context_metadata["response_diagnostics"] = diagnostics
         trace.context_metadata['provider_result'] = copy.deepcopy(result)
