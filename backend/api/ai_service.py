@@ -577,6 +577,7 @@ class AIService:
             if api_format != active_api_format or provider_url != active_provider_url:
                 raise ProviderUnavailable("context_configuration_changed")
         api_key = AIService._credential(cfg, api_format=api_format)
+        canonical_quote_input = canonical_quote_schema = None
         if api_format == ANTHROPIC_MESSAGES:
             default_max_tokens = (
                 cfg.max_completion_tokens
@@ -614,8 +615,15 @@ class AIService:
             data = normalize_response(raw_data)
         else:
             if cfg.chat_model_name == "openrouter/free":
-                from .free_router import request
+                from .free_router import request, _extraction_input
+                from .quote_input_codec import POLICY as QUOTE_INPUT_POLICY
+                canonical_inputs = _extraction_input(payload)
                 payload = request(payload, cfg.max_completion_tokens)
+                if (canonical_inputs is not None and canonical_inputs.get('native_quote_policy') == QUOTE_INPUT_POLICY
+                        and _extraction_input(payload) is None):
+                    from .extraction_schema import extraction_schema
+                    canonical_quote_input = canonical_inputs
+                    canonical_quote_schema = extraction_schema(canonical_inputs)
             from .qwen_profile import enabled as qwen_enabled, grounded_schema
             if qwen_enabled(cfg) and '_ollama_format' in payload:
                 payload = dict(payload)
@@ -676,6 +684,10 @@ class AIService:
                 schema = payload.get("response_format", {}).get("json_schema", {}).get("schema")
                 if schema and not Draft202012Validator(schema).is_valid(result):
                     raise ProviderUnavailable("invalid_extraction_schema", diagnostics=diagnostics)
+                if canonical_quote_input is not None:
+                    from .quote_input_codec import restore
+                    result = restore(result, canonical_quote_input, canonical_quote_schema)
+                    diagnostics['native_quote_policy'] = QUOTE_INPUT_POLICY
                 from .extraction_schema import COMPACT_SOURCE_WIRE_VERSION
                 inputs = json.loads(payload['messages'][-1]['content'])
                 if inputs.get('source_wire_version') == COMPACT_SOURCE_WIRE_VERSION and 'threads' in result:
