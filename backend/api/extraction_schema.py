@@ -6,6 +6,7 @@ from .facts import FactSchema
 from .dialogue_threads import ThemeSchema, LinkSchema
 
 WIRE_VERSION = 'facts-v7-laya-unique-sources'
+COMPACT_SOURCE_WIRE_VERSION = 'facts-v8-compact-source-slots'
 
 
 def resolution_schema(input_data):
@@ -221,7 +222,13 @@ def extraction_schema(input_data=None):
                 sources = {}
                 for pk in sorted(message_ids):
                     item = copy.deepcopy(link)
-                    item['properties']['raw_message_id'] = {'type':'integer','enum':[pk]}
+                    if input_data.get('source_wire_version') == COMPACT_SOURCE_WIRE_VERSION:
+                        # The slot already pins identity. Identical value schemas
+                        # can share one definition instead of one per source ID.
+                        item['properties'].pop('raw_message_id')
+                        item['required'].remove('raw_message_id')
+                    else:
+                        item['properties']['raw_message_id'] = {'type':'integer','enum':[pk]}
                     sources[f'm{pk}'] = item
                 theme_slot['properties']['messages'] = {'type':'object','additionalProperties':False,
                     'minProperties':1,'properties':sources,'required':[f'm{targets[0]}'] if key=='t0' else []}

@@ -484,8 +484,10 @@ def extraction_payload(
     source_metadata=None, current_time=None, target_message_id=None, known_threads=None, batch_message_ids=None,
 ):
     from .ai_service import WORKER_PROMPT, PACKET_PROMPT
+    from .extraction_schema import COMPACT_SOURCE_WIRE_VERSION
 
     system_prompt = WORKER_PROMPT
+    compact_sources = endpoint.get('transport') == 'openrouter_free'
     if getattr(cfg, "analysis_policy", None) == "history-packets-v1":
         system_prompt = PACKET_PROMPT
         if getattr(cfg, 'full_history_policy', None) == 'thread-context-v2':
@@ -495,6 +497,8 @@ def extraction_payload(
             if cfg.analysis_repair_reason in {'fact_thread_evidence_conflict', 'fact_thread_evidence_missing'}:
                 system_prompt += '\nКаждый evidence_message_id, promise_message_id и raw_message_id из evidence_messages факта должен явно входить в messages его thread_key. Добавляй источник в тему только при доказанной связи; иначе не извлекай этот факт. Источники и цитаты не изменяй.'
             system_prompt += '\nДля commitment обязательны promise_message_id и evidence_messages с role=promise, ID исходного обещания и его точной цитатой. fulfilled требует fulfillment_message_id и отдельную цитату с role=fulfillment; cancelled требует отдельную цитату отмены с role=cancellation, позже обещания. Готовый и отправленный результат — исполнение, не отмена. ID события, статусы и роли доказательств должны соответствовать друг другу. Не выдавай отмену без источника отмены.'
+    if compact_sources:
+        system_prompt += '\nЕсли messages — объект, ключ m123 задаёт raw_message_id=123; не повторяй ID внутри значения. Соблюдай JSONSchema.'
     from .models import AISettings
     configured_prompt = cfg.system_prompt_worker.strip()
     if configured_prompt and configured_prompt != AISettings._meta.get_field("system_prompt_worker").get_default().strip():
@@ -509,6 +513,7 @@ def extraction_payload(
     target_ids = {item["raw_message_id"] for item in targets}
     user_content = extraction_input(
         {
+            **({'source_wire_version': COMPACT_SOURCE_WIRE_VERSION} if compact_sources else {}),
             "content": content,
             "sender": sender,
             "sent_at": sent_at,
