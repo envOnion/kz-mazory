@@ -484,7 +484,7 @@ def extraction_payload(
     source_metadata=None, current_time=None, target_message_id=None, known_threads=None, batch_message_ids=None,
 ):
     from .ai_service import WORKER_PROMPT, PACKET_PROMPT
-    from .extraction_schema import COMPACT_SOURCE_WIRE_VERSION
+    from .extraction_schema import COMPACT_SOURCE_WIRE_VERSION, NATIVE_STRING_POLICY
 
     system_prompt = WORKER_PROMPT
     compact_sources = endpoint.get('transport') == 'openrouter_free'
@@ -513,7 +513,8 @@ def extraction_payload(
     target_ids = {item["raw_message_id"] for item in targets}
     user_content = extraction_input(
         {
-            **({'source_wire_version': COMPACT_SOURCE_WIRE_VERSION} if compact_sources else {}),
+            **({'source_wire_version': COMPACT_SOURCE_WIRE_VERSION,
+                'native_string_policy': NATIVE_STRING_POLICY} if compact_sources else {}),
             "content": content,
             "sender": sender,
             "sent_at": sent_at,
