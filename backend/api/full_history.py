@@ -15,7 +15,7 @@ from .providers import ProviderUnavailable
 POLICY = 'thread-context-v2'
 
 
-def compact_result(result, targets):
+def compact_result(result, targets, compact_evidence=False):
     """Compress repeated links, keeping summaries and every fact's literal sources.
 
     Complete responses and original links remain immutable in stage traces. This
@@ -24,6 +24,15 @@ def compact_result(result, targets):
     if not result:
         return None
     value = copy.deepcopy(result)
+    if compact_evidence:
+        for fact in value.get('facts', []):
+            evidence = fact.get('evidence')
+            anchors = [ref for ref in fact.get('evidence_messages', [])
+                       if ref['raw_message_id'] == fact.get('evidence_message_id')]
+            if isinstance(evidence, str) and anchors and all(ref['quote'] == evidence for ref in anchors):
+                # Continuity needs one copy of the literal, not two long originals.
+                # Keep every source/role; the response schema still requires evidence.
+                del fact['evidence']
     for theme in value.get('threads', []):
         required = set(targets)
         for fact in value.get('facts', []):
@@ -38,9 +47,9 @@ def compact_result(result, targets):
     return value
 
 
-def state_parts(result, targets, counter, limit):
+def state_parts(result, targets, counter, limit, compact_evidence=False):
     """Hierarchical reconciliation pages; each new original visits every page."""
-    value = compact_result(result, targets)
+    value = compact_result(result, targets, compact_evidence=compact_evidence)
     if not value or counter.count_text(canonical_json(value)) <= limit:
         return [value]
     groups = []
@@ -171,7 +180,8 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
         raise ProviderUnavailable('context_source_unavailable')
     source = source_metadata(raw)
     page = copy.deepcopy(state.get('page', {}))
-    parts = page.get('parts') or sorted(state_parts(state.get('result'), targets, counter, min(chunk_limit // 3, cfg.max_completion_tokens // 2)),
+    parts = page.get('parts') or sorted(state_parts(state.get('result'), targets, counter, min(chunk_limit // 3, cfg.max_completion_tokens // 2),
+                                                  compact_evidence=endpoint.get('transport') == 'openrouter_free'),
                                       key=lambda value: counter.count_text(canonical_json(value)), reverse=True)
     part_index = page.get('index', 0)
     prior = parts[part_index]
@@ -259,6 +269,8 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
             value['analysis_instructions'] = value['analysis_instructions'].replace('Используй короткие достаточные непрерывные цитаты, не копируй целиком длинные исходники.', 'Цитаты evidence/quote — полные неизменённые оригиналы, включая отступы, пустые строки и завершающие пробелы.')
         if final:
             value['analysis_instructions'] += ' Все оригиналы snapshot уже прочитаны по этапам. Выполни окончательное сведение: просьба сама по себе не обещание; проверь авторство, отмены, переносы и исполнения через evidence_messages. Сводка служит указателем, а не доказательством.'
+        if prior and any('evidence' not in fact for fact in prior.get('facts', [])):
+            value['analysis_instructions'] += ' Если у факта previous_result опущено evidence, восстанови его в ответе из буквальной quote в evidence_messages с raw_message_id=evidence_message_id: эти anchor-цитаты точно совпадают.'
         from .context_tokens import extraction_input
         message['content'] = extraction_input(value)
         return payload
