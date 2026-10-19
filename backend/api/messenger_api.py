@@ -432,9 +432,13 @@ def _current_axes_cte(qs):
                 SELECT trace.id, trace.{trace_status} AS status,
                        trace.{trace_action} AS pipeline_action,
                        trace.{trace_metadata}->>'request_state' AS request_state
-                FROM {trace_table} AS trace
-                WHERE trace.{trace_raw_id} = scoped.raw_message_id
-                ORDER BY trace.id DESC LIMIT 1
+                FROM (
+                    SELECT source_trace.id
+                    FROM {trace_table} AS source_trace
+                    WHERE source_trace.{trace_raw_id} = scoped.raw_message_id
+                    ORDER BY source_trace.id DESC LIMIT 1
+                ) AS chosen_trace
+                INNER JOIN {trace_table} AS trace ON trace.id = chosen_trace.id
             ) AS latest_trace ON TRUE
             LEFT JOIN LATERAL (
                 SELECT work.id, work.{work_state} AS state, work.{work_error} AS error_code
