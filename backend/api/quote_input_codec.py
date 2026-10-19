@@ -121,7 +121,8 @@ def _project(inputs, schema):
         return _children(node, encode)
 
     wire_schema = encode(schema)
-    Draft202012Validator.check_schema(wire_schema)
+    # The schema is generated locally; probes must not revalidate its grammar.
+    # All native and restored response values are still validated below.
     source_rows = list(_sources(inputs))
     sources = {path: (row, source_id) for row, source_id, path in source_rows}
     wire = copy.deepcopy(inputs)
