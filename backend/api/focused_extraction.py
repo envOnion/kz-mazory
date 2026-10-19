@@ -93,7 +93,7 @@ def read_content(message, trace):
 
 
 def recover(result, raw, trace, cfg):
-    from .extraction_schema import WIRE_VERSION
+    from .extraction_schema import WIRE_VERSION, NATIVE_CONFIDENCE_POLICY
     native_autonomous = cfg.autonomous_enabled and trace.context_metadata.get('wire_schema_version')==WIRE_VERSION
     if not raw.config_id or not (raw.config.thread_routing_enabled or native_autonomous):
         return
@@ -141,6 +141,8 @@ def recover(result, raw, trace, cfg):
         from .quote_input_codec import POLICY as QUOTE_INPUT_POLICY
         if endpoint.get('transport') == 'openrouter_free' and trace.context_metadata.get('native_quote_policy') == QUOTE_INPUT_POLICY:
             inputs['native_quote_policy'] = QUOTE_INPUT_POLICY
+        if endpoint.get('transport') == 'openrouter_free' and trace.context_metadata.get('native_confidence_policy') == NATIVE_CONFIDENCE_POLICY:
+            inputs['native_confidence_policy'] = NATIVE_CONFIDENCE_POLICY
         inputs['analysis_fact_types'] = [kind]
         inputs['analysis_operation'] = 'focused_fact_extraction'
         if kind == 'payment':
