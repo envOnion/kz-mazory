@@ -262,9 +262,10 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
             'input_tokens': fixed, 'available_input_tokens': available,
             'user_input_token_limit': cfg.analysis_input_token_limit,
         })
-    if endpoint.get('transport') == 'openrouter_free' and getattr(cfg, 'analysis_chunk_input_limit', None):
-        # Retry caps scale the fresh portion, not the mandatory fixed envelope.
-        # Otherwise halving a request can leave no room even for source framing.
+    if endpoint.get('transport') == 'openrouter_free' and (
+            getattr(cfg, 'analysis_chunk_input_limit', None) or len(parts) > 1):
+        # Retry/page caps scale fresh originals, not the fixed envelope. A page
+        # can legitimately occupy more than 90% of the input window by itself.
         fresh_budget = (available - fixed) * chunk_limit // available
         chunk_budget = fixed + (int(fresh_budget * .9) if len(parts) > 1 else fresh_budget)
     # A scheduling cap reduces newly read originals, never the actual model
