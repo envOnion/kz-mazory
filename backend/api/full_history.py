@@ -13,6 +13,7 @@ from .plain_text import plain_text
 from .providers import ProviderUnavailable
 
 POLICY = 'thread-context-v2'
+QUOTE_REFERENCE_INSTRUCTION = ' В previous_result quote_ref — JSON Pointer на полную буквальную строку content в этом же входе. Сначала восстанови quote по этому указателю; raw_message_id и role не меняй. В ответе нужны обычные quote, без quote_ref.'
 
 
 def compact_result(result, targets, compact_evidence=False):
@@ -45,6 +46,59 @@ def compact_result(result, targets, compact_evidence=False):
                         if link.get('relation') in ('answers', 'clarifies', 'cancels', 'fulfills'))
         theme['messages'] = [link for link in links if link['raw_message_id'] in required]
     return value
+
+
+def reference_quotes(prior, inputs, target_complete):
+    """Reference a duplicate literal already present in this wire request.
+
+    Page plans keep their complete prior; pointers belong only to a fresh copy
+    and must be rebuilt after each request's context positions are known.
+    """
+    offered = []
+    if target_complete:
+        offered.append((inputs['target_message_id'], inputs['content'], '/content'))
+    for name in ('target_messages', 'context'):
+        offered.extend((item['raw_message_id'], item['content'], f'/{name}/{index}/content')
+                       for index, item in enumerate(inputs.get(name, [])) if not item.get('partial'))
+    sources = {}
+    for raw_id, content, pointer in offered:
+        if type(raw_id) is not int or not isinstance(content, str):
+            continue
+        # A repeated ID must never resolve to an arbitrary occurrence.
+        sources[raw_id] = None if raw_id in sources else (content, pointer)
+    result, count = copy.deepcopy(prior), 0
+    for fact in (result or {}).get('facts', []):
+        for ref in fact.get('evidence_messages', []):
+            if type(ref.get('raw_message_id')) is not int:
+                continue
+            source = sources.get(ref['raw_message_id'])
+            if source is not None and ref.get('quote') == source[0] and 'quote_ref' not in ref:
+                if len(ref['quote'].encode('utf-8')) <= len(source[1].encode('utf-8')) + 4:
+                    continue
+                del ref['quote']
+                ref['quote_ref'] = source[1]
+                count += 1
+    if count:
+        # Account for the JSON string embedded in the outer messages payload,
+        # including the extra instruction; compression must actually save space.
+        def wire_size(value):
+            return len(canonical_json(canonical_json(value)).encode('utf-8'))
+        if wire_size(prior) - wire_size(result) <= wire_size(QUOTE_REFERENCE_INSTRUCTION):
+            return copy.deepcopy(prior), 0
+    return result, count
+
+
+def referenced_sources(prior):
+    """Originals required by a page's facts and active continuity links."""
+    value = prior or {}
+    sources = {ref['raw_message_id'] for fact in value.get('facts', [])
+               for ref in fact.get('evidence_messages', [])}
+    sources.update(fact['evidence_message_id'] for fact in value.get('facts', [])
+                   if fact.get('evidence_message_id'))
+    sources.update(link['raw_message_id'] for theme in value.get('threads', [])
+                   for link in theme['messages'] if theme['state'] == 'open'
+                   or link.get('relation') in ('answers', 'clarifies', 'cancels', 'fulfills'))
+    return sources
 
 
 def state_parts(result, targets, counter, limit, compact_evidence=False):
@@ -163,7 +217,7 @@ def source_hash(rows):
     return digest.hexdigest()
 
 
-def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
+def prepare(raw, cfg, known_projects, maximum, batch_ids, state, *, _probe=False):
     """Select a chronological chunk using complete provider token counts."""
     counter, endpoint = context_runtime(cfg)
     from .qwen_profile import enabled as qwen_enabled
@@ -185,6 +239,9 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
                                       key=lambda value: counter.count_text(canonical_json(value)), reverse=True)
     part_index = page.get('index', 0)
     prior = parts[part_index]
+    router = endpoint.get('transport') == 'openrouter_free'
+    carry_free = all(not (referenced_sources(part) - targets) for part in parts)
+    quote_references = router and (len(parts) == 1 or carry_free)
     ranges = copy.deepcopy(state.get('ranges', {}))
     previous_source_ids = [int(pk) for pk in ranges]
     validated_read = sum(not item['content'] or ranges.get(str(item['raw_message_id']), 0) >= len(item['content']) for item in rows)
@@ -240,12 +297,7 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
                                 if ref['raw_message_id'] == item['raw_message_id'])
             if excerpt:
                 target_rows[index] = {**item, 'content': excerpt, 'evidence_excerpt': True}
-    reference_ids = {ref['raw_message_id'] for fact in (prior or {}).get('facts', [])
-                     for ref in fact.get('evidence_messages', [])}
-    reference_ids.update(fact['evidence_message_id'] for fact in (prior or {}).get('facts', []) if fact.get('evidence_message_id'))
-    reference_ids.update(link['raw_message_id'] for theme in (prior or {}).get('threads', [])
-                         for link in theme['messages'] if theme['state'] == 'open'
-                         or link.get('relation') in ('answers', 'clarifies', 'cancels', 'fulfills'))
+    reference_ids = referenced_sources(prior)
     carry = [by_id[pk] for pk in sorted(reference_ids - targets) if pk in by_id]
 
     def request(items):
@@ -269,6 +321,12 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
             value['analysis_instructions'] = value['analysis_instructions'].replace('Используй короткие достаточные непрерывные цитаты, не копируй целиком длинные исходники.', 'Цитаты evidence/quote — полные неизменённые оригиналы, включая отступы, пустые строки и завершающие пробелы.')
         if final:
             value['analysis_instructions'] += ' Все оригиналы snapshot уже прочитаны по этапам. Выполни окончательное сведение: просьба сама по себе не обещание; проверь авторство, отмены, переносы и исполнения через evidence_messages. Сводка служит указателем, а не доказательством.'
+        if quote_references and prior:
+            wire_prior, references = reference_quotes(prior, value,
+                target_range is None or target_range == [0, len(by_id[raw.id]['content'])])
+            value['analysis_state']['previous_result'] = wire_prior
+            if references:
+                value['analysis_instructions'] += QUOTE_REFERENCE_INSTRUCTION
         if prior and any('evidence' not in fact for fact in prior.get('facts', [])):
             value['analysis_instructions'] += ' Если у факта previous_result опущено evidence, восстанови его в ответе из буквальной quote в evidence_messages с raw_message_id=evidence_message_id: эти anchor-цитаты точно совпадают.'
         from .context_tokens import extraction_input
@@ -289,15 +347,54 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
             'input_tokens': fixed, 'available_input_tokens': available,
             'user_input_token_limit': cfg.analysis_input_token_limit,
         })
-    if endpoint.get('transport') == 'openrouter_free' and (
+    if _probe:
+        return request, fixed
+    other_requests = []
+    scheduling_fixed = fixed
+    if router and carry_free and len(parts) > 1 and not page and not final:
+        # Later pages reuse these targets and the same selected originals. Their
+        # fixed envelopes differ, so choose one chunk against every native schema.
+        projected_ranges = copy.deepcopy(ranges)
+        if target_range:
+            projected_ranges[str(raw.id)] = max(target_offset, target_range[1])
+        for pk in targets - {raw.id}:
+            projected_ranges[str(pk)] = len(by_id[pk]['content'])
+        for index in range(1, len(parts)):
+            probe_state = {**state, 'ranges': projected_ranges, 'analysis_time': prepared_at,
+                           'page': {'parts': parts, 'index': index, 'target_range': target_range}}
+            builder, page_fixed = prepare(raw, cfg, known_projects, maximum, batch_ids,
+                                          probe_state, _probe=True)
+            other_requests.append(builder)
+            scheduling_fixed = max(scheduling_fixed, page_fixed)
+
+    def selection_count(items, own_count=None):
+        largest = counter.count_payload(request(items)) if own_count is None else own_count
+        for builder in other_requests:
+            payload = builder(items)
+            message = payload['messages'][-1]
+            import json
+            value = json.loads(message['content'])
+            read_ids = value['analysis_state']['read_source_ids']
+            seen = set(read_ids)
+            for item in items:
+                pk = item['raw_message_id']
+                if pk not in seen:
+                    read_ids.append(pk)
+                    seen.add(pk)
+            from .context_tokens import extraction_input
+            message['content'] = extraction_input(value)
+            largest = max(largest, counter.count_payload(payload))
+        return largest
+
+    if router and (
             getattr(cfg, 'analysis_chunk_input_limit', None) or len(parts) > 1):
         # Retry/page caps scale fresh originals, not the fixed envelope. A page
         # can legitimately occupy more than 90% of the input window by itself.
-        fresh_budget = (available - fixed) * chunk_limit // available
-        chunk_budget = fixed + (int(fresh_budget * .9) if len(parts) > 1 else fresh_budget)
+        fresh_budget = (available - scheduling_fixed) * chunk_limit // available
+        chunk_budget = scheduling_fixed + (int(fresh_budget * .9) if len(parts) > 1 else fresh_budget)
     # A scheduling cap reduces newly read originals, never the actual model
     # window or already verified evidence. Leave room for at least a fragment.
-    chunk_budget = min(available, max(chunk_budget, fixed + min(512, available-fixed)))
+    chunk_budget = min(available, max(chunk_budget, scheduling_fixed + min(512, available-scheduling_fixed)))
     selected = []
     empty = sum(not r['content'] for r in rows)
     if target_range:
@@ -318,7 +415,7 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
         low, high = 0, len(candidates)
         while low < high:
             middle = (low + high + 1) // 2
-            if counter.count_payload(request(candidates[:middle])) <= chunk_budget:
+            if selection_count(candidates[:middle]) <= chunk_budget:
                 low = middle
             else:
                 high = middle - 1
@@ -337,7 +434,7 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
                 middle = (low + high) // 2
                 current = {**item, 'content': item['content'][start:middle], 'partial': True,
                            'included_character_range': [start, middle], 'original_characters': len(item['content'])}
-                if counter.count_payload(request(selected + [current])) <= chunk_budget:
+                if selection_count(selected + [current]) <= chunk_budget:
                     accepted, low = middle, middle + 1
                 else:
                     high = middle - 1
@@ -352,8 +449,9 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
             cursor, offset = len(rows), 0
     payload = request(selected)
     input_tokens = counter.count_payload(payload)
-    if input_tokens > available:
-        raise ProviderUnavailable('context_batch_too_large', diagnostics={'input_tokens': input_tokens, 'available_input_tokens': available})
+    selection_tokens = selection_count(selected, input_tokens)
+    if selection_tokens > available:
+        raise ProviderUnavailable('context_batch_too_large', diagnostics={'input_tokens': selection_tokens, 'available_input_tokens': available})
     read_ids = [r['raw_message_id'] for r in rows if not r['content'] or ranges.get(str(r['raw_message_id']), 0) >= len(r['content'])]
     done = len(read_ids) == len(rows)
     request_context = target_rows + [r for r in carry if r['raw_message_id'] not in {item['raw_message_id'] for item in selected}] + selected
