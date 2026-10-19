@@ -160,6 +160,11 @@ def _axis_from_trace(trace, work, clar_state):
             return "error"
         if trace.status in ("sending", "accepted", "unknown"):
             return "analyzing"
+        if trace.status != "success":
+            if trace.axis_retry_state in ("pending", "budget_wait", "rate_wait"):
+                return "queued"
+            if trace.axis_retry_state == "processing":
+                return "analyzing"
         if trace.pipeline_action == "non_commercial":
             state = trace.axis_request_state
             if state == 'not_sent':
@@ -234,7 +239,8 @@ def axes_for_records(records):
     traces = _latest_by(
         MessageProcessingTrace.objects.filter(pk__in=Subquery(latest_traces))
         .only('id','raw_message_id','status','pipeline_action')
-        .annotate(axis_request_state=F('context_metadata__request_state')),
+        .annotate(axis_request_state=F('context_metadata__request_state'),
+                  axis_retry_state=F('context_metadata__retry__state')),
         "raw_message_id",
     )
     trace_ids = [t.id for t in traces.values()]
@@ -386,6 +392,10 @@ def _current_axes_cte(qs):
                     WHEN COALESCE(notification_clar.state, trace_clar.state) = 'awaiting' THEN 'need_context'
                     WHEN latest_trace.id IS NOT NULL AND latest_trace.status = 'error' THEN 'error'
                     WHEN latest_trace.status IN ('sending', 'accepted', 'unknown') THEN 'analyzing'
+                    WHEN latest_trace.status <> 'success'
+                         AND latest_trace.retry_state IN ('pending', 'budget_wait', 'rate_wait') THEN 'queued'
+                    WHEN latest_trace.status <> 'success'
+                         AND latest_trace.retry_state = 'processing' THEN 'analyzing'
                     WHEN latest_trace.pipeline_action = 'non_commercial'
                          AND latest_trace.request_state = 'not_sent' THEN 'queued'
                     WHEN latest_trace.pipeline_action = 'non_commercial'
@@ -431,7 +441,8 @@ def _current_axes_cte(qs):
             LEFT JOIN LATERAL (
                 SELECT trace.id, trace.{trace_status} AS status,
                        trace.{trace_action} AS pipeline_action,
-                       trace.{trace_metadata}->>'request_state' AS request_state
+                       trace.{trace_metadata}->>'request_state' AS request_state,
+                       trace.{trace_metadata}->'retry'->>'state' AS retry_state
                 FROM (
                     SELECT source_trace.id
                     FROM {trace_table} AS source_trace
