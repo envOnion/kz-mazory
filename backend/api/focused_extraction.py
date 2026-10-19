@@ -8,6 +8,7 @@ from .dialogue_threads import normalize_themes, bound_topic_label
 from .message_context import source_scope
 from .message_time import source_metadata
 from .providers import ProviderUnavailable
+from .full_history import budget
 
 # This selects work for the LLM, and never supplies an action, actor or deadline.
 EXPLICIT_FUTURE = re.compile(r"\b(?:скину|отправлю|подготовлю|сделаю|закончу|вышлю|предоставлю|обещаю|жіберемін|дайындаймын)\b|\b(?:завтра|послезавтра)\s+будет\b", re.I)
@@ -52,7 +53,10 @@ def read_originals(raw, trace):
            if not item.get('partial')}
     full = trace.context_metadata.get('full_history', {})
     target_range = full.get('target_range')
-    if not full or target_range == [0, len(raw.content)] or full.get('ranges', {}).get(str(raw.id), 0) >= len(raw.content):
+    from .plain_text import plain_text
+    from .qwen_profile import MODEL
+    target_length = len(raw.content if trace.model_version == MODEL else plain_text(raw.content))
+    if not full or target_range == [0, target_length] or full.get('ranges', {}).get(str(raw.id), 0) >= target_length:
         ids.add(raw.id)
     return list(source_scope(raw).filter(pk__in=ids,
         id__lte=trace.context_metadata['snapshot_max_id']).exclude(
@@ -63,15 +67,18 @@ def read_content(message, trace):
     from .qwen_profile import MODEL
     if trace.model_version == MODEL:
         return message.content
+    from .plain_text import plain_text
+    # Full-history coverage is measured in the canonical text projection.
+    # Keep focused literals in that same projection, including decoded markup.
+    content = plain_text(message.content) if trace.context_metadata.get('full_history') else message.content
     if message.id in trace.context_metadata.get('batch_message_ids', []):
-        from .plain_text import plain_text
         coverage = trace.context_metadata.get('full_history', {}).get('ranges', {})
         if coverage.get(str(message.id), 0) >= len(plain_text(message.content)):
-            return message.content
+            return content
     for item in trace.earlier_messages_context:
         if item['raw_message_id'] == message.id and item.get('evidence_excerpt'):
             return item['content']
-    return message.content
+    return content
 
 
 def recover(result, raw, trace, cfg):
@@ -114,7 +121,7 @@ def recover(result, raw, trace, cfg):
         rows = [item for item in originals if item.id != target.id]
         context = [{'raw_message_id': item.id, 'content':read_content(item, trace),'sender_name':item.sender_name,'timestamp':item.timestamp.isoformat(),
                     'received_at':item.received_at.isoformat(),'source_metadata':source_metadata(item),'partial':False} for item in rows]
-        payload = extraction_payload(prepared, endpoint, target.content, source['sender'], context, [], source['sent_at'], source['timezone'],
+        payload = extraction_payload(prepared, endpoint, read_content(target, trace), source['sender'], context, [], source['sent_at'], source['timezone'],
             source_metadata=source, target_message_id=target.id, known_threads=trace.context_metadata.get('known_threads',[]), batch_message_ids=[target.id])
         inputs = json.loads(payload['messages'][-1]['content'])
         inputs['analysis_fact_types'] = [kind]
@@ -169,7 +176,7 @@ def recover(result, raw, trace, cfg):
         if '_ollama_num_ctx' in payload:
             from .extraction_schema import extraction_schema
             payload['_ollama_format'] = extraction_schema(inputs)
-        if counter.count_payload(payload) + prepared.max_completion_tokens + prepared.context_safety_tokens > prepared.context_window_tokens:
+        if counter.count_payload(payload) > budget(prepared):
             raise ProviderUnavailable('context_budget_exceeded')
         cache_key = f'{target.id}:{kind}'
         saved = trace.context_metadata.setdefault('focused_extraction', {}).get(cache_key)
@@ -279,7 +286,7 @@ def reconcile_promises(facts, raw, trace, cfg):
         pair_row = {'type':'object','additionalProperties':False,'required':['pair_index','reason','same_promise'],'properties':{
             'pair_index':{'type':'integer','enum':list(range(len(comparisons)))},'reason':{'type':'string'},'same_promise':{'type':'boolean'}}}
         pair_payload['_ollama_format'] = {'type':'object','additionalProperties':False,'required':['facts'],'properties':{'facts':{'type':'array','minItems':len(comparisons),'maxItems':len(comparisons),'items':pair_row}}}
-        if counter.count_payload(pair_payload)+prepared.max_completion_tokens+prepared.context_safety_tokens>prepared.context_window_tokens:
+        if counter.count_payload(pair_payload) > budget(prepared):
             raise ProviderUnavailable('commitment_context_message_too_large')
         pair_digest = payload_hash(pair_payload)
         saved_pairs = trace.context_metadata.get('promise_identity')
@@ -323,7 +330,7 @@ def reconcile_promises(facts, raw, trace, cfg):
         'properties':{'assessment':{'type':'string'},'draft_index':{'type':'integer','enum':list(range(len(drafts)))},'basis_index':{'type':'integer','enum':list(range(len(bases)))},
         'commitment_status':{'type':'string','enum':['pending','fulfilled']},'evidence_messages':{'type':'array','items':ref}}}
     payload['_ollama_format'] = {'type':'object','additionalProperties':False,'required':['facts'],'properties':{'facts':{'type':'array','minItems':len(drafts),'maxItems':len(drafts),'items':row}}}
-    if counter.count_payload(payload)+prepared.max_completion_tokens+prepared.context_safety_tokens>prepared.context_window_tokens:
+    if counter.count_payload(payload) > budget(prepared):
         raise ProviderUnavailable('commitment_context_message_too_large')
     digest = payload_hash(payload)
     saved = trace.context_metadata.get('promise_reconciliation')
