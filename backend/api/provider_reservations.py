@@ -36,11 +36,13 @@ def reserve(cfg, payload, operation, *, lease_seconds=600):
         active = reservations.filter(state="reserved", lease_until__gt=now)
         limit = max(1, locked.autonomous_max_in_flight)
         if locked.autonomous_enabled and (active.count() >= limit or (operation == "extraction" and active.filter(operation="extraction").exists())):
-            raise ProviderUnavailable("provider_in_flight_budget", retry_after=10)
+            raise ProviderUnavailable("provider_in_flight_budget", retry_after=10,
+                                      diagnostics={"request_admission_denied": True})
         usage = ProviderUsage.objects.filter(created_at__gte=day)
         failures = list(usage.filter(operation=operation).order_by("-id").values("error_code", "created_at")[:3])
         if len(failures) == 3 and all(row["error_code"] in ("provider_server_error", "provider_overloaded", "provider_timeout", "provider_connection_failed") for row in failures) and failures[0]["created_at"] > now - timedelta(seconds=60):
-            raise ProviderUnavailable("provider_circuit_open", retry_after=60)
+            raise ProviderUnavailable("provider_circuit_open", retry_after=60,
+                                      diagnostics={"request_admission_denied": True})
         unsettled = reservations.filter(usage__isnull=True)
         if locked.daily_request_limit and usage.count() + unsettled.count() >= locked.daily_request_limit:
             raise ProviderUnavailable("ai_daily_budget_exhausted")

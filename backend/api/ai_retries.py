@@ -1,5 +1,6 @@
 """Durable retries for background message AI work; no sleeping worker threads."""
 
+import copy
 import random
 from datetime import timedelta
 
@@ -88,6 +89,31 @@ def record_attempt(event, state, code="", next_at=None):
             processing_state="received"
         )
     trace.save(update_fields=["context_metadata", "status", "result_summary"])
+
+
+def _main_response_checkpoint(event):
+    """Plan one retry-phase transition after durable native main progress."""
+    trace = MessageProcessingTrace.objects.filter(pk=event.payload.get('trace_id')).first()
+    if trace is None or trace.context_metadata.get('full_history_policy') != 'thread-context-v2':
+        return None
+    metadata = trace.context_metadata
+    if metadata.get('request_state') != 'responded' or not metadata.get('main_response_cache'):
+        return None
+    from .pipeline import _main_response_cache, _restore_request
+    try:
+        value = _main_response_cache(trace, _restore_request(trace))
+    except ProviderUnavailable:
+        return None
+    if value is None:
+        return None
+    marker = {'trace_id': trace.pk, 'response_sha256': metadata['main_response_cache']['response_sha256']}
+    if event.payload.get('main_transport_checkpoint') == marker:
+        return None
+    retry = copy.deepcopy(metadata.get('retry', {}))
+    retry['completed_main_phase'] = {'attempts': event.attempt_count, 'history': retry.get('history', []),
+                                     'response_sha256': marker['response_sha256']}
+    retry['history'], retry['phase'] = [], 'auxiliary'
+    return trace, retry, marker
 
 
 def _retry_focused_context(current, exc):
@@ -254,6 +280,14 @@ def handle_failure(event, exc):
                 record_attempt(current, "pending", code, current.next_attempt_at)
                 return True
         transport = {"provider_timeout", "provider_connection_failed", "provider_server_error", "provider_rate_limited", "provider_overloaded", "provider_in_flight_budget", "provider_circuit_open", "context_model_metadata_unavailable", "routing_snapshot_changed"}
+        if code in transport - {'provider_circuit_open', 'context_model_metadata_unavailable', 'routing_snapshot_changed'}:
+            checkpoint = _main_response_checkpoint(current)
+            if checkpoint is not None:
+                completed, retry, marker = checkpoint
+                completed.context_metadata['retry'] = retry
+                completed.save(update_fields=['context_metadata'])
+                current.payload = {**current.payload, 'main_transport_checkpoint': marker}
+                current.attempt_count = 1
         pending = code in transport and current.attempt_count < 3
         delay = max((15 if current.attempt_count == 1 else 45) + random.randint(0, 5), exc.retry_after or 0)
         current.state, current.lease_until = "pending" if pending else "failed", None

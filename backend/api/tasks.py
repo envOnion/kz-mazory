@@ -444,7 +444,10 @@ def run_outbox(pk):
             if isinstance(exc, ProviderUnavailable)
             else type(exc).__name__
         )
-        if code == "ai_minute_limit_exhausted":
+        local_admission_wait = (isinstance(exc, ProviderUnavailable)
+            and code in {"provider_circuit_open", "provider_in_flight_budget"}
+            and exc.diagnostics.get("request_admission_denied") is True)
+        if code == "ai_minute_limit_exhausted" or local_admission_wait:
             next_at = timezone.now() + timedelta(seconds=max(1, exc.retry_after or 60))
             uncancelled_attempt(pk).update(
                 state="pending", error_code=code, lease_until=None, next_attempt_at=next_at,
