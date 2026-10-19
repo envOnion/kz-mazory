@@ -632,6 +632,60 @@ def validate_evidence(result, raw, trace):
         theme['messages'] = list(links.values())
 
 
+def _compressed_ceiling_rebase(pages, growth, available):
+    """Measure saved native requests; a marker alone cannot lift a ceiling."""
+    from .free_router import LITERAL_ENUM_POLICY, RouterCounter
+    from .pipeline import _extraction_user_message, _main_response_cache, _restore_request
+    from .context_tokens import extraction_input
+    import json
+    counter, compression = RouterCounter(), False
+    try:
+        for page in pages:
+            metadata = page.context_metadata
+            if (metadata.get('native_enum_policy') != LITERAL_ENUM_POLICY
+                    or metadata.get('analysis_limits', {}).get('focused_context_ceiling_policy') == LITERAL_ENUM_POLICY
+                    or 'promise_identity' in metadata or 'promise_reconciliation' in metadata):
+                return False
+            page_budget = metadata.get('effective_input_budget')
+            if type(page_budget) is not int or page_budget <= 0:
+                return False
+            headroom = min(available, page_budget)
+            main = _restore_request(page)
+            if (_main_response_cache(page, main) is None
+                    or json.loads(_extraction_user_message(main)['content']).get('native_enum_policy') != LITERAL_ENUM_POLICY
+                    or counter.count_payload(main) + growth > headroom):
+                return False
+            requests = metadata.get('focused_requests', {})
+            caches = metadata.get('focused_extraction', {})
+            if not isinstance(requests, dict) or not isinstance(caches, dict) or set(requests) != set(caches):
+                return False
+            for key, saved in requests.items():
+                cache = caches[key]
+                if (not isinstance(saved, dict) or not isinstance(cache, dict)
+                        or not isinstance(saved.get('request'), dict)
+                        or not isinstance(cache.get('result'), dict)
+                        or not isinstance(cache['result'].get('facts'), list)):
+                    return False
+                payload = saved['request']
+                digest = payload_hash(payload)
+                if digest != saved.get('payload_sha256') or digest != cache.get('payload_sha256'):
+                    return False
+                inputs = json.loads(_extraction_user_message(payload)['content'])
+                if (inputs.get('native_enum_policy') != LITERAL_ENUM_POLICY
+                        or inputs.get('analysis_operation') != 'focused_fact_extraction'):
+                    return False
+                count = counter.count_payload(payload)
+                if count + growth > headroom:
+                    return False
+                legacy = copy.deepcopy(payload)
+                inputs.pop('native_enum_policy')
+                _extraction_user_message(legacy)['content'] = extraction_input(inputs)
+                compression |= counter.count_payload(legacy) - count >= growth
+    except (ProviderUnavailable, KeyError, TypeError, ValueError):
+        return False
+    return compression
+
+
 def continuation_input_limit(trace, state, plan):
     """Recover a scheduling cap only after a complete, low-output page set."""
     metadata = trace.context_metadata
@@ -653,7 +707,8 @@ def continuation_input_limit(trace, state, plan):
     previous = list(MessageProcessingTrace.objects.filter(pk__in=previous_ids))
     if len(previous) != previous_count:
         return cap
-    for page in [*previous, trace]:
+    pages = [*previous, trace]
+    for page in pages:
         item = page.context_metadata
         if (item.get('request_state') != 'segment_validated'
                 or item.get('full_history', {}).get('ranges') != metadata['full_history']['ranges']
@@ -671,7 +726,12 @@ def continuation_input_limit(trace, state, plan):
             if (type(output) is not int or not 0 < output <= reserve // 2
                     or type(characters) is not int or characters <= 0):
                 return cap
-    return min(available, cap + max(512, cap // 4), ceiling if type(ceiling) is int and ceiling > 0 else available)
+    following_cap = min(available, cap + max(512, cap // 4))
+    if type(ceiling) is int and ceiling > 0 and following_cap > ceiling:
+        if _compressed_ceiling_rebase(pages, following_cap - cap, available):
+            return following_cap
+        return min(following_cap, ceiling)
+    return following_cap
 
 
 def extract(payload):
@@ -734,6 +794,16 @@ def extract(payload):
         for key in ('focused_context_retry_stage', 'focused_context_retry_generation'):
             following.context_metadata['analysis_limits'].pop(key, None)
         following.context_metadata['analysis_chunk_input_limit'] = continuation_input_limit(trace, state, plan)
+        old_ceiling = following.context_metadata['analysis_limits'].get('focused_context_input_ceiling')
+        if (type(old_ceiling) is int and old_ceiling > 0
+                and following.context_metadata['analysis_chunk_input_limit'] > old_ceiling):
+            limits = following.context_metadata['analysis_limits']
+            limits.pop('focused_context_input_ceiling')
+            limits.pop('focused_context_ceiling_policy', None)
+            limits['focused_context_ceiling_rebase'] = {
+                'proof_trace_id': trace.id, 'old_ceiling': old_ceiling,
+                'policy': trace.context_metadata['native_enum_policy'],
+            }
         if trace.context_metadata.get('required_thread_keys'):
             following.context_metadata['required_thread_keys'] = trace.context_metadata['required_thread_keys']
         if trace.context_metadata.get('replace_unsent'):
