@@ -313,10 +313,11 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
         selected = candidates[:low]
         for _, item in pending[:low]:
             ranges[str(item['raw_message_id'])] = len(item['content'])
-        if low:
-            cursor, offset = pending[low-1][0] + 1, 0
-        elif pending:
-            cursor, item = pending[0]
+        full_count = low
+        if full_count:
+            cursor, offset = pending[full_count-1][0] + 1, 0
+        if full_count < len(pending):
+            next_cursor, item = pending[full_count]
             pk = str(item['raw_message_id'])
             start = ranges.get(pk, 0)
             low, high, accepted = start + 1, len(item['content']), start
@@ -324,16 +325,18 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
                 middle = (low + high) // 2
                 current = {**item, 'content': item['content'][start:middle], 'partial': True,
                            'included_character_range': [start, middle], 'original_characters': len(item['content'])}
-                if counter.count_payload(request([current])) <= chunk_budget:
+                if counter.count_payload(request(selected + [current])) <= chunk_budget:
                     accepted, low = middle, middle + 1
                 else:
                     high = middle - 1
             if accepted == start:
-                raise ProviderUnavailable('context_fixed_input_too_large')
-            selected.append({**item, 'content': item['content'][start:accepted], 'partial': True,
-                             'included_character_range': [start, accepted], 'original_characters': len(item['content'])})
-            ranges[pk], offset = accepted, accepted
-        else:
+                if not selected:
+                    raise ProviderUnavailable('context_fixed_input_too_large')
+            else:
+                selected.append({**item, 'content': item['content'][start:accepted], 'partial': True,
+                                 'included_character_range': [start, accepted], 'original_characters': len(item['content'])})
+                ranges[pk], cursor, offset = accepted, next_cursor, accepted
+        elif not pending:
             cursor, offset = len(rows), 0
     payload = request(selected)
     input_tokens = counter.count_payload(payload)
