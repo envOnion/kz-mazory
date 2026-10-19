@@ -623,7 +623,15 @@ def validate_evidence(result, raw, trace):
         if theme is None:
             continue
         links = {link['raw_message_id']:link for link in theme['messages']}
-        for ref in fact.get('evidence_messages', []):
+        sources = list(fact.get('evidence_messages', []))
+        if raw.config_id and raw.config.thread_routing_enabled and not exact and fact.get('evidence_message_id') and fact.get('evidence'):
+            # The primary quote passed the same source checks above. Its ID
+            # may have been uniquely reconciled independently of the references.
+            # Retain explicit reference roles when they cite that same source.
+            anchor_id = fact['evidence_message_id']
+            if not any(ref['raw_message_id'] == anchor_id for ref in sources):
+                sources.append({'raw_message_id': anchor_id, 'role': None})
+        for ref in sources:
             pk, relation = ref['raw_message_id'], relations.get(ref['role'], 'discusses')
             if pk not in links:
                 links[pk] = {'raw_message_id':pk, 'thought_state':'intermediate', 'relation':relation,
