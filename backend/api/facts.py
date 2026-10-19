@@ -761,7 +761,8 @@ def edit_candidate(candidate_id, user, reason, changes, remove_fields, base_vers
         evidence = None
         if changes and "evidence_messages" in changes:
             from .message_context import source_scope
-            from .pipeline import _source_quote
+            from .pipeline import _source_quote_matcher
+            quote_match = _source_quote_matcher(candidate.trace)
             raw = candidate.trace.raw_message
             refs = schema.validated_data["evidence_messages"]
             ids = {ref["raw_message_id"] for ref in refs}
@@ -772,7 +773,7 @@ def edit_candidate(candidate_id, user, reason, changes, remove_fields, base_vers
                 raise serializers.ValidationError("Доказательства должны быть доступны в исходном чате.")
             before["evidence"] = list(candidate.evidence.values("raw_message_id", "quote", "field_name"))
             for ref in refs:
-                ref["quote"] = _source_quote(ref["quote"], rows[ref["raw_message_id"]].content)
+                ref["quote"] = quote_match(ref["quote"], rows[ref["raw_message_id"]].content)
             evidence = refs
         if unmatch:
             options = list(candidate.crm_matches.select_for_update(of=("self",)).filter(
@@ -1110,7 +1111,7 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                 ).aggregate(s=Sum("amount"))["s"] or Decimal(0)
             elif candidate.fact_type == "commitment":
                 from .commitment_evidence import validate_commitment
-                from .pipeline import _source_quote
+                from .pipeline import _source_content_for_trace, _source_quote_matcher
                 reviewed_deadline = data.get("deadline_at")
                 reviewed_precision = data["deadline_precision"]
                 from .message_context import source_scope
@@ -1121,7 +1122,7 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                 if not system:
                     # New evidence saved by a reviewer must not rewrite the original AI snapshot.
                     snapshot_id = max(snapshot_id, max(candidate.evidence.values_list("raw_message_id", flat=True), default=0))
-                if not raw or not validate_commitment(data, raw, snapshot_id, _source_quote, threaded=bool(candidate.thread_revision_id), autonomous=True if system else None):
+                if not raw or not validate_commitment(data, raw, snapshot_id, _source_quote_matcher(candidate.trace), threaded=bool(candidate.thread_revision_id), autonomous=True if system else None, body_text=_source_content_for_trace(raw.content, candidate.trace)):
                     raise serializers.ValidationError("Нужны конкретное действие и доказательства обязательства.")
                 evidence_ids = set(candidate.evidence.values_list("raw_message_id", flat=True))
                 if set((source_scope(raw) if system else access.messages_for(user)).filter(pk__in=evidence_ids).values_list("pk", flat=True)) != evidence_ids:

@@ -53,9 +53,8 @@ def read_originals(raw, trace):
            if not item.get('partial')}
     full = trace.context_metadata.get('full_history', {})
     target_range = full.get('target_range')
-    from .plain_text import plain_text
-    from .qwen_profile import MODEL
-    target_length = len(raw.content if trace.model_version == MODEL else plain_text(raw.content))
+    from .pipeline import _source_content_for_trace
+    target_length = len(_source_content_for_trace(raw.content, trace))
     if not full or target_range == [0, target_length] or full.get('ranges', {}).get(str(raw.id), 0) >= target_length:
         ids.add(raw.id)
     return list(source_scope(raw).filter(pk__in=ids,
@@ -68,9 +67,10 @@ def read_content(message, trace):
     if trace.model_version == MODEL:
         return message.content
     from .plain_text import plain_text
+    from .pipeline import _source_content_for_trace
     # Full-history coverage is measured in the canonical text projection.
     # Keep focused literals in that same projection, including decoded markup.
-    content = plain_text(message.content) if trace.context_metadata.get('full_history') else message.content
+    content = _source_content_for_trace(message.content, trace)
     if message.id in trace.context_metadata.get('batch_message_ids', []):
         coverage = trace.context_metadata.get('full_history', {}).get('ranges', {})
         if coverage.get(str(message.id), 0) >= len(plain_text(message.content)):
@@ -357,7 +357,7 @@ def reconcile_promises(facts, raw, trace, cfg):
                 promise = originals.get(basis['promise_message_id'])
                 if ref.get('role') != 'fulfillment' or not message or not promise or message.timestamp < promise.timestamp:
                     continue
-                quote = _source_quote(ref['quote'], message.content)
+                quote = _source_quote(ref['quote'], read_content(message, trace))
                 action = delivery_action(quote, draft['commitment_text'])
                 if EXPLICIT_FUTURE.search(action) or re.search(r'не\s+(?:готов|отправ|переда|выдан|выполн)|не\s+удалось|частично', action, re.I):
                     continue
@@ -384,7 +384,7 @@ def reconcile_promises(facts, raw, trace, cfg):
                 promise = originals.get(draft['promise_message_id'])
                 if not message or not promise or message.timestamp<promise.timestamp or not isinstance(item.get('quote'),str) or not item['quote'].strip():
                     raise ProviderUnavailable('commitment_resolution_invalid')
-                quote = _source_quote(item['quote'],message.content)
+                quote = _source_quote(item['quote'], read_content(message, trace))
                 # A repeated future promise cannot prove a completed action.
                 if EXPLICIT_FUTURE.search(quote):
                     continue

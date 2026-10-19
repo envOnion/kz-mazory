@@ -13,6 +13,7 @@ from .plain_text import plain_text
 from .providers import ProviderUnavailable
 
 POLICY = 'thread-context-v2'
+CANONICAL_EVIDENCE_POLICY = 'canonical-plain-v1'
 QUOTE_REFERENCE_INSTRUCTION = ' В previous_result quote_ref — JSON Pointer на полную буквальную строку content в этом же входе. Сначала восстанови quote по этому указателю; raw_message_id и role не меняй. В ответе нужны обычные quote, без quote_ref.'
 
 
@@ -482,6 +483,8 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state, *, _probe=False
         'included_period': [selected[0]['order_time'], selected[-1]['order_time']] if selected else [None, None],
         'external_import_completeness': 'unknown', 'relevance_selected': False,
     }
+    if not exact:
+        metadata['evidence_text_policy'] = CANONICAL_EVIDENCE_POLICY
     metadata['token_breakdown'] = {'instructions_target_catalog_state': fixed, 'history': input_tokens-fixed}
     if len(parts) > 1:
         metadata['full_history']['reconciliation_page'] = part_index + 1

@@ -8,7 +8,7 @@ from .providers import ProviderUnavailable
 from .evidence_scope import delivery_action
 
 
-def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, autonomous=None):
+def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, autonomous=None, body_text=None):
     from .models import AISettings
     if autonomous is None:
         autonomous = AISettings.get_active().autonomous_enabled or bool(raw.config_id and raw.config.thread_routing_enabled)
@@ -27,7 +27,7 @@ def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, aut
         ref["raw_message_id"] == raw.id and ref["role"] == "promise" for ref in refs
     ):
         raise ProviderUnavailable("commitment_promise_evidence_unavailable")
-    body = EXPORT_HEADER.sub("", raw.content).strip().casefold().rstrip(".! ")
+    body = EXPORT_HEADER.sub("", raw.content if body_text is None else body_text).strip().casefold().rstrip(".! ")
     short_reply = body in {
         "тогда завтра",
         "принято",

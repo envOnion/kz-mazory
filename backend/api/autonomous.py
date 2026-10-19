@@ -79,7 +79,8 @@ def _project_label_quoted(label, text):
 
 
 def _evidence(candidate):
-    from .pipeline import _source_quote
+    from .pipeline import _source_quote_matcher
+    quote_match = _source_quote_matcher(candidate.trace)
     raw = candidate.trace.raw_message
     if not raw or raw.source not in ("waha", "whatsapp", "whatsapp_export", "chat"):
         raise Deferred("unsupported_source", "Для автоматического учета нужен источник WhatsApp.")
@@ -98,7 +99,7 @@ def _evidence(candidate):
     if ids != set(scope.filter(pk__in=ids).exclude(processing_state__in=("deleted", "superseded", "clarification_reply")).values_list("pk", flat=True)):
         raise Deferred("source_unavailable", "Доказательства недоступны в текущем источнике.")
     for ref in refs:
-        if _source_quote(ref.quote, ref.raw_message.content) != ref.quote:
+        if quote_match(ref.quote, ref.raw_message.content) != ref.quote:
             raise Deferred("unsupported_quote", "Цитата не соответствует сохраненному оригиналу.", True)
         if "\ufffd" in ref.quote:
             raise Deferred("damaged_source", "Поврежденная кодировка в доказательстве.")

@@ -50,12 +50,34 @@ def _source_quote(quote, content):
     return match.group()
 
 
-def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False, target_ids=None):
+def _source_content_for_trace(content, trace=None):
+    """Use the same source projection as the full-history request."""
+    if trace is not None and trace.context_metadata.get("full_history"):
+        from .full_history import CANONICAL_EVIDENCE_POLICY
+        from .qwen_profile import MODEL
+        if (trace.context_metadata.get("evidence_text_policy") == CANONICAL_EVIDENCE_POLICY
+                and trace.model_version != MODEL):
+            from .plain_text import plain_text
+            return plain_text(content)
+    return content
+
+
+def _source_quote_matcher(trace=None):
+    if trace is None or not trace.context_metadata.get("full_history"):
+        return _source_quote
+    from .qwen_profile import MODEL
+    if trace.model_version == MODEL:
+        return _source_quote
+    return lambda quote, content: _source_quote(quote, _source_content_for_trace(content, trace))
+
+
+def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False, target_ids=None, trace=None):
     # A missing optional value and an explicit null both mean unknown. Required
     # values, enums and evidence still go through the full serializer validation.
     normalized = normalize_fact_fields(result['facts'])
     schema = FactSchema(data=normalized, many=True)
     schema.is_valid(raise_exception=True)
+    quote_match = _source_quote_matcher(trace)
     accepted_facts = []
     for index, fact in enumerate(schema.validated_data):
         if fact['fact_type']=='project' and artifact_subject(fact['object_name']):
@@ -111,7 +133,7 @@ def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False, targ
         evidence_raw = raw
         if threaded:
             evidence_raw = source_scope(raw).get(pk=fact["evidence_message_id"], id__lte=snapshot_id)
-        quote = _source_quote(fact["evidence"], evidence_raw.content)
+        quote = quote_match(fact["evidence"], evidence_raw.content)
         if quote != fact["evidence"] and diagnostics is not None:
             diagnostics.setdefault("source_whitespace_restored", []).append(index)
         fact["evidence"] = quote
@@ -126,9 +148,11 @@ def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False, targ
             promise_raw = source_scope(raw).filter(pk=fact.get("promise_message_id"), id__lte=snapshot_id).first() if threaded else raw
             if not promise_raw:
                 raise ProviderUnavailable("commitment_promise_evidence_unavailable")
-            if not validate_commitment(fact, promise_raw, snapshot_id or raw.id, _source_quote, threaded=threaded):
+            if not validate_commitment(fact, promise_raw, snapshot_id or raw.id, quote_match, threaded=threaded, body_text=_source_content_for_trace(promise_raw.content, trace)):
                 continue
-        is_receipt_ack = lambda message: bool(re.search(r"\b(?:принято|принял|подтверждаю|верно)\b", message.content[:120], re.I)) and not re.search(r"\b(?:нов\w+|ещ[её]|втор\w+|дополнительн\w+)\b", message.content[:120], re.I)
+        def is_receipt_ack(message):
+            text = _source_content_for_trace(message.content, trace)[:120]
+            return bool(re.search(r"\b(?:принято|принял|подтверждаю|верно)\b", text, re.I)) and not re.search(r"\b(?:нов\w+|ещ[её]|втор\w+|дополнительн\w+)\b", text, re.I)
         duplicate = next((previous for previous in accepted_facts if previous['fact_type']==fact['fact_type'] and (
             previous['thread_key']==fact['thread_key'] and same_commitment_origin(previous,fact) if fact['fact_type']=='commitment' else
             (fact_identity(previous)==fact_identity(fact) or (
@@ -378,11 +402,11 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         validate_evidence(result, raw, trace)
         themes = prepare_themes(result, raw, trace)
         targets = set(trace.context_metadata.get('batch_message_ids') or [raw.id])
-        facts = _facts(ready_facts(result, themes), raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True, target_ids=targets)
+        facts = _facts(ready_facts(result, themes), raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True, target_ids=targets, trace=trace)
         if not defer_result:
             from .focused_extraction import reconcile_promises
             facts = reconcile_promises(facts,raw,trace,cfg)
-            facts = _facts({'facts':json_value(facts)},raw,diagnostics,trace.context_metadata['snapshot_max_id'],threaded=True,target_ids=targets)
+            facts = _facts({'facts':json_value(facts)},raw,diagnostics,trace.context_metadata['snapshot_max_id'],threaded=True,target_ids=targets,trace=trace)
         if defer_result:
             trace.context_metadata.update(request_state="segment_validated", segment_result=result,
                                           segment_usage=usage, segment_diagnostics=diagnostics, segment_range=segment_range)
@@ -395,7 +419,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             return (result, usage, diagnostics)
         from .commitment_resolution import resolve_remaining
         resolved = resolve_remaining(facts, raw, cfg, trace)
-        facts = _facts({"facts": json_value(resolved)}, raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True, target_ids=targets)
+        facts = _facts({"facts": json_value(resolved)}, raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True, target_ids=targets, trace=trace)
         if packet:
             # Only add closing sources after their quote, source and chronology
             # have passed the same commitment validation as the main request.
