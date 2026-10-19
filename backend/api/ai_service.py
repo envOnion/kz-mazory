@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from decimal import Decimal, InvalidOperation
 
 import requests
+from urllib3.exceptions import HTTPError as ResponseTransportError, ReadTimeoutError
 from django.conf import settings
 from django.db import DatabaseError
 from django.db.models import Sum
@@ -51,6 +52,28 @@ def embedding_chunks(text, max_bytes=480):
         size += width
     chunks.append("".join(current))
     return chunks
+
+
+def read_provider_response(response, deadline, read_timeout, timeout_code):
+    """Keep response heartbeats from extending the caller's total budget."""
+    if deadline is None:
+        return response.content
+    body = bytearray()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ProviderUnavailable(timeout_code)
+        connection = response.raw.connection
+        if connection is not None and connection.sock is not None:
+            connection.sock.settimeout(min(read_timeout, remaining))
+        # read1 returns the currently available bytes instead of waiting to
+        # fill a buffer while a provider sends small keepalive chunks.
+        chunk = response.raw.read1(65536, decode_content=True)
+        if not chunk:
+            if time.monotonic() >= deadline:
+                raise ProviderUnavailable(timeout_code)
+            return bytes(body)
+        body.extend(chunk)
 
 analytics_deadline = ContextVar("analytics_deadline", default=None)
 usage_event_id = ContextVar("usage_event_id", default=None)
@@ -292,11 +315,20 @@ class AIService:
                 headers=headers,
                 timeout=timeout,
                 allow_redirects=False,
+                stream=deadline is not None,
             )
+            try:
+                response_body = read_provider_response(
+                    response, deadline,
+                    timeout[1] if isinstance(timeout, tuple) else timeout,
+                    "provider_timeout" if extraction_limit else "analytics_timeout",
+                )
+            finally:
+                response.close()
             if deadline is not None and time.monotonic() >= deadline:
                 raise ProviderUnavailable("provider_timeout" if extraction_limit else "analytics_timeout")
             if response.status_code in (400, 413, 422):
-                detail = response.text.lower()
+                detail = response_body.decode("utf-8", errors="replace").lower()
                 if any(
                     term in detail
                     for term in (
@@ -312,7 +344,7 @@ class AIService:
                     raise ProviderUnavailable(error)
             retry_after = retry_after_seconds(response.headers.get("Retry-After"))
             try:
-                data = response.json()
+                data = json.loads(response_body)
             except ValueError:
                 if response.status_code < 400:
                     raise ProviderUnavailable("provider_invalid_response") from None
@@ -333,10 +365,10 @@ class AIService:
         except ProviderUnavailable as exc:
             error = str(exc)
             raise
-        except requests.Timeout:
+        except (requests.Timeout, ReadTimeoutError):
             error = "provider_timeout"
             raise ProviderUnavailable(error) from None
-        except requests.ConnectionError:
+        except (requests.ConnectionError, ResponseTransportError):
             error = "provider_connection_failed"
             raise ProviderUnavailable(error) from None
         except (requests.RequestException, ValueError, KeyError):
