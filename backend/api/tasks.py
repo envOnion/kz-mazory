@@ -1315,3 +1315,9 @@ def verify_qwen_provider():
     """Maintenance canary: provider/usage rows only, no business or CRM writes."""
     from .provider_canary import run
     return run()
+
+
+def check_model_connection(operation_id):
+    """Q2 entrypoint: no provider calls from the HTTP settings handlers."""
+    from .ai_connection_checks import check_connection
+    check_connection(operation_id)

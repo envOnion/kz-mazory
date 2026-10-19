@@ -657,7 +657,7 @@ def reconcile(limit=100):
     failed_ids = set(OutboxEvent.objects.filter(
         event_type__in=ANALYSIS_EVENTS, payload__raw_id__in=[raw.id for raw in raw_rows], state="failed"
     ).values_list("payload__raw_id", flat=True))
-    routing_enabled = cfg.thread_routing_mode != "llm"
+    routing_enabled = cfg.decision_enabled
     for raw in raw_rows:
         if raw.id not in active_ids and raw.id not in failed_ids:
             event_type = "route_message" if raw.config_id and raw.config.thread_routing_enabled and routing_enabled else "extract_message"

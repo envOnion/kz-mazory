@@ -1,5 +1,6 @@
 from django.urls import path
 from .health import health
+from .ai_settings_api import SettingsModelView, SettingsModelCheckView
 from .analytics.dialogue import ConversationList, ConversationDetail, TurnList, ArtifactDetail
 from .thread_views import ThreadListView, ThreadDetailView, ThreadBackfillView, ThreadSubscribeView, ThreadFlushView
 from .platform_views import CrmCatalogSyncView, ParticipantsSyncView
@@ -159,6 +160,8 @@ urlpatterns = [
     path("settings/diagnostics/", SettingsDiagnosticsView.as_view()),
     path("settings/ai/", SettingsAIView.as_view()),
     path("settings/ai/<int:pk>/", SettingsAIDetailView.as_view()),
+    path("settings/ai/<int:pk>/models/<str:role>/", SettingsModelView.as_view()),
+    path("settings/ai/<int:pk>/models/<str:role>/check/", SettingsModelCheckView.as_view()),
     path("settings/bitrix/", SettingsBitrixView.as_view()),
     # Операционные разделы новой оболочки.
     path("analytics/operations/", AnalyticsOperationsView.as_view()),

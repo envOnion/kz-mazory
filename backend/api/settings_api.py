@@ -23,6 +23,9 @@ from .models import (AISettings, AdminMFA, AuditEvent, BitrixSettings, Team,
 from .providers import ProviderUnavailable, checked_base_url
 
 SAFE_AI_FIELDS = (
+    'decision_enabled', 'decision_provider_url', 'decision_model_name', 'decision_api_format',
+    'decision_request_path', 'decision_timeout_seconds', 'decision_model_revision',
+    'decision_calibration_revision', 'decision_quality_confirmed', 'chat_model_profile',
     'name', 'thread_routing_mode', 'laya_match_threshold', 'laya_match_margin', 'routing_policy_version',
     'thread_extract_idle_seconds', 'thread_extract_max_wait_seconds',
     'thread_extract_batch_size', 'analysis_input_token_limit',
@@ -100,6 +103,7 @@ def schema_for(model, fields):
         kind = ('boolean' if isinstance(field, models.BooleanField) else
                 'integer' if isinstance(field, (models.IntegerField, models.ForeignKey)) else
                 'number' if isinstance(field, models.FloatField) else
+                'json' if isinstance(field, models.JSONField) else
                 'decimal' if isinstance(field, models.DecimalField) else
                 'text' if isinstance(field, models.TextField) else 'string')
         result.append({'name': name, 'label': LABELS.get(name, str(field.verbose_name)),
@@ -132,17 +136,35 @@ def update_model(request, cfg, fields):
     if isinstance(cfg, Team) and not 0 <= values.get('low_margin_percent',cfg.low_margin_percent) <= 100:
         raise ValidationError({'low_margin_percent':'Укажите процент от 0 до 100.'})
     if isinstance(cfg, AISettings):
-        for purpose in ('chat', 'embedding'):
+        for purpose in ('chat', 'embedding', 'decision'):
             key = f'{purpose}_provider_url'
-            if key in values:
+            if key in values and values[key]:
                 try:
                     values[key] = checked_base_url(values[key])
                 except ProviderUnavailable:
                     raise ValidationError({key: 'Нужен HTTPS URL без логина, параметров и нестандартного порта.'}) from None
             host_changed = key in values and urlsplit(values[key]).hostname != urlsplit(getattr(cfg, key)).hostname
-            format_changed = purpose == 'chat' and values.get('chat_api_format', cfg.chat_api_format) != cfg.chat_api_format
+            format_field = 'chat_api_format' if purpose == 'chat' else 'decision_api_format' if purpose == 'decision' else None
+            format_changed = bool(format_field and values.get(format_field, getattr(cfg, format_field)) != getattr(cfg, format_field))
             if (host_changed or format_changed) and getattr(cfg, f'has_{purpose}_api_key'):
                 raise ValidationError({key: 'Перед сменой хоста или протокола явно удалите сохранённый ключ.'})
+        from .decision_models import QUALITY_FIELDS
+        if any(name in values and values[name] != getattr(cfg, name) for name in QUALITY_FIELDS) and values.get('decision_quality_confirmed') is not True:
+            values['decision_quality_confirmed'] = False
+        if values.get('decision_enabled') and values.get('thread_routing_mode', cfg.thread_routing_mode) == 'llm':
+            values['thread_routing_mode'] = 'decision'
+        if 'chat_model_profile' in values:
+            from .ai_model_profiles import validate_profile
+            try:
+                validate_profile(values['chat_model_profile'])
+            except ModelValidationError as exc:
+                raise ValidationError(exc.message_dict) from None
+            profile = values['chat_model_profile']
+            for field in ('context_window_tokens', 'tokenizer_id', 'tokenizer_revision'):
+                if field in profile:
+                    if field in values and values[field] != profile[field]:
+                        raise ValidationError({field: 'Значение не совпадает с импортируемым профилем.'})
+                    values[field] = profile[field]
         if not 0 <= values.get('chat_temperature', cfg.chat_temperature) <= 2:
             raise ValidationError({'chat_temperature': 'Допустимо от 0 до 2.'})
         if values.get('embedding_dimension', cfg.embedding_dimension) < 1:
@@ -160,6 +182,8 @@ def update_model(request, cfg, fields):
     except ModelValidationError as exc:
         raise ValidationError(getattr(exc, 'message_dict', {'error': exc.messages})) from None
     cfg.save()
+    if isinstance(cfg, AISettings) and values.get('is_active') is True:
+        AISettings.objects.exclude(pk=cfg.pk).filter(is_active=True).update(is_active=False)
     audit(request, 'settings.update', cfg, values)
     return cfg
 
@@ -208,7 +232,7 @@ class SettingsAIView(APIView):
         cfgs = AISettings.objects.order_by('-is_active', 'id')
         rows = serializer_for(AISettings, SAFE_AI_FIELDS)(cfgs, many=True).data
         for row, cfg in zip(rows, cfgs):
-            row['keys'] = {'chat': cfg.has_chat_api_key, 'embedding': cfg.has_embedding_api_key}
+            row['keys'] = {'chat': cfg.has_chat_api_key, 'embedding': cfg.has_embedding_api_key, 'decision': cfg.has_decision_api_key}
             row['updated_at'] = cfg.updated_at.isoformat() if cfg.updated_at else None
         defaults = dict(serializer_for(AISettings, SAFE_AI_FIELDS)(AISettings(is_active=False)).data)
         defaults['id'] = 0
@@ -219,7 +243,7 @@ class SettingsAIView(APIView):
         require_integration(request, AISettings, write=True)
         if not request.user.has_perm('api.add_aisettings'):
             raise PermissionDenied('Нет права создавать конфигурации ИИ.')
-        cfg = update_model(request, AISettings(), SAFE_AI_FIELDS)
+        cfg = update_model(request, AISettings(is_active=False), SAFE_AI_FIELDS)
         return Response({'id': cfg.pk}, status=201)
 
 
@@ -243,7 +267,7 @@ class SettingsAIDetailView(APIView):
         if not isinstance(data, dict) or set(data) - {'key', 'value', 'clear'}:
             raise ValidationError({'error': 'Неверные параметры ключа.'})
         key = data.get('key')
-        if key not in ('chat', 'embedding') or ('clear' in data and type(data['clear']) is not bool):
+        if key not in ('chat', 'embedding', 'decision') or ('clear' in data and type(data['clear']) is not bool):
             raise ValidationError({'error': 'Укажите тип ключа и действие.'})
         if data.get('clear') is True:
             if 'value' in data:
@@ -257,9 +281,13 @@ class SettingsAIDetailView(APIView):
                 getattr(cfg, f'set_{key}_api_key')(value.strip())
             except CredentialError:
                 raise ValidationError({'error': 'Шифрование ключей недоступно.'}) from None
-        cfg.save(update_fields=[f'{key}_api_key', f'{key}_api_key_encrypted', 'updated_at'])
+        changed_fields = [f'{key}_api_key', f'{key}_api_key_encrypted', 'updated_at']
+        if key == 'decision':
+            cfg.decision_quality_confirmed = False
+            changed_fields.append('decision_quality_confirmed')
+        cfg.save(update_fields=changed_fields)
         audit(request, 'settings.ai.key', cfg, [f'{key}_api_key'])
-        return Response({'id': cfg.id, 'chat': cfg.has_chat_api_key, 'embedding': cfg.has_embedding_api_key})
+        return Response({'id': cfg.id, 'chat': cfg.has_chat_api_key, 'embedding': cfg.has_embedding_api_key, 'decision': cfg.has_decision_api_key})
 
 
 class SettingsWhatsAppView(APIView):

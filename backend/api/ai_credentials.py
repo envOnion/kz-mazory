@@ -12,7 +12,7 @@ from django.conf import settings
 from django.views.decorators.debug import sensitive_variables
 
 CIPHERTEXT_PREFIX = "fernet:v1:"
-VALID_PURPOSES = frozenset({"chat", "embedding"})
+VALID_PURPOSES = frozenset({"chat", "embedding", "decision"})
 OPENAI_COMPATIBLE = "openai_compatible"
 ANTHROPIC_MESSAGES = "anthropic_messages"
 VALID_CHAT_FORMATS = frozenset({OPENAI_COMPATIBLE, ANTHROPIC_MESSAGES})
@@ -46,6 +46,8 @@ def _valid_purpose(purpose):
 
 
 def _valid_api_format(purpose, api_format):
+    if purpose == "decision":
+        return api_format in {"systemone", OPENAI_COMPATIBLE}
     if purpose == "embedding":
         return api_format == OPENAI_COMPATIBLE
     return purpose == "chat" and api_format in VALID_CHAT_FORMATS

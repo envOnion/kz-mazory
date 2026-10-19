@@ -8,6 +8,7 @@ import { currentUser } from '../composables/session'
 import AccessGrants from '../shell/AccessGrants.vue'
 import SettingsForm from '../shell/SettingsForm.vue'
 import ConnectionSecretForm from '../shell/ConnectionSecretForm.vue'
+import AiModelSettings from '../components/settings/AiModelSettings.vue'
 import DiagnosticsPanel from '../shell/DiagnosticsPanel.vue'
 import WorkspaceView from '../components/WorkspaceView.vue'
 import { ErrorState, Skeleton, EmptyState, StatusBadge, formatTime } from '../shell/bits'
@@ -131,14 +132,15 @@ onBeforeUnmount(() => { generation++; if (timer) clearInterval(timer) })
         <EmptyState v-if="!sections.length" title="Настройки интеграций недоступны" text="Личные настройки и активные сессии доступны в профиле." />
         <template v-if="data">
           <button v-if="(active === 'ai' && access?.can_create_ai) || (active === 'whatsapp' && access?.can_create_whatsapp) || (active === 'bitrix' && access?.can_create_bitrix && !data.items.length)" class="mx-btn" @click="creating = !creating">{{ creating ? 'Отменить создание' : 'Создать конфигурацию' }}</button>
-          <article v-if="creating && data.defaults" class="mx-card p-4 space-y-3"><h2 class="font-semibold">Новая конфигурация</h2><SettingsForm :fields="data.fields" :row="data.defaults" :endpoint="`/settings/${active}/`" method="POST" :teams="access?.teams" @saved="load" /></article>
+          <article v-if="creating && data.defaults" class="mx-card p-4 space-y-3"><h2 class="font-semibold">Новая конфигурация</h2><SettingsForm :fields="active === 'ai' ? data.fields.filter(field => field.name === 'name') : data.fields" :row="data.defaults" :endpoint="`/settings/${active}/`" method="POST" :teams="access?.teams" @saved="load" /></article>
           <EmptyState v-if="!data.items.length" title="Конфигураций нет" text="Для этого раздела ещё не создана конфигурация." />
-          <article v-for="row in data.items" :key="row.id" class="mx-card p-4 space-y-4">
+          <template v-for="row in data.items" :key="row.id">
+          <AiModelSettings v-if="active === 'ai'" :row="row" :fields="data.fields" :defaults="data.defaults" :readonly="data.can_change === false" />
+          <article v-else class="mx-card p-4 space-y-4">
             <div class="flex gap-2 items-center flex-wrap"><h2 class="font-semibold text-base">{{ row.name }}</h2><StatusBadge v-if="typeof row.status === 'string'" :state="row.status" /><span v-if="row.connection_configured !== undefined" class="mx-chip">Подключение: {{ row.connection_configured ? 'Настроено' : 'Не настроено' }}</span></div>
             <SettingsForm :fields="data.fields" :row="row" :endpoint="endpoint(row)" :readonly="data.can_change === false" :teams="access?.teams" @saved="load" />
             <p v-if="typeof row.updated_at === 'string'" class="mx-muted text-xs">Конфигурация обновлена: {{ formatTime(row.updated_at) }}</p>
             <div v-if="row.keys" class="mx-muted text-sm">Ключ диалога: {{ row.keys.chat ? 'Настроено' : 'Не настроено' }} · Ключ векторизации: {{ row.keys.embedding ? 'Настроено' : 'Не настроено' }}</div>
-            <template v-if="active === 'ai' && row.keys"><ConnectionSecretForm v-for="key in (['chat','embedding'] as const)" :key="key" :endpoint="endpoint(row)" :kind="key" :label="key === 'chat' ? 'Ключ диалога' : 'Ключ векторизации'" :configured="row.keys[key]" :readonly="data.can_change === false" @saved="load" /></template>
             <template v-if="active === 'bitrix'"><ConnectionSecretForm v-for="key in ['webhook_url','inbound_token']" :key="key" endpoint="/settings/bitrix/" :kind="key" :label="key === 'webhook_url' ? 'REST webhook Bitrix24' : 'Токен входящего webhook'" :configured="Boolean(key === 'webhook_url' ? row.connection_configured : row.inbound_configured)" :readonly="data.can_change === false" @saved="load" /></template>
             <template v-if="active === 'whatsapp'">
               <div class="flex gap-2 flex-wrap"><button v-for="command in [{id:'status',name:'Обновить статус'},{id:'qr',name:'Запросить QR'},{id:'start',name:'Запустить сессию'},{id:'restart',name:'Перезапустить'},{id:'groups',name:'Обновить группы'}]" :key="command.id" class="mx-btn" :disabled="busy" @click="control(row,command.id)">{{ command.name }}</button><button class="mx-btn" @click="openHistory(row.id)">История и импорт</button></div>
@@ -155,6 +157,7 @@ onBeforeUnmount(() => { generation++; if (timer) clearInterval(timer) })
             <p v-if="typeof row.last_sync_at === 'string'" class="mx-muted text-xs">Последняя загрузка CRM: {{ formatTime(row.last_sync_at) }}</p>
             <p v-if="typeof row.last_hourly_sync_at === 'string'" class="mx-muted text-xs">Последний запуск синхронизации: {{ formatTime(row.last_hourly_sync_at) }}</p>
           </article>
+          </template>
           <div v-if="active === 'bitrix'" class="mx-card p-4 space-y-3"><h2 class="font-semibold">Обновить каталог CRM</h2><button v-for="team in access?.teams" :key="team.id" class="mx-btn mr-2" :disabled="busy" @click="action(() => post('/directory/crm-sync/', {team_id:team.id}), 'Синхронизация поставлена в очередь.')">Синхронизировать · {{ team.name }}</button></div>
         </template>
         <article v-if="history && selectedConfig" class="mx-card p-4 space-y-4"><h2 class="font-semibold">История WhatsApp</h2>

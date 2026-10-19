@@ -386,6 +386,14 @@ def context_runtime(cfg):
         }
     if api_format != "openai_compatible":
         raise ProviderUnavailable("context_provider_unsupported")
+    profile = getattr(cfg, "chat_model_profile", {})
+    if profile.get("tokenizer") and api_format == "openai_compatible":
+        from .ai_model_profiles import profile_counter
+        return profile_counter(json.dumps(profile, ensure_ascii=False, allow_nan=False)), {
+            "tag": "uploaded_profile_v1", "transport": "openai_profile", "context_length": cfg.context_window_tokens,
+            "supported_parameters": ["max_tokens", "reasoning"], "api_format": api_format,
+            "effective_provider_url": cfg.chat_provider_url.rstrip("/"),
+        }
     if cfg.chat_model_name == "openrouter/free":
         from .free_router import runtime
         return runtime(cfg)
@@ -487,6 +495,10 @@ def extraction_payload(
             if cfg.analysis_repair_reason in {'fact_thread_evidence_conflict', 'fact_thread_evidence_missing'}:
                 system_prompt += '\nКаждый evidence_message_id, promise_message_id и raw_message_id из evidence_messages факта должен явно входить в messages его thread_key. Добавляй источник в тему только при доказанной связи; иначе не извлекай этот факт. Источники и цитаты не изменяй.'
             system_prompt += '\nДля commitment обязательны promise_message_id и evidence_messages с role=promise, ID исходного обещания и его точной цитатой. fulfilled требует fulfillment_message_id и отдельную цитату с role=fulfillment; cancelled требует отдельную цитату отмены с role=cancellation, позже обещания. Готовый и отправленный результат — исполнение, не отмена. ID события, статусы и роли доказательств должны соответствовать друг другу. Не выдавай отмену без источника отмены.'
+    from .models import AISettings
+    configured_prompt = cfg.system_prompt_worker.strip()
+    if configured_prompt and configured_prompt != AISettings._meta.get_field("system_prompt_worker").get_default().strip():
+        system_prompt = configured_prompt + "\nОбязательные правила схемы и доказательств Mazory:\n" + system_prompt
     if getattr(cfg, "autonomous_enabled", False):
         system_prompt += "\nАвтономный режим: точное время дедлайна не выдумывай. Только день/утро означает deadline_precision=date; искусственные 09:00/18:00 не являются сообщенным временем. Сервер задает техническую границу дня отдельно от точности источника."
         system_prompt += "\nСвязь с объектом доказывается цитатами, а не наличием ID в known_projects/known_threads. Если название находится в более раннем сообщении, добавь буквальную цитату этого сообщения в evidence_messages с role=identity. Пустое object_name не подтверждает предложенный project. Не выбирай между активным и архивным одноименным объектом только по статусу активности."
@@ -521,7 +533,7 @@ def extraction_payload(
         }
     payload = {
         "model": cfg.chat_model_name,
-        "temperature": 0,
+        "temperature": cfg.chat_temperature,
         "max_tokens": cfg.max_completion_tokens,
         "reasoning": {"enabled": False},
         "provider": {
@@ -535,6 +547,9 @@ def extraction_payload(
             {"role": "user", "content": user_content},
         ],
     }
+    if endpoint.get("transport") == "openai_profile":
+        for key in ("provider", "plugins", "reasoning"):
+            payload.pop(key, None)
     if endpoint.get("transport") in ("ollama", "ollama_native"):
         payload.pop("provider")
         payload.pop("plugins")
