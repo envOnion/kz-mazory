@@ -49,6 +49,7 @@ ERRORS = {
     "provider_server_error": "Временная ошибка сервера AI.",
     "provider_invalid_response": "Провайдер AI вернул ответ в некорректном формате.",
     "provider_in_flight_budget": "Провайдер временно ограничил одновременные запросы.",
+    "provider_circuit_open": "После ошибок провайдера действует защитная пауза; запрос ожидает отправки.",
     "provider_authentication_failed": "Провайдер AI отклонил ключ доступа.",
     "provider_access_denied": "Провайдер AI запретил запрос.",
     "provider_insufficient_credits": "Недостаточно средств у провайдера AI.",

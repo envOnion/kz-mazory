@@ -734,8 +734,11 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         if usage:
             trace.context_metadata["input_tokens_actual"] = usage.input_tokens
         diagnostics = trace.context_metadata.setdefault("response_diagnostics", {})
+        # Admission provenance belongs to this error, never an earlier retry.
+        current_error_diagnostics = dict(exc.diagnostics) if isinstance(exc, ProviderUnavailable) else {}
+        diagnostics.pop('request_admission_denied', None)
         if isinstance(exc, ProviderUnavailable):
-            diagnostics.update(exc.diagnostics)
+            diagnostics.update(current_error_diagnostics)
         elif isinstance(exc, ValidationError):
             diagnostics["field_errors"] = json_value(exc.get_full_details())
         trace.result_summary = (
