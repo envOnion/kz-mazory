@@ -365,7 +365,8 @@ def run_outbox(pk):
     analysis_timeout = 240
     if event.event_type in ANALYSIS_EVENTS:
         from .qwen_profile import enabled as qwen_enabled
-        if qwen_enabled(AISettings.get_active()):
+        active = AISettings.get_active()
+        if active.chat_model_name == "openrouter/free" or qwen_enabled(active):
             analysis_timeout = min(settings.AI_REQUEST_TIMEOUT, 1200)
     deadline_token = extraction_deadline.set(time.monotonic() + analysis_timeout if event.event_type in ANALYSIS_EVENTS else None)
     try:

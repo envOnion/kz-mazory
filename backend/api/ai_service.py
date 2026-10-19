@@ -268,7 +268,7 @@ class AIService:
         deadline = extraction_limit or analytics_deadline.get()
         if extraction_limit and isinstance(timeout, tuple):
             from .qwen_profile import MODEL
-            request_limit = min(settings.AI_REQUEST_TIMEOUT, 1200) if payload.get('model') == MODEL else 180
+            request_limit = min(settings.AI_REQUEST_TIMEOUT, 1200) if payload.get('model') in (MODEL, "openrouter/free") else 180
             timeout = (min(timeout[0], 10), min(timeout[1], request_limit))
         if deadline is not None:
             remaining = deadline - time.monotonic()
