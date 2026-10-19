@@ -471,6 +471,45 @@ def validate_evidence(result, raw, trace):
         theme['messages'] = list(links.values())
 
 
+def continuation_input_limit(trace, state, plan):
+    """Recover a scheduling cap only after a complete, low-output page set."""
+    metadata = trace.context_metadata
+    cap = metadata.get('analysis_chunk_input_limit')
+    available = metadata.get('effective_input_budget')
+    if (metadata.get('token_counter') != 'router-utf8-bound-v1'
+            or type(cap) is not int or cap <= 0
+            or type(available) is not int or available <= cap):
+        return cap
+    if plan and plan['index'] + 1 != len(plan['parts']):
+        return cap
+    previous_count = plan['index'] if plan else 0
+    previous_ids = state.get('stage_trace_ids', [])[-previous_count:] if previous_count else []
+    if len(previous_ids) != previous_count:
+        return cap
+    previous = list(MessageProcessingTrace.objects.filter(pk__in=previous_ids))
+    if len(previous) != previous_count:
+        return cap
+    for page in [*previous, trace]:
+        item = page.context_metadata
+        if (item.get('request_state') != 'segment_validated'
+                or item.get('full_history', {}).get('ranges') != metadata['full_history']['ranges']
+                or item.get('full_history', {}).get('source_hash') != metadata['full_history']['source_hash']):
+            return cap
+        reserve = item.get('completion_reserve_tokens')
+        if type(reserve) is not int or reserve <= 0:
+            return cap
+        responses = [(item.get('segment_usage', {}), item.get('segment_diagnostics', {}))]
+        responses.extend((value.get('usage', {}), value.get('diagnostics', {}))
+                         for value in item.get('focused_extraction', {}).values())
+        for usage, diagnostics in responses:
+            output = usage.get('completion_tokens', usage.get('output_tokens'))
+            characters = diagnostics.get('response_characters')
+            if (type(output) is not int or not 0 < output <= reserve // 2
+                    or type(characters) is not int or characters <= 0):
+                return cap
+    return min(available, cap + max(512, cap // 4))
+
+
 def extract(payload):
     from .pipeline import extract_message
     from .processing_attempts import reserve_attempt
@@ -525,6 +564,7 @@ def extract(payload):
         raw = RawMessage.objects.select_for_update().get(pk=payload['raw_id'])
         following = reserve_attempt(raw, f'{current.deduplication_key}:full-stage:{len(stages)}')
         following.context_metadata.update({k: trace.context_metadata[k] for k in ['analysis_policy', 'analysis_limits', 'snapshot_max_id', 'full_history_policy', 'analysis_chunk_input_limit']})
+        following.context_metadata['analysis_chunk_input_limit'] = continuation_input_limit(trace, state, plan)
         if trace.context_metadata.get('required_thread_keys'):
             following.context_metadata['required_thread_keys'] = trace.context_metadata['required_thread_keys']
         if trace.context_metadata.get('replace_unsent'):
