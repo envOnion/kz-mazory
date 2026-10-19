@@ -10,6 +10,17 @@ from .message_time import source_metadata
 from .providers import ProviderUnavailable
 from .full_history import budget
 
+
+def check_focused_budget(payload, counter, cfg, operation, context_ids):
+    count = counter.count_payload(payload)
+    available = budget(cfg)
+    if count > available:
+        raise ProviderUnavailable('focused_context_budget_exceeded', diagnostics={
+            'focused_operation': operation, 'input_tokens': count,
+            'available_input_tokens': available, 'focused_context_count': len(context_ids),
+            'focused_context_ids': list(context_ids),
+        })
+
 # This selects work for the LLM, and never supplies an action, actor or deadline.
 EXPLICIT_FUTURE = re.compile(r"\b(?:скину|отправлю|подготовлю|сделаю|закончу|вышлю|предоставлю|обещаю|жіберемін|дайындаймын)\b|\b(?:завтра|послезавтра)\s+будет\b", re.I)
 PROJECT_SUBJECT = re.compile(r"договор|контракт|мощност|МВт|коммерческ|\bКП\b|шарт|постав\w*|монтаж", re.I)
@@ -176,8 +187,7 @@ def recover(result, raw, trace, cfg):
         if '_ollama_num_ctx' in payload:
             from .extraction_schema import extraction_schema
             payload['_ollama_format'] = extraction_schema(inputs)
-        if counter.count_payload(payload) > budget(prepared):
-            raise ProviderUnavailable('context_budget_exceeded')
+        check_focused_budget(payload, counter, prepared, f'focused_fact_extraction:{kind}', [item.id for item in rows])
         cache_key = f'{target.id}:{kind}'
         saved = trace.context_metadata.setdefault('focused_extraction', {}).get(cache_key)
         digest = payload_hash(payload)
@@ -286,8 +296,7 @@ def reconcile_promises(facts, raw, trace, cfg):
         pair_row = {'type':'object','additionalProperties':False,'required':['pair_index','reason','same_promise'],'properties':{
             'pair_index':{'type':'integer','enum':list(range(len(comparisons)))},'reason':{'type':'string'},'same_promise':{'type':'boolean'}}}
         pair_payload['_ollama_format'] = {'type':'object','additionalProperties':False,'required':['facts'],'properties':{'facts':{'type':'array','minItems':len(comparisons),'maxItems':len(comparisons),'items':pair_row}}}
-        if counter.count_payload(pair_payload) > budget(prepared):
-            raise ProviderUnavailable('commitment_context_message_too_large')
+        check_focused_budget(pair_payload, counter, prepared, 'promise_identity', list(originals))
         pair_digest = payload_hash(pair_payload)
         saved_pairs = trace.context_metadata.get('promise_identity')
         if saved_pairs and saved_pairs['payload_sha256']==pair_digest:
@@ -330,8 +339,7 @@ def reconcile_promises(facts, raw, trace, cfg):
         'properties':{'assessment':{'type':'string'},'draft_index':{'type':'integer','enum':list(range(len(drafts)))},'basis_index':{'type':'integer','enum':list(range(len(bases)))},
         'commitment_status':{'type':'string','enum':['pending','fulfilled']},'evidence_messages':{'type':'array','items':ref}}}
     payload['_ollama_format'] = {'type':'object','additionalProperties':False,'required':['facts'],'properties':{'facts':{'type':'array','minItems':len(drafts),'maxItems':len(drafts),'items':row}}}
-    if counter.count_payload(payload) > budget(prepared):
-        raise ProviderUnavailable('commitment_context_message_too_large')
+    check_focused_budget(payload, counter, prepared, 'promise_reconciliation', list(originals))
     digest = payload_hash(payload)
     saved = trace.context_metadata.get('promise_reconciliation')
     if saved and saved['payload_sha256']==digest:
