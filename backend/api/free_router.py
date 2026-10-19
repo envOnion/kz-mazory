@@ -265,6 +265,16 @@ def request(payload, max_tokens):
             schema = extraction_schema(inputs if type(inputs.get("target_message_id")) is int else None)
             schema_name = EXTRACTION_SCHEMA_NAME
     if schema is not None:
+        if (schema_name == EXTRACTION_SCHEMA_NAME and inputs is not None):
+            from .quote_input_codec import POLICY, QuoteCodecError, project
+            if inputs.get('native_quote_policy') == POLICY:
+                try:
+                    inputs, schema = project(inputs, schema)
+                except QuoteCodecError:
+                    raise ProviderUnavailable('context_snapshot_mismatch') from None
+                result['messages'] = [dict(row) for row in result['messages']]
+                user = next(row for row in reversed(result['messages']) if row.get('role') == 'user')
+                user['content'] = json.dumps(inputs, ensure_ascii=False, separators=(',', ':'))
         result["response_format"] = {
             "type": "json_schema",
             "json_schema": {"name": schema_name, "strict": True, "schema": compact_schema(schema,

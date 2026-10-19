@@ -138,6 +138,9 @@ def recover(result, raw, trace, cfg):
         from .free_router import LITERAL_ENUM_POLICY
         if endpoint.get('transport') == 'openrouter_free' and trace.context_metadata.get('native_enum_policy') == LITERAL_ENUM_POLICY:
             inputs['native_enum_policy'] = LITERAL_ENUM_POLICY
+        from .quote_input_codec import POLICY as QUOTE_INPUT_POLICY
+        if endpoint.get('transport') == 'openrouter_free' and trace.context_metadata.get('native_quote_policy') == QUOTE_INPUT_POLICY:
+            inputs['native_quote_policy'] = QUOTE_INPUT_POLICY
         inputs['analysis_fact_types'] = [kind]
         inputs['analysis_operation'] = 'focused_fact_extraction'
         if kind == 'payment':

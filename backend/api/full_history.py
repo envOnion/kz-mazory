@@ -12,6 +12,7 @@ from .models import MessageProcessingTrace, OutboxEvent, RawMessage, HistoryAnal
 from .plain_text import plain_text
 from .providers import ProviderUnavailable
 from .free_router import LITERAL_ENUM_POLICY
+from .quote_input_codec import POLICY as QUOTE_INPUT_POLICY
 
 POLICY = 'thread-context-v2'
 CANONICAL_EVIDENCE_POLICY = 'canonical-plain-v1'
@@ -354,6 +355,7 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state, *, _probe=False
         value = json.loads(message['content'])
         if router:
             value['native_enum_policy'] = LITERAL_ENUM_POLICY
+            value['native_quote_policy'] = QUOTE_INPUT_POLICY
         if exact:
             value['target_original_complete'] = target_text == by_id[raw.id]['content']
         value['analysis_state'] = {'previous_result': prior, 'read_source_ids': previous_source_ids,
@@ -530,6 +532,7 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state, *, _probe=False
         metadata['evidence_text_policy'] = CANONICAL_EVIDENCE_POLICY
     if router:
         metadata['native_enum_policy'] = LITERAL_ENUM_POLICY
+        metadata['native_quote_policy'] = QUOTE_INPUT_POLICY
     metadata['token_breakdown'] = {'instructions_target_catalog_state': fixed, 'history': input_tokens-fixed}
     if len(parts) > 1:
         metadata['full_history']['reconciliation_page'] = part_index + 1
