@@ -63,6 +63,11 @@ def read_content(message, trace):
     from .qwen_profile import MODEL
     if trace.model_version == MODEL:
         return message.content
+    if message.id in trace.context_metadata.get('batch_message_ids', []):
+        from .plain_text import plain_text
+        coverage = trace.context_metadata.get('full_history', {}).get('ranges', {})
+        if coverage.get(str(message.id), 0) >= len(plain_text(message.content)):
+            return message.content
     for item in trace.earlier_messages_context:
         if item['raw_message_id'] == message.id and item.get('evidence_excerpt'):
             return item['content']

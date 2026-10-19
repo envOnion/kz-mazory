@@ -202,10 +202,16 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
     target_offset = ranges.get(str(raw.id), 0)
     target_done = target_offset >= len(target_text)
     if final or target_done:
-        if prior and counter.count_text(target_text) > chunk_limit // 3:
-            target_text = '\n'.join(ref['quote'] for fact in prior.get('facts', [])
-                                    for ref in fact.get('evidence_messages', []) if ref['raw_message_id'] == raw.id)
-            target_range = None
+        if prior and (endpoint.get('transport') == 'openrouter_free'
+                      or counter.count_text(target_text) > chunk_limit // 3):
+            # The original has already passed coverage validation. Keep its
+            # page's literal evidence and continuity state instead of repeating
+            # the complete target (and its quote enum) on every router call.
+            # Originals remain available to evidence checks and focused passes.
+            excerpt = '\n'.join(ref['quote'] for fact in prior.get('facts', [])
+                                for ref in fact.get('evidence_messages', []) if ref['raw_message_id'] == raw.id)
+            if excerpt or endpoint.get('transport') != 'openrouter_free':
+                target_text, target_range = excerpt, None
     elif counter.count_text(target_text) > chunk_limit // 3:
         end = min(len(target_text), target_offset + max(256, chunk_limit))
         while end > target_offset + 1 and counter.count_text(target_text[target_offset:end]) > chunk_limit // 3:
@@ -215,6 +221,15 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state):
         target_range = page['target_range']
         target_text = by_id[raw.id]['content'][target_range[0]:target_range[1]]
     target_rows = [by_id[pk] for pk in targets if pk != raw.id]
+    if endpoint.get('transport') == 'openrouter_free' and prior:
+        for index, item in enumerate(target_rows):
+            if ranges.get(str(item['raw_message_id']), 0) < len(item['content']):
+                continue
+            excerpt = '\n'.join(ref['quote'] for fact in prior.get('facts', [])
+                                for ref in fact.get('evidence_messages', [])
+                                if ref['raw_message_id'] == item['raw_message_id'])
+            if excerpt:
+                target_rows[index] = {**item, 'content': excerpt, 'evidence_excerpt': True}
     reference_ids = {ref['raw_message_id'] for fact in (prior or {}).get('facts', [])
                      for ref in fact.get('evidence_messages', [])}
     reference_ids.update(fact['evidence_message_id'] for fact in (prior or {}).get('facts', []) if fact.get('evidence_message_id'))
