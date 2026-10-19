@@ -11,7 +11,7 @@ from .models import AISettings, OutboxEvent, ProviderReservation, ProviderUsage
 from .providers import ProviderUnavailable
 
 
-def reserve(cfg, payload, operation):
+def reserve(cfg, payload, operation, *, lease_seconds=600):
     from .ai_service import usage_event_id
     event = OutboxEvent.objects.filter(pk=usage_event_id.get()).first() if usage_event_id.get() else None
     purpose = "history" if event and event.payload.get("priority") == "history" else "live"
@@ -60,5 +60,5 @@ def reserve(cfg, payload, operation):
             operation=operation,
             purpose=purpose,
             reserved_tokens=tokens,
-            lease_until=now + timedelta(minutes=10),
+            lease_until=now + timedelta(seconds=lease_seconds),
         )

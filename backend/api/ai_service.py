@@ -302,7 +302,11 @@ class AIService:
         ) or (cfg.daily_budget_usd > 0 and spent >= cfg.daily_budget_usd):
             raise ProviderUnavailable("ai_daily_budget_exhausted")
         from .provider_reservations import reserve
-        reservation = reserve(cfg, payload, operation)
+        reservation = reserve(
+            cfg, payload, operation,
+            lease_seconds=max(600, math.ceil(deadline - time.monotonic()) + 30)
+            if deadline is not None else 600,
+        )
         started = time.monotonic()
         data, succeeded, error = {}, False, ""
         try:
