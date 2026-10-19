@@ -609,6 +609,30 @@ def enqueue_periodic_reconcile():
     return event.id if created else None
 
 
+def _transient_extraction_recoveries(now):
+    """Quarantine recovery owns only current, automatic inbound attempts."""
+    from django.db.models import BigIntegerField, Exists, Func, JSONField, OuterRef
+    from django.db.models.fields.json import KeyTextTransform
+    from django.db.models.functions import Cast
+    from .ai_retries import RETRYABLE
+    from .models import MessageProcessingTrace
+    from .thread_routing import ANALYSIS_EVENTS
+    transient = RETRYABLE - {"invalid_extraction_schema", "invalid_schema", "fact_thread_missing", "batch_classification_missing", "thread_classification_invalid", "invalid_embedding"}
+    query = OutboxEvent.objects.filter(state='failed', event_type='extract_message',
+        error_code__in=transient, next_attempt_at__lt=now - timedelta(hours=1))
+    for key in ('requested_by_id', 'history_run_id', 'resume_from_event_id'):
+        query = query.filter(Q(**{f'payload__{key}__isnull': True}) | Q(**{f'payload__{key}': None}))
+    query = query.alias(recovery_raw_id=Cast(KeyTextTransform('raw_id', 'payload'), BigIntegerField()),
+                        recovery_trace_id=Cast(KeyTextTransform('trace_id', 'payload'), BigIntegerField()))
+    trace_owner = MessageProcessingTrace.objects.filter(pk=OuterRef('recovery_trace_id'), raw_message_id=OuterRef('recovery_raw_id'))
+    newer = MessageProcessingTrace.objects.filter(raw_message_id=OuterRef('recovery_raw_id'), pk__gt=OuterRef('recovery_trace_id'))
+    active = OutboxEvent.objects.filter(event_type__in=ANALYSIS_EVENTS, state__in=['pending', 'enqueued', 'processing']).filter(
+        Q(payload__raw_id=OuterRef('payload__raw_id')) |
+        Q(payload__batch_ids__contains=Func(OuterRef('recovery_raw_id'), function='jsonb_build_array', output_field=JSONField())))
+    raw = RawMessage.objects.filter(pk=OuterRef('recovery_raw_id'), processed=False)
+    return query.filter(Exists(trace_owner), ~Exists(newer), ~Exists(active), Exists(raw))
+
+
 def reconcile(limit=100):
     """Bounded periodic repair. Identical inputs never re-run model calls."""
     cfg = AISettings.get_active()
@@ -670,9 +694,7 @@ def reconcile(limit=100):
         OutboxEvent.objects.get_or_create(deduplication_key=f"work-recover:{item.id}:{cfg.autonomous_policy_version}", defaults={"event_type": "extract_message", "payload": {"raw_id": item.raw_message_id, "reanalyze": True, "batch_ids": [item.raw_message_id], "priority": "history"}})
     # Transient outages are probed again after quarantine; schema/auth failures
     # stay visible rather than looping forever. Daily reservations bound cost.
-    from .ai_retries import RETRYABLE
-    transient = RETRYABLE - {"invalid_extraction_schema", "invalid_schema", "fact_thread_missing", "batch_classification_missing", "thread_classification_invalid", "invalid_embedding"}
-    OutboxEvent.objects.filter(state="failed", event_type="extract_message", error_code__in=transient, next_attempt_at__lt=timezone.now() - timedelta(hours=1)).update(state="pending", attempt_count=0, next_attempt_at=timezone.now(), lease_until=None)
+    _transient_extraction_recoveries(timezone.now()).update(state="pending", attempt_count=0, next_attempt_at=timezone.now(), lease_until=None)
     from django.conf import settings
     from .models import CrmDelivery
     deliveries = list(CrmDelivery.objects.filter(error_code="crm_stage_mapping_missing", outbox_event__state="failed").select_related("external_object_link", "outbox_event")[:limit])
