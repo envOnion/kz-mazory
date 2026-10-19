@@ -8,6 +8,7 @@ from .providers import ProviderUnavailable
 MODEL = "openrouter/free"
 PROFILE = "router-utf8-bound-v1"
 EXTRACTION_SCHEMA_NAME = "mazory_extraction"
+LITERAL_ENUM_POLICY = "shared-literal-enums-v1"
 
 
 def _schema_children(node, transform):
@@ -31,7 +32,82 @@ def _schema_children(node, transform):
     return result
 
 
-def compact_schema(schema):
+def _share_literal_enums(schema):
+    """Share one profitable literal subset while retaining outer constraints."""
+    if not isinstance(schema, dict):
+        return schema
+    def encoded(node):
+        return json.dumps(node, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+    def literals(node):
+        if (not isinstance(node, dict) or node.get('type') != 'string'
+                or any(key in node for key in ('anyOf', '$ref', '$id', '$anchor', '$dynamicAnchor', '$dynamicRef'))):
+            return None
+        values = node.get('enum')
+        if (not isinstance(values, list) or not values
+                or any(not isinstance(value, str) for value in values)
+                or len(set(values)) != len(values)):
+            return None
+        return frozenset(values)
+
+    sets = set()
+
+    def collect(node):
+        values = literals(node)
+        if values is not None:
+            sets.add(values)
+        return _schema_children(node, collect)
+
+    collect(schema)
+    subsets = sorted((tuple(sorted(values)) for values in sets
+                      if any(values < other for other in sets)))
+    best, best_bytes = schema, len(encoded(schema).encode('utf-8'))
+    definitions = schema.get('$defs', {})
+    for values in subsets:
+        shared = frozenset(values)
+        existing = [name for name, node in definitions.items()
+                    if isinstance(node, dict) and set(node) == {'type', 'enum'}
+                    and literals(node) == shared]
+        if existing:
+            name = min(existing, key=lambda value: (len(value.encode('utf-8')), value))
+            base = definitions[name]
+        else:
+            name, suffix = 'mazory_literal_enum', 0
+            while name in definitions:
+                suffix += 1
+                name = f'mazory_literal_enum_{suffix}'
+            base = None
+        pointer = name.replace('~', '~0').replace('/', '~1')
+        reference = {'$ref': f'#/$defs/{pointer}'}
+
+        def rewrite(node):
+            # An existing unconstrained definition is the terminal reference;
+            # never turn it into an alias to itself.
+            if node is base:
+                return node
+            current = literals(node)
+            if current is None or not shared <= current:
+                return _schema_children(node, rewrite)
+            outer = _schema_children({key: value for key, value in node.items() if key != 'enum'}, rewrite)
+            remainder = sorted(current - shared)
+            if not remainder and set(outer) == {'type'}:
+                return dict(reference)
+            outer['anyOf'] = [dict(reference)]
+            if remainder:
+                outer['anyOf'].append({'type': 'string', 'enum': remainder})
+            return outer
+
+        candidate = rewrite(schema)
+        if base is None:
+            # Append after rewriting: the shared enum remains a literal leaf.
+            candidate['$defs'] = {**candidate.get('$defs', {}), name: {'type': 'string', 'enum': list(values)}}
+        candidate_bytes = len(encoded(candidate).encode('utf-8'))
+        if candidate_bytes < best_bytes:
+            best, best_bytes = candidate, candidate_bytes
+    return best
+
+
+def compact_schema(schema, *, share_literal_enums=False):
     """Share identical schema nodes without changing their validation contract."""
     counts, nodes = Counter(), {}
     scoped = False
@@ -59,7 +135,7 @@ def compact_schema(schema):
         value for value, count in counts.items() if count > 1
     ))}
     if not names:
-        return schema
+        return _share_literal_enums(schema) if share_literal_enums else schema
     if any(name in schema.get("$defs", {}) for name in names.values()):
         return schema
 
@@ -91,7 +167,7 @@ def compact_schema(schema):
         result["$defs"] = {**result.get("$defs", {}), **{
             name: definitions[name] for name in sorted(used)
         }}
-    return result
+    return _share_literal_enums(result) if share_literal_enums else result
 
 
 def _extraction_input(payload):
@@ -180,8 +256,8 @@ def request(payload, max_tokens):
                      and response_format.get("type") == "json_schema"
                      and (not isinstance(json_schema, dict)
                           or json_schema.get("name") != EXTRACTION_SCHEMA_NAME))
+    inputs = _extraction_input(result)
     if schema is None and not custom_schema:
-        inputs = _extraction_input(result)
         if inputs is not None:
             from .extraction_schema import extraction_schema
             # Focused passes edit the user JSON after extraction_payload().
@@ -191,7 +267,8 @@ def request(payload, max_tokens):
     if schema is not None:
         result["response_format"] = {
             "type": "json_schema",
-            "json_schema": {"name": schema_name, "strict": True, "schema": compact_schema(schema)},
+            "json_schema": {"name": schema_name, "strict": True, "schema": compact_schema(schema,
+                share_literal_enums=isinstance(inputs, dict) and inputs.get('native_enum_policy') == LITERAL_ENUM_POLICY)},
         }
     # The router chooses the model and provider. Never inherit the former local
     # server's options or force a model-specific reasoning implementation.

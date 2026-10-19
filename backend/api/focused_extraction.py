@@ -135,6 +135,9 @@ def recover(result, raw, trace, cfg):
         payload = extraction_payload(prepared, endpoint, read_content(target, trace), source['sender'], context, [], source['sent_at'], source['timezone'],
             source_metadata=source, target_message_id=target.id, known_threads=trace.context_metadata.get('known_threads',[]), batch_message_ids=[target.id])
         inputs = json.loads(payload['messages'][-1]['content'])
+        from .free_router import LITERAL_ENUM_POLICY
+        if endpoint.get('transport') == 'openrouter_free' and trace.context_metadata.get('native_enum_policy') == LITERAL_ENUM_POLICY:
+            inputs['native_enum_policy'] = LITERAL_ENUM_POLICY
         inputs['analysis_fact_types'] = [kind]
         inputs['analysis_operation'] = 'focused_fact_extraction'
         if kind == 'payment':
