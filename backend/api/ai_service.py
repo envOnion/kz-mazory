@@ -641,6 +641,12 @@ class AIService:
                 schema = payload.get("response_format", {}).get("json_schema", {}).get("schema")
                 if schema and not Draft202012Validator(schema).is_valid(result):
                     raise ProviderUnavailable("invalid_extraction_schema", diagnostics=diagnostics)
+                from .extraction_schema import COMPACT_SOURCE_WIRE_VERSION
+                inputs = json.loads(payload['messages'][-1]['content'])
+                if inputs.get('source_wire_version') == COMPACT_SOURCE_WIRE_VERSION and 'threads' in result:
+                    from .dialogue_threads import normalize_themes
+                    result['threads'] = normalize_themes(
+                        result['threads'], source_wire_version=COMPACT_SOURCE_WIRE_VERSION)
             from .qwen_profile import enabled as qwen_enabled
             if qwen_enabled(cfg):
                 from jsonschema import Draft202012Validator

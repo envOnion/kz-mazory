@@ -155,7 +155,7 @@ class ThemeSchema(serializers.Serializer):
     messages = LinkSchema(many=True, allow_empty=False)
 
 
-def normalize_themes(rows):
+def normalize_themes(rows, *, source_wire_version=None):
     """Fixed wire slots prevent repeated keys; saved legacy arrays stay valid."""
     if isinstance(rows, dict):
         if "t0" not in rows or any(key not in {f"t{i}" for i in range(16)} or not isinstance(value,dict) or "key" in value for key,value in rows.items()):
@@ -165,9 +165,22 @@ def normalize_themes(rows):
         rows = [dict(row) if isinstance(row,dict) else row for row in rows]
         for row in rows:
             if isinstance(row,dict) and isinstance(row.get('messages'),dict):
-                if any(not isinstance(value,dict) or type(value.get('raw_message_id')) is not int or key!=f"m{value['raw_message_id']}" for key,value in row['messages'].items()):
-                    raise ProviderUnavailable('thread_classification_invalid')
-                row['messages'] = list(row['messages'].values())
+                from .extraction_schema import COMPACT_SOURCE_WIRE_VERSION
+                if source_wire_version == COMPACT_SOURCE_WIRE_VERSION:
+                    links = []
+                    for key, value in row['messages'].items():
+                        if (not isinstance(key, str) or not re.fullmatch(r'm[1-9][0-9]{0,18}', key)
+                                or not isinstance(value, dict) or 'raw_message_id' in value):
+                            raise ProviderUnavailable('thread_classification_invalid')
+                        source_id = int(key[1:])
+                        if source_id > 2**63 - 1:
+                            raise ProviderUnavailable('thread_classification_invalid')
+                        links.append({**value, 'raw_message_id': source_id})
+                    row['messages'] = links
+                else:
+                    if any(not isinstance(value,dict) or type(value.get('raw_message_id')) is not int or key!=f"m{value['raw_message_id']}" for key,value in row['messages'].items()):
+                        raise ProviderUnavailable('thread_classification_invalid')
+                    row['messages'] = list(row['messages'].values())
     return rows
 
 
