@@ -993,7 +993,7 @@ class RecordTracesView(APIView):
                 ),
                 _has_raw_payload=RawSQL(
                     "CASE WHEN jsonb_typeof(whatsapp_raw_payload) = 'object' "
-                    "THEN jsonb_object_length(whatsapp_raw_payload) > 0 "
+                    "THEN whatsapp_raw_payload <> '{}'::jsonb "
                     "WHEN jsonb_typeof(whatsapp_raw_payload) = 'array' "
                     "THEN jsonb_array_length(whatsapp_raw_payload) > 0 ELSE FALSE END",
                     [], output_field=BooleanField(),
