@@ -353,10 +353,20 @@ class AIService:
                 if response.status_code < 400:
                     raise ProviderUnavailable("provider_invalid_response") from None
             if response.status_code >= 300:
+                detail = data.get("error") if isinstance(data, dict) else None
+                # The free router can temporarily have no eligible endpoint.
+                # Retry this explicit routing response within the existing
+                # transport limit; an unknown 404 remains a terminal error.
+                if (payload.get("model") == "openrouter/free" and response.status_code == 404
+                        and isinstance(detail, dict) and isinstance(detail.get("message"), str)
+                        and detail["message"].startswith("No endpoints found")):
+                    raise ProviderUnavailable("provider_overloaded", retry_after=retry_after,
+                        diagnostics={"provider_error_code": 404, "provider_routing_unavailable": True,
+                                     "retry_after_seconds": retry_after})
                 raise provider_error(
                     response.status_code,
                     retry_after=retry_after,
-                    detail=data.get("error") if isinstance(data, dict) else None,
+                    detail=detail,
                 )
             if isinstance(data, dict) and data.get("error"):
                 detail = data["error"]
