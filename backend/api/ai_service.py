@@ -362,6 +362,24 @@ class AIService:
                 detail = data["error"]
                 status = detail.get("code") if isinstance(detail, dict) else None
                 raise provider_error(status, retry_after=retry_after, detail=detail)
+            choices = data.get("choices") if isinstance(data, dict) else None
+            for choice in choices if isinstance(choices, list) else []:
+                if not isinstance(choice, dict) or not (
+                    choice.get("finish_reason") == "error" or choice.get("error") is not None
+                ):
+                    continue
+                # OpenRouter can report a failed generation inside HTTP 200.
+                # It is not model content to repair or accept as successful use.
+                detail = choice.get("error")
+                status = detail.get("code") if isinstance(detail, dict) else None
+                failure = provider_error(status, retry_after=retry_after, detail=detail)
+                if str(failure) == "provider_response_error":
+                    failure = ProviderUnavailable("provider_server_error", retry_after=retry_after,
+                                                  diagnostics=failure.diagnostics)
+                failure.diagnostics.update(provider_error_location="choice",
+                                           provider_http_status=response.status_code,
+                                           finish_reason=choice.get("finish_reason"))
+                raise failure
             if response_validator is not None:
                 response_validator(data)
             succeeded = True
@@ -608,12 +626,19 @@ class AIService:
             choice = data["choices"][0]
             content = choice["message"]["content"]
             usage = data.get("usage", {})
+            reasoning = choice['message'].get('reasoning')
+            if not isinstance(reasoning, str):
+                reasoning = choice['message'].get('reasoning_content')
+            details = usage.get('completion_tokens_details', {})
+            reasoning_tokens = details.get('reasoning_tokens') if isinstance(details, dict) else None
             diagnostics = {
                 "finish_reason": choice.get("finish_reason"),
                 "provider_stop_reason": choice.get("provider_stop_reason"),
                 "output_tokens": usage.get("completion_tokens"),
                 "response_characters": len(content) if isinstance(content, str) else 0,
-                "reasoning_characters": len(choice['message'].get('reasoning_content') or ''),
+                "reasoning_characters": len(reasoning) if isinstance(reasoning, str) else 0,
+                "reasoning_tokens": reasoning_tokens if type(reasoning_tokens) is int
+                    and 0 <= reasoning_tokens <= MAX_USAGE_TOKEN_COUNT else None,
             }
             if cfg.chat_model_name == "openrouter/free":
                 diagnostics.update(requested_model=cfg.chat_model_name, resolved_model=data.get("model"))
