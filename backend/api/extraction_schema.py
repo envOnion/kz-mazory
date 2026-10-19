@@ -8,6 +8,7 @@ from .dialogue_threads import ThemeSchema, LinkSchema
 WIRE_VERSION = 'facts-v7-laya-unique-sources'
 COMPACT_SOURCE_WIRE_VERSION = 'facts-v8-compact-source-slots'
 NATIVE_STRING_POLICY = 'serializer-charfield-v1'
+NATIVE_CONFIDENCE_POLICY = 'serializer-confidence-range-v1'
 
 
 def resolution_schema(input_data):
@@ -82,7 +83,13 @@ def serializer_schema(serializer, *, strict_strings=False):
 
 def extraction_schema(input_data=None):
     strict_strings = isinstance(input_data, dict) and input_data.get('native_string_policy') == NATIVE_STRING_POLICY
-    fact = serializer_schema(FactSchema(), strict_strings=strict_strings)
+    fact_serializer = FactSchema()
+    fact = serializer_schema(fact_serializer, strict_strings=strict_strings)
+    if isinstance(input_data, dict) and input_data.get('native_confidence_policy') == NATIVE_CONFIDENCE_POLICY:
+        confidence = fact_serializer.fields['confidence']
+        for keyword, limit in (('minimum', confidence.min_value), ('maximum', confidence.max_value)):
+            if limit is not None:
+                fact['properties']['confidence'][keyword] = limit
     fact["required"] = sorted(set(fact["required"]) | {"thread_key", "evidence_message_id", "object_name", "company_name", "confidence", "evidence_messages", "uncertainties"})
     # Serializer defaults do not express cross-field validate() requirements.
     # Generate separate business variants so "payment" cannot silently omit
