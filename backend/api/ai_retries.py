@@ -151,6 +151,7 @@ def _retry_focused_context(current, exc):
         return False
     cap = max(512, min(cap, available) // 2)
     limits.update(focused_context_input_ceiling=cap,
+                  focused_context_ceiling_policy=metadata.get('native_enum_policy'),
                   focused_context_retry_stage=stage,
                   focused_context_retry_generation=generation + 1)
     from .processing_attempts import reserve_attempt
