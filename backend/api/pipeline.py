@@ -385,6 +385,11 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         trace.context_metadata["response_diagnostics"] = diagnostics
         trace.context_metadata['provider_result'] = copy.deepcopy(result)
         trace.save(update_fields=['context_metadata'])
+        from .full_history import restore_continuity_topics
+        result, restored_topics = restore_continuity_topics(result, json.loads(_extraction_user_message(payload)['content']))
+        if restored_topics:
+            diagnostics.setdefault('schema_repairs', []).append('unchanged_prior_topic_restored')
+            diagnostics['restored_topic_keys'] = restored_topics
         value = (
             usage.get("prompt_tokens", usage.get("input_tokens"))
             if isinstance(usage, dict)

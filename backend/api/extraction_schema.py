@@ -7,6 +7,7 @@ from .dialogue_threads import ThemeSchema, LinkSchema
 
 WIRE_VERSION = 'facts-v7-laya-unique-sources'
 COMPACT_SOURCE_WIRE_VERSION = 'facts-v8-compact-source-slots'
+NATIVE_STRING_POLICY = 'serializer-charfield-v1'
 
 
 def resolution_schema(input_data):
@@ -28,11 +29,11 @@ def resolution_schema(input_data):
             "properties":{"facts":{"type":"array","minItems":len(drafts),"maxItems":len(drafts),"items":status}}}
 
 
-def field_schema(field):
+def field_schema(field, *, strict_strings=False):
     if isinstance(field, serializers.ListSerializer):
-        shape = {"type": "array", "items": serializer_schema(field.child)}
+        shape = {"type": "array", "items": serializer_schema(field.child, strict_strings=strict_strings)}
     elif isinstance(field, serializers.ListField):
-        shape = {"type": "array", "items": field_schema(field.child)}
+        shape = {"type": "array", "items": field_schema(field.child, strict_strings=strict_strings)}
     elif isinstance(field, serializers.ChoiceField):
         shape = {"type": "string", "enum": list(field.choices)}
     elif isinstance(field, serializers.BooleanField):
@@ -51,6 +52,19 @@ def field_schema(field):
         # Native constrained decoding reliably restricts JSON numbers. The
         # server converts them to Decimal and enforces the same 14/2 precision.
         shape = {"type": "number"}
+    elif strict_strings and isinstance(field, serializers.CharField):
+        shape = {"type": "string"}
+        if field.max_length is not None:
+            shape["maxLength"] = field.max_length
+        if field.min_length is not None:
+            shape["minLength"] = field.min_length
+        if not field.allow_blank:
+            shape["minLength"] = max(1, field.min_length or 0)
+            if field.trim_whitespace:
+                shape["pattern"] = r"\S"
+        elif field.min_length:
+            # DRF accepts an explicit blank before running length validators.
+            shape = {"anyOf": [{"type": "string", "const": ""}, shape]}
     else:
         shape = {"type": "string"}
     if field.allow_null or (isinstance(field, serializers.DecimalField) and not field.required):
@@ -60,14 +74,15 @@ def field_schema(field):
     return shape
 
 
-def serializer_schema(serializer):
+def serializer_schema(serializer, *, strict_strings=False):
     return {"type": "object", "additionalProperties": False,
-            "properties": {name: field_schema(field) for name, field in serializer.fields.items()},
+            "properties": {name: field_schema(field, strict_strings=strict_strings) for name, field in serializer.fields.items()},
             "required": [name for name, field in serializer.fields.items() if field.required]}
 
 
 def extraction_schema(input_data=None):
-    fact = serializer_schema(FactSchema())
+    strict_strings = isinstance(input_data, dict) and input_data.get('native_string_policy') == NATIVE_STRING_POLICY
+    fact = serializer_schema(FactSchema(), strict_strings=strict_strings)
     fact["required"] = sorted(set(fact["required"]) | {"thread_key", "evidence_message_id", "object_name", "company_name", "confidence", "evidence_messages", "uncertainties"})
     # Serializer defaults do not express cross-field validate() requirements.
     # Generate separate business variants so "payment" cannot silently omit
@@ -113,7 +128,7 @@ def extraction_schema(input_data=None):
             variants.append(variant)
     if input_data is not None and input_data.get('analysis_fact_types') in (['commitment'], ['project'], ['payment']):
         variants[:] = [variant for variant in variants if variant['properties']['fact_type']['enum'] == input_data['analysis_fact_types']]
-    theme = serializer_schema(ThemeSchema())
+    theme = serializer_schema(ThemeSchema(), strict_strings=strict_strings)
     # Defaults are useful to old saved responses, but a new generation must
     # explicitly explain its classification rather than omit the reason.
     theme["required"] = sorted(set(theme["required"]) | {"completion_reason", "thread_id", "summary"})
@@ -141,7 +156,7 @@ def extraction_schema(input_data=None):
             if isinstance(key, str) and key in shape['properties']['threads']['properties']})
         for variant in variants:
             variant["properties"]["thread_key"]["enum"] = [f"t{i}" for i in range(16)]
-        classification = serializer_schema(LinkSchema())
+        classification = serializer_schema(LinkSchema(), strict_strings=strict_strings)
         classification["properties"]["raw_message_id"] = {"type":"integer", "enum":[input_data["target_message_id"]]}
         classification["properties"]["thread_key"] = {"type":"string", "enum":["t0"]}
         classification["required"] = sorted(set(classification["required"]) | {"thread_key", "relation", "rationale"})

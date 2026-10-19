@@ -17,6 +17,46 @@ CANONICAL_EVIDENCE_POLICY = 'canonical-plain-v1'
 QUOTE_REFERENCE_INSTRUCTION = ' В previous_result quote_ref — JSON Pointer на полную буквальную строку content в этом же входе. Сначала восстанови quote по этому указателю; raw_message_id и role не меняй. В ответе нужны обычные quote, без quote_ref.'
 
 
+def restore_continuity_topics(result, inputs):
+    """Restore only a prior label on an otherwise exactly unchanged theme."""
+    from .dialogue_threads import normalize_themes
+    state = inputs.get('analysis_state') if isinstance(inputs, dict) else None
+    prior = state.get('previous_result') if isinstance(state, dict) else None
+    if not isinstance(result, dict) or not isinstance(prior, dict):
+        return result, []
+    try:
+        version = inputs.get('source_wire_version')
+        previous = normalize_themes(copy.deepcopy(prior.get('threads')), source_wire_version=version)
+        current = normalize_themes(copy.deepcopy(result.get('threads')), source_wire_version=version)
+    except ProviderUnavailable:
+        return result, []
+    if (not isinstance(previous, list) or not isinstance(current, list)
+            or any(not isinstance(row, dict) or not isinstance(row.get('key'), str)
+                   for row in [*previous, *current])
+            or len({row['key'] for row in previous}) != len(previous)
+            or len({row['key'] for row in current}) != len(current)):
+        return result, []
+    by_key = {row['key']: row for row in previous}
+    restored = []
+    for row in current:
+        saved = by_key.get(row['key'])
+        topic = row.get('topic')
+        if (not isinstance(topic, str) or topic.strip() or saved is None
+                or not isinstance(saved.get('topic'), str) or not saved['topic'].strip()):
+            continue
+        # Canonical JSON also distinguishes booleans from numbers; list order,
+        # missing fields, source identities, roles and state must all agree.
+        if canonical_json({key: value for key, value in row.items() if key != 'topic'}) != canonical_json({key: value for key, value in saved.items() if key != 'topic'}):
+            continue
+        row['topic'] = saved['topic']
+        restored.append(row['key'])
+    if not restored:
+        return result, []
+    value = copy.deepcopy(result)
+    value['threads'] = current
+    return value, restored
+
+
 def compact_result(result, targets, compact_evidence=False):
     """Compress repeated links, keeping summaries and every fact's literal sources.
 
