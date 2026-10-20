@@ -178,14 +178,19 @@ def _main_rejection_payload_sha(trace, exc):
 def _focused_rejection_payload_sha(trace, exc):
     """Replay one observed Free Router rejection after verifying auxiliary work."""
     if (trace is None or not isinstance(exc, ProviderUnavailable)
-            or str(exc) != 'provider_invalid_request' or trace.model_version != 'openrouter/free'):
+            or trace.model_version != 'openrouter/free'):
+        return None
+    code = str(exc)
+    output_failure = code in {'invalid_extraction_schema', 'provider_output_truncated'}
+    if code != 'provider_invalid_request' and not output_failure:
         return None
     metadata, diagnostics = trace.context_metadata, exc.diagnostics
     if not isinstance(metadata, dict) or not isinstance(diagnostics, dict):
         return None
     if (metadata.get('full_history_policy') != 'thread-context-v2'
-            or metadata.get('request_state') != 'responded'
-            or type(diagnostics.get('provider_http_status')) is not int
+            or metadata.get('request_state') != 'responded'):
+        return None
+    if not output_failure and (type(diagnostics.get('provider_http_status')) is not int
             or type(diagnostics.get('provider_error_code')) is not int
             or diagnostics.get('provider_error_category') != 'unknown'
             or (diagnostics.get('provider_http_status'), diagnostics.get('provider_error_code'),
@@ -221,9 +226,12 @@ def _focused_rejection_payload_sha(trace, exc):
                 return digest
             return None
 
-        allowed = [['project'], ['payment']] if diagnostics['provider_http_status'] == 404 else [['project']]
+        allowed = [['project'], ['payment']] if not output_failure and diagnostics['provider_http_status'] == 404 else [['project']]
         digest = owned_request_sha(*pending[0], allowed)
         if digest is None:
+            return None
+        if output_failure and (diagnostics.get('focused_payload_sha256') != digest
+                               or diagnostics.get('focused_cache_key') != pending[0][0]):
             return None
         retry = metadata.get('retry', {})
         history = retry.get('history', []) + retry.get('completed_main_phase', {}).get('history', [])
@@ -232,10 +240,11 @@ def _focused_rejection_payload_sha(trace, exc):
         for previous in history:
             if not isinstance(previous, dict) or not isinstance(previous.get('error_code'), str):
                 return None
-            if previous['error_code'] != 'provider_invalid_request':
+            if previous['error_code'] not in {'provider_invalid_request', 'invalid_extraction_schema', 'provider_output_truncated'}:
                 continue
             if 'main_payload_sha256' in previous:
-                if ('focused_payload_sha256' in previous or seen_main
+                if (previous['error_code'] != 'provider_invalid_request'
+                        or 'focused_payload_sha256' in previous or seen_main
                         or previous['main_payload_sha256'] != payload_hash(main_request)):
                     return None
                 seen_main = True
@@ -245,13 +254,14 @@ def _focused_rejection_payload_sha(trace, exc):
                 return None
             seen.add(previous_digest)
             proven = False
+            previous_allowed = [['project'], ['payment']] if previous['error_code'] == 'provider_invalid_request' else [['project']]
             for key, row in requests.items():
                 saved = completed.get(key)
                 if (isinstance(saved, dict) and saved.get('payload_sha256') == previous_digest
                         and isinstance(saved.get('result'), dict)
                         and isinstance(saved['result'].get('facts'), list)
                         and isinstance(saved['result'].get('topic_updates'), list)
-                        and owned_request_sha(key, row, [['project'], ['payment']]) == previous_digest):
+                        and owned_request_sha(key, row, previous_allowed) == previous_digest):
                     proven = True
                     break
             if not proven:
@@ -347,10 +357,15 @@ def handle_failure(event, exc):
     if current.payload.get("analysis_policy") == "history-packets-v1":
         if code == 'focused_context_budget_exceeded' and _retry_focused_context(current, exc):
             return True
+        focused_payload_sha256 = None
+        rejected_trace = None
+        if code in {'provider_invalid_request', 'invalid_extraction_schema', 'provider_output_truncated'}:
+            rejected_trace = MessageProcessingTrace.objects.filter(pk=current.payload.get('trace_id')).first()
+            focused_payload_sha256 = _focused_rejection_payload_sha(rejected_trace, exc)
         structural = {"source_revision_changed", "skipped_crm_delivered", "blocked_delivery", "projection_changed", "projection_snapshot_missing", "deduplication_ambiguous", "extraction_json_parse", "extraction_top_level_type", "extraction_facts_missing", "extraction_facts_type", "invalid_extraction_schema", "invalid_schema", "batch_classification_missing", "thread_classification_invalid", "thread_completion_unproven", "thread_sources_unavailable", "thread_source_conflict", "thread_sources_duplicate", "thread_keys_duplicate", "thread_parent_invalid", "thread_revision_conflict", "target_classification_invalid", "target_classification_conflict", "fact_thread_missing", "fact_thread_evidence_missing", "fact_thread_evidence_conflict", "provider_output_truncated", "context_batch_too_large", "context_fixed_input_too_large"}
         structural |= EVIDENCE_ERRORS
         from .history_analysis import split
-        if code in structural:
+        if code in structural and focused_payload_sha256 is None:
             current.error_code = code
             current.save(update_fields=["error_code"])
             if split(current):
@@ -426,13 +441,9 @@ def handle_failure(event, exc):
                 record_attempt(current, "pending", code, current.next_attempt_at)
                 return True
         transport = {"provider_timeout", "provider_connection_failed", "provider_server_error", "provider_rate_limited", "provider_overloaded", "provider_in_flight_budget", "provider_circuit_open", "context_model_metadata_unavailable", "routing_snapshot_changed"}
-        focused_payload_sha256 = None
         main_payload_sha256 = None
-        if code == 'provider_invalid_request':
-            rejected_trace = MessageProcessingTrace.objects.filter(pk=current.payload.get('trace_id')).first()
-            focused_payload_sha256 = _focused_rejection_payload_sha(rejected_trace, exc)
-            if focused_payload_sha256 is None:
-                main_payload_sha256 = _main_rejection_payload_sha(rejected_trace, exc)
+        if code == 'provider_invalid_request' and focused_payload_sha256 is None:
+            main_payload_sha256 = _main_rejection_payload_sha(rejected_trace, exc)
         if focused_payload_sha256 is not None or main_payload_sha256 is not None:
             transport.add(code)
         if code in transport - {'provider_circuit_open', 'context_model_metadata_unavailable', 'routing_snapshot_changed'}:
