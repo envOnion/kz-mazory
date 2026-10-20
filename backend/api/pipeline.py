@@ -176,6 +176,36 @@ def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False, targ
 
 
 
+def _preflight_thread_completion(result, raw, trace):
+    """Reject only completion that focused recovery cannot repair."""
+    from .dialogue_threads import normalize_themes, prepare_themes
+
+    if not isinstance(result, dict):
+        return
+    try:
+        themes = normalize_themes(copy.deepcopy(result.get('threads')))
+    except ProviderUnavailable:
+        return
+    if not isinstance(themes, list) or not any(
+        isinstance(theme, dict) and theme.get('state') == 'ready'
+        and isinstance(theme.get('messages'), list)
+        and (not theme.get('completion_reason') or not any(
+            isinstance(link, dict) and link.get('thought_state') == 'final'
+            for link in theme['messages']))
+        for theme in themes
+    ):
+        return
+    work = copy.copy(trace)
+    work.context_metadata = copy.deepcopy(trace.context_metadata)
+    try:
+        prepare_themes(copy.deepcopy(result), raw, work)
+    except ProviderUnavailable as exc:
+        if str(exc) == 'thread_completion_unproven':
+            raise
+    except ValidationError:
+        pass
+
+
 def _main_response_cache(trace, payload):
     """Reuse only a native-success response from this immutable attempt."""
     cache = trace.context_metadata.get('main_response_cache')
@@ -430,6 +460,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             value if type(value) is int and value >= 0 else None
         )
         from .dialogue_threads import prepare_themes, ready_facts, persist_themes, lock_source
+        if cache_enabled and result_override is None:
+            _preflight_thread_completion(result, raw, trace)
         from .focused_extraction import recover
         recover(result, raw, trace, cfg)
         # Bounded packets also carry evidence_ranges. Validate their literal
