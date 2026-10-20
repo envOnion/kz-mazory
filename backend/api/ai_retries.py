@@ -44,7 +44,7 @@ RETRYABLE = {
 
 
 @transaction.atomic
-def record_attempt(event, state, code="", next_at=None):
+def record_attempt(event, state, code="", next_at=None, *, focused_payload_sha256=None):
     if event.event_type not in {"extract_message", "route_message", "extract_thread"}:
         return
     traces = MessageProcessingTrace.objects.select_for_update()
@@ -73,6 +73,8 @@ def record_attempt(event, state, code="", next_at=None):
                 "finished_at": timezone.now().isoformat(),
             }
         )
+        if focused_payload_sha256 is not None:
+            history[-1]['focused_payload_sha256'] = focused_payload_sha256
     if state == "cancelled":
         trace.status = "warning"
         trace.result_summary = "Запуск отменён администратором. Повторы этой попытки не назначаются."
@@ -118,13 +120,17 @@ def _main_response_checkpoint(event):
 
 
 def _retryable_focused_project_rejection(trace, exc):
+    return _focused_rejection_payload_sha(trace, exc) is not None
+
+
+def _focused_rejection_payload_sha(trace, exc):
     """Replay one observed Free Router rejection after verifying auxiliary work."""
     if (trace is None or not isinstance(exc, ProviderUnavailable)
             or str(exc) != 'provider_invalid_request' or trace.model_version != 'openrouter/free'):
-        return False
+        return None
     metadata, diagnostics = trace.context_metadata, exc.diagnostics
     if not isinstance(metadata, dict) or not isinstance(diagnostics, dict):
-        return False
+        return None
     if (metadata.get('full_history_policy') != 'thread-context-v2'
             or metadata.get('request_state') != 'responded'
             or type(diagnostics.get('provider_http_status')) is not int
@@ -135,35 +141,64 @@ def _retryable_focused_project_rejection(trace, exc):
                     (200, 400, 'top_level', 'invalid_request'),
                     (404, 404, 'http', 'unknown'),
                 )):
-        return False
+        return None
     from .context_tokens import payload_hash
     from .pipeline import _extraction_user_message, _main_response_cache, _restore_request
     try:
-        retry = metadata.get('retry', {})
-        history = retry.get('history', []) + retry.get('completed_main_phase', {}).get('history', [])
-        if any(row.get('error_code') == 'provider_invalid_request' for row in history):
-            return False
         if _main_response_cache(trace, _restore_request(trace)) is None:
-            return False
+            return None
+        requests = metadata.get('focused_requests', {})
         completed = metadata.get('focused_extraction', {})
-        pending = [(key, row) for key, row in metadata.get('focused_requests', {}).items()
+        pending = [(key, row) for key, row in requests.items()
                    if not isinstance(completed.get(key), dict)
                    or completed[key].get('payload_sha256') != row.get('payload_sha256')]
         if len(pending) != 1:
-            return False
-        key, row = pending[0]
-        request = row['request']
-        if payload_hash(request) != row['payload_sha256'] or request.get('model') != 'openrouter/free':
-            return False
-        inputs = json.loads(_extraction_user_message(request)['content'])
-        target = inputs.get('target_message_id')
-        kinds = inputs.get('analysis_fact_types')
+            return None
+
+        def owned_request_sha(key, row, allowed):
+            request = row['request']
+            digest = row['payload_sha256']
+            if payload_hash(request) != digest or request.get('model') != 'openrouter/free':
+                return None
+            inputs = json.loads(_extraction_user_message(request)['content'])
+            target, kinds = inputs.get('target_message_id'), inputs.get('analysis_fact_types')
+            if (type(target) is int and target in (metadata.get('batch_message_ids') or [trace.raw_message_id])
+                    and kinds in allowed and key == f'{target}:{kinds[0]}'
+                    and inputs.get('analysis_operation') == 'focused_fact_extraction'):
+                return digest
+            return None
+
         allowed = [['project'], ['payment']] if diagnostics['provider_http_status'] == 404 else [['project']]
-        return (type(target) is int and target in (metadata.get('batch_message_ids') or [trace.raw_message_id])
-                and kinds in allowed and key == f'{target}:{kinds[0]}'
-                and inputs.get('analysis_operation') == 'focused_fact_extraction')
+        digest = owned_request_sha(*pending[0], allowed)
+        if digest is None:
+            return None
+        retry = metadata.get('retry', {})
+        history = retry.get('history', []) + retry.get('completed_main_phase', {}).get('history', [])
+        seen = set()
+        for previous in history:
+            if not isinstance(previous, dict) or not isinstance(previous.get('error_code'), str):
+                return None
+            if previous['error_code'] != 'provider_invalid_request':
+                continue
+            previous_digest = previous.get('focused_payload_sha256')
+            if not isinstance(previous_digest, str) or previous_digest == digest or previous_digest in seen:
+                return None
+            seen.add(previous_digest)
+            proven = False
+            for key, row in requests.items():
+                saved = completed.get(key)
+                if (isinstance(saved, dict) and saved.get('payload_sha256') == previous_digest
+                        and isinstance(saved.get('result'), dict)
+                        and isinstance(saved['result'].get('facts'), list)
+                        and isinstance(saved['result'].get('topic_updates'), list)
+                        and owned_request_sha(key, row, [['project'], ['payment']]) == previous_digest):
+                    proven = True
+                    break
+            if not proven:
+                return None
+        return digest
     except (ProviderUnavailable, KeyError, TypeError, ValueError, AttributeError):
-        return False
+        return None
 
 
 def _retry_focused_context(current, exc):
@@ -331,8 +366,11 @@ def handle_failure(event, exc):
                 record_attempt(current, "pending", code, current.next_attempt_at)
                 return True
         transport = {"provider_timeout", "provider_connection_failed", "provider_server_error", "provider_rate_limited", "provider_overloaded", "provider_in_flight_budget", "provider_circuit_open", "context_model_metadata_unavailable", "routing_snapshot_changed"}
-        if code == 'provider_invalid_request' and _retryable_focused_project_rejection(
-                MessageProcessingTrace.objects.filter(pk=current.payload.get('trace_id')).first(), exc):
+        focused_payload_sha256 = None
+        if code == 'provider_invalid_request':
+            focused_payload_sha256 = _focused_rejection_payload_sha(
+                MessageProcessingTrace.objects.filter(pk=current.payload.get('trace_id')).first(), exc)
+        if focused_payload_sha256 is not None:
             transport.add(code)
         if code in transport - {'provider_circuit_open', 'context_model_metadata_unavailable', 'routing_snapshot_changed'}:
             checkpoint = _main_response_checkpoint(current)
@@ -349,7 +387,8 @@ def handle_failure(event, exc):
         if pending:
             current.next_attempt_at = timezone.now() + timedelta(seconds=delay)
         current.save()
-        record_attempt(current, current.state, code, current.next_attempt_at if pending else None)
+        record_attempt(current, current.state, code, current.next_attempt_at if pending else None,
+                       focused_payload_sha256=focused_payload_sha256)
         return True
     pending = code in RETRYABLE and event.attempt_count < MAX_ATTEMPTS
     delay = 60 * 2 ** max(0, min(event.attempt_count - 1, 3)) + random.randint(0, 15)
