@@ -15,7 +15,8 @@ ACTIVE = ("queued", "processing", "retry_wait")
 @transaction.atomic
 def schedule(run):
     cfg = AISettings.get_active()
-    limit = run.settings_snapshot.get("analysis_target_message_limit", cfg.analysis_target_message_limit)
+    from .context_window import LIMIT
+    limit = min(LIMIT + 1, run.settings_snapshot.get("analysis_target_message_limit", cfg.analysis_target_message_limit))
     items = []
     raw_rows = list(run.messages.order_by("timestamp", "id"))
     raw_ids = [raw.id for raw in raw_rows]
@@ -214,10 +215,16 @@ def summary(value):
 @transaction.atomic
 def split(event):
     """Transfer ownership to smaller packets without dropping half the targets."""
+    import copy
     items = list(HistoryAnalysisItem.objects.select_for_update().filter(outbox_event=event).exclude(state="succeeded").order_by("raw_message__timestamp", "raw_message_id"))
     if len(items) < 2:
         return False
-    from .models import MessageProcessingTrace
+    owner = MessageProcessingTrace.objects.filter(pk=event.payload.get('trace_id')).first()
+    operation_window = owner.context_metadata.get('context_window') if owner else None
+    if operation_window is not None and not operation_window['include_following']:
+        # A live window cannot be rebound to an earlier target with later
+        # sources still attached. Live arrivals are processed individually.
+        return False
     midpoint = (len(items) + 1) // 2
     for index, group in enumerate((items[:midpoint], items[midpoint:])):
         raw = group[0].raw_message
@@ -229,6 +236,11 @@ def split(event):
             trace.context_metadata.update(analysis_policy=POLICY, analysis_limits=old.context_metadata.get("analysis_limits", {}), parent_trace_id=old.id)
             for field in ("replace_unsent", "snapshot_max_id", "full_history_policy"):
                 if field in old.context_metadata:trace.context_metadata[field]=old.context_metadata[field]
+            window = operation_window
+            if window is not None:
+                window = copy.deepcopy(window)
+                window.update(anchor_id=raw.id, target_ids=[entry.raw_message_id for entry in group])
+                trace.context_metadata['context_window'] = window
             from .free_fallback import policy_metadata
             trace.context_metadata.update(policy_metadata(old.context_metadata))
             trace.save(update_fields=["context_metadata"])

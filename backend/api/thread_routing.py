@@ -48,8 +48,13 @@ def update_descriptor(thread, theme):
 
 
 def snapshot(raw):
-    return [{"id": t.id, "version": t.routing_descriptor_version, "topic": t.topic, "summary": t.routing_descriptor.get("summary", "")}
-            for t in DialogueThread.objects.filter(source_key=source_key(raw), routing_state="prepared").exclude(state="superseded").order_by("id")[:201]]
+    from .context_window import current_window
+    from .dialogue_threads import context_threads
+    qs = DialogueThread.objects.filter(source_key=source_key(raw), routing_state="prepared").exclude(state="superseded")
+    if current_window() is not None:
+        qs = qs.filter(pk__in=[row['id'] for row in context_threads(raw)])
+    return [{"id": t.id, "version": t.routing_descriptor_version, "topic": t.topic, "summary": "" if current_window() is not None else t.routing_descriptor.get("summary", "")}
+            for t in qs.order_by("id")[:201]]
 
 
 def unsuitable(raw):
@@ -191,6 +196,11 @@ def build_thread_context(raw, cfg, known_projects, maximum, state):
     from .message_context import source_scope
     thread = DialogueThread.objects.get(pk=state["routing_thread_id"], source_key=source_key(raw))
     ids = list(thread.message_links.values_list("raw_message_id", flat=True))
+    from .context_window import current_window
+    window = current_window()
+    all_inside = window is None or set(ids) <= set(window['source_ids'])
+    if window is not None:
+        ids = [pk for pk in ids if pk in window['source_ids']]
     rows = list(source_scope(raw).filter(pk__in=ids, id__lte=maximum).exclude(processing_state__in=["deleted", "superseded", "clarification_reply"]).order_by("timestamp", "id"))
     context = [{"raw_message_id": item.id, "content": item.content, "sender_name": item.sender_name, "timestamp": item.timestamp.isoformat(),
                 "received_at": item.received_at.isoformat(), "source_metadata": source_metadata(item), "partial": False}
@@ -198,6 +208,10 @@ def build_thread_context(raw, cfg, known_projects, maximum, state):
     pending_ids = [item.pk for item in rows if not item.processed and item.pk in state['batch_ids']]
     descriptor = {"id": thread.id, "version": thread.version, "topic": thread.topic, "summary": thread.summary, "state": thread.state,
                   "parent_id": thread.parent_id, "project_id": thread.project_id, "message_ids": ids, "commitments": []}
+    if window is not None:
+        descriptor['summary'] = ''
+    if not all_inside:
+        descriptor.update(topic='', summary='', state='unknown', parent_id=None, project_id=None)
     prepared = copy.copy(cfg)
     prepared.analysis_policy = "history-packets-v1"
     counter, endpoint = context_runtime(prepared)
@@ -260,8 +274,15 @@ def extract_thread(payload):
         return
     generation = thread.routing_generation
     cfg = AISettings.get_active()
-    pending = pending[:min(cfg.thread_extract_batch_size,cfg.analysis_target_message_limit)]
+    from .context_window import LIMIT
+    pending = pending[:min(LIMIT + 1, cfg.thread_extract_batch_size,cfg.analysis_target_message_limit)]
     raw = pending[-1].raw_message
+    from .message_context import history_queryset, source_scope
+    from django.db.models import Max
+    maximum = source_scope(raw).aggregate(last=Max('id'))['last'] or raw.id
+    preceding, _ = history_queryset(raw, maximum)
+    allowed = {raw.id, *preceding.values_list('id', flat=True)}
+    pending = [link for link in pending if link.raw_message_id in allowed]
     with transaction.atomic():
         lock_source(raw)
         trace = raw.traces.filter(pk=payload['trace_id']).first() if payload.get('trace_id') else None

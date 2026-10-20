@@ -674,6 +674,8 @@ class AIService:
         api_key = AIService._credential(cfg, api_format=api_format)
         if not isinstance(payload, dict):
             raise ProviderUnavailable("provider_invalid_request")
+        from .context_window import validate_payload
+        validate_payload(payload)
         payload = dict(payload)
         payload["model"] = cfg.chat_model_name
         if cfg.chat_model_name != "openrouter/free":

@@ -37,6 +37,8 @@ def reserve_attempt(raw, operation_key, *, cfg=None, snapshot_max_id=None,
     attempt = (latest_attempt_no if latest_attempt_no is not None else
                raw.traces.aggregate(last=Max("attempt_no"))["last"] or 0) + 1
     cfg = cfg or AISettings.get_active()
+    from .context_window import current_window
+    import copy
     return MessageProcessingTrace.objects.create(
         raw_message=raw,
         operation_key=operation_key,
@@ -49,8 +51,9 @@ def reserve_attempt(raw, operation_key, *, cfg=None, snapshot_max_id=None,
         whatsapp_content=raw.content,
         prompt_version="facts-v5-dialogue-threads",
         status="warning",
-        result_summary="Ожидает обработки с полной историей.",
+        result_summary="Ожидает обработки с контекстом до 50 сообщений.",
         context_metadata={
+            **({"context_window": copy.deepcopy(current_window())} if current_window() is not None else {}),
             "analysis_policy": "history-packets-v1",
             "full_history_policy": "thread-context-v2",
             "analysis_limits": {"analysis_input_token_limit":cfg.analysis_input_token_limit,

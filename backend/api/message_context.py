@@ -45,7 +45,7 @@ def source_scope(raw):
     )
 
 
-def history_queryset(raw, snapshot_id, include_following=False):
+def history_queryset(raw, snapshot_id, include_following=False, target_ids=None):
     scope = source_scope(raw).filter(id__lte=snapshot_id)
     # Resolve revisions before applying time filters, so an old revision cannot reappear.
     newer = scope.filter(
@@ -66,6 +66,11 @@ def history_queryset(raw, snapshot_id, include_following=False):
         )
         .exclude(processing_state__in=["superseded", "deleted", "deduplication_ambiguous", "export_staged", "clarification_reply"])
     )
+    from .context_window import LIMIT, current_window
+    window = current_window()
+    if window is not None:
+        include_following = window["include_following"]
+        qs = qs.filter(pk__in=window["source_ids"])
     if include_following:
         at = raw.timestamp if raw.sent_at_known else raw.received_at
         qs = qs.annotate(order_time=Case(When(sent_at_known=True, then=F("timestamp")), default=F("received_at"), output_field=DateTimeField()))
@@ -74,18 +79,32 @@ def history_queryset(raw, snapshot_id, include_following=False):
             default=ExpressionWrapper(Value(at) - F("order_time"), output_field=DurationField()),
             output_field=DurationField(),
         )
-        return qs.annotate(distance=distance).order_by("distance", "order_time", "id"), "order_time"
-    time_field = "timestamp" if raw.sent_at_known else "received_at"
-    before = getattr(raw, time_field)
-    qs = qs.filter(
-        Q(**{f"{time_field}__lt": before}) | Q(**{time_field: before, "id__lt": raw.id})
-    )
-    if raw.sent_at_known:
-        qs = qs.filter(sent_at_known=True)
-    return qs.order_by(f"-{time_field}", "-id"), time_field
+        qs = qs.annotate(distance=distance).order_by("distance", "order_time", "id")
+    else:
+        before = raw.timestamp if raw.sent_at_known else raw.received_at
+        qs = qs.annotate(order_time=Case(When(sent_at_known=True, then=F("timestamp")), default=F("received_at"), output_field=DateTimeField()))
+        qs = qs.filter(Q(order_time__lt=before) | Q(order_time=before, id__lt=raw.id)).order_by("-order_time", "-id")
+    if window is None:
+        pinned = set(target_ids or []) - {raw.id}
+        if len(pinned) > LIMIT:
+            raise ProviderUnavailable("context_batch_too_large")
+        if set(qs.filter(pk__in=pinned).values_list("id", flat=True)) != pinned:
+            raise ProviderUnavailable("context_source_unavailable")
+        if include_following:
+            selected = pinned | set(qs.exclude(pk__in=pinned).values_list("id", flat=True)[:LIMIT-len(pinned)])
+        else:
+            selected = set(qs.values_list("id", flat=True)[:LIMIT])
+            if not pinned <= selected:
+                raise ProviderUnavailable("context_batch_too_large")
+        qs = qs.filter(pk__in=selected)
+    return qs, "order_time"
 
 
 def build_context(raw, cfg, known_projects, snapshot_id, include_following=False, batch_ids=None, target_content=None, full_state=None):
+    from .context_window import current_window
+    window = current_window()
+    if window is not None:
+        include_following = window['include_following']
     if full_state and full_state.get("routing_thread_id"):
         from .thread_routing import build_thread_context
         return build_thread_context(raw, cfg, known_projects, snapshot_id, full_state)
@@ -262,6 +281,7 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
         if full:
             continue
         item = {
+            "order_time": when,
             "raw_message_id": row["id"],
             "message_id": row["message_id"],
             "source_revision": row["source_revision"],

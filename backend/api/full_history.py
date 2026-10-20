@@ -323,9 +323,14 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state, *, _probe=False
     required_ids = {theme['thread_id'] for theme in (prior or {}).get('threads', []) if theme.get('thread_id')}
     offered_ids = {theme['id'] for theme in themes}
     for theme in DialogueThread.objects.filter(source_key=source_key(raw), pk__in=required_ids-offered_ids).exclude(state='superseded'):
+        from .context_window import current_window
+        window = current_window()
+        linked_ids = list(theme.message_links.values_list('raw_message_id', flat=True))
+        if window is not None and not set(linked_ids) <= set(window['source_ids']):
+            continue
         themes.append({'id':theme.id, 'version':theme.version, 'topic':theme.topic, 'state':theme.state,
                        'parent_id':theme.parent_id, 'project_id':theme.project_id, 'commitments':[],
-                       'message_ids':list(theme.message_links.values_list('raw_message_id', flat=True))})
+                       'message_ids':linked_ids})
     themes = [{k: v for k, v in theme.items() if k != 'summary'} for theme in themes]
     prepared_at = state.get('analysis_time') or timezone.now().astimezone(source_zone(raw)).isoformat()
     target_text = by_id[raw.id]['content']

@@ -326,7 +326,7 @@ def _retry_focused_context(current, exc):
     trace = reserve_attempt(raw, f'{current.deduplication_key}:focused-context:{stage}:{generation + 1}:{previous.id}')
     trace.context_metadata.update({key: metadata[key] for key in (
         'analysis_policy', 'full_history_policy', 'snapshot_max_id', 'full_history',
-        'replace_unsent', 'required_thread_keys', 'output_retry_generation') if key in metadata})
+        'replace_unsent', 'required_thread_keys', 'output_retry_generation', 'context_window') if key in metadata})
     from .free_fallback import policy_metadata
     trace.context_metadata.update(policy_metadata(metadata))
     trace.context_metadata.update(analysis_limits=limits, analysis_chunk_input_limit=cap,
@@ -435,7 +435,7 @@ def handle_failure(event, exc):
                     allowed = {f't{i}' for i in range(16)}
                     trace.context_metadata['required_thread_keys'] = sorted({row.get('thread_key') for row in references
                         if isinstance(row, dict) and isinstance(row.get('thread_key'), str) and row['thread_key'] in allowed})
-                for field in ('full_history_policy', 'full_history', 'analysis_chunk_input_limit', 'output_retry_generation'):
+                for field in ('full_history_policy', 'full_history', 'analysis_chunk_input_limit', 'output_retry_generation', 'context_window'):
                     if field in previous.context_metadata:
                         if field in ('analysis_chunk_input_limit', 'output_retry_generation'):
                             trace.context_metadata.setdefault(field, previous.context_metadata[field])
@@ -459,7 +459,7 @@ def handle_failure(event, exc):
                     HistoryAnalysisItem.objects.filter(outbox_event=current).update(trace=trace)
                 record_attempt(current, "pending", code, current.next_attempt_at)
                 return True
-        transport = {"provider_timeout", "provider_connection_failed", "provider_server_error", "provider_rate_limited", "provider_overloaded", "provider_in_flight_budget", "provider_circuit_open", "context_model_metadata_unavailable", "routing_snapshot_changed"}
+        transport = {"provider_timeout", "provider_connection_failed", "provider_server_error", "provider_rate_limited", "provider_overloaded", "provider_invalid_response", "provider_in_flight_budget", "provider_circuit_open", "context_model_metadata_unavailable", "routing_snapshot_changed"}
         main_payload_sha256 = None
         if code == 'provider_invalid_request' and focused_payload_sha256 is None:
             main_payload_sha256 = _main_rejection_payload_sha(rejected_trace, exc)
