@@ -72,8 +72,8 @@ def extraction_schema_diagnostics(schema, result):
                 "validator": error.validator,
                 "value_type": type(error.instance).__name__,
                 "expected": error.validator_value if error.validator in {"type", "required", "additionalProperties"} else None,
-                "unexpected_keys": sorted(set(error.instance) - set(error.schema.get("properties", {})))[:32]
-                    if error.validator == "additionalProperties" and isinstance(error.instance, dict) else [],
+                "unexpected_key_count": len(set(error.instance) - set(error.schema.get("properties", {})))
+                    if error.validator == "additionalProperties" and isinstance(error.instance, dict) else 0,
             })
     valid = True
     for error in Draft202012Validator(schema).iter_errors(result):
