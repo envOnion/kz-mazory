@@ -124,6 +124,8 @@ def recover(result, raw, trace, cfg):
             other.append((target,kind))
     selected = other + list(grouped.values())
     prepared = copy.copy(cfg)
+    from .free_fallback import with_policy
+    prepared = with_policy(prepared, trace.context_metadata)
     prepared.analysis_policy = 'history-packets-v1'
     prepared.full_history_policy = 'focused-facts-v1'
     counter, endpoint = context_runtime(prepared)
@@ -263,6 +265,8 @@ def reconcile_promises(facts, raw, trace, cfg):
         and all(ref.get('raw_message_id') in originals for ref in row.proposed_changes.get('evidence_messages', []))]
     context = [{'raw_message_id':item.id,'content':read_content(item, trace),'sender_name':item.sender_name,'timestamp':item.timestamp.isoformat()} for item in originals.values()]
     prepared = copy.copy(cfg)
+    from .free_fallback import with_policy
+    prepared = with_policy(prepared, trace.context_metadata)
     from .qwen_profile import enabled as qwen_enabled
     if not qwen_enabled(prepared):
         prepared.max_completion_tokens = min(2048, prepared.max_completion_tokens)
