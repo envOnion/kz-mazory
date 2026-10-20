@@ -362,6 +362,9 @@ def handle_failure(event, exc):
         if code in {'provider_invalid_request', 'invalid_extraction_schema', 'provider_output_truncated'}:
             rejected_trace = MessageProcessingTrace.objects.filter(pk=current.payload.get('trace_id')).first()
             focused_payload_sha256 = _focused_rejection_payload_sha(rejected_trace, exc)
+        if (focused_payload_sha256 is not None and code in {'invalid_extraction_schema', 'provider_output_truncated'}
+                and current.attempt_count >= 3 and _main_response_checkpoint(current) is None):
+            focused_payload_sha256 = None
         structural = {"source_revision_changed", "skipped_crm_delivered", "blocked_delivery", "projection_changed", "projection_snapshot_missing", "deduplication_ambiguous", "extraction_json_parse", "extraction_top_level_type", "extraction_facts_missing", "extraction_facts_type", "invalid_extraction_schema", "invalid_schema", "batch_classification_missing", "thread_classification_invalid", "thread_completion_unproven", "thread_sources_unavailable", "thread_source_conflict", "thread_sources_duplicate", "thread_keys_duplicate", "thread_parent_invalid", "thread_revision_conflict", "target_classification_invalid", "target_classification_conflict", "fact_thread_missing", "fact_thread_evidence_missing", "fact_thread_evidence_conflict", "provider_output_truncated", "context_batch_too_large", "context_fixed_input_too_large"}
         structural |= EVIDENCE_ERRORS
         from .history_analysis import split
