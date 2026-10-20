@@ -769,7 +769,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         # Error provenance belongs to this error, never an earlier retry.
         current_error_diagnostics = dict(exc.diagnostics) if isinstance(exc, ProviderUnavailable) else {}
         for key in ('request_admission_denied', 'provider_error_type', 'provider_error_category',
-                    'provider_http_status', 'provider_error_location'):
+                    'provider_http_status', 'provider_error_location', 'provider_error_body_format',
+                    'provider_error_detail_shape', 'provider_error_message_hint'):
             diagnostics.pop(key, None)
         if isinstance(exc, ProviderUnavailable):
             diagnostics.update(current_error_diagnostics)
