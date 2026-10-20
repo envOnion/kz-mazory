@@ -35,7 +35,7 @@ SAFE_AI_FIELDS = (
     'autonomous_input_tokens', 'chat_api_format', 'chat_provider_url',
     'chat_model_name', 'chat_temperature', 'context_window_tokens',
     'max_completion_tokens', 'context_safety_tokens', 'daily_request_limit',
-    'minute_request_limit', 'daily_budget_usd', 'is_active',
+    'minute_request_limit', 'daily_budget_usd', 'is_active', 'is_primary',
     'embedding_provider_url', 'embedding_model_name', 'embedding_dimension',
     'tokenizer_id', 'tokenizer_revision', 'system_prompt_worker', 'system_prompt_assistant',
 )
@@ -178,12 +178,20 @@ def update_model(request, cfg, fields):
     for name, value in values.items():
         setattr(cfg, name, value)
     try:
-        cfg.full_clean(exclude=['webhook_url','inbound_token'] if isinstance(cfg, BitrixSettings) else None)
+        cfg.full_clean(
+            exclude=['webhook_url','inbound_token'] if isinstance(cfg, BitrixSettings) else None,
+            validate_constraints=not isinstance(cfg, AISettings),
+        )
     except ModelValidationError as exc:
         raise ValidationError(getattr(exc, 'message_dict', {'error': exc.messages})) from None
-    cfg.save()
-    if isinstance(cfg, AISettings) and values.get('is_active') is True:
-        AISettings.objects.exclude(pk=cfg.pk).filter(is_active=True).update(is_active=False)
+    if isinstance(cfg, AISettings):
+        from .ai_configurations import save_configuration
+        try:
+            save_configuration(cfg, actor=request.user)
+        except ModelValidationError as exc:
+            raise ValidationError(getattr(exc, 'message_dict', {'error': exc.messages})) from None
+    else:
+        cfg.save()
     audit(request, 'settings.update', cfg, values)
     return cfg
 
@@ -229,7 +237,7 @@ class SettingsAIView(APIView):
 
     def get(self, request):
         require_integration(request, AISettings, write=request.method != 'GET')
-        cfgs = AISettings.objects.order_by('-is_active', 'id')
+        cfgs = AISettings.objects.order_by('-is_active', '-is_primary', 'id')
         rows = serializer_for(AISettings, SAFE_AI_FIELDS)(cfgs, many=True).data
         for row, cfg in zip(rows, cfgs):
             row['keys'] = {'chat': cfg.has_chat_api_key, 'embedding': cfg.has_embedding_api_key, 'decision': cfg.has_decision_api_key}
@@ -253,7 +261,7 @@ class SettingsAIDetailView(APIView):
     @transaction.atomic
     def patch(self, request, pk):
         require_integration(request, AISettings, write=request.method != 'GET')
-        cfg = get_object_or_404(AISettings.objects.select_for_update(), pk=pk)
+        cfg = get_object_or_404(AISettings.objects, pk=pk)
         update_model(request, cfg, SAFE_AI_FIELDS)
         return Response({'id': cfg.id, 'updated_at': cfg.updated_at.isoformat() if cfg.updated_at else None})
 

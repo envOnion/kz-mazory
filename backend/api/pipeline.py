@@ -21,6 +21,8 @@ from .facts import FactSchema, fact_identity, json_value, same_commitment_origin
 from .message_context import build_context, source_scope
 from .message_time import source_time
 from .models import (
+    AISettings,
+    AuditEvent,
     FactCandidate,
     FactEvidence,
     OutboxEvent,
@@ -322,7 +324,10 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             cfg.analysis_chunk_input_limit = trace.context_metadata.get('analysis_chunk_input_limit')
             if cfg.full_history_policy == 'thread-context-v2':
                 from .processing_attempts import ANALYSIS_CONFIG_FIELDS
-                changed = [name for name in ANALYSIS_CONFIG_FIELDS if name in limits and limits[name] != getattr(cfg, name)]
+                transport_fields = {'chat_model_name', 'chat_api_format', 'chat_provider_url',
+                                    'context_window_tokens', 'tokenizer_id', 'tokenizer_revision'}
+                changed = [name for name in ANALYSIS_CONFIG_FIELDS if name in limits
+                           and name not in transport_fields and limits[name] != getattr(cfg, name)]
                 if changed:
                     raise ProviderUnavailable('context_configuration_changed', diagnostics={'changed_fields':changed})
             cfg.analysis_repair_reason = trace.context_metadata.get("repair_reason")
@@ -344,15 +349,43 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             snapshot_url = trace.context_metadata.get(
                 "effective_provider_url", trace.context_metadata.get("provider_url")
             )
-            if (
+            if not isinstance(snapshot_url, str):
+                raise ProviderUnavailable("context_snapshot_mismatch")
+            route_changed = (
                 cfg.chat_model_name != trace.model_version
                 or api_format != snapshot_format
-                or not isinstance(snapshot_url, str)
                 or effective_provider_url.rstrip("/") != snapshot_url.rstrip("/")
-                or (qwen_enabled(cfg) and trace.context_metadata.get('provider_profile') != PROFILE)
-            ):
+            )
+            if route_changed:
+                if trace.context_metadata.get("request_state") == "sent":
+                    raise ProviderUnavailable("context_request_uncertain")
+                source_hash = trace.context_metadata.get("full_history", {}).get("source_hash")
+                payload_sha256 = trace.context_metadata.get("payload_sha256")
+                if (not isinstance(source_hash, str) or not re.fullmatch(r"[a-f0-9]{64}", source_hash)
+                        or not isinstance(payload_sha256, str) or not re.fullmatch(r"[a-f0-9]{64}", payload_sha256)):
+                    raise ProviderUnavailable("context_snapshot_mismatch")
+                old = AISettings.objects.filter(
+                    chat_model_name=trace.model_version,
+                    chat_api_format=snapshot_format,
+                    chat_provider_url=snapshot_url,
+                ).order_by("pk").first()
+                transition = {
+                    "version": 1,
+                    "from_config_id": old.pk if old else None,
+                    "to_primary_config_id": cfg.pk,
+                    "source_hash": source_hash,
+                    "request_sha256": payload_sha256,
+                }
+                if trace.context_metadata.get("provider_route_transition") != transition:
+                    AuditEvent.objects.create(
+                        target_type="MessageProcessingTrace", target_id=trace.pk,
+                        action="ai.provider_route_transition", before_after=transition,
+                    )
+                    trace.context_metadata["provider_route_transition"] = transition
+                    trace.save(update_fields=["context_metadata"])
+            elif qwen_enabled(cfg) and trace.context_metadata.get('provider_profile') != PROFILE:
                 raise ProviderUnavailable("context_configuration_changed")
-            if 'free_fallback_policy' in trace.context_metadata:
+            if 'free_fallback_policy' in trace.context_metadata and cfg.chat_model_name == "openrouter/free":
                 from .context_tokens import context_runtime
                 _, endpoint = context_runtime(cfg)
                 fallback_models(cfg, endpoint)
@@ -420,7 +453,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             sources.extend(offered.get('target_messages', []))
             sources.extend(item for item in offered.get('context', []) if not item.get('partial'))
             trace.context_metadata['evidence_ranges'] = {str(item['raw_message_id']): len(item['content']) for item in sources}
-        cache_enabled = cfg.chat_model_name == 'openrouter/free' and getattr(cfg, 'full_history_policy', None) == 'thread-context-v2'
+        cache_enabled = getattr(cfg, 'full_history_policy', None) == 'thread-context-v2'
         cached_response = _main_response_cache(trace, payload) if cache_enabled and result_override is None else None
         trace.context_metadata["request_state"] = "responded" if cached_response else "sent"
         trace.context_metadata.setdefault("timings_ms", {})["prepare"] = round((time.monotonic()-preparation_started)*1000)
@@ -442,6 +475,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             or trace.context_metadata.get("provider_url"),
             expected_api_format=api_format,
         )
+        if trace.context_metadata.get("provider_route_transition"):
+            diagnostics["provider_route_transition"] = trace.context_metadata["provider_route_transition"]
         trace.context_metadata["request_state"] = "responded"
         trace.context_metadata["timings_ms"]["provider"] = round((time.monotonic()-provider_started)*1000)
         if cache_enabled and result_override is None and cached_response is None:

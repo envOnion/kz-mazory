@@ -134,12 +134,18 @@ class AISettingsForm(forms.ModelForm):
             "embedding_api_key_encrypted",
         )
 
+    def validate_constraints(self):
+        # Primary swaps are validated and persisted atomically in AISettingsAdmin.save_model.
+        # Running the partial unique check here would reject a valid swap before the old row is demoted.
+        return
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._encrypted_replacements = {}
         self._previous_chat_api_format = None
         self._previous_chat_provider_url = ""
         self._previous_embedding_provider_url = ""
+        self._was_primary = bool(self.instance and self.instance.pk and self.instance.is_primary)
         if self.instance and self.instance.pk:
             previous = AISettings.objects.filter(pk=self.instance.pk).only(
                 "chat_api_format", "chat_provider_url", "embedding_provider_url"
@@ -181,6 +187,12 @@ class AISettingsForm(forms.ModelForm):
     @sensitive_variables()
     def clean(self):
         cleaned_data = super().clean()
+        active = cleaned_data.get("is_active", getattr(self.instance, "is_active", False))
+        primary = cleaned_data.get("is_primary", getattr(self.instance, "is_primary", False))
+        if primary and not active:
+            self.add_error("is_primary", "Основная конфигурация должна быть активной.")
+        if self._was_primary and (not active or not primary) and AISettings.objects.filter(is_active=True).exclude(pk=self.instance.pk).exists():
+            self.add_error("is_primary", "Сначала выберите другую основную конфигурацию.")
         chat_format = cleaned_data.get("chat_api_format")
         self._clean_base_url("chat_provider_url")
         self._clean_base_url("embedding_provider_url")

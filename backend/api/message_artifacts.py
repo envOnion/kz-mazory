@@ -85,7 +85,7 @@ def recognize(content, mime, provider):
         error = str(exc)[:64] if isinstance(exc, ProviderUnavailable) else type(exc).__name__
         raise
     finally:
-        usage = ProviderUsage.objects.create(outbox_event_id=usage_event_id.get(), operation=operation, model_name="configured-recognizer", duration_ms=round((time.monotonic() - started) * 1000), succeeded=not error, error_code=error)
+        usage = ProviderUsage.objects.create(config=reservation.config, outbox_event_id=usage_event_id.get(), operation=operation, model_name="configured-recognizer", duration_ms=round((time.monotonic() - started) * 1000), succeeded=not error, error_code=error)
         if reservation:
             reservation.state, reservation.usage = "settled", usage
             reservation.save(update_fields=["state", "usage"])
