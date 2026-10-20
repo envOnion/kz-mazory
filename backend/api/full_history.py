@@ -176,7 +176,7 @@ def state_parts(result, targets, counter, limit, compact_evidence=False):
     return pages
 
 
-def merge_results(values):
+def merge_results(values, *, deduplicate_facts=True):
     """Join independently validated pages by theme and original promise identity.
 
     A page returns the current status, rather than an append-only copy of the
@@ -207,7 +207,25 @@ def merge_results(values):
         for fact in value['facts']:
             identity = (fact['fact_type'], fact.get('promise_message_id') or fact.get('evidence_message_id'),
                         fact.get('commitment_text', '') if fact['fact_type'] == 'commitment' else fact.get('object_name', ''))
+            if not deduplicate_facts:
+                identity = len(facts)
             facts[identity] = {**copy.deepcopy(fact), 'thread_key': keys[fact['thread_key']]}
+        for field in ('target_classification', 'target_classifications'):
+            if field not in value:
+                continue
+            classified = copy.deepcopy(value[field])
+            entries = classified.values() if field == 'target_classifications' else [classified]
+            for item in entries:
+                if item is not None:
+                    item['thread_key'] = keys[item['thread_key']]
+            result[field] = classified
+    for key, theme in themes.items():
+        seen, parent = {key}, theme.get('parent_key')
+        while parent and parent in themes:
+            if parent in seen:
+                raise ProviderUnavailable('thread_parent_invalid')
+            seen.add(parent)
+            parent = themes[parent].get('parent_key')
     result['threads'], result['facts'] = list(themes.values()), list(facts.values())
     return result
 
@@ -783,6 +801,8 @@ def extract(payload):
             value = (merge_results(results), value[1], value[2])
     complete = coverage['complete']
     if complete:
+        # Single-page results need the same alias normalization as paged results.
+        value = (merge_results([value[0]], deduplicate_facts=False), value[1], value[2])
         trace.context_metadata['full_history']['stage_trace_ids'] = stages
         trace.save(update_fields=['context_metadata'])
         return extract_message(payload['raw_id'], trace_id=trace.id,
