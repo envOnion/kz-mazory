@@ -70,6 +70,13 @@ def context_threads(raw):
     qs = DialogueThread.objects.filter(source_key=source_key(raw)).exclude(
         state="superseded"
     )
+    from .context_window import current_window
+    window = current_window()
+    if window is not None:
+        from django.db.models import Exists, OuterRef
+        links = ThreadMessage.objects.filter(thread_id=OuterRef('pk'))
+        qs = qs.filter(Exists(links.filter(raw_message_id__in=window['source_ids']))).exclude(
+            Exists(links.exclude(raw_message_id__in=window['source_ids'])))
     # Recent themes plus named older themes. Summary is a retrieval hint, never evidence.
     words = [
         word for word in re.findall(r"\w+", raw.content.casefold()) if len(word) >= 4
@@ -89,7 +96,12 @@ def context_threads(raw):
         candidate__thread_revision__thread_id__in=item_ids,
         status__in=["pending", "overdue"],
         is_verified=True,
-    ).annotate(thread_rank=Window(
+    )
+    if window is not None:
+        from .models import FactEvidence
+        outside = FactEvidence.objects.filter(candidate_id=OuterRef('candidate_id')).exclude(raw_message_id__in=window['source_ids'])
+        commitments = commitments.filter(source_message_id__in=window['source_ids']).exclude(Exists(outside))
+    commitments = commitments.annotate(thread_rank=Window(
         expression=RowNumber(),
         partition_by=[F("candidate__thread_revision__thread_id")],
         order_by=[F("deadline").asc(), F("id").asc()],
@@ -120,7 +132,7 @@ def context_threads(raw):
             "state": item.state,
             "parent_id": item.parent_id,
             "project_id": item.project_id,
-            "summary": item.summary[:600],
+            "summary": "" if window is not None else item.summary[:600],
             "commitments": [{**task, "deadline_at": task["deadline_at"].isoformat() if task["deadline_at"] else None} for task in commitments_by_thread[item.id]],
             "message_ids": messages_by_thread[item.id],
         }

@@ -33,6 +33,7 @@ from .models import (
 )
 from .processing_attempts import require_reanalysis, reserve_attempt
 from .providers import ProviderUnavailable
+from .context_window import bounded_operation, current_window
 
 logger = logging.getLogger(__name__)
 
@@ -268,6 +269,7 @@ def _extraction_user_message(payload):
     return matches[0]
 
 
+@bounded_operation
 def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refresh=False, batch_ids=None, reanalyze=False, trace_ids=None, segment_range=None, defer_result=False, result_override=None, full_state=None):
     preparation_started = time.monotonic()
     explicit = trace_id is not None or reanalyze
@@ -401,9 +403,10 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                     .values("id", "name", "company__name")[:100]
                 )
             )
-            if cfg.autonomous_enabled and not batch_ids and not requested_by_id:
-                limit = min(cfg.autonomous_context_messages, cfg.analysis_target_message_limit)
-                batch_ids = [raw.id] + list(source_scope(raw).filter(processed=False, id__gte=raw.id, id__lte=trace.context_metadata["snapshot_max_id"]).exclude(pk=raw.id).exclude(content="").order_by("id").values_list("id", flat=True)[:max(0,limit-1)])
+            # Live arrivals are individual targets. Explicit imported packets
+            # supply their own targets within the same bounded source window.
+            if current_window() is not None:
+                trace.context_metadata['context_window'] = copy.deepcopy(current_window())
             context, metadata, payload = build_context(
                 raw, cfg, known, trace.context_metadata["snapshot_max_id"], include_following=True, full_state=full_state, **({"batch_ids": batch_ids} if batch_ids else {}), **({"target_content":raw.content[segment_range[0]:segment_range[1]]} if segment_range else {})
             )
@@ -433,6 +436,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 provider_url=effective_provider_url,
                 effective_provider_url=effective_provider_url,
                 api_format=api_format,
+                context_window=copy.deepcopy(current_window()),
             )
             if packet:
                 metadata.update(analysis_policy="history-packets-v1", analysis_limits=limits,

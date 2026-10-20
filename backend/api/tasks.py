@@ -840,6 +840,10 @@ def apply_delivery_ack(payload):
     return "matched"
 
 
+from .context_window import bounded_operation
+
+
+@bounded_operation
 def extract_message(payload):
     raw = RawMessage.objects.select_related('config').get(pk=payload['raw_id'])
     if raw.processing_state == 'clarification_reply':
@@ -889,6 +893,7 @@ def extract_message(payload):
     )
 
 
+@bounded_operation
 def route_message(payload):
     from .thread_routing import route_message as route
     return route(payload)
