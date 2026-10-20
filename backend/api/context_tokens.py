@@ -388,9 +388,21 @@ def context_runtime(cfg):
         raise ProviderUnavailable("context_provider_unsupported")
     if getattr(cfg, "tokenizer_id", "") == "utf8-byte-upper-bound-v1":
         class Utf8ByteUpperBoundCounter:
+            strategy = "utf8_byte_upper_bound_v1"
+            remote = False
+            request_count = 0
+
+            @staticmethod
+            def count_text(text):
+                return len(text.encode("utf-8"))
+
             @staticmethod
             def count_payload(payload):
                 return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+            @staticmethod
+            def offsets(text):
+                return list(range(len(text)))
 
         return Utf8ByteUpperBoundCounter(), {
             "tag": "utf8_byte_upper_bound_v1", "context_length": cfg.context_window_tokens,
