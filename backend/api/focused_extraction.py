@@ -204,7 +204,13 @@ def recover(result, raw, trace, cfg):
         else:
             trace.context_metadata.setdefault('focused_requests', {})[cache_key] = {'payload_sha256':digest,'request':copy.deepcopy(payload)}
             trace.save(update_fields=['context_metadata'])
-            supplemental, usage, diagnostics = AIService.analyze_payload(payload, provider_url=endpoint['effective_provider_url'], expected_api_format=endpoint['api_format'])
+            try:
+                supplemental, usage, diagnostics = AIService.analyze_payload(payload, provider_url=endpoint['effective_provider_url'], expected_api_format=endpoint['api_format'])
+            except ProviderUnavailable as exc:
+                raise ProviderUnavailable(str(exc), retry_after=exc.retry_after, diagnostics={
+                    **exc.diagnostics, 'focused_payload_sha256': digest,
+                    'focused_cache_key': cache_key,
+                }) from None
             trace.context_metadata['focused_extraction'][cache_key] = {'payload_sha256':digest,'result':copy.deepcopy(supplemental),'usage':usage,'diagnostics':diagnostics}
             trace.save(update_fields=['context_metadata'])
         facts = supplemental.get('facts')
