@@ -822,6 +822,8 @@ def extract(payload):
         raw = RawMessage.objects.select_for_update().get(pk=payload['raw_id'])
         following = reserve_attempt(raw, f'{current.deduplication_key}:full-stage:{len(stages)}')
         following.context_metadata.update({k: trace.context_metadata[k] for k in ['analysis_policy', 'analysis_limits', 'snapshot_max_id', 'full_history_policy', 'analysis_chunk_input_limit']})
+        from .free_fallback import policy_metadata
+        following.context_metadata.update(policy_metadata(trace.context_metadata))
         # Internal retry metadata travels with limits without changing settings.
         # A validated stage advances the checkpoint; only its retry counter resets.
         following.context_metadata['analysis_limits'] = dict(following.context_metadata['analysis_limits'])

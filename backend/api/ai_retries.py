@@ -315,6 +315,8 @@ def _retry_focused_context(current, exc):
     trace.context_metadata.update({key: metadata[key] for key in (
         'analysis_policy', 'full_history_policy', 'snapshot_max_id', 'full_history',
         'replace_unsent', 'required_thread_keys', 'output_retry_generation') if key in metadata})
+    from .free_fallback import policy_metadata
+    trace.context_metadata.update(policy_metadata(metadata))
     trace.context_metadata.update(analysis_limits=limits, analysis_chunk_input_limit=cap,
                                   repair_reason=str(exc), parent_trace_id=previous.id,
                                   focused_context_retry_fresh_ids=fresh_ids)
@@ -429,6 +431,8 @@ def handle_failure(event, exc):
                             trace.context_metadata[field] = previous.context_metadata[field]
                 for field in ("replace_unsent", "snapshot_max_id"):
                     if field in previous.context_metadata:trace.context_metadata[field]=previous.context_metadata[field]
+                from .free_fallback import policy_metadata
+                trace.context_metadata.update(policy_metadata(previous.context_metadata))
                 trace.save(update_fields=["context_metadata"])
                 current.payload = {**current.payload, "trace_id": trace.id, "trace_ids": [{"raw_id":raw.id,"trace_id":trace.id}], "schema_repaired":current.payload.get('schema_repaired', False) if full_output else True}
                 if current.payload.get("segment_trace_ids"):

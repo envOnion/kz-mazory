@@ -485,6 +485,9 @@ def extraction_payload(
 ):
     from .ai_service import WORKER_PROMPT, PACKET_PROMPT
     from .extraction_schema import COMPACT_SOURCE_WIRE_VERSION, NATIVE_STRING_POLICY
+    from .free_fallback import models
+
+    fallback_models = models(cfg, endpoint)
 
     system_prompt = WORKER_PROMPT
     compact_sources = endpoint.get('transport') == 'openrouter_free'
@@ -571,5 +574,7 @@ def extraction_payload(
         payload["messages"][0]["content"] += EVIDENCE_RULES
     if endpoint.get("transport") == "openrouter_free":
         from .free_router import request
+        if fallback_models is not None:
+            payload['models'] = fallback_models
         payload = request(payload, cfg.max_completion_tokens)
     return payload

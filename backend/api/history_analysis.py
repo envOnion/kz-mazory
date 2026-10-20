@@ -229,6 +229,8 @@ def split(event):
             trace.context_metadata.update(analysis_policy=POLICY, analysis_limits=old.context_metadata.get("analysis_limits", {}), parent_trace_id=old.id)
             for field in ("replace_unsent", "snapshot_max_id", "full_history_policy"):
                 if field in old.context_metadata:trace.context_metadata[field]=old.context_metadata[field]
+            from .free_fallback import policy_metadata
+            trace.context_metadata.update(policy_metadata(old.context_metadata))
             trace.save(update_fields=["context_metadata"])
             traces[item.raw_message_id] = trace.id
         payload = {**event.payload, "raw_id": raw.id, "trace_id": traces[raw.id],

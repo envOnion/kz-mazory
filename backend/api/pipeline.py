@@ -244,6 +244,8 @@ def _restore_request(trace):
         raise ProviderUnavailable("context_snapshot_mismatch") from None
     if payload_hash(payload) != expected_hash:
         raise ProviderUnavailable("context_snapshot_mismatch")
+    from .free_fallback import check_frozen
+    check_frozen(payload, trace.context_metadata, trace.model_version)
     return payload
 
 
@@ -306,6 +308,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             except (User.DoesNotExist, PermissionDenied) as exc:
                 raise ProviderUnavailable("reanalysis_access_revoked") from exc
         cfg = AIService._config()
+        from .free_fallback import with_policy, policy_metadata, models as fallback_models
+        cfg = with_policy(cfg, trace.context_metadata)
         packet = trace.context_metadata.get("analysis_policy") == "history-packets-v1"
         target_traces = {raw.id: trace}
         if packet:
@@ -346,6 +350,10 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 or (qwen_enabled(cfg) and trace.context_metadata.get('provider_profile') != PROFILE)
             ):
                 raise ProviderUnavailable("context_configuration_changed")
+            if 'free_fallback_policy' in trace.context_metadata:
+                from .context_tokens import context_runtime
+                _, endpoint = context_runtime(cfg)
+                fallback_models(cfg, endpoint)
             payload = _restore_request(trace)
         else:
             team = raw.config.team if raw.config_id else raw.team
@@ -364,6 +372,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             context, metadata, payload = build_context(
                 raw, cfg, known, trace.context_metadata["snapshot_max_id"], include_following=True, full_state=full_state, **({"batch_ids": batch_ids} if batch_ids else {}), **({"target_content":raw.content[segment_range[0]:segment_range[1]]} if segment_range else {})
             )
+            metadata.update(policy_metadata(trace.context_metadata))
             if '_ollama_num_ctx' in payload or qwen_enabled(cfg):
                 from .extraction_schema import extraction_schema, WIRE_VERSION
                 user = _extraction_user_message(payload)

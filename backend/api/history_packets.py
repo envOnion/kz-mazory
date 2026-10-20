@@ -54,6 +54,8 @@ def prepare_segments(event, *, output_overflow=False):
         trace.context_metadata.update(analysis_policy="history-packets-v1", analysis_limits=original.context_metadata.get("analysis_limits", {}), segment_range=bounds, parent_trace_id=original.id)
         for field in ("replace_unsent", "snapshot_max_id"):
             if field in original.context_metadata:trace.context_metadata[field]=original.context_metadata[field]
+        from .free_fallback import policy_metadata
+        trace.context_metadata.update(policy_metadata(original.context_metadata))
         trace.save(update_fields=["context_metadata"])
         traces.append(trace.id)
     event.payload = {**event.payload, "segment_ranges": ranges, "segment_trace_ids": traces,
