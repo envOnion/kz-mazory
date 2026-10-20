@@ -28,6 +28,8 @@ def validate_openai_extraction_response(data):
         "content_type": type(message.get("content")).__name__ if isinstance(message, dict) else None,
         "refusal_present": bool(message.get("refusal")) if isinstance(message, dict) else False,
         "tool_calls_type": type(message.get("tool_calls")).__name__ if isinstance(message, dict) else None,
+        "reasoning_type": type(message.get("reasoning")).__name__ if isinstance(message, dict) else None,
+        "reasoning_content_type": type(message.get("reasoning_content")).__name__ if isinstance(message, dict) else None,
         "choice_text_type": type(choice.get("text")).__name__ if isinstance(choice, dict) else None,
         "choice_delta_type": type(choice.get("delta")).__name__ if isinstance(choice, dict) else None,
         "finish_reason": choice.get("finish_reason") if isinstance(choice, dict)
