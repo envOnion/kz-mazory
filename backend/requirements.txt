@@ -16,7 +16,7 @@ attrs==26.1.0
     # via
     #   jsonschema
     #   referencing
-certifi==2026.7.22
+certifi==2026.10.19
     # via
     #   httpcore
     #   httpx
@@ -112,7 +112,7 @@ numpy==2.5.3
     #   qdrant-client
 packaging==26.3
     # via huggingface-hub
-pillow==12.3.0
+pillow==13.0.0
     # via mazory-backend
 portalocker==3.2.0
     # via qdrant-client
