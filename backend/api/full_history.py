@@ -886,14 +886,20 @@ def extract(payload):
             if owned != len(prefix) or AuditEvent.objects.filter(action=ACTIVATION_ACTION,
                     target_type='OutboxEvent', target_id=current.pk, before_after__request_audit_id=audit.pk).exists():
                 raise ProviderUnavailable('context_snapshot_mismatch')
-            following.context_metadata[KEY] = policy
+            if policy is None:
+                following.context_metadata.pop(KEY, None)
+                following.context_metadata.pop('free_local_global_input_budget', None)
+            else:
+                following.context_metadata[KEY] = policy
             current.payload = {key:value for key,value in current.payload.items() if key != INTENT_KEY}
             AuditEvent.objects.create(actor=audit.actor, target_type='OutboxEvent', target_id=current.pk,
                 action=ACTIVATION_ACTION, before_after={'request_audit_id':audit.pk, 'request_key':intent['request_key'],
                     'event_id':current.pk, 'raw_id':raw.pk, 'following_trace_id':following.pk,
                     'source_hash':next_state['source_hash'], 'snapshot_max_id':trace.context_metadata['snapshot_max_id'],
                     'stage_trace_ids':list(stages), 'old_policy':copy.deepcopy(trace.context_metadata[KEY]),
-                    'free_fallback_policy':copy.deepcopy(policy)})
+                    'free_fallback_policy':copy.deepcopy(policy),
+                    'free_local_budget_applied': policy is not None,
+                    'provider_config_id': AIService._config().pk})
         following.save(update_fields=['context_metadata'])
         members = [entry for entry in payload.get('trace_ids', []) if entry['raw_id'] != raw.id]
         members.append({'raw_id': raw.id, 'trace_id': following.id})

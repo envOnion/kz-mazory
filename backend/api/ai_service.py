@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 import requests
 from urllib3.exceptions import HTTPError as ResponseTransportError, ReadTimeoutError
 from django.conf import settings
-from django.db import DatabaseError
+from django.db import DatabaseError, models
 from django.db.models import Sum
 from django.utils import timezone
 from django.views.decorators.debug import sensitive_variables
@@ -83,6 +83,18 @@ usage_event_id = ContextVar("usage_event_id", default=None)
 extraction_deadline = ContextVar("extraction_deadline", default=None)
 outbox_claim = ContextVar("outbox_claim", default=None)
 logger = logging.getLogger(__name__)
+
+
+def fallback_allowed(exc):
+    """Shared admission and immutable-request failures must not fan out."""
+    diagnostics = getattr(exc, "diagnostics", {})
+    if diagnostics.get("budget_scope") == "autonomous_shared":
+        return False
+    return str(exc) not in {
+        "context_configuration_changed", "context_snapshot_mismatch",
+        "context_request_uncertain", "reanalysis_access_revoked",
+        "ai_disabled", "source_scope_changed", "analysis_claim_expired",
+    }
 
 MAX_USAGE_TOKEN_COUNT = 2_147_483_647
 MAX_USAGE_COST = Decimal("999999.99999999")
@@ -298,7 +310,9 @@ class AIService:
         except (TypeError, ValueError):
             raise ProviderUnavailable("provider_invalid_request") from None
         day = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        today = ProviderUsage.objects.filter(created_at__gte=day)
+        today = ProviderUsage.objects.filter(created_at__gte=day).filter(
+            models.Q(config=cfg) | models.Q(config__isnull=True)
+        )
         spent = today.aggregate(total=Sum("cost_usd"))["total"] or Decimal(0)
         if (
             cfg.daily_request_limit > 0 and today.count() >= cfg.daily_request_limit
@@ -459,6 +473,7 @@ class AIService:
                 cost = None
             try:
                 stored_usage = ProviderUsage.objects.create(
+                    config=cfg,
                     outbox_event_id=usage_event_id.get(),
                     api_format=api_format,
                     operation=operation,
@@ -509,6 +524,7 @@ class AIService:
                 api_format=OPENAI_COMPATIBLE,
                 operation="embedding",
                 api_key=api_key,
+                config=cfg,
             )
             try:
                 rows = data["data"]
@@ -557,6 +573,7 @@ class AIService:
                 operation="token_count",
                 headers=anthropic_headers(api_key),
                 response_validator=validate_anthropic_count,
+                config=cfg,
             )
         except ProviderUnavailable as exc:
             if exc.diagnostics.get("provider_error_code") in (404, 405):
@@ -571,28 +588,109 @@ class AIService:
     @staticmethod
     @sensitive_variables("api_key")
     def analyze_payload(payload, provider_url=None, expected_api_format=None):
-        cfg = AIService._config()
-        active_api_format = chat_api_format(cfg)
-        active_provider_url = AIService.effective_chat_provider_url(cfg)
-        if expected_api_format is None:
-            api_format = active_api_format
-            if provider_url is not None:
-                if checked_base_url(provider_url) != active_provider_url:
-                    raise ProviderUnavailable("context_configuration_changed")
-            provider_url = active_provider_url
-        else:
-            # Extraction retries use an immutable request snapshot. Keep its
-            # transport frozen even if an administrator changes the active
-            # configuration after the snapshot check but before this call.
-            api_format = expected_api_format
-            if api_format not in (OPENAI_COMPATIBLE, ANTHROPIC_MESSAGES):
-                raise ProviderUnavailable("provider_configuration_invalid")
-            if not isinstance(provider_url, str) or not provider_url:
-                raise ProviderUnavailable("context_snapshot_mismatch")
-            provider_url = checked_base_url(provider_url)
-            if api_format != active_api_format or provider_url != active_provider_url:
-                raise ProviderUnavailable("context_configuration_changed")
+        from .ai_configurations import chat_candidates
+        candidates = chat_candidates()
+        if not candidates:
+            raise ProviderUnavailable("ai_disabled")
+        last_error = None
+        event_id = usage_event_id.get()
+        completed_ids = set(ProviderUsage.objects.filter(
+            outbox_event_id=event_id, operation="chat", succeeded=True,
+        ).exclude(config_id__isnull=True).values_list("config_id", flat=True)) if event_id else set()
+        attempts = []
+        for index, cfg in enumerate(candidates):
+            if cfg.pk in completed_ids:
+                last_error = ProviderUnavailable("provider_response_previously_used")
+                attempts.append({"config_id": cfg.pk, "error_code": str(last_error)})
+                continue
+            if not cfg.has_chat_api_key and not getattr(settings, "AI_PROVIDER_ENV_FALLBACK", False):
+                last_error = ProviderUnavailable("ai_not_configured")
+                attempts.append({"config_id": cfg.pk, "error_code": str(last_error)})
+                continue
+            try:
+                result, usage, diagnostics = AIService._analyze_payload_once(
+                    payload, config=cfg,
+                )
+                diagnostics = dict(diagnostics)
+                diagnostics["provider_config_id"] = cfg.pk
+                diagnostics["provider_config_name"] = cfg.name
+                diagnostics["provider_model"] = cfg.chat_model_name
+                diagnostics["provider_attempts"] = [*attempts, {"config_id": cfg.pk, "error_code": None}]
+                if index:
+                    diagnostics["fallback_from_config_id"] = candidates[0].pk
+                    diagnostics["fallback_reason"] = str(last_error)[:64] if last_error else "provider_error"
+                return result, usage, diagnostics
+            except ProviderUnavailable as exc:
+                last_error = exc
+                attempts.append({"config_id": cfg.pk, "error_code": str(exc)[:64]})
+                if not fallback_allowed(exc):
+                    break
+                if index + 1 >= len(candidates):
+                    break
+        if last_error:
+            raise ProviderUnavailable(
+                str(last_error), diagnostics={**last_error.diagnostics, "provider_attempts": attempts},
+                retry_after=last_error.retry_after,
+            ) from None
+        raise ProviderUnavailable("ai_not_configured")
+
+    @staticmethod
+    @sensitive_variables("api_key")
+    def _analyze_payload_once(payload, *, config):
+        cfg = config
+        if not cfg.is_active:
+            raise ProviderUnavailable("ai_disabled")
+        api_format = chat_api_format(cfg)
+        provider_url = AIService.effective_chat_provider_url(cfg)
         api_key = AIService._credential(cfg, api_format=api_format)
+        if not isinstance(payload, dict):
+            raise ProviderUnavailable("provider_invalid_request")
+        payload = dict(payload)
+        payload["model"] = cfg.chat_model_name
+        if cfg.chat_model_name != "openrouter/free":
+            payload.pop("models", None)
+            payload.pop("provider", None)
+            payload.pop("plugins", None)
+        if cfg.chat_model_name != "gemma4:e4b":
+            payload.pop("_ollama_num_ctx", None)
+            local_schema = payload.pop("_ollama_format", None)
+            if local_schema is not None and "response_format" not in payload:
+                payload["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {"name": "grounded_whatsapp", "strict": True, "schema": local_schema},
+                }
+            from .qwen_profile import enabled as qwen_enabled
+            if not qwen_enabled(cfg):
+                for field in ("reasoning", "reasoning_effort", "chat_template_kwargs"):
+                    payload.pop(field, None)
+        if "max_tokens" in payload:
+            if type(payload["max_tokens"]) is not int or payload["max_tokens"] <= 0:
+                raise ProviderUnavailable("provider_invalid_request")
+            payload["max_tokens"] = min(payload["max_tokens"], cfg.max_completion_tokens)
+        try:
+            user_content = next(row["content"] for row in reversed(payload.get("messages", []))
+                                if isinstance(row, dict) and row.get("role") == "user"
+                                and isinstance(row.get("content"), str))
+            extraction_input_data = json.loads(user_content)
+        except (StopIteration, TypeError, ValueError):
+            extraction_input_data = None
+        if not payload.get("response_format") and isinstance(extraction_input_data, dict):
+            from .extraction_schema import extraction_schema
+            schema_name = "mazory_extraction" if cfg.chat_model_name == "openrouter/free" else "grounded_whatsapp"
+            payload["response_format"] = {"type": "json_schema", "json_schema": {
+                "name": schema_name, "strict": True,
+                "schema": extraction_schema(extraction_input_data),
+            }}
+        json_schema = payload.get("response_format", {}).get("json_schema", {}) if isinstance(payload.get("response_format"), dict) else {}
+        validation_schema = json_schema.get("schema") if isinstance(json_schema, dict) else None
+        from .context_tokens import context_runtime
+        counter, _runtime = context_runtime(cfg)
+        reserved_output = payload.get("max_tokens", cfg.max_completion_tokens)
+        if type(reserved_output) is not int or reserved_output <= 0:
+            raise ProviderUnavailable("provider_invalid_request")
+        reserved_output = min(reserved_output, cfg.max_completion_tokens)
+        if counter.count_payload(payload) + reserved_output + cfg.context_safety_tokens > cfg.context_window_tokens:
+            raise ProviderUnavailable("context_budget_exceeded")
         canonical_quote_input = canonical_quote_schema = None
         if api_format == ANTHROPIC_MESSAGES:
             default_max_tokens = (
@@ -614,6 +712,7 @@ class AIService:
                 operation="chat",
                 headers=anthropic_headers(api_key),
                 response_validator=normalize_anthropic_message,
+                config=cfg,
             )
             data = normalize_anthropic_message(raw_data)
         elif "_ollama_num_ctx" in payload:
@@ -627,6 +726,7 @@ class AIService:
                 (10, settings.AI_REQUEST_TIMEOUT),
                 api_format=api_format, operation="chat", api_key=api_key,
                 response_validator=normalize_response,
+                config=cfg,
             )
             data = normalize_response(raw_data)
         else:
@@ -654,6 +754,7 @@ class AIService:
                 api_format=api_format,
                 operation="chat",
                 api_key=api_key,
+                config=cfg,
             )
         diagnostics = {}
         try:
@@ -710,6 +811,10 @@ class AIService:
                     from .dialogue_threads import normalize_themes
                     result['threads'] = normalize_themes(
                         result['threads'], source_wire_version=COMPACT_SOURCE_WIRE_VERSION)
+            if validation_schema:
+                from jsonschema import Draft202012Validator
+                if not Draft202012Validator(validation_schema).is_valid(result):
+                    raise ProviderUnavailable("invalid_extraction_schema", diagnostics=diagnostics)
             from .qwen_profile import enabled as qwen_enabled
             if qwen_enabled(cfg):
                 from jsonschema import Draft202012Validator
@@ -731,7 +836,25 @@ class AIService:
     @staticmethod
     @sensitive_variables("api_key")
     def chat_assistant(prompt, context, mode="detailed", suggest=True):
-        cfg = AIService._config()
+        from .ai_configurations import chat_candidates
+        candidates = chat_candidates()
+        if not candidates:
+            raise ProviderUnavailable("ai_disabled")
+        last_error = None
+        for cfg in candidates:
+            try:
+                return AIService._chat_assistant_once(prompt, context, mode, suggest, cfg)
+            except ProviderUnavailable as exc:
+                last_error = exc
+                if not fallback_allowed(exc):
+                    break
+        raise last_error or ProviderUnavailable("ai_not_configured")
+
+    @staticmethod
+    @sensitive_variables("api_key")
+    def _chat_assistant_once(prompt, context, mode, suggest, cfg):
+        if not cfg.is_active:
+            raise ProviderUnavailable("ai_disabled")
         api_format = chat_api_format(cfg)
         api_key = AIService._credential(cfg, api_format=api_format)
         instruction = (
@@ -754,10 +877,12 @@ class AIService:
                 },
             ],
         }
+        payload.setdefault("max_tokens", cfg.max_completion_tokens)
         from .qwen_profile import enabled as qwen_enabled, parameters
         if qwen_enabled(cfg):
             payload = parameters(payload)
             payload['max_tokens'] = min(cfg.max_completion_tokens, 8192)
+        if cfg.chat_model_name != "gemma4:e4b":
             from .context_tokens import context_runtime
             counter, _ = context_runtime(cfg)
             if counter.count_payload(payload) + payload['max_tokens'] + cfg.context_safety_tokens > cfg.context_window_tokens:
@@ -774,6 +899,7 @@ class AIService:
                 operation="chat",
                 headers=anthropic_headers(api_key),
                 response_validator=normalize_anthropic_message,
+                config=cfg,
             )
             data = normalize_anthropic_message(raw_data)
         elif cfg.chat_model_name == "gemma4:e4b":
@@ -787,6 +913,7 @@ class AIService:
                 base[:-3] + "/api/chat", native_request(payload, cfg, structured=False), 45,
                 api_format=api_format, operation="chat", api_key=api_key,
                 response_validator=normalize_response,
+                config=cfg,
             )
             data = normalize_response(raw_data)
         else:
@@ -797,6 +924,7 @@ class AIService:
                 api_format=api_format,
                 operation="chat",
                 api_key=api_key,
+                config=cfg,
             )
         try:
             choice = data["choices"][0]
@@ -844,6 +972,7 @@ class AIService:
                 api_format=api_format, operation="token_count",
                 headers=anthropic_headers(AIService._credential(cfg, api_format=api_format)),
                 response_validator=validate_anthropic_count,
+                config=cfg,
             )
             if counted['input_tokens'] > available:
                 raise ProviderUnavailable('context_budget_exceeded', diagnostics={
@@ -880,6 +1009,7 @@ class AIService:
                 headers=anthropic_headers(key) if native else None,
                 api_key=None if native else key,
                 response_validator=lambda data: analytics_turn(normalized(data), api_format),
+                config=cfg,
             )
         except ProviderUnavailable as exc:
             if str(exc) in ["provider_invalid_request", "provider_request_rejected"]:

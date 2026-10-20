@@ -5,6 +5,7 @@ from urllib.parse import quote, urlsplit
 import requests
 
 from django.contrib import admin
+from django.core.exceptions import ValidationError
 from django.db.models import F, Prefetch
 from django.template.loader import render_to_string
 from django.utils.html import format_html, format_html_join
@@ -884,10 +885,10 @@ class AISettingsAdmin(IntegrationAdmin):
         "embedding_model_name",
         "embedding_dimension",
         "is_active",
+        "is_primary",
         "updated_at",
     )
-    list_filter = ("chat_api_format", "is_active")
-    list_editable = ("chat_model_name", "embedding_model_name", "is_active")
+    list_filter = ("chat_api_format", "is_active", "is_primary")
     exclude = (
         "chat_api_key",
         "chat_api_key_encrypted",
@@ -900,7 +901,7 @@ class AISettingsAdmin(IntegrationAdmin):
         "updated_at",
     )
     fieldsets = (
-        ("Конфигурация", {"fields": ("name", "is_active")}),
+        ("Конфигурация", {"fields": ("name", "is_active", "is_primary")}),
         ("Маршрутизация тем WhatsApp", {"fields": ("thread_routing_mode", "laya_match_threshold", "laya_match_margin", "routing_policy_version", "thread_extract_idle_seconds", "thread_extract_max_wait_seconds", "thread_extract_batch_size"),
             "description": "LAYA назначает сообщения только при подтверждённой политике качества. Тему и факты определяет LLM. Включение отдельно для каждого чата."}),
         ("Автономный учет WhatsApp", {"fields": ("autonomous_enabled", "autonomous_crm_enabled", "autonomous_policy_version", "autonomous_context_messages", "autonomous_input_tokens", "autonomous_daily_token_limit", "autonomous_max_in_flight")}),
@@ -991,6 +992,13 @@ class AISettingsAdmin(IntegrationAdmin):
         )
 
     def save_model(self, request, obj, form, change):
+        from .ai_configurations import save_configuration
+        try:
+            save_configuration(obj, actor=request.user)
+        except ValidationError as exc:
+            from django.contrib import messages
+            self.message_user(request, "; ".join(exc.messages), level=messages.ERROR)
+            raise
         super().save_model(request, obj, form, change)
         from django.utils import timezone
         from .models import OutboxEvent

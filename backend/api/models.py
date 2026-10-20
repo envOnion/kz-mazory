@@ -919,10 +919,21 @@ class AISettings(TimestampedModel):
     )
 
     is_active = models.BooleanField("Активная конфигурация", default=True)
+    is_primary = models.BooleanField("Основная конфигурация", default=False)
 
     class Meta:
         verbose_name = "Настройки моделей AI"
         verbose_name_plural = "Настройки моделей AI"
+        constraints = [
+            models.UniqueConstraint(
+                fields=("is_primary",), condition=models.Q(is_primary=True),
+                name="one_primary_ai_settings",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(is_primary=False) | models.Q(is_active=True),
+                name="primary_ai_settings_active",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.name} ({self.chat_model_name})"
@@ -1004,7 +1015,7 @@ class AISettings(TimestampedModel):
 
     @classmethod
     def get_active(cls):
-        return cls.objects.filter(is_active=True).first() or cls(is_active=False)
+        return cls.objects.filter(is_primary=True, is_active=True).first() or cls(is_active=False)
 
 
 class BitrixSettings(TimestampedModel):
@@ -1942,6 +1953,10 @@ class PrivateAttachment(TimestampedModel):
 
 
 class ProviderUsage(TimestampedModel):
+    config = models.ForeignKey(
+        AISettings, null=True, blank=True, on_delete=models.PROTECT,
+        related_name="provider_usage",
+    )
     outbox_event = models.ForeignKey(
         OutboxEvent, null=True, on_delete=models.PROTECT, related_name="provider_usage"
     )

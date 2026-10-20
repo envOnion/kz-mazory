@@ -74,10 +74,11 @@ def with_policy(cfg, metadata):
         return cfg
     if metadata.get('full_history_policy') != 'thread-context-v2':
         raise ProviderUnavailable('context_configuration_changed')
-    _cfg(metadata[KEY], cfg)
     result = copy.copy(cfg)
+    if cfg.chat_model_name == MODEL:
+        _cfg(metadata[KEY], cfg)
     setattr(result, KEY, copy.deepcopy(metadata[KEY]))
-    if metadata[KEY]['version'] == LOCAL_VERSION:
+    if metadata[KEY]['version'] == LOCAL_VERSION and cfg.chat_model_name == MODEL:
         result._free_global_input_budget = getattr(cfg, '_free_global_input_budget', cfg.analysis_input_token_limit)
     return result
 
@@ -86,6 +87,8 @@ def local_runtime(cfg):
     """Apply only after the caller validates the original global snapshot."""
     policy = getattr(cfg, KEY, None)
     if not isinstance(policy, dict) or policy.get('version') != LOCAL_VERSION:
+        return cfg
+    if cfg.chat_model_name != MODEL:
         return cfg
     _cfg(policy, cfg)
     base = getattr(cfg, '_free_global_input_budget', None)
@@ -164,8 +167,15 @@ def validate_intent(intent, audit, event, raw, trace, following, state, cfg):
                 or {**{key:value for key,value in policy.items() if key != 'local_input_budget'}, 'version':VERSION} != previous):
             raise ProviderUnavailable('context_configuration_changed')
         limits = following.context_metadata['analysis_limits']
-        if any(name not in limits or limits[name] != getattr(cfg, name) for name in ANALYSIS_CONFIG_FIELDS):
+        transport_fields = {'chat_model_name', 'chat_api_format', 'chat_provider_url',
+                            'context_window_tokens', 'tokenizer_id', 'tokenizer_revision'}
+        if any(name not in limits or limits[name] != getattr(cfg, name)
+               for name in ANALYSIS_CONFIG_FIELDS if not (cfg.chat_model_name != MODEL and name in transport_fields)):
             raise ProviderUnavailable('context_configuration_changed')
+        if cfg.chat_model_name != MODEL:
+            # The reviewed intent may continue its proven source/prefix under
+            # the paid primary, but its Free-only local window is not applied.
+            return None
         candidate = with_policy(cfg, {**metadata, KEY:policy})
         candidate.analysis_input_token_limit = limits['analysis_input_token_limit']
         candidate.max_completion_tokens = min(candidate.max_completion_tokens, limits['analysis_output_token_limit'])
@@ -203,6 +213,8 @@ def check_frozen(payload, metadata, model_version, cfg=None):
                 or metadata.get('api_format') != 'openai_compatible'
                 or not _official(metadata.get('effective_provider_url', metadata.get('provider_url')))):
             raise ProviderUnavailable('context_snapshot_mismatch')
+        if metadata[KEY]['version'] == LOCAL_VERSION and cfg is not None and getattr(cfg, 'chat_model_name', None) != MODEL:
+            cfg = None
         if metadata[KEY]['version'] == LOCAL_VERSION:
             if cfg is None:
                 # Pure cache/checkpoint readers have no active cfg. Reconstruct

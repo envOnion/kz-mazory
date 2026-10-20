@@ -3,7 +3,17 @@ export interface SettingField {
   name: string; label: string; type: 'boolean' | 'integer' | 'number' | 'decimal' | 'text' | 'string' | 'json'
   help: string; choices: { value: string; label: string }[]; max_length: number | null
 }
-export interface SettingsRow { id: number; runtime?: {effective_autonomous_write_enabled:boolean}; keys?: { chat: boolean; embedding: boolean; decision?: boolean }; [key: string]: unknown }
+export interface SettingsRow {
+  id: number
+  name?: string
+  is_active?: boolean
+  is_primary?: boolean
+  chat_model_name?: string
+  chat_provider_url?: string
+  runtime?: {effective_autonomous_write_enabled:boolean}
+  keys?: { chat: boolean; embedding: boolean; decision?: boolean }
+  [key: string]: unknown
+}
 export type AiModelRole = 'chat' | 'embedding' | 'decision'
 export type AiSettingsRole = AiModelRole | 'shared'
 export type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue }

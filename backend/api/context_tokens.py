@@ -386,6 +386,17 @@ def context_runtime(cfg):
         }
     if api_format != "openai_compatible":
         raise ProviderUnavailable("context_provider_unsupported")
+    if getattr(cfg, "tokenizer_id", "") == "utf8-byte-upper-bound-v1":
+        class Utf8ByteUpperBoundCounter:
+            @staticmethod
+            def count_payload(payload):
+                return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+
+        return Utf8ByteUpperBoundCounter(), {
+            "tag": "utf8_byte_upper_bound_v1", "context_length": cfg.context_window_tokens,
+            "supported_parameters": [], "api_format": api_format,
+            "effective_provider_url": cfg.chat_provider_url.rstrip("/"),
+        }
     profile = getattr(cfg, "chat_model_profile", {})
     if profile.get("tokenizer") and api_format == "openai_compatible":
         from .ai_model_profiles import profile_counter
