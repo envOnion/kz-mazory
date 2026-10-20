@@ -118,7 +118,7 @@ def _main_response_checkpoint(event):
 
 
 def _retryable_focused_project_rejection(trace, exc):
-    """Allow one observed Free Router auxiliary rejection, never a client 400."""
+    """Replay one observed Free Router rejection after verifying auxiliary work."""
     if (trace is None or not isinstance(exc, ProviderUnavailable)
             or str(exc) != 'provider_invalid_request' or trace.model_version != 'openrouter/free'):
         return False
@@ -129,11 +129,12 @@ def _retryable_focused_project_rejection(trace, exc):
             or metadata.get('request_state') != 'responded'
             or type(diagnostics.get('provider_http_status')) is not int
             or type(diagnostics.get('provider_error_code')) is not int
-            or any(diagnostics.get(key) != value for key, value in {
-                'provider_http_status': 200, 'provider_error_code': 400,
-                'provider_error_location': 'top_level', 'provider_error_type': 'invalid_request',
-                'provider_error_category': 'unknown',
-            }.items())):
+            or diagnostics.get('provider_error_category') != 'unknown'
+            or (diagnostics.get('provider_http_status'), diagnostics.get('provider_error_code'),
+                diagnostics.get('provider_error_location'), diagnostics.get('provider_error_type')) not in (
+                    (200, 400, 'top_level', 'invalid_request'),
+                    (404, 404, 'http', 'unknown'),
+                )):
         return False
     from .context_tokens import payload_hash
     from .pipeline import _extraction_user_message, _main_response_cache, _restore_request
@@ -156,8 +157,10 @@ def _retryable_focused_project_rejection(trace, exc):
             return False
         inputs = json.loads(_extraction_user_message(request)['content'])
         target = inputs.get('target_message_id')
+        kinds = inputs.get('analysis_fact_types')
+        allowed = [['project'], ['payment']] if diagnostics['provider_http_status'] == 404 else [['project']]
         return (type(target) is int and target in (metadata.get('batch_message_ids') or [trace.raw_message_id])
-                and key == f'{target}:project' and inputs.get('analysis_fact_types') == ['project']
+                and kinds in allowed and key == f'{target}:{kinds[0]}'
                 and inputs.get('analysis_operation') == 'focused_fact_extraction')
     except (ProviderUnavailable, KeyError, TypeError, ValueError, AttributeError):
         return False
