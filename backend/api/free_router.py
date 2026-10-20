@@ -233,7 +233,9 @@ def validate_usage(counter, expected, actual):
 def runtime(cfg):
     from .ai_service import AIService
 
-    if cfg.context_window_tokens > 200000 or cfg.tokenizer_id != MODEL or cfg.tokenizer_revision != PROFILE:
+    from .free_fallback import local_window_valid
+    if ((cfg.context_window_tokens > 200000 and not local_window_valid(cfg))
+            or cfg.tokenizer_id != MODEL or cfg.tokenizer_revision != PROFILE):
         raise ProviderUnavailable("context_tokenizer_unavailable")
     return RouterCounter(), {
         "tag": MODEL, "transport": "openrouter_free",
