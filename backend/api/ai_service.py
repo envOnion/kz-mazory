@@ -57,6 +57,31 @@ def embedding_chunks(text, max_bytes=480):
     return chunks
 
 
+def extraction_schema_diagnostics(schema, result):
+    """Explain rejected structure without recording source values or credentials."""
+    from jsonschema import Draft202012Validator
+    errors = []
+    def collect(error):
+        if error.context:
+            for child in error.context:
+                collect(child)
+        elif len(errors) < 24:
+            errors.append({
+                "path": list(error.absolute_path),
+                "schema_path": list(error.absolute_schema_path),
+                "validator": error.validator,
+                "value_type": type(error.instance).__name__,
+                "expected": error.validator_value if error.validator in {"type", "required", "additionalProperties"} else None,
+                "unexpected_keys": sorted(set(error.instance) - set(error.schema.get("properties", {})))[:32]
+                    if error.validator == "additionalProperties" and isinstance(error.instance, dict) else [],
+            })
+    valid = True
+    for error in Draft202012Validator(schema).iter_errors(result):
+        valid = False
+        collect(error)
+    return None if valid else {"schema_errors": errors}
+
+
 def read_provider_response(response, deadline, read_timeout, timeout_code):
     """Keep response heartbeats from extending the caller's total budget."""
     if deadline is None:
@@ -593,6 +618,7 @@ class AIService:
         if not candidates:
             raise ProviderUnavailable("ai_disabled")
         last_error = None
+        primary_error = None
         attempts = []
         for index, cfg in enumerate(candidates):
             # One outbox event can contain multiple history chunks and auxiliary
@@ -616,13 +642,20 @@ class AIService:
                     diagnostics["fallback_reason"] = str(last_error)[:64] if last_error else "provider_error"
                 return result, usage, diagnostics
             except ProviderUnavailable as exc:
+                if primary_error is None:
+                    primary_error = exc
                 last_error = exc
-                attempts.append({"config_id": cfg.pk, "error_code": str(exc)[:64]})
+                attempts.append({"config_id": cfg.pk, "error_code": str(exc)[:64],
+                                 "diagnostics": exc.diagnostics})
                 if not fallback_allowed(exc):
                     break
                 if index + 1 >= len(candidates):
                     break
         if last_error:
+            # An incompatible backup window must not hide a retryable primary
+            # failure and turn a temporary outage into a terminal message error.
+            if str(last_error) == "context_budget_exceeded" and primary_error is not None:
+                last_error = primary_error
             raise ProviderUnavailable(
                 str(last_error), diagnostics={**last_error.diagnostics, "provider_attempts": attempts},
                 retry_after=last_error.retry_after,
@@ -689,13 +722,7 @@ class AIService:
             raise ProviderUnavailable("context_budget_exceeded")
         canonical_quote_input = canonical_quote_schema = None
         if api_format == ANTHROPIC_MESSAGES:
-            default_max_tokens = (
-                cfg.max_completion_tokens
-                if expected_api_format is None
-                else payload.get("max_tokens")
-                if isinstance(payload, dict)
-                else None
-            )
+            default_max_tokens = payload.get("max_tokens", cfg.max_completion_tokens)
             request_payload = anthropic_message_payload(
                 payload,
                 default_max_tokens=default_max_tokens,
@@ -795,8 +822,9 @@ class AIService:
             if cfg.chat_model_name == "openrouter/free":
                 from jsonschema import Draft202012Validator
                 schema = payload.get("response_format", {}).get("json_schema", {}).get("schema")
-                if schema and not Draft202012Validator(schema).is_valid(result):
-                    raise ProviderUnavailable("invalid_extraction_schema", diagnostics=diagnostics)
+                schema_failure = extraction_schema_diagnostics(schema, result) if schema else None
+                if schema_failure:
+                    raise ProviderUnavailable("invalid_extraction_schema", diagnostics={**diagnostics, **schema_failure})
                 if canonical_quote_input is not None:
                     from .quote_input_codec import restore
                     result = restore(result, canonical_quote_input, canonical_quote_schema)
@@ -809,8 +837,9 @@ class AIService:
                         result['threads'], source_wire_version=COMPACT_SOURCE_WIRE_VERSION)
             if validation_schema:
                 from jsonschema import Draft202012Validator
-                if not Draft202012Validator(validation_schema).is_valid(result):
-                    raise ProviderUnavailable("invalid_extraction_schema", diagnostics=diagnostics)
+                schema_failure = extraction_schema_diagnostics(validation_schema, result)
+                if schema_failure:
+                    raise ProviderUnavailable("invalid_extraction_schema", diagnostics={**diagnostics, **schema_failure})
             from .qwen_profile import enabled as qwen_enabled
             if qwen_enabled(cfg):
                 from jsonschema import Draft202012Validator
@@ -819,8 +848,9 @@ class AIService:
                 if reordered:
                     diagnostics['promise_evidence_order'] = reordered
                 schema = payload.get('response_format', {}).get('json_schema', {}).get('schema')
-                if schema and not Draft202012Validator(schema).is_valid(result):
-                    raise ProviderUnavailable('invalid_extraction_schema', diagnostics=diagnostics)
+                schema_failure = extraction_schema_diagnostics(schema, result) if schema else None
+                if schema_failure:
+                    raise ProviderUnavailable('invalid_extraction_schema', diagnostics={**diagnostics, **schema_failure})
                 from .qwen_profile import restore_evidence
                 result = restore_evidence(result, json.loads(payload['messages'][-1]['content']))
             return result, usage, diagnostics
