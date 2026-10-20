@@ -1,6 +1,7 @@
 """Durable retries for background message AI work; no sleeping worker threads."""
 
 import copy
+import json
 import random
 from datetime import timedelta
 
@@ -114,6 +115,52 @@ def _main_response_checkpoint(event):
                                      'response_sha256': marker['response_sha256']}
     retry['history'], retry['phase'] = [], 'auxiliary'
     return trace, retry, marker
+
+
+def _retryable_focused_project_rejection(trace, exc):
+    """Allow one observed Free Router auxiliary rejection, never a client 400."""
+    if (trace is None or not isinstance(exc, ProviderUnavailable)
+            or str(exc) != 'provider_invalid_request' or trace.model_version != 'openrouter/free'):
+        return False
+    metadata, diagnostics = trace.context_metadata, exc.diagnostics
+    if not isinstance(metadata, dict) or not isinstance(diagnostics, dict):
+        return False
+    if (metadata.get('full_history_policy') != 'thread-context-v2'
+            or metadata.get('request_state') != 'responded'
+            or type(diagnostics.get('provider_http_status')) is not int
+            or type(diagnostics.get('provider_error_code')) is not int
+            or any(diagnostics.get(key) != value for key, value in {
+                'provider_http_status': 200, 'provider_error_code': 400,
+                'provider_error_location': 'top_level', 'provider_error_type': 'invalid_request',
+                'provider_error_category': 'unknown',
+            }.items())):
+        return False
+    from .context_tokens import payload_hash
+    from .pipeline import _extraction_user_message, _main_response_cache, _restore_request
+    try:
+        retry = metadata.get('retry', {})
+        history = retry.get('history', []) + retry.get('completed_main_phase', {}).get('history', [])
+        if any(row.get('error_code') == 'provider_invalid_request' for row in history):
+            return False
+        if _main_response_cache(trace, _restore_request(trace)) is None:
+            return False
+        completed = metadata.get('focused_extraction', {})
+        pending = [(key, row) for key, row in metadata.get('focused_requests', {}).items()
+                   if not isinstance(completed.get(key), dict)
+                   or completed[key].get('payload_sha256') != row.get('payload_sha256')]
+        if len(pending) != 1:
+            return False
+        key, row = pending[0]
+        request = row['request']
+        if payload_hash(request) != row['payload_sha256'] or request.get('model') != 'openrouter/free':
+            return False
+        inputs = json.loads(_extraction_user_message(request)['content'])
+        target = inputs.get('target_message_id')
+        return (type(target) is int and target in (metadata.get('batch_message_ids') or [trace.raw_message_id])
+                and key == f'{target}:project' and inputs.get('analysis_fact_types') == ['project']
+                and inputs.get('analysis_operation') == 'focused_fact_extraction')
+    except (ProviderUnavailable, KeyError, TypeError, ValueError, AttributeError):
+        return False
 
 
 def _retry_focused_context(current, exc):
@@ -281,6 +328,9 @@ def handle_failure(event, exc):
                 record_attempt(current, "pending", code, current.next_attempt_at)
                 return True
         transport = {"provider_timeout", "provider_connection_failed", "provider_server_error", "provider_rate_limited", "provider_overloaded", "provider_in_flight_budget", "provider_circuit_open", "context_model_metadata_unavailable", "routing_snapshot_changed"}
+        if code == 'provider_invalid_request' and _retryable_focused_project_rejection(
+                MessageProcessingTrace.objects.filter(pk=current.payload.get('trace_id')).first(), exc):
+            transport.add(code)
         if code in transport - {'provider_circuit_open', 'context_model_metadata_unavailable', 'routing_snapshot_changed'}:
             checkpoint = _main_response_checkpoint(current)
             if checkpoint is not None:
