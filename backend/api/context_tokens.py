@@ -398,7 +398,27 @@ def context_runtime(cfg):
 
             @staticmethod
             def count_payload(payload):
-                return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+                # The compatible adapter adds a grounded schema before sending.
+                # Count that same schema during boundary probes, so literal
+                # source enums cannot push an already selected chunk over budget.
+                wire = dict(payload)
+                if not wire.get("response_format"):
+                    try:
+                        content = next(row["content"] for row in reversed(wire.get("messages", []))
+                                       if isinstance(row, dict) and row.get("role") == "user"
+                                       and isinstance(row.get("content"), str))
+                        inputs = json.loads(content)
+                    except (StopIteration, TypeError, ValueError):
+                        inputs = None
+                    if isinstance(inputs, dict):
+                        from .extraction_schema import compatible_extraction_schema, extraction_schema
+                        name = "mazory_extraction" if cfg.chat_model_name == "openrouter/free" else "grounded_whatsapp"
+                        wire["response_format"] = {"type": "json_schema", "json_schema": {
+                            "name": name, "strict": True, "schema": (
+                                extraction_schema(inputs) if cfg.chat_model_name == "openrouter/free"
+                                else compatible_extraction_schema(inputs)),
+                        }}
+                return len(json.dumps(wire, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
             @staticmethod
             def offsets(text):
