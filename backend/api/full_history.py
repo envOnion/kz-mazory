@@ -296,6 +296,9 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state, *, _probe=False
         raise ProviderUnavailable('context_source_unavailable')
     source = source_metadata(raw)
     page = copy.deepcopy(state.get('page', {}))
+    from .free_fallback import check_page
+    if not _probe:
+        check_page(cfg, page)
     parts = page.get('parts') or sorted(state_parts(state.get('result'), targets, counter, min(chunk_limit // 3, cfg.max_completion_tokens // 2),
                                                   compact_evidence=endpoint.get('transport') == 'openrouter_free'),
                                       key=lambda value: counter.count_text(canonical_json(value)), reverse=True)
@@ -561,6 +564,10 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state, *, _probe=False
         metadata['page_plan'] = {'parts': parts, 'index': part_index, 'results': page.get('results', []),
                                  'selected': selected, 'ranges': ranges, 'cursor': cursor, 'offset': offset,
                                  'target_range': target_range}
+        from .free_fallback import KEY, LOCAL_VERSION
+        policy = getattr(cfg, KEY, None)
+        if isinstance(policy, dict) and policy.get('version') == LOCAL_VERSION:
+            metadata['page_plan'][KEY] = copy.deepcopy(policy)
     return request_context, metadata, payload
 
 
@@ -845,6 +852,48 @@ def extract(payload):
         if trace.context_metadata.get('replace_unsent'):
             following.context_metadata['replace_unsent'] = True
         following.context_metadata['full_history'] = {**coverage, 'phase': next_state['phase'], 'complete': False}
+        from .free_fallback import INTENT_KEY, KEY, REQUEST_ACTION, ACTIVATION_ACTION, validate_intent
+        if INTENT_KEY in current.payload and not next_state.get('page'):
+            from .models import AuditEvent
+            from .ai_service import AIService
+            from .processing_attempts import require_reanalysis
+            from .operation_scopes import outbox_scope
+            from rest_framework.exceptions import PermissionDenied
+            intent = current.payload[INTENT_KEY]
+            audit_id = intent.get('audit_id') if isinstance(intent, dict) else None
+            if type(audit_id) is not int:
+                raise ProviderUnavailable('context_snapshot_mismatch')
+            audit = AuditEvent.objects.select_related('actor').filter(pk=audit_id, action=REQUEST_ACTION).first()
+            if audit is None or audit.actor is None:
+                raise ProviderUnavailable('context_snapshot_mismatch')
+            policy = validate_intent(intent, audit, current, raw, trace, following, next_state, AIService._config())
+            from .access import integration_allowed
+            if not integration_allowed(audit.actor):
+                raise ProviderUnavailable('reanalysis_access_revoked')
+            try:
+                require_reanalysis(audit.actor, raw)
+            except PermissionDenied:
+                raise ProviderUnavailable('reanalysis_access_revoked') from None
+            if not outbox_scope(audit.actor).filter(pk=current.pk).exists():
+                raise ProviderUnavailable('reanalysis_access_revoked')
+            prefix = audit.before_after['initial_stage_trace_ids']
+            from django.db.models import Q
+            owned = MessageProcessingTrace.objects.filter(pk__in=prefix,
+                context_metadata__request_state='segment_validated',
+                context_metadata__snapshot_max_id=audit.before_after['snapshot_max_id'],
+                context_metadata__full_history__source_hash=next_state['source_hash']).filter(
+                    Q(raw_message_id=raw.pk) | Q(context_metadata__batch_message_ids__contains=[raw.pk])).count()
+            if owned != len(prefix) or AuditEvent.objects.filter(action=ACTIVATION_ACTION,
+                    target_type='OutboxEvent', target_id=current.pk, before_after__request_audit_id=audit.pk).exists():
+                raise ProviderUnavailable('context_snapshot_mismatch')
+            following.context_metadata[KEY] = policy
+            current.payload = {key:value for key,value in current.payload.items() if key != INTENT_KEY}
+            AuditEvent.objects.create(actor=audit.actor, target_type='OutboxEvent', target_id=current.pk,
+                action=ACTIVATION_ACTION, before_after={'request_audit_id':audit.pk, 'request_key':intent['request_key'],
+                    'event_id':current.pk, 'raw_id':raw.pk, 'following_trace_id':following.pk,
+                    'source_hash':next_state['source_hash'], 'snapshot_max_id':trace.context_metadata['snapshot_max_id'],
+                    'stage_trace_ids':list(stages), 'old_policy':copy.deepcopy(trace.context_metadata[KEY]),
+                    'free_fallback_policy':copy.deepcopy(policy)})
         following.save(update_fields=['context_metadata'])
         members = [entry for entry in payload.get('trace_ids', []) if entry['raw_id'] != raw.id]
         members.append({'raw_id': raw.id, 'trace_id': following.id})

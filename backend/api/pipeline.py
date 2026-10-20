@@ -224,7 +224,7 @@ def _main_response_cache(trace, payload):
     return tuple(copy.deepcopy(value))
 
 
-def _restore_request(trace):
+def _restore_request(trace, cfg=None):
     try:
         payload = copy.deepcopy(trace.context_metadata["request_envelope"])
         user_message = _extraction_user_message(payload)
@@ -245,7 +245,7 @@ def _restore_request(trace):
     if payload_hash(payload) != expected_hash:
         raise ProviderUnavailable("context_snapshot_mismatch")
     from .free_fallback import check_frozen
-    check_frozen(payload, trace.context_metadata, trace.model_version)
+    check_frozen(payload, trace.context_metadata, trace.model_version, cfg)
     return payload
 
 
@@ -330,6 +330,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             cfg.max_completion_tokens = min(cfg.max_completion_tokens, limits.get("analysis_output_token_limit", cfg.analysis_output_token_limit))
             if cfg.full_history_policy == 'thread-context-v2' and not defer_result and result_override is None:
                 raise ProviderUnavailable('analysis_claim_expired')
+        from .free_fallback import local_runtime, runtime_metadata
+        cfg = local_runtime(cfg)
         api_format = getattr(cfg, "chat_api_format", "openai_compatible")
         effective_provider_url = AIService.effective_chat_provider_url(cfg)
         from .qwen_profile import enabled as qwen_enabled, attach_schema, PROFILE
@@ -354,7 +356,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 from .context_tokens import context_runtime
                 _, endpoint = context_runtime(cfg)
                 fallback_models(cfg, endpoint)
-            payload = _restore_request(trace)
+            payload = _restore_request(trace, cfg)
         else:
             team = raw.config.team if raw.config_id else raw.team
             known = json_value(
@@ -373,6 +375,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 raw, cfg, known, trace.context_metadata["snapshot_max_id"], include_following=True, full_state=full_state, **({"batch_ids": batch_ids} if batch_ids else {}), **({"target_content":raw.content[segment_range[0]:segment_range[1]]} if segment_range else {})
             )
             metadata.update(policy_metadata(trace.context_metadata))
+            metadata.update(runtime_metadata(cfg))
             if '_ollama_num_ctx' in payload or qwen_enabled(cfg):
                 from .extraction_schema import extraction_schema, WIRE_VERSION
                 user = _extraction_user_message(payload)
