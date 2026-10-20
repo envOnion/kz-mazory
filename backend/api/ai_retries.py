@@ -226,7 +226,19 @@ def _focused_rejection_payload_sha(trace, exc):
                 return digest
             return None
 
-        allowed = [['project'], ['payment']] if not output_failure and diagnostics['provider_http_status'] == 404 else [['project']]
+        empty_filtered_payment = (
+            code == 'invalid_extraction_schema'
+            and diagnostics.get('finish_reason') == 'content_filter'
+            and type(diagnostics.get('output_tokens')) is int
+            and diagnostics['output_tokens'] > 0
+            and type(diagnostics.get('reasoning_tokens')) is int
+            and diagnostics['reasoning_tokens'] == diagnostics['output_tokens']
+            and type(diagnostics.get('response_characters')) is int
+            and diagnostics['response_characters'] == 0
+        )
+        allowed = [['project']]
+        if (not output_failure and diagnostics['provider_http_status'] == 404) or empty_filtered_payment:
+            allowed.append(['payment'])
         digest = owned_request_sha(*pending[0], allowed)
         if digest is None:
             return None
@@ -254,7 +266,7 @@ def _focused_rejection_payload_sha(trace, exc):
                 return None
             seen.add(previous_digest)
             proven = False
-            previous_allowed = [['project'], ['payment']] if previous['error_code'] == 'provider_invalid_request' else [['project']]
+            previous_allowed = [['project'], ['payment']] if previous['error_code'] in {'provider_invalid_request', 'invalid_extraction_schema'} else [['project']]
             for key, row in requests.items():
                 saved = completed.get(key)
                 if (isinstance(saved, dict) and saved.get('payload_sha256') == previous_digest
