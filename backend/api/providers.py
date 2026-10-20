@@ -28,7 +28,47 @@ def retry_after_seconds(value):
         return None
 
 
-def provider_error(status, *, retry_after=None, detail=None):
+PROVIDER_ERROR_TYPES = frozenset({
+    "context_length_exceeded", "max_tokens_exceeded", "token_limit_exceeded", "string_too_long",
+    "authentication", "permission_denied", "payment_required", "rate_limit_exceeded",
+    "provider_overloaded", "provider_unavailable", "invalid_request", "invalid_prompt", "not_found",
+    "precondition_failed", "payload_too_large", "unprocessable", "content_policy_violation", "refusal",
+    "invalid_image", "image_too_large", "image_too_small", "unsupported_image_format", "image_not_found",
+    "image_download_failed", "server", "timeout", "unmapped",
+})
+
+
+def _rejection_diagnostics(detail, http_status, error_location):
+    """Keep finite labels only; provider text is inspected, never retained."""
+    metadata = detail.get("metadata") if isinstance(detail, dict) else None
+    typed = metadata.get("error_type") if isinstance(metadata, dict) else None
+    error_type = typed if isinstance(typed, str) and typed in PROVIDER_ERROR_TYPES else "unknown"
+    category = "unknown"
+    if not isinstance(metadata, dict) or "error_type" not in metadata:
+        message = detail.get("message") if isinstance(detail, dict) else None
+        raw = metadata.get("raw") if isinstance(metadata, dict) else None
+        text = "\n".join(value[:4096].lower() for value in (message, raw) if isinstance(value, str))
+        for label, terms in (
+            ("context_limit", ("context length", "context_length", "context window", "too many tokens", "prompt is too long", "maximum context")),
+            ("output_limit", ("max_tokens", "max_completion_tokens", "output token limit", "completion token limit")),
+            ("schema", ("json schema", "json_schema", "response_format", "structured output", "schema")),
+            ("parameter", ("unsupported parameter", "unknown parameter", "invalid parameter", "unrecognized parameter")),
+            ("availability", ("no endpoints found", "no available endpoints", "provider unavailable", "temporarily unavailable", "overloaded", "service unavailable")),
+            ("rate_limit", ("rate limit", "rate_limit", "too many requests")),
+            ("content_policy", ("content policy", "content_policy", "safety policy", "moderation", "refusal")),
+        ):
+            if any(term in text for term in terms):
+                category = label
+                break
+    return {
+        "provider_error_type": error_type,
+        "provider_error_category": category,
+        "provider_http_status": http_status if type(http_status) is int and 100 <= http_status <= 599 else None,
+        "provider_error_location": error_location if isinstance(error_location, str) and error_location in ("http", "top_level", "choice") else "unknown",
+    }
+
+
+def provider_error(status, *, retry_after=None, detail=None, http_status=None, error_location=None):
     """Classify both HTTP failures and provider error envelopes inside HTTP 200."""
     if (
         isinstance(status, str)
@@ -77,7 +117,8 @@ def provider_error(status, *, retry_after=None, detail=None):
     return ProviderUnavailable(
         code,
         retry_after=retry_after,
-        diagnostics={"provider_error_code": status, "retry_after_seconds": retry_after},
+        diagnostics={"provider_error_code": status, "retry_after_seconds": retry_after,
+                     **_rejection_diagnostics(detail, http_status, error_location)},
     )
 
 

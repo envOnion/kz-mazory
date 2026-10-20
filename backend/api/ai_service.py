@@ -29,6 +29,7 @@ from .ai_providers import (
 from .models import AISettings, ProviderUsage
 from .providers import (
     ProviderUnavailable,
+    _rejection_diagnostics,
     checked_base_url,
     checked_ai_url,
     provider_error,
@@ -345,7 +346,8 @@ class AIService:
                     )
                 ):
                     error = "provider_context_overflow"
-                    raise ProviderUnavailable(error)
+                    raise ProviderUnavailable(error, diagnostics=_rejection_diagnostics(
+                        None, response.status_code, "http"))
             retry_after = retry_after_seconds(response.headers.get("Retry-After"))
             try:
                 data = json.loads(response_body)
@@ -362,16 +364,20 @@ class AIService:
                         and detail["message"].startswith("No endpoints found")):
                     raise ProviderUnavailable("provider_overloaded", retry_after=retry_after,
                         diagnostics={"provider_error_code": 404, "provider_routing_unavailable": True,
-                                     "retry_after_seconds": retry_after})
+                                     "retry_after_seconds": retry_after,
+                                     **_rejection_diagnostics(detail, response.status_code, "http")})
                 raise provider_error(
                     response.status_code,
                     retry_after=retry_after,
                     detail=detail,
+                    http_status=response.status_code,
+                    error_location="http",
                 )
             if isinstance(data, dict) and data.get("error"):
                 detail = data["error"]
                 status = detail.get("code") if isinstance(detail, dict) else None
-                raise provider_error(status, retry_after=retry_after, detail=detail)
+                raise provider_error(status, retry_after=retry_after, detail=detail,
+                    http_status=response.status_code, error_location="top_level")
             choices = data.get("choices") if isinstance(data, dict) else None
             for choice in choices if isinstance(choices, list) else []:
                 if not isinstance(choice, dict) or not (
@@ -382,13 +388,12 @@ class AIService:
                 # It is not model content to repair or accept as successful use.
                 detail = choice.get("error")
                 status = detail.get("code") if isinstance(detail, dict) else None
-                failure = provider_error(status, retry_after=retry_after, detail=detail)
+                failure = provider_error(status, retry_after=retry_after, detail=detail,
+                    http_status=response.status_code, error_location="choice")
                 if str(failure) == "provider_response_error":
                     failure = ProviderUnavailable("provider_server_error", retry_after=retry_after,
                                                   diagnostics=failure.diagnostics)
-                failure.diagnostics.update(provider_error_location="choice",
-                                           provider_http_status=response.status_code,
-                                           finish_reason=choice.get("finish_reason"))
+                failure.diagnostics.update(finish_reason=choice.get("finish_reason"))
                 raise failure
             if response_validator is not None:
                 response_validator(data)
