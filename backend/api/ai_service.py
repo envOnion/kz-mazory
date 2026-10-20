@@ -29,6 +29,8 @@ from .ai_providers import (
 from .models import AISettings, ProviderUsage
 from .providers import (
     ProviderUnavailable,
+    _rejection_body_diagnostics,
+    _rejection_body_format,
     _rejection_diagnostics,
     checked_base_url,
     checked_ai_url,
@@ -349,11 +351,15 @@ class AIService:
                     raise ProviderUnavailable(error, diagnostics=_rejection_diagnostics(
                         None, response.status_code, "http"))
             retry_after = retry_after_seconds(response.headers.get("Retry-After"))
+            json_parsed = False
             try:
                 data = json.loads(response_body)
+                json_parsed = True
             except ValueError:
                 if response.status_code < 400:
-                    raise ProviderUnavailable("provider_invalid_response") from None
+                    raise ProviderUnavailable("provider_invalid_response", diagnostics=_rejection_body_diagnostics(
+                        None, body_format=_rejection_body_format(response_body, parsed=False),
+                        body_excerpt=response_body[:4096])) from None
             if response.status_code >= 300:
                 detail = data.get("error") if isinstance(data, dict) else None
                 # The free router can temporarily have no eligible endpoint.
@@ -365,19 +371,23 @@ class AIService:
                     raise ProviderUnavailable("provider_overloaded", retry_after=retry_after,
                         diagnostics={"provider_error_code": 404, "provider_routing_unavailable": True,
                                      "retry_after_seconds": retry_after,
-                                     **_rejection_diagnostics(detail, response.status_code, "http")})
+                                     **_rejection_diagnostics(detail, response.status_code, "http",
+                                         body_format=_rejection_body_format(data, parsed=True))})
                 raise provider_error(
                     response.status_code,
                     retry_after=retry_after,
                     detail=detail,
                     http_status=response.status_code,
                     error_location="http",
+                    body_format=_rejection_body_format(data if json_parsed else response_body, parsed=json_parsed),
+                    body_excerpt=response_body[:4096] if not json_parsed else data[:4096] if isinstance(data, str) else None,
                 )
             if isinstance(data, dict) and data.get("error"):
                 detail = data["error"]
                 status = detail.get("code") if isinstance(detail, dict) else None
                 raise provider_error(status, retry_after=retry_after, detail=detail,
-                    http_status=response.status_code, error_location="top_level")
+                    http_status=response.status_code, error_location="top_level",
+                    body_format=_rejection_body_format(data, parsed=True))
             choices = data.get("choices") if isinstance(data, dict) else None
             for choice in choices if isinstance(choices, list) else []:
                 if not isinstance(choice, dict) or not (
@@ -389,7 +399,8 @@ class AIService:
                 detail = choice.get("error")
                 status = detail.get("code") if isinstance(detail, dict) else None
                 failure = provider_error(status, retry_after=retry_after, detail=detail,
-                    http_status=response.status_code, error_location="choice")
+                    http_status=response.status_code, error_location="choice",
+                    body_format=_rejection_body_format(data, parsed=True))
                 if str(failure) == "provider_response_error":
                     failure = ProviderUnavailable("provider_server_error", retry_after=retry_after,
                                                   diagnostics=failure.diagnostics)

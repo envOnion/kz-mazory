@@ -38,8 +38,73 @@ PROVIDER_ERROR_TYPES = frozenset({
 })
 
 
-def _rejection_diagnostics(detail, http_status, error_location):
-    """Keep finite labels only; provider text is inspected, never retained."""
+def _rejection_message_category(text):
+    for label, terms in (
+        ("context_limit", ("context length", "context_length", "context window", "too many tokens", "prompt is too long", "maximum context")),
+        ("output_limit", ("max_tokens", "max_completion_tokens", "output token limit", "completion token limit")),
+        ("schema", ("json schema", "json_schema", "response_format", "structured output", "schema")),
+        ("parameter", ("unsupported parameter", "unknown parameter", "invalid parameter", "unrecognized parameter")),
+        ("availability", ("no endpoints found", "no available endpoints", "provider unavailable", "temporarily unavailable", "overloaded", "service unavailable")),
+        ("rate_limit", ("rate limit", "rate_limit", "too many requests")),
+        ("content_policy", ("content policy", "content_policy", "safety policy", "moderation", "refusal")),
+    ):
+        if any(term in text for term in terms):
+            return label
+    return "unknown"
+
+
+def _rejection_body_format(value, *, parsed):
+    if parsed:
+        if isinstance(value, dict):
+            return "json_object"
+        if isinstance(value, list):
+            return "json_array"
+        return "json_string" if isinstance(value, str) else "json_scalar"
+    if isinstance(value, bytes):
+        text = value[:4096].decode("utf-8", errors="replace")
+    elif isinstance(value, str):
+        text = value.encode("utf-8", errors="replace")[:4096].decode("utf-8", errors="replace")
+    else:
+        return "unknown"
+    if not value:
+        return "empty"
+    text = text.lower()
+    return "html" if any(tag in text for tag in ("<!doctype html", "<html", "<head", "<body")) else "text"
+
+
+def _rejection_body_diagnostics(detail, *, body_format="unknown", body_excerpt=None):
+    """Return finite observations only; never retain inspected error text."""
+    metadata = detail.get("metadata") if isinstance(detail, dict) else None
+    message = detail.get("message") if isinstance(detail, dict) else detail if isinstance(detail, str) else None
+    raw = metadata.get("raw") if isinstance(metadata, dict) else None
+    if isinstance(body_excerpt, str):
+        body_excerpt = body_excerpt.encode("utf-8", errors="replace")
+    if isinstance(body_excerpt, bytes):
+        body_excerpt = body_excerpt[:4096].decode("utf-8", errors="replace")
+    text = "\n".join(value[:4096].lower() for value in (message, raw, body_excerpt) if isinstance(value, str))
+    hint = _rejection_message_category(text)
+    if hint == "unknown":
+        for label, terms in (
+            ("not_found", ("not found", "not_found", "not-found")),
+            ("provider_returned_error", ("provider returned error", "provider_returned_error")),
+            ("challenge", ("cf-chl-", "challenge-platform", "checking your browser", "verify you are human", "captcha")),
+        ):
+            if any(term in text for term in terms):
+                hint = label
+                break
+    shape = ("none" if detail is None else "object" if isinstance(detail, dict)
+             else "array" if isinstance(detail, list) else "string" if isinstance(detail, str)
+             else "scalar" if type(detail) in (bool, int, float) else "unknown")
+    return {
+        "provider_error_body_format": body_format if isinstance(body_format, str) and body_format in {
+            "empty", "html", "text", "json_object", "json_array", "json_string", "json_scalar"} else "unknown",
+        "provider_error_detail_shape": shape,
+        "provider_error_message_hint": hint,
+    }
+
+
+def _rejection_diagnostics(detail, http_status, error_location, *, body_format="unknown", body_excerpt=None):
+    """Keep finite labels only; existing categories retain their original gate."""
     metadata = detail.get("metadata") if isinstance(detail, dict) else None
     typed = metadata.get("error_type") if isinstance(metadata, dict) else None
     error_type = typed if isinstance(typed, str) and typed in PROVIDER_ERROR_TYPES else "unknown"
@@ -48,27 +113,18 @@ def _rejection_diagnostics(detail, http_status, error_location):
         message = detail.get("message") if isinstance(detail, dict) else None
         raw = metadata.get("raw") if isinstance(metadata, dict) else None
         text = "\n".join(value[:4096].lower() for value in (message, raw) if isinstance(value, str))
-        for label, terms in (
-            ("context_limit", ("context length", "context_length", "context window", "too many tokens", "prompt is too long", "maximum context")),
-            ("output_limit", ("max_tokens", "max_completion_tokens", "output token limit", "completion token limit")),
-            ("schema", ("json schema", "json_schema", "response_format", "structured output", "schema")),
-            ("parameter", ("unsupported parameter", "unknown parameter", "invalid parameter", "unrecognized parameter")),
-            ("availability", ("no endpoints found", "no available endpoints", "provider unavailable", "temporarily unavailable", "overloaded", "service unavailable")),
-            ("rate_limit", ("rate limit", "rate_limit", "too many requests")),
-            ("content_policy", ("content policy", "content_policy", "safety policy", "moderation", "refusal")),
-        ):
-            if any(term in text for term in terms):
-                category = label
-                break
+        category = _rejection_message_category(text)
     return {
         "provider_error_type": error_type,
         "provider_error_category": category,
         "provider_http_status": http_status if type(http_status) is int and 100 <= http_status <= 599 else None,
         "provider_error_location": error_location if isinstance(error_location, str) and error_location in ("http", "top_level", "choice") else "unknown",
+        **_rejection_body_diagnostics(detail, body_format=body_format, body_excerpt=body_excerpt),
     }
 
 
-def provider_error(status, *, retry_after=None, detail=None, http_status=None, error_location=None):
+def provider_error(status, *, retry_after=None, detail=None, http_status=None, error_location=None,
+                   body_format="unknown", body_excerpt=None):
     """Classify both HTTP failures and provider error envelopes inside HTTP 200."""
     if (
         isinstance(status, str)
@@ -118,7 +174,8 @@ def provider_error(status, *, retry_after=None, detail=None, http_status=None, e
         code,
         retry_after=retry_after,
         diagnostics={"provider_error_code": status, "retry_after_seconds": retry_after,
-                     **_rejection_diagnostics(detail, http_status, error_location)},
+                     **_rejection_diagnostics(detail, http_status, error_location,
+                                             body_format=body_format, body_excerpt=body_excerpt)},
     )
 
 
