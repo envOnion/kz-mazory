@@ -291,3 +291,62 @@ def extraction_schema(input_data=None, *, literal_quote_enums=True):
             shape = {'type':'object', 'additionalProperties':False, 'required':['facts','topic_updates'], 'properties':{
                 'facts':shape['properties']['facts'], 'topic_updates':{'type':'array','items':update}}}
     return shape
+
+
+def compatible_extraction_schema(input_data):
+    """Share identical subschemas without dropping structural constraints."""
+    import json
+    from collections import Counter
+
+    shape = extraction_schema(input_data, literal_quote_enums=False)
+    counts = Counter()
+    mappings = ('properties', 'patternProperties', '$defs', 'dependentSchemas')
+    singles = ('items', 'additionalProperties', 'contains', 'not', 'if', 'then', 'else', 'propertyNames')
+    sequences = ('allOf', 'anyOf', 'oneOf', 'prefixItems')
+
+    def key(node):
+        return json.dumps(node, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+
+    def children(node):
+        for name in mappings:
+            yield from node.get(name, {}).values()
+        for name in singles:
+            if isinstance(node.get(name), dict):
+                yield node[name]
+        for name in sequences:
+            yield from node.get(name, [])
+
+    def collect(node):
+        if isinstance(node, dict):
+            counts[key(node)] += 1
+            for child in children(node):
+                collect(child)
+
+    collect(shape)
+    names, definitions = {}, {}
+
+    def pack(node, *, inline=False):
+        if not isinstance(node, dict):
+            return copy.deepcopy(node)
+        fingerprint = key(node)
+        if not inline and counts[fingerprint] > 1 and len(fingerprint.encode()) > 128:
+            if fingerprint not in names:
+                name = names[fingerprint] = f's{len(names)}'
+                definitions[name] = pack(node, inline=True)
+            return {'$ref': f'#/$defs/{names[fingerprint]}'}
+        result = copy.deepcopy(node)
+        for name in mappings:
+            if name in result:
+                result[name] = {field: pack(value) for field, value in node[name].items()}
+        for name in singles:
+            if isinstance(node.get(name), dict):
+                result[name] = pack(node[name])
+        for name in sequences:
+            if name in result:
+                result[name] = [pack(value) for value in node[name]]
+        return result
+
+    result = pack(shape, inline=True)
+    if definitions:
+        result['$defs'] = definitions
+    return result

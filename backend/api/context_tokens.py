@@ -411,11 +411,12 @@ def context_runtime(cfg):
                     except (StopIteration, TypeError, ValueError):
                         inputs = None
                     if isinstance(inputs, dict):
-                        from .extraction_schema import extraction_schema
+                        from .extraction_schema import compatible_extraction_schema, extraction_schema
                         name = "mazory_extraction" if cfg.chat_model_name == "openrouter/free" else "grounded_whatsapp"
                         wire["response_format"] = {"type": "json_schema", "json_schema": {
-                            "name": name, "strict": True, "schema": extraction_schema(inputs,
-                                literal_quote_enums=cfg.chat_model_name == "openrouter/free"),
+                            "name": name, "strict": True, "schema": (
+                                extraction_schema(inputs) if cfg.chat_model_name == "openrouter/free"
+                                else compatible_extraction_schema(inputs)),
                         }}
                 return len(json.dumps(wire, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
 
