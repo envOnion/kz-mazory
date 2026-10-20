@@ -593,16 +593,11 @@ class AIService:
         if not candidates:
             raise ProviderUnavailable("ai_disabled")
         last_error = None
-        event_id = usage_event_id.get()
-        completed_ids = set(ProviderUsage.objects.filter(
-            outbox_event_id=event_id, operation="chat", succeeded=True,
-        ).exclude(config_id__isnull=True).values_list("config_id", flat=True)) if event_id else set()
         attempts = []
         for index, cfg in enumerate(candidates):
-            if cfg.pk in completed_ids:
-                last_error = ProviderUnavailable("provider_response_previously_used")
-                attempts.append({"config_id": cfg.pk, "error_code": str(last_error)})
-                continue
+            # One outbox event can contain multiple history chunks and auxiliary
+            # calls. HTTP success on an earlier chunk does not complete this
+            # request; validated main responses are reused by the payload cache.
             if not cfg.has_chat_api_key and not getattr(settings, "AI_PROVIDER_ENV_FALLBACK", False):
                 last_error = ProviderUnavailable("ai_not_configured")
                 attempts.append({"config_id": cfg.pk, "error_code": str(last_error)})
