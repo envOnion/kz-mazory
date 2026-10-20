@@ -81,7 +81,7 @@ def serializer_schema(serializer, *, strict_strings=False):
             "required": [name for name, field in serializer.fields.items() if field.required]}
 
 
-def extraction_schema(input_data=None):
+def extraction_schema(input_data=None, *, literal_quote_enums=True):
     strict_strings = isinstance(input_data, dict) and input_data.get('native_string_policy') == NATIVE_STRING_POLICY
     fact_serializer = FactSchema()
     fact = serializer_schema(fact_serializer, strict_strings=strict_strings)
@@ -229,7 +229,7 @@ def extraction_schema(input_data=None):
                                 field.clear(); field.update({"type":"null"})
                         else:
                             field["enum"] = values
-                    if name in ('quote','evidence') and quotes:
+                    if literal_quote_enums and name in ('quote','evidence') and quotes:
                         field['enum'] = sorted(quotes)
                 for item in node.values():
                     bind(item)

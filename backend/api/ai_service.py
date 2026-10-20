@@ -674,7 +674,8 @@ class AIService:
             schema_name = "mazory_extraction" if cfg.chat_model_name == "openrouter/free" else "grounded_whatsapp"
             payload["response_format"] = {"type": "json_schema", "json_schema": {
                 "name": schema_name, "strict": True,
-                "schema": extraction_schema(extraction_input_data),
+                "schema": extraction_schema(extraction_input_data,
+                    literal_quote_enums=cfg.chat_model_name == "openrouter/free"),
             }}
         json_schema = payload.get("response_format", {}).get("json_schema", {}) if isinstance(payload.get("response_format"), dict) else {}
         validation_schema = json_schema.get("schema") if isinstance(json_schema, dict) else None
