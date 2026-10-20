@@ -44,7 +44,8 @@ RETRYABLE = {
 
 
 @transaction.atomic
-def record_attempt(event, state, code="", next_at=None, *, focused_payload_sha256=None):
+def record_attempt(event, state, code="", next_at=None, *, focused_payload_sha256=None,
+                   main_payload_sha256=None):
     if event.event_type not in {"extract_message", "route_message", "extract_thread"}:
         return
     traces = MessageProcessingTrace.objects.select_for_update()
@@ -75,6 +76,8 @@ def record_attempt(event, state, code="", next_at=None, *, focused_payload_sha25
         )
         if focused_payload_sha256 is not None:
             history[-1]['focused_payload_sha256'] = focused_payload_sha256
+        if main_payload_sha256 is not None:
+            history[-1]['main_payload_sha256'] = main_payload_sha256
     if state == "cancelled":
         trace.status = "warning"
         trace.result_summary = "Запуск отменён администратором. Повторы этой попытки не назначаются."
@@ -123,6 +126,55 @@ def _retryable_focused_project_rejection(trace, exc):
     return _focused_rejection_payload_sha(trace, exc) is not None
 
 
+def _main_rejection_payload_sha(trace, exc):
+    """Retry only the first observed routing rejection of an owned main request."""
+    if (trace is None or not isinstance(exc, ProviderUnavailable)
+            or str(exc) != 'provider_invalid_request' or trace.model_version != 'openrouter/free'):
+        return None
+    metadata, diagnostics = trace.context_metadata, exc.diagnostics
+    if not isinstance(metadata, dict) or not isinstance(diagnostics, dict):
+        return None
+    if (metadata.get('full_history_policy') != 'thread-context-v2'
+            or metadata.get('request_state') != 'failed'
+            or type(diagnostics.get('provider_http_status')) is not int
+            or type(diagnostics.get('provider_error_code')) is not int
+            or any(diagnostics.get(key) != value for key, value in {
+                'provider_http_status': 404, 'provider_error_code': 404,
+                'provider_error_location': 'http', 'provider_error_type': 'unknown',
+                'provider_error_category': 'unknown',
+            }.items())
+            or any(key in metadata for key in ('provider_result', 'main_response_cache',
+                'focused_requests', 'focused_extraction', 'promise_identity', 'promise_reconciliation'))):
+        return None
+    from .context_tokens import payload_hash
+    from .pipeline import _extraction_user_message, _restore_request
+    try:
+        retry = metadata.get('retry', {})
+        history = retry.get('history', []) + retry.get('completed_main_phase', {}).get('history', [])
+        if any(not isinstance(row, dict) or not isinstance(row.get('error_code'), str)
+               or row['error_code'] == 'provider_invalid_request' for row in history):
+            return None
+        request = _restore_request(trace)
+        if request.get('model') != 'openrouter/free':
+            return None
+        inputs = json.loads(_extraction_user_message(request)['content'])
+        target = inputs.get('target_message_id')
+        targets = metadata.get('batch_message_ids') or [trace.raw_message_id]
+        declared = inputs.get('batch_message_ids') or [target]
+        extra = [row['raw_message_id'] for row in inputs.get('target_messages', [])]
+        if (type(target) is not int or target != trace.raw_message_id
+                or not isinstance(targets, list) or any(type(pk) is not int for pk in targets)
+                or len(set(targets)) != len(targets) or target not in targets
+                or not isinstance(declared, list) or any(type(pk) is not int for pk in declared)
+                or declared != targets
+                or any(type(pk) is not int or pk not in targets or pk == target for pk in extra)
+                or len(set(extra)) != len(extra)):
+            return None
+        return payload_hash(request)
+    except (ProviderUnavailable, KeyError, TypeError, ValueError, AttributeError):
+        return None
+
+
 def _focused_rejection_payload_sha(trace, exc):
     """Replay one observed Free Router rejection after verifying auxiliary work."""
     if (trace is None or not isinstance(exc, ProviderUnavailable)
@@ -145,7 +197,8 @@ def _focused_rejection_payload_sha(trace, exc):
     from .context_tokens import payload_hash
     from .pipeline import _extraction_user_message, _main_response_cache, _restore_request
     try:
-        if _main_response_cache(trace, _restore_request(trace)) is None:
+        main_request = _restore_request(trace)
+        if _main_response_cache(trace, main_request) is None:
             return None
         requests = metadata.get('focused_requests', {})
         completed = metadata.get('focused_extraction', {})
@@ -175,10 +228,17 @@ def _focused_rejection_payload_sha(trace, exc):
         retry = metadata.get('retry', {})
         history = retry.get('history', []) + retry.get('completed_main_phase', {}).get('history', [])
         seen = set()
+        seen_main = False
         for previous in history:
             if not isinstance(previous, dict) or not isinstance(previous.get('error_code'), str):
                 return None
             if previous['error_code'] != 'provider_invalid_request':
+                continue
+            if 'main_payload_sha256' in previous:
+                if ('focused_payload_sha256' in previous or seen_main
+                        or previous['main_payload_sha256'] != payload_hash(main_request)):
+                    return None
+                seen_main = True
                 continue
             previous_digest = previous.get('focused_payload_sha256')
             if not isinstance(previous_digest, str) or previous_digest == digest or previous_digest in seen:
@@ -367,10 +427,13 @@ def handle_failure(event, exc):
                 return True
         transport = {"provider_timeout", "provider_connection_failed", "provider_server_error", "provider_rate_limited", "provider_overloaded", "provider_in_flight_budget", "provider_circuit_open", "context_model_metadata_unavailable", "routing_snapshot_changed"}
         focused_payload_sha256 = None
+        main_payload_sha256 = None
         if code == 'provider_invalid_request':
-            focused_payload_sha256 = _focused_rejection_payload_sha(
-                MessageProcessingTrace.objects.filter(pk=current.payload.get('trace_id')).first(), exc)
-        if focused_payload_sha256 is not None:
+            rejected_trace = MessageProcessingTrace.objects.filter(pk=current.payload.get('trace_id')).first()
+            focused_payload_sha256 = _focused_rejection_payload_sha(rejected_trace, exc)
+            if focused_payload_sha256 is None:
+                main_payload_sha256 = _main_rejection_payload_sha(rejected_trace, exc)
+        if focused_payload_sha256 is not None or main_payload_sha256 is not None:
             transport.add(code)
         if code in transport - {'provider_circuit_open', 'context_model_metadata_unavailable', 'routing_snapshot_changed'}:
             checkpoint = _main_response_checkpoint(current)
@@ -388,7 +451,8 @@ def handle_failure(event, exc):
             current.next_attempt_at = timezone.now() + timedelta(seconds=delay)
         current.save()
         record_attempt(current, current.state, code, current.next_attempt_at if pending else None,
-                       focused_payload_sha256=focused_payload_sha256)
+                       focused_payload_sha256=focused_payload_sha256,
+                       main_payload_sha256=main_payload_sha256)
         return True
     pending = code in RETRYABLE and event.attempt_count < MAX_ATTEMPTS
     delay = 60 * 2 ** max(0, min(event.attempt_count - 1, 3)) + random.randint(0, 15)
