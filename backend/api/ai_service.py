@@ -25,6 +25,7 @@ from .ai_providers import (
     normalize_anthropic_message,
     normalize_anthropic_usage,
     validate_anthropic_count,
+    validate_openai_extraction_response,
 )
 from .models import AISettings, ProviderUsage
 from .providers import (
@@ -778,12 +779,13 @@ class AIService:
                 operation="chat",
                 api_key=api_key,
                 config=cfg,
+                response_validator=validate_openai_extraction_response,
             )
         diagnostics = {}
         try:
             choice = data["choices"][0]
             content = choice["message"]["content"]
-            usage = data.get("usage", {})
+            usage = data.get("usage") or {}
             reasoning = choice['message'].get('reasoning')
             if not isinstance(reasoning, str):
                 reasoning = choice['message'].get('reasoning_content')

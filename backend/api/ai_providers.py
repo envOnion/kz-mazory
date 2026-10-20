@@ -12,6 +12,32 @@ ANTHROPIC_MESSAGES = "anthropic_messages"
 ANTHROPIC_VERSION = "2023-06-01"
 
 
+def validate_openai_extraction_response(data):
+    """Reject malformed envelopes before they count as a usable chat response."""
+    root = data if isinstance(data, dict) else {}
+    choices = root.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices else None
+    message = choice.get("message") if isinstance(choice, dict) else None
+    diagnostics = {"response_envelope": {
+        "root_type": type(data).__name__,
+        "choices_type": type(choices).__name__,
+        "choices_count": len(choices) if isinstance(choices, list) else None,
+        "choice_type": type(choice).__name__,
+        "message_type": type(message).__name__,
+        "content_type": type(message.get("content")).__name__ if isinstance(message, dict) else None,
+        "choice_text_type": type(choice.get("text")).__name__ if isinstance(choice, dict) else None,
+        "choice_delta_type": type(choice.get("delta")).__name__ if isinstance(choice, dict) else None,
+        "usage_type": type(root.get("usage")).__name__,
+        "content_blocks_type": type(root.get("content")).__name__,
+        "output_type": type(root.get("output")).__name__,
+    }}
+    if (not isinstance(data, dict) or not isinstance(choice, dict)
+            or not isinstance(message, dict) or not isinstance(message.get("content"), str)
+            or (root.get("usage") is not None and not isinstance(root["usage"], dict))):
+        raise ProviderUnavailable("provider_invalid_response", diagnostics=diagnostics)
+    return data
+
+
 def chat_api_format(cfg):
     """Return a validated format, defaulting old configuration rows to OpenAI."""
     value = getattr(cfg, "chat_api_format", OPENAI_COMPATIBLE)
