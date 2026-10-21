@@ -61,13 +61,20 @@ def embedding_chunks(text, max_bytes=480):
 def extraction_schema_diagnostics(schema, result):
     """Explain rejected structure without recording source values or credentials."""
     from jsonschema import Draft202012Validator
+    from .facts import FactSchema, EvidenceSchema
+    from .dialogue_threads import LinkSchema
+
+    fact_fields = set(FactSchema().fields)
+    safe_labels = {choice for serializer in (FactSchema(), EvidenceSchema(), LinkSchema())
+                   for field in serializer.fields.values()
+                   for choice in getattr(field, 'choices', {}) if isinstance(choice, str)}
     errors = []
     def collect(error):
         if error.context:
             for child in error.context:
                 collect(child)
         elif len(errors) < 24:
-            errors.append({
+            detail = {
                 "path": list(error.absolute_path),
                 "schema_path": list(error.absolute_schema_path),
                 "validator": error.validator,
@@ -75,7 +82,22 @@ def extraction_schema_diagnostics(schema, result):
                 "expected": error.validator_value if error.validator in {"type", "required", "additionalProperties"} else None,
                 "unexpected_key_count": len(set(error.instance) - set(error.schema.get("properties", {})))
                     if error.validator == "additionalProperties" and isinstance(error.instance, dict) else 0,
-            })
+            }
+            if error.validator == 'additionalProperties' and isinstance(error.instance, dict):
+                unexpected = set(error.instance) - set(error.schema.get('properties', {}))
+                detail['unexpected_known_fields'] = [
+                    {'name': name, 'value_type': type(error.instance[name]).__name__,
+                     'is_null': error.instance[name] is None}
+                    for name in sorted(unexpected & fact_fields)]
+                detail['unexpected_unknown_key_count'] = len(unexpected - fact_fields)
+            if error.validator == 'enum' and list(error.absolute_path)[-1:] == ['role']:
+                if isinstance(error.instance, str) and error.instance in safe_labels:
+                    detail['known_enum_label'] = error.instance
+                else:
+                    detail['enum_label_category'] = 'unrecognized'
+                    if isinstance(error.instance, str):
+                        detail['enum_label_length'] = len(error.instance)
+            errors.append(detail)
     valid = True
     for error in Draft202012Validator(schema).iter_errors(result):
         valid = False
