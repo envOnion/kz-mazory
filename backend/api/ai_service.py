@@ -648,6 +648,11 @@ class AIService:
                 last_error = exc
                 attempts.append({"config_id": cfg.pk, "error_code": str(exc)[:64],
                                  "diagnostics": exc.diagnostics})
+                from .gpt_sol import enabled as sol_enabled, REPAIRABLE_OUTPUT
+                if sol_enabled(cfg) and str(exc) in REPAIRABLE_OUTPUT:
+                    # Repair/page the same source snapshot before paying for an
+                    # unrelated provider call that could mask the real error.
+                    break
                 if not fallback_allowed(exc):
                     break
                 if index + 1 >= len(candidates):
@@ -827,6 +832,11 @@ class AIService:
                 raise ProviderUnavailable("extraction_facts_missing", diagnostics=diagnostics)
             if not isinstance(result["facts"], list):
                 raise ProviderUnavailable("extraction_facts_type", diagnostics=diagnostics)
+            if sol_enabled(cfg):
+                from .gpt_sol import normalize_result
+                result, normalized_nulls = normalize_result(result)
+                if normalized_nulls:
+                    diagnostics['optional_null_normalizations'] = normalized_nulls
             if cfg.chat_model_name == "openrouter/free":
                 from jsonschema import Draft202012Validator
                 schema = payload.get("response_format", {}).get("json_schema", {}).get("schema")

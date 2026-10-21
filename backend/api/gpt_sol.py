@@ -5,6 +5,8 @@ import json
 
 MODEL = 'gpt-sol-5-6'
 POLICY = 'gpt-sol-json-v1'
+REPAIRABLE_OUTPUT = {'provider_output_truncated', 'invalid_extraction_schema', 'extraction_json_parse',
+                    'extraction_top_level_type', 'extraction_facts_missing', 'extraction_facts_type'}
 
 INSTRUCTIONS = """Верни только окончательный JSON по output_schema. Без Markdown, вступления, имени модели и пояснений вне JSON.
 Если есть threads, это массив тем с key t0, t1 и т.д.; messages — массив ссылок raw_message_id/thought_state/relation/rationale. Классифицируй все batch_message_ids (иначе target_message_id); context — источники, не новые цели. Для понятного сообщения допустимы ready, final и facts=[]. ready требует completion_reason и final. Не создавай факты из «ок/принято», вопросов, KPI или общих поручений без конкретного действия. Извлеки все конкретные события целевого сообщения, в том числе разные объекты отчёта.
@@ -15,6 +17,26 @@ evidence/quote — непустые краткие буквальные непр
 
 def enabled(cfg):
     return cfg.chat_model_name == MODEL and getattr(cfg, 'chat_api_format', 'openai_compatible') == 'openai_compatible'
+
+
+def normalize_result(result):
+    """Apply only the serializer's unknown optional values, never infer a fact."""
+    from rest_framework import serializers
+    from .facts import FactSchema, normalize_fact_fields
+    fields = FactSchema().fields
+    value = copy.deepcopy(result)
+    normalized = set()
+    for fact in value['facts']:
+        if not isinstance(fact, dict):
+            continue
+        for name, item in list(fact.items()):
+            field = fields.get(name)
+            if item is None and field is not None and not field.required and not field.allow_null:
+                normalized.add(name)
+                if isinstance(field, serializers.CharField) and field.allow_blank:
+                    fact[name] = ''
+    value['facts'] = normalize_fact_fields(value['facts'])
+    return value, sorted(normalized)
 
 
 def request(payload, cfg):
