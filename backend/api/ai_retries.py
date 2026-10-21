@@ -3,6 +3,7 @@
 import copy
 import json
 import random
+import re
 from datetime import timedelta
 
 from django.db import transaction
@@ -283,6 +284,102 @@ def _focused_rejection_payload_sha(trace, exc):
         return None
 
 
+def _sol_focused_rejection(trace, exc):
+    """Recognize only an owned GPT Sol auxiliary failure after verified main work."""
+    from .gpt_sol import MODEL, POLICY, LEGACY_POLICY, LITERAL_POLICY, REPAIRABLE_OUTPUT
+    if (trace is None or not isinstance(exc, ProviderUnavailable)
+            or trace.model_version != MODEL or str(exc) not in REPAIRABLE_OUTPUT):
+        return None
+    metadata, diagnostics = trace.context_metadata, exc.diagnostics
+    if (not isinstance(metadata, dict) or not isinstance(diagnostics, dict)
+            or metadata.get('full_history_policy') != 'thread-context-v2'
+            or metadata.get('request_state') != 'responded'):
+        return None
+    key, digest = diagnostics.get('focused_cache_key'), diagnostics.get('focused_payload_sha256')
+    if (not isinstance(key, str) or len(key) > 256 or not isinstance(digest, str)
+            or not re.fullmatch(r'[0-9a-f]{64}', digest)):
+        return None
+    from .context_tokens import payload_hash
+    from .pipeline import _extraction_user_message, _main_response_cache, _restore_request
+    try:
+        if _main_response_cache(trace, _restore_request(trace)) is None:
+            return None
+        row = metadata.get('focused_requests', {}).get(key)
+        if not isinstance(row, dict) or row.get('payload_sha256') != digest:
+            return None
+        request = row['request']
+        if request.get('model') != MODEL or payload_hash(request) != digest:
+            return None
+        inputs = json.loads(_extraction_user_message(request)['content'])
+        target, kinds = inputs.get('target_message_id'), inputs.get('analysis_fact_types')
+        targets = metadata.get('batch_message_ids') or [trace.raw_message_id]
+        policy = inputs.get('analysis_transport', POLICY)
+        if (not isinstance(targets, list) or any(type(pk) is not int for pk in targets)
+                or type(target) is not int or target not in targets
+                or kinds not in (['project'], ['payment'], ['commitment'])
+                or policy not in (POLICY, LEGACY_POLICY, LITERAL_POLICY)
+                or inputs.get('analysis_operation') != 'focused_fact_extraction'
+                or key not in (f'{target}:{kinds[0]}', f'{target}:{kinds[0]}:{policy}',
+                               f'{target}:{kinds[0]}:{policy}:{digest}')):
+            return None
+        sources = {target}
+        for item in inputs.get('context', []) + inputs.get('target_messages', []):
+            if not isinstance(item, dict) or type(item.get('raw_message_id')) is not int:
+                return None
+            sources.add(item['raw_message_id'])
+        window = metadata.get('context_window', {})
+        source_ids = window.get('source_ids') if isinstance(window, dict) else None
+        if (not isinstance(source_ids, list) or not 1 <= len(source_ids) <= 51
+                or any(type(pk) is not int for pk in source_ids)
+                or len(set(source_ids)) != len(source_ids) or not sources <= set(source_ids)):
+            return None
+        completed = metadata.get('focused_extraction', {}).get(key)
+        if isinstance(completed, dict) and completed.get('payload_sha256') == digest:
+            return None
+        rejection = {'version': 'gpt-sol-focused-rejection-v1', 'payload_sha256': digest,
+                'focused_cache_key': key, 'target_message_id': target, 'fact_type': kinds[0],
+                'error_code': str(exc), 'schema_errors': copy.deepcopy(diagnostics.get('schema_errors', [])[:24])}
+        base_digest = row.get('base_payload_sha256')
+        if isinstance(base_digest, str) and re.fullmatch(r'[0-9a-f]{64}', base_digest):
+            rejection['base_payload_sha256'] = base_digest
+        return rejection
+    except (KeyError, TypeError, ValueError, AttributeError, ProviderUnavailable):
+        return None
+
+
+def _retry_sol_focused(current, trace, rejection, exc):
+    """Bound auxiliary retries on the same immutable main response and trace."""
+    checkpoint = _main_response_checkpoint(current)
+    if checkpoint is not None:
+        completed, retry, marker = checkpoint
+        completed.context_metadata['retry'] = retry
+        completed.save(update_fields=['context_metadata'])
+        current.payload = {**current.payload, 'main_transport_checkpoint': marker}
+        current.attempt_count = 1
+    trace.refresh_from_db()
+    key = rejection['focused_cache_key']
+    records = trace.context_metadata.setdefault('focused_rejections', {})
+    previous = records.get(key, {})
+    history = previous.get('attempts', []) if previous.get('payload_sha256') == rejection['payload_sha256'] else []
+    # Preserve each observed rejection; feedback for the next request is a
+    # separate map and never replaces this exact-envelope audit history.
+    recorded = previous if history else rejection
+    records[key] = {**recorded, 'attempts': [*history, {
+        'attempt': current.attempt_count, 'at': timezone.now().isoformat(),
+        'error_code': str(exc), 'schema_errors': copy.deepcopy(rejection['schema_errors'])}]}
+    trace.save(update_fields=['context_metadata'])
+    pending = current.attempt_count < 3
+    delay = max((15 if current.attempt_count == 1 else 45) + random.randint(0, 5), exc.retry_after or 0)
+    current.state, current.lease_until = 'pending' if pending else 'failed', None
+    current.error_code = str(exc)
+    if pending:
+        current.next_attempt_at = timezone.now() + timedelta(seconds=delay)
+    current.save()
+    record_attempt(current, current.state, str(exc), current.next_attempt_at if pending else None,
+                   focused_payload_sha256=rejection['payload_sha256'])
+    return True
+
+
 def _retry_focused_context(current, exc):
     """Reselect only unvalidated fresh context; never rewrite a frozen page."""
     if current.event_type != 'extract_message' or not current.payload.get('trace_id'):
@@ -373,8 +470,15 @@ def handle_failure(event, exc):
             return True
         focused_payload_sha256 = None
         rejected_trace = None
-        if code in {'provider_invalid_request', 'invalid_extraction_schema', 'provider_output_truncated'}:
+        from .gpt_sol import REPAIRABLE_OUTPUT as SOL_REPAIRABLE_OUTPUT
+        if code in SOL_REPAIRABLE_OUTPUT:
             rejected_trace = MessageProcessingTrace.objects.filter(pk=current.payload.get('trace_id')).first()
+            sol_rejection = _sol_focused_rejection(rejected_trace, exc)
+            if sol_rejection is not None:
+                return _retry_sol_focused(current, rejected_trace, sol_rejection, exc)
+        if code in {'provider_invalid_request', 'invalid_extraction_schema', 'provider_output_truncated'}:
+            if rejected_trace is None:
+                rejected_trace = MessageProcessingTrace.objects.filter(pk=current.payload.get('trace_id')).first()
             focused_payload_sha256 = _focused_rejection_payload_sha(rejected_trace, exc)
         if (focused_payload_sha256 is not None and code in {'invalid_extraction_schema', 'provider_output_truncated'}
                 and current.attempt_count >= 3 and _main_response_checkpoint(current) is None):

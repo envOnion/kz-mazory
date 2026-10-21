@@ -197,10 +197,33 @@ def recover(result, raw, trace, cfg):
         if '_ollama_num_ctx' in payload:
             from .extraction_schema import extraction_schema
             payload['_ollama_format'] = extraction_schema(inputs)
+        from .gpt_sol import enabled as sol_enabled, POLICY as SOL_POLICY
+        if sol_enabled(prepared):
+            next(message for message in payload['messages'] if message['role'] == 'system')['content'] += (
+                ' Возвращай только поля варианта запрошенного fact_type из output_schema. '
+                'Поля других типов запрещены даже с пустыми значениями. '
+                'role — только одно из значений enum схемы, без новых названий ролей.'
+            )
+        base_digest = payload_hash(payload)
+        rejection_key = f'{target.id}:{kind}:{SOL_POLICY}'
+        if sol_enabled(prepared):
+            rejection = trace.context_metadata.get('focused_schema_feedback', {}).get(rejection_key, {})
+            if (rejection.get('base_payload_sha256') == base_digest
+                    and rejection.get('schema_errors')):
+                # This is a fresh, hash-keyed auxiliary request. The frozen main
+                # request and every earlier auxiliary envelope stay unchanged.
+                inputs['analysis_schema_feedback'] = {
+                    'policy': 'focused-schema-feedback-v1',
+                    'instruction': ('Исправь ранее отклонённую структуру: возвращай только поля '
+                                    'варианта запрошенного fact_type, без полей других типов даже '
+                                    'с пустыми значениями. Для role используй только enum схемы. '
+                                    'Доказательства по-прежнему выбирай из исходных quote_id.'),
+                    'errors': copy.deepcopy(rejection['schema_errors']),
+                }
+                payload['messages'][-1]['content'] = extraction_input(inputs)
         check_focused_budget(payload, counter, prepared, f'focused_fact_extraction:{kind}', [item.id for item in rows])
         digest = payload_hash(payload)
         cache_key = f'{target.id}:{kind}'
-        from .gpt_sol import enabled as sol_enabled, POLICY as SOL_POLICY
         legacy_key = None
         if sol_enabled(prepared):
             cache_key += f':{SOL_POLICY}'
@@ -211,11 +234,21 @@ def recover(result, raw, trace, cfg):
         if saved and saved['payload_sha256'] == digest:
             supplemental = copy.deepcopy(saved['result'])
         else:
-            trace.context_metadata.setdefault('focused_requests', {})[cache_key] = {'payload_sha256':digest,'request':copy.deepcopy(payload)}
+            trace.context_metadata.setdefault('focused_requests', {})[cache_key] = {
+                'payload_sha256': digest, 'base_payload_sha256': base_digest,
+                'request': copy.deepcopy(payload),
+            }
             trace.save(update_fields=['context_metadata'])
             try:
                 supplemental, usage, diagnostics = AIService.analyze_payload(payload, provider_url=endpoint['effective_provider_url'], expected_api_format=endpoint['api_format'])
             except ProviderUnavailable as exc:
+                if (sol_enabled(prepared) and str(exc) == 'invalid_extraction_schema'
+                        and exc.diagnostics.get('schema_errors')):
+                    trace.context_metadata.setdefault('focused_schema_feedback', {})[rejection_key] = {
+                        'base_payload_sha256': base_digest, 'payload_sha256': digest,
+                        'schema_errors': copy.deepcopy(exc.diagnostics['schema_errors']),
+                    }
+                    trace.save(update_fields=['context_metadata'])
                 raise ProviderUnavailable(str(exc), retry_after=exc.retry_after, diagnostics={
                     **exc.diagnostics, 'focused_payload_sha256': digest,
                     'focused_cache_key': cache_key,
