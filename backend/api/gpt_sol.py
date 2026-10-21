@@ -4,8 +4,9 @@ import copy
 import json
 
 MODEL = 'gpt-sol-5-6'
-POLICY = 'gpt-sol-json-v2'
+POLICY = 'gpt-sol-json-v3'
 LEGACY_POLICY = 'gpt-sol-json-v1'
+LITERAL_POLICY = 'gpt-sol-json-v2'
 REPAIRABLE_OUTPUT = {'provider_output_truncated', 'invalid_extraction_schema', 'extraction_json_parse',
                     'extraction_top_level_type', 'extraction_facts_missing', 'extraction_facts_type'}
 
@@ -14,6 +15,8 @@ INSTRUCTIONS = """Верни только окончательный JSON по o
 Неизвестные деньги не равны нулю. КП не означает договор; плановая прибыль не означает оплату. Аванс без абсолютной суммы — payment с amount_precision=unknown без amount. Процент не является суммой в тенге. Не вычисляй сумму договора по проценту. Планы, просьбы, обещания, исполнения и отмены различай по источнику, автору и хронологии. Не выдумывай контрагента из имени автора.
 Сроки «завтра/в пятницу» разрешай от sent_at и timezone источника, не от current_time. Не выдумывай время: день означает deadline_precision=date. responsible_name — доказанный исполнитель, не автоматически автор поручения. income/expense — направление денег относительно компании; поступление=increment, выставленный счёт=invoice, долг=debt, остаток=balance, будущее ожидание=promise. Различай повтор события и новый платёж.
 evidence/quote — непустые краткие буквальные непрерывные цитаты указанного оригинала, прямо подтверждающие факт. Все источники факта должны быть в messages его темы. commitment требует цитаты promise; fulfilled — отдельного fulfillment; cancelled — отдельной более поздней cancellation. Сроки и объект подтверждай источниками. Предыдущее состояние — указатель, не новое доказательство; сохраняй ранее проверенные факты при сверке очередной порции. Выполни analysis_instructions и instruction текущей фазы, не объявляй весь разбор завершённым до покрытия источников сервером."""
+
+QUOTE_ID_INSTRUCTIONS = """Обязательный формат доказательств этого запроса: evidence и evidence_messages[].quote — ЦЕЛЫЕ ЧИСЛА quote_id, whole_quote_id или evidence_quote_id из входа, а не текст цитаты. Это правило заменяет указания вернуть строковые evidence/quote. Выбирай ID точной строки либо полного пакета строк, подтверждающего поле. Сервер восстановит неизменённую цитату. Не составляй новый текст, не склеивай строки и не меняй ID источника или role. content.lines содержит полный исходный текст: читай text вместе с line_ending по порядку, включая все объекты отчёта. Отдельная строка имеет quote_id, полный текст — whole_quote_id; прежние проверенные цитаты имеют quote_id/evidence_quote_id. Сохрани все подтверждённые факты целей, а не только их пересказ в summary; facts=[] допустим только при отсутствии доказанных бизнес-событий."""
 
 
 def enabled(cfg):
@@ -79,6 +82,69 @@ def normalize_grounded_fields(result, diagnostics):
                 uncertainties.append(explanation)
 
 
+def _explicit_schema(payload):
+    response_format = payload.get('response_format')
+    container = response_format.get('json_schema') if isinstance(response_format, dict) else None
+    schema = container.get('schema') if isinstance(container, dict) else None
+    return schema or payload.get('_ollama_format')
+
+
+def _quote_plan(inputs):
+    """Build a fresh uninterned literal contract before lossless ID projection."""
+    from .providers import ProviderUnavailable
+    from .extraction_schema import extraction_schema, NATIVE_STRING_POLICY
+    from .quote_input_codec import POLICY as QUOTE_POLICY, QuoteCodecError, project
+    from jsonschema.exceptions import SchemaError, ValidationError
+
+    canonical = copy.deepcopy(inputs)
+    canonical['native_string_policy'] = NATIVE_STRING_POLICY
+    canonical['native_quote_policy'] = QUOTE_POLICY
+    try:
+        schema = extraction_schema(canonical, literal_quote_enums=True,
+                                   fixed_slots=False, focused_quote_enums=True)
+        projected, wire_schema = project(canonical, schema)
+    except (QuoteCodecError, KeyError, TypeError, ValueError, AttributeError,
+            SchemaError, ValidationError):
+        raise ProviderUnavailable('context_snapshot_mismatch', diagnostics={
+            'quote_codec_error': 'invalid_canonical_projection'}) from None
+    return canonical, schema, projected, wire_schema
+
+
+def restore_result(result, canonical_payload, cfg):
+    """Restore v3 integer evidence after wire validation, before business checks.
+
+    canonical_payload must be the untouched payload captured immediately before
+    request(); v1/v2 and explicit operation schemas keep their literal results.
+    Regenerating the plan binds IDs to that request, without saved mutable state.
+    """
+    if not enabled(cfg) or _explicit_schema(canonical_payload) is not None:
+        return result
+    from .providers import ProviderUnavailable
+    from .quote_input_codec import QuoteCodecError, restore
+    from jsonschema.exceptions import SchemaError, ValidationError
+
+    try:
+        users = [row for row in canonical_payload.get('messages', [])
+                 if isinstance(row, dict) and row.get('role') == 'user'
+                 and isinstance(row.get('content'), str)]
+        if len(users) != 1:
+            return result
+        inputs = json.loads(users[0]['content'])
+    except (TypeError, ValueError):
+        return result
+    if not isinstance(inputs, dict) or inputs.get('analysis_transport', POLICY) != POLICY:
+        return result
+    if type(inputs.get('target_message_id')) is not int:
+        return result
+    canonical, schema, _, _ = _quote_plan(inputs)
+    try:
+        return restore(result, canonical, schema)
+    except (QuoteCodecError, KeyError, TypeError, ValueError, AttributeError,
+            SchemaError, ValidationError):
+        raise ProviderUnavailable('invalid_extraction_schema', diagnostics={
+            'quote_codec_error': 'invalid_quote_id_result'}) from None
+
+
 def request(payload, cfg):
     """Return the same wire for boundary counting and the HTTP adapter."""
     from .providers import ProviderUnavailable
@@ -95,18 +161,28 @@ def request(payload, cfg):
         return wire, None
     if not isinstance(inputs, dict):
         return wire, None
-    explicit = wire.get('response_format', {}).get('json_schema', {}).get('schema') or wire.get('_ollama_format')
+    explicit = _explicit_schema(wire)
+    policies = (POLICY, LEGACY_POLICY, LITERAL_POLICY)
+    if (inputs.get('analysis_transport') in policies
+            and isinstance(inputs.get('output_schema'), dict)):
+        # Encoded v3 content is a line packet, not a string. Recognize its
+        # immutable inline contract before the ordinary extraction shape check.
+        return wire, inputs['output_schema']
     if explicit is None and (type(inputs.get('target_message_id')) is not int or not isinstance(inputs.get('content'), str)):
         # Chat answers and analytics share the counter, not this extraction wire.
         return wire, None
     policy = inputs.get('analysis_transport', POLICY)
-    if policy not in (POLICY, LEGACY_POLICY):
+    if policy not in policies:
         raise ProviderUnavailable('context_configuration_changed')
     if isinstance(inputs.get('output_schema'), dict):
         return wire, inputs['output_schema']
     if explicit is not None:
         # Promise identity and status operations own their exact schema.
         schema = explicit
+    elif policy == POLICY:
+        from .free_router import compact_schema
+        _, _, inputs, projected_schema = _quote_plan(inputs)
+        schema = compact_schema(projected_schema)
     else:
         inputs['native_string_policy'] = NATIVE_STRING_POLICY
         schema = compatible_extraction_schema(inputs, fixed_slots=False,
@@ -126,6 +202,8 @@ def request(payload, cfg):
         requirements = original_instructions + '\n' + requirements
     if configured and configured != default:
         requirements = configured + '\nОбязательный контракт Mazory:\n' + requirements
+    if policy == POLICY and explicit is None:
+        requirements += '\n' + QUOTE_ID_INSTRUCTIONS
     inputs.update(analysis_transport=policy, output_requirements=requirements, output_schema=schema)
     users[0]['content'] = json.dumps(inputs, ensure_ascii=False, separators=(',', ':'))
     wire['messages'] = [{'role':'system', 'content':'Извлекай подтверждённые факты. Соблюдай output_requirements и output_schema из пользовательского сообщения.'}, users[0]]

@@ -715,7 +715,9 @@ class AIService:
             extraction_input_data = None
         from .gpt_sol import enabled as sol_enabled, request as sol_request
         sol_schema = None
+        sol_canonical_payload = None
         if sol_enabled(cfg):
+            sol_canonical_payload = payload
             payload, sol_schema = sol_request(payload, cfg)
         if sol_schema is None and not payload.get("response_format") and isinstance(extraction_input_data, dict):
             from .extraction_schema import compatible_extraction_schema, extraction_schema
@@ -861,6 +863,13 @@ class AIService:
                 schema_failure = extraction_schema_diagnostics(validation_schema, result)
                 if schema_failure:
                     raise ProviderUnavailable("invalid_extraction_schema", diagnostics={**diagnostics, **schema_failure})
+            if sol_schema is not None:
+                from .gpt_sol import restore_result
+                restored = restore_result(result, sol_canonical_payload, cfg)
+                if restored is not result:
+                    from .quote_input_codec import POLICY as QUOTE_INPUT_POLICY
+                    diagnostics['native_quote_policy'] = QUOTE_INPUT_POLICY
+                result = restored
             from .qwen_profile import enabled as qwen_enabled
             if qwen_enabled(cfg):
                 from jsonschema import Draft202012Validator
