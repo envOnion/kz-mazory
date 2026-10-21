@@ -81,7 +81,7 @@ def serializer_schema(serializer, *, strict_strings=False):
             "required": [name for name, field in serializer.fields.items() if field.required]}
 
 
-def extraction_schema(input_data=None, *, literal_quote_enums=True, fixed_slots=True):
+def extraction_schema(input_data=None, *, literal_quote_enums=True, fixed_slots=True, focused_quote_enums=True):
     strict_strings = isinstance(input_data, dict) and input_data.get('native_string_policy') == NATIVE_STRING_POLICY
     fact_serializer = FactSchema()
     fact = serializer_schema(fact_serializer, strict_strings=strict_strings)
@@ -293,8 +293,9 @@ def extraction_schema(input_data=None, *, literal_quote_enums=True, fixed_slots=
                 variant['properties']['thread_key']['enum'] = input_data['known_extraction_theme_keys']
                 if input_data.get('analysis_fact_types') in (['project'], ['payment']):
                     variant['properties']['evidence_message_id'] = {'type':'integer','enum':[input_data['target_message_id']]}
-                    target_quotes = sorted({text for text in [input_data['content'],*input_data['content'].splitlines()] if text.strip()})
-                    variant['properties']['evidence'] = {'type':'string','enum':target_quotes}
+                    if focused_quote_enums:
+                        target_quotes = sorted({text for text in [input_data['content'],*input_data['content'].splitlines()] if text.strip()})
+                        variant['properties']['evidence'] = {'type':'string','enum':target_quotes}
             update = {'type':'object', 'additionalProperties':False, 'required':['thread_key','topic','summary','state'], 'properties':{
                 'thread_key':{'type':'string','enum':input_data['known_extraction_theme_keys']}, 'topic':{'type':'string'},
                 'summary':{'type':'string'}, 'state':{'type':'string','enum':['open','unknown']}}}
@@ -303,12 +304,13 @@ def extraction_schema(input_data=None, *, literal_quote_enums=True, fixed_slots=
     return shape
 
 
-def compatible_extraction_schema(input_data, *, fixed_slots=True):
+def compatible_extraction_schema(input_data, *, fixed_slots=True, focused_quote_enums=True):
     """Share identical subschemas without dropping structural constraints."""
     import json
     from collections import Counter
 
-    shape = extraction_schema(input_data, literal_quote_enums=False, fixed_slots=fixed_slots)
+    shape = extraction_schema(input_data, literal_quote_enums=False, fixed_slots=fixed_slots,
+                              focused_quote_enums=focused_quote_enums)
     counts = Counter()
     mappings = ('properties', 'patternProperties', '$defs', 'dependentSchemas')
     singles = ('items', 'additionalProperties', 'contains', 'not', 'if', 'then', 'else', 'propertyNames')

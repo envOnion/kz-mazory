@@ -4,7 +4,8 @@ import copy
 import json
 
 MODEL = 'gpt-sol-5-6'
-POLICY = 'gpt-sol-json-v1'
+POLICY = 'gpt-sol-json-v2'
+LEGACY_POLICY = 'gpt-sol-json-v1'
 REPAIRABLE_OUTPUT = {'provider_output_truncated', 'invalid_extraction_schema', 'extraction_json_parse',
                     'extraction_top_level_type', 'extraction_facts_missing', 'extraction_facts_type'}
 
@@ -23,7 +24,11 @@ def normalize_result(result):
     """Apply only the serializer's unknown optional values, never infer a fact."""
     from rest_framework import serializers
     from .facts import FactSchema, normalize_fact_fields
+    from .extraction_schema import extraction_schema
     fields = FactSchema().fields
+    variants = extraction_schema(fixed_slots=False)['properties']['facts']['items']['oneOf']
+    allowed = {variant['properties']['fact_type']['enum'][0]: set(variant['properties'])
+               for variant in variants}
     value = copy.deepcopy(result)
     normalized = set()
     for fact in value['facts']:
@@ -31,12 +36,47 @@ def normalize_result(result):
             continue
         for name, item in list(fact.items()):
             field = fields.get(name)
+            if (item is None and field is not None and fact.get('fact_type') in allowed
+                    and name not in allowed[fact['fact_type']]):
+                del fact[name]
+                normalized.add(name)
+                continue
             if item is None and field is not None and not field.required and not field.allow_null:
                 normalized.add(name)
                 if isinstance(field, serializers.CharField) and field.allow_blank:
                     fact[name] = ''
     value['facts'] = normalize_fact_fields(value['facts'])
     return value, sorted(normalized)
+
+
+def normalize_grounded_fields(result, diagnostics):
+    """Keep supported events, but never promote an inferred optional value."""
+    import re
+    from .commercial_amounts import contract_price_evidence
+    from .deduplication import normalize_deal_name
+    for index, fact in enumerate(result['facts']):
+        quotes = [ref['quote'] for ref in fact.get('evidence_messages', [])]
+        quotes.append(fact['evidence'])
+        removed = []
+        if (fact['fact_type'] == 'project' and fact.get('contract_amount') is not None
+                and not contract_price_evidence(fact['contract_amount'], quotes)):
+            del fact['contract_amount']
+            removed.append(('contract_amount', 'contract_price_not_in_evidence',
+                            'Сумма договора не названа в доказательствах; цена продажи не является суммой договора.'))
+        company = normalize_deal_name(fact.get('company_name', ''))
+        if company and not re.search(r'(?<!\w)' + re.escape(company) + r'(?!\w)',
+                                     normalize_deal_name('\n'.join(quotes), max_length=None)):
+            fact['company_name'], fact['party_role'] = '', 'unknown'
+            removed.append(('company_name', 'company_not_in_evidence',
+                            'Наименование контрагента не подтверждено цитатами.'))
+        for field, reason, explanation in removed:
+            entry = {'fact_index': index, 'field': field, 'reason': reason}
+            entries = diagnostics.setdefault('unsupported_optional_fields', [])
+            if entry not in entries:
+                entries.append(entry)
+            uncertainties = fact.setdefault('uncertainties', [])
+            if explanation not in uncertainties and len(uncertainties) < 20:
+                uncertainties.append(explanation)
 
 
 def request(payload, cfg):
@@ -59,14 +99,18 @@ def request(payload, cfg):
     if explicit is None and (type(inputs.get('target_message_id')) is not int or not isinstance(inputs.get('content'), str)):
         # Chat answers and analytics share the counter, not this extraction wire.
         return wire, None
-    if inputs.get('analysis_transport') == POLICY and isinstance(inputs.get('output_schema'), dict):
+    policy = inputs.get('analysis_transport', POLICY)
+    if policy not in (POLICY, LEGACY_POLICY):
+        raise ProviderUnavailable('context_configuration_changed')
+    if isinstance(inputs.get('output_schema'), dict):
         return wire, inputs['output_schema']
     if explicit is not None:
         # Promise identity and status operations own their exact schema.
         schema = explicit
     else:
         inputs['native_string_policy'] = NATIVE_STRING_POLICY
-        schema = compatible_extraction_schema(inputs, fixed_slots=False)
+        schema = compatible_extraction_schema(inputs, fixed_slots=False,
+                                              focused_quote_enums=policy == LEGACY_POLICY)
     configured = cfg.system_prompt_worker.strip()
     default = AISettings._meta.get_field('system_prompt_worker').get_default().strip()
     requirements = INSTRUCTIONS + SALE_AMOUNT_RULES
@@ -82,7 +126,7 @@ def request(payload, cfg):
         requirements = original_instructions + '\n' + requirements
     if configured and configured != default:
         requirements = configured + '\nОбязательный контракт Mazory:\n' + requirements
-    inputs.update(analysis_transport=POLICY, output_requirements=requirements, output_schema=schema)
+    inputs.update(analysis_transport=policy, output_requirements=requirements, output_schema=schema)
     users[0]['content'] = json.dumps(inputs, ensure_ascii=False, separators=(',', ':'))
     wire['messages'] = [{'role':'system', 'content':'Извлекай подтверждённые факты. Соблюдай output_requirements и output_schema из пользовательского сообщения.'}, users[0]]
     wire['model'] = cfg.chat_model_name

@@ -234,6 +234,10 @@ def _validate(candidate, data, primary, text):
             raise Deferred("older_source_revision", "Более поздняя переписка уже уточнила значение; старый факт не заменяет текущий.")
         if "contract_amount" in data and not re.search(r"договор|контракт", text, re.I):
             raise Deferred("plan_not_contract", "Сумма без договорного основания не является суммой договора.")
+        if "contract_amount" in data:
+            from .commercial_amounts import contract_price_evidence
+            if not contract_price_evidence(data['contract_amount'], candidate.evidence.values_list('quote', flat=True)):
+                raise Deferred('unsupported_contract_amount', 'Сумма договора должна быть прямо названа в одной цитате; цена продажи и отдельное подписание её не доказывают.')
         if "cost_amount" in data and not re.search(r"себестоим|затрат|стоимость\s+(?:закуп|материал|изготов|оборудован)", text, re.I):
             raise Deferred("unsupported_cost", "Поступление или договорная сумма не доказывают себестоимость.")
         if "stage" in data:

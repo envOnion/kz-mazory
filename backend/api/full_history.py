@@ -299,7 +299,9 @@ def prepare(raw, cfg, known_projects, maximum, batch_ids, state, *, _probe=False
     from .free_fallback import check_page
     if not _probe:
         check_page(cfg, page)
-    parts = page.get('parts') or sorted(state_parts(state.get('result'), targets, counter, min(chunk_limit // 3, cfg.max_completion_tokens // 2),
+    from .gpt_sol import enabled as sol_enabled
+    state_output_limit = cfg.max_completion_tokens if sol_enabled(cfg) else cfg.max_completion_tokens // 2
+    parts = page.get('parts') or sorted(state_parts(state.get('result'), targets, counter, min(chunk_limit // 3, state_output_limit),
                                                   compact_evidence=endpoint.get('transport') == 'openrouter_free'),
                                       key=lambda value: counter.count_text(canonical_json(value)), reverse=True)
     part_index = page.get('index', 0)

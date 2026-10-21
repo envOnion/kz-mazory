@@ -519,6 +519,9 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         # sources and complete source links after any focused extraction.
         from .full_history import validate_evidence
         validate_evidence(result, raw, trace)
+        from .gpt_sol import enabled as sol_enabled, normalize_grounded_fields
+        if sol_enabled(cfg):
+            normalize_grounded_fields(result, diagnostics)
         themes = prepare_themes(result, raw, trace)
         targets = set(trace.context_metadata.get('batch_message_ids') or [raw.id])
         facts = _facts(ready_facts(result, themes), raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True, target_ids=targets, trace=trace)

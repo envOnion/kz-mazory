@@ -32,6 +32,37 @@ APPROXIMATE = re.compile(r"\b(?:около|порядка|примерно|по�
 OBJECT_START = re.compile(r"^(?:[-*•\d.)\s]+)?(?:жк|бц|мжд|пгу|зру|бмк|цтп|тц|бтп|объект|проект)\b", re.I)
 ACTION_WORD = re.compile(r"\b(?:сегодня|вчера|завтра|сумма|цена|стоимость|следующ|планиру|занимал|направ|переда|подготов|отправ|соглас|получ|принят|договор|кп|заказчик|вечером|утром|совместно|после|будет|необходим|работа|выполн|прибыль|маржа|аванс|оплата)\w*", re.I)
 
+CONTRACT_PRICE = re.compile(
+    r'\b(?:сумм[аыуе]|стоимост[ьи]|цен[аыуе])\s+(?:по\s+)?(?:договор\w*|контракт\w*)\b'
+    r'|\b(?:договор\w*|контракт\w*)\s+(?:заключ[её]н\w*\s+)?на\s+(?:сумму\s+)?', re.I)
+
+
+def contract_price_evidence(value, quotes):
+    """A selling price and a separate signature do not prove contract money."""
+    from .autonomous import MONEY, _money_matches
+    from .evidence_scope import statements
+    for quote in quotes:
+        for clause in statements(quote):
+            for label in CONTRACT_PRICE.finditer(clause):
+                if re.search(r'\b(?:нет|без|неизвест\w*|не\s+указан\w*)\s*$', clause[:label.start()], re.I):
+                    continue
+                tail = clause[label.end():]
+                number = MONEY.search(tail)
+                if number is None or APPROXIMATE.search(tail[:number.start()]):
+                    continue
+                if re.search(r'\b(?:не|нет|без|неизвест\w*|неопредел\w*)\b', tail[:number.start()], re.I):
+                    continue
+                # A nearer advance/profit/sale label owns its number, even if
+                # the same clause also mentions a signed contract.
+                if re.search(r'аванс|прибыл|марж|продаж|себестоим|плат[её]ж|оплат|остаток|бюджет', tail[:number.start()], re.I):
+                    continue
+                suffix = re.split(r'\d', tail[number.end():], maxsplit=1)[0]
+                literal = tail[number.start():number.end()] + suffix
+                explicit_price = bool(re.search(r'сумм|стоимост|цен', label.group(), re.I))
+                if _money_matches(Decimal(str(value)), literal, monetary_unit=not explicit_price):
+                    return clause.strip()
+    return None
+
 
 def _named(label, text):
     return bool(label and re.search(r"(?<!\w)" + re.escape(label) + r"(?!\w)", text))

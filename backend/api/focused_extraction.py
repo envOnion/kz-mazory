@@ -199,6 +199,9 @@ def recover(result, raw, trace, cfg):
             payload['_ollama_format'] = extraction_schema(inputs)
         check_focused_budget(payload, counter, prepared, f'focused_fact_extraction:{kind}', [item.id for item in rows])
         cache_key = f'{target.id}:{kind}'
+        from .gpt_sol import enabled as sol_enabled, POLICY as SOL_POLICY
+        if sol_enabled(prepared):
+            cache_key += f':{SOL_POLICY}'
         saved = trace.context_metadata.setdefault('focused_extraction', {}).get(cache_key)
         digest = payload_hash(payload)
         if saved and saved['payload_sha256'] == digest:
