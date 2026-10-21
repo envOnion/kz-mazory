@@ -38,6 +38,12 @@ def validate_openai_extraction_response(data):
         "content_blocks_type": type(root.get("content")).__name__,
         "output_type": type(root.get("output")).__name__,
     }}
+    if isinstance(message, dict) and isinstance(choice, dict) and choice.get("finish_reason") == "length":
+        usage = root.get("usage")
+        output = usage.get("completion_tokens") if isinstance(usage, dict) else None
+        diagnostics.update(finish_reason="length", output_tokens=output if type(output) is int else None,
+                           response_characters=len(message["content"]) if isinstance(message.get("content"), str) else 0)
+        raise ProviderUnavailable("provider_output_truncated", diagnostics=diagnostics)
     if (not isinstance(data, dict) or not isinstance(choice, dict)
             or not isinstance(message, dict) or not isinstance(message.get("content"), str)
             or (root.get("usage") is not None and not isinstance(root["usage"], dict))):

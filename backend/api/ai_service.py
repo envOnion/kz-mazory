@@ -705,7 +705,11 @@ class AIService:
             extraction_input_data = json.loads(user_content)
         except (StopIteration, TypeError, ValueError):
             extraction_input_data = None
-        if not payload.get("response_format") and isinstance(extraction_input_data, dict):
+        from .gpt_sol import enabled as sol_enabled, request as sol_request
+        sol_schema = None
+        if sol_enabled(cfg):
+            payload, sol_schema = sol_request(payload, cfg)
+        if sol_schema is None and not payload.get("response_format") and isinstance(extraction_input_data, dict):
             from .extraction_schema import compatible_extraction_schema, extraction_schema
             schema_name = "mazory_extraction" if cfg.chat_model_name == "openrouter/free" else "grounded_whatsapp"
             payload["response_format"] = {"type": "json_schema", "json_schema": {
@@ -714,7 +718,7 @@ class AIService:
                            else compatible_extraction_schema(extraction_input_data)),
             }}
         json_schema = payload.get("response_format", {}).get("json_schema", {}) if isinstance(payload.get("response_format"), dict) else {}
-        validation_schema = json_schema.get("schema") if isinstance(json_schema, dict) else None
+        validation_schema = sol_schema if sol_schema is not None else json_schema.get("schema") if isinstance(json_schema, dict) else None
         from .context_tokens import context_runtime
         counter, _runtime = context_runtime(cfg)
         reserved_output = payload.get("max_tokens", cfg.max_completion_tokens)

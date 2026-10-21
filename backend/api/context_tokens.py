@@ -398,6 +398,10 @@ def context_runtime(cfg):
 
             @staticmethod
             def count_payload(payload):
+                from .gpt_sol import enabled as sol_enabled, request as sol_request
+                if sol_enabled(cfg):
+                    wire, _ = sol_request(payload, cfg)
+                    return len(json.dumps(wire, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
                 # The compatible adapter adds a grounded schema before sending.
                 # Count that same schema during boundary probes, so literal
                 # source enums cannot push an already selected chunk over budget.
@@ -599,6 +603,11 @@ def extraction_payload(
             {"role": "user", "content": user_content},
         ],
     }
+    from .gpt_sol import enabled as sol_enabled, POLICY as SOL_POLICY
+    if sol_enabled(cfg):
+        inputs = json.loads(payload['messages'][-1]['content'])
+        inputs['analysis_transport'] = SOL_POLICY
+        payload['messages'][-1]['content'] = extraction_input(inputs)
     if endpoint.get("transport") == "openai_profile":
         for key in ("provider", "plugins", "reasoning"):
             payload.pop(key, None)
