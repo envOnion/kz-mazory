@@ -9,6 +9,7 @@ POLICY = 'gpt-sol-json-v1'
 INSTRUCTIONS = """Верни только окончательный JSON по output_schema. Без Markdown, вступления, имени модели и пояснений вне JSON.
 Если есть threads, это массив тем с key t0, t1 и т.д.; messages — массив ссылок raw_message_id/thought_state/relation/rationale. Классифицируй все batch_message_ids (иначе target_message_id); context — источники, не новые цели. Для понятного сообщения допустимы ready, final и facts=[]. ready требует completion_reason и final. Не создавай факты из «ок/принято», вопросов, KPI или общих поручений без конкретного действия. Извлеки все конкретные события целевого сообщения, в том числе разные объекты отчёта.
 Неизвестные деньги не равны нулю. КП не означает договор; плановая прибыль не означает оплату. Аванс без абсолютной суммы — payment с amount_precision=unknown без amount. Процент не является суммой в тенге. Не вычисляй сумму договора по проценту. Планы, просьбы, обещания, исполнения и отмены различай по источнику, автору и хронологии. Не выдумывай контрагента из имени автора.
+Сроки «завтра/в пятницу» разрешай от sent_at и timezone источника, не от current_time. Не выдумывай время: день означает deadline_precision=date. responsible_name — доказанный исполнитель, не автоматически автор поручения. income/expense — направление денег относительно компании; поступление=increment, выставленный счёт=invoice, долг=debt, остаток=balance, будущее ожидание=promise. Различай повтор события и новый платёж.
 evidence/quote — непустые краткие буквальные непрерывные цитаты указанного оригинала, прямо подтверждающие факт. Все источники факта должны быть в messages его темы. commitment требует цитаты promise; fulfilled — отдельного fulfillment; cancelled — отдельной более поздней cancellation. Сроки и объект подтверждай источниками. Предыдущее состояние — указатель, не новое доказательство; сохраняй ранее проверенные факты при сверке очередной порции. Выполни analysis_instructions и instruction текущей фазы, не объявляй весь разбор завершённым до покрытия источников сервером."""
 
 
@@ -25,16 +26,19 @@ def request(payload, cfg):
     wire = copy.deepcopy(payload)
     users = [row for row in wire.get('messages', []) if row.get('role') == 'user' and isinstance(row.get('content'), str)]
     if len(users) != 1:
-        raise ProviderUnavailable('provider_invalid_request')
+        return wire, None
     try:
         inputs = json.loads(users[0]['content'])
     except (TypeError, ValueError):
-        raise ProviderUnavailable('provider_invalid_request') from None
+        return wire, None
     if not isinstance(inputs, dict):
-        raise ProviderUnavailable('provider_invalid_request')
+        return wire, None
+    explicit = wire.get('response_format', {}).get('json_schema', {}).get('schema') or wire.get('_ollama_format')
+    if explicit is None and (type(inputs.get('target_message_id')) is not int or not isinstance(inputs.get('content'), str)):
+        # Chat answers and analytics share the counter, not this extraction wire.
+        return wire, None
     if inputs.get('analysis_transport') == POLICY and isinstance(inputs.get('output_schema'), dict):
         return wire, inputs['output_schema']
-    explicit = wire.get('response_format', {}).get('json_schema', {}).get('schema') or wire.get('_ollama_format')
     if explicit is not None:
         # Promise identity and status operations own their exact schema.
         schema = explicit
@@ -46,7 +50,12 @@ def request(payload, cfg):
     requirements = INSTRUCTIONS + SALE_AMOUNT_RULES
     from .ai_service import WORKER_PROMPT, PACKET_PROMPT
     original_instructions = '\n'.join(row.get('content', '') for row in wire.get('messages', []) if row.get('role') == 'system')
-    if original_instructions and not any(base in original_instructions for base in (WORKER_PROMPT, PACKET_PROMPT)):
+    base = next((base for base in sorted((WORKER_PROMPT, PACKET_PROMPT), key=len, reverse=True)
+                 if base in original_instructions), None)
+    if base is not None:
+        suffix = original_instructions.split(base, 1)[1].replace(SALE_AMOUNT_RULES, '')
+        requirements += '\n' + suffix
+    elif original_instructions:
         # Typed identity/resolution/focused passes carry their own semantics.
         requirements = original_instructions + '\n' + requirements
     if configured and configured != default:
