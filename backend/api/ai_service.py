@@ -308,11 +308,13 @@ class AIService:
         extraction_limit = extraction_deadline.get()
         deadline = extraction_limit or analytics_deadline.get()
         from .gpt_sol import MODEL as SOL_MODEL
-        if extraction_limit and payload.get('model') == SOL_MODEL:
-            deadline = min(extraction_limit, time.monotonic() + 180)
+        sol_extraction = bool(extraction_limit and payload.get('model') == SOL_MODEL)
+        if sol_extraction:
+            deadline = min(extraction_limit, time.monotonic() + settings.AI_REQUEST_TIMEOUT)
         if extraction_limit and isinstance(timeout, tuple):
             from .qwen_profile import MODEL
-            request_limit = min(settings.AI_REQUEST_TIMEOUT, 1200) if payload.get('model') in (MODEL, "openrouter/free") else 180
+            request_limit = (settings.AI_REQUEST_TIMEOUT if sol_extraction else
+                             min(settings.AI_REQUEST_TIMEOUT, 1200) if payload.get('model') in (MODEL, "openrouter/free") else 180)
             timeout = (min(timeout[0], 10), min(timeout[1], request_limit))
         if deadline is not None:
             remaining = deadline - time.monotonic()
@@ -356,6 +358,17 @@ class AIService:
         started = time.monotonic()
         data, succeeded, error = {}, False, ""
         try:
+            if sol_extraction:
+                # Admission can wait on quota locks. Recheck immediately before
+                # HTTP, retaining both the configured call and phase deadlines.
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ProviderUnavailable('provider_timeout')
+                if isinstance(timeout, tuple):
+                    connect_limit = min(timeout[0], remaining / 2)
+                    timeout = (connect_limit, min(timeout[1], remaining - connect_limit))
+                else:
+                    timeout = min(timeout, remaining / 2)
             request = requests.get if http_method == "GET" else requests.post
             if http_method == "POST":
                 headers = {**headers, "Content-Type": "application/json"}
