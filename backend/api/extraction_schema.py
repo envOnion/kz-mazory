@@ -81,7 +81,7 @@ def serializer_schema(serializer, *, strict_strings=False):
             "required": [name for name, field in serializer.fields.items() if field.required]}
 
 
-def extraction_schema(input_data=None, *, literal_quote_enums=True):
+def extraction_schema(input_data=None, *, literal_quote_enums=True, fixed_slots=True):
     strict_strings = isinstance(input_data, dict) and input_data.get('native_string_policy') == NATIVE_STRING_POLICY
     fact_serializer = FactSchema()
     fact = serializer_schema(fact_serializer, strict_strings=strict_strings)
@@ -147,20 +147,30 @@ def extraction_schema(input_data=None, *, literal_quote_enums=True):
     if input_data is not None:
         # Object properties are emitted once by native constrained decoding.
         # A list of free-text keys allowed the same theme to be repeated.
-        slot = copy.deepcopy(theme)
-        slot["properties"].pop("key")
-        slot["required"].remove("key")
-        shape["properties"]["threads"] = {"type":"object", "additionalProperties":False,
-            "required":["t0"], "properties":{f"t{i}":copy.deepcopy(slot) for i in range(16)}}
-        for key, theme_slot in shape['properties']['threads']['properties'].items():
-            theme_slot['properties']['parent_key'] = {'anyOf':[{'type':'string','enum':['',*[f't{i}' for i in range(16) if f't{i}'!=key]]},{'type':'null'}]}
+        if fixed_slots:
+            slot = copy.deepcopy(theme)
+            slot["properties"].pop("key")
+            slot["required"].remove("key")
+            shape["properties"]["threads"] = {"type":"object", "additionalProperties":False,
+                "required":["t0"], "properties":{f"t{i}":copy.deepcopy(slot) for i in range(16)}}
+            for key, theme_slot in shape['properties']['threads']['properties'].items():
+                theme_slot['properties']['parent_key'] = {'anyOf':[{'type':'string','enum':['',*[f't{i}' for i in range(16) if f't{i}'!=key]]},{'type':'null'}]}
+        else:
+            theme['properties']['key']['enum'] = [f't{i}' for i in range(16)]
+            shape['properties']['threads']['maxItems'] = 16
         previous = input_data.get('analysis_state', {}).get('previous_result', {})
         previous_threads = previous.get('threads', []) if isinstance(previous, dict) else []
         previous_keys = list(previous_threads) if isinstance(previous_threads, dict) else [
             row.get('key') for row in previous_threads if isinstance(row, dict)] if isinstance(previous_threads, list) else []
-        shape['properties']['threads']['required'] = sorted({'t0'} | {
+        required_keys = sorted({'t0'} | {
             key for key in [*input_data.get('required_thread_keys', []), *previous_keys]
-            if isinstance(key, str) and key in shape['properties']['threads']['properties']})
+            if isinstance(key, str) and key in {f't{i}' for i in range(16)}})
+        if fixed_slots:
+            shape['properties']['threads']['required'] = required_keys
+        else:
+            shape['properties']['threads']['allOf'] = [
+                {'contains': {'type':'object', 'properties': {'key': {'const': key}}, 'required':['key']}}
+                for key in required_keys]
         for variant in variants:
             variant["properties"]["thread_key"]["enum"] = [f"t{i}" for i in range(16)]
         classification = serializer_schema(LinkSchema(), strict_strings=strict_strings)
@@ -236,7 +246,7 @@ def extraction_schema(input_data=None, *, literal_quote_enums=True):
         bind(shape)
         for item, pk in pinned:
             item["properties"]["raw_message_id"]["enum"] = [pk]
-        if len(message_ids) <= 200:
+        if fixed_slots and len(message_ids) <= 200:
             # Fixed source slots cannot repeat a message with another rationale.
             # Keep the public and saved-response representation as a list.
             for key, theme_slot in shape['properties']['threads']['properties'].items():
@@ -293,12 +303,12 @@ def extraction_schema(input_data=None, *, literal_quote_enums=True):
     return shape
 
 
-def compatible_extraction_schema(input_data):
+def compatible_extraction_schema(input_data, *, fixed_slots=True):
     """Share identical subschemas without dropping structural constraints."""
     import json
     from collections import Counter
 
-    shape = extraction_schema(input_data, literal_quote_enums=False)
+    shape = extraction_schema(input_data, literal_quote_enums=False, fixed_slots=fixed_slots)
     counts = Counter()
     mappings = ('properties', 'patternProperties', '$defs', 'dependentSchemas')
     singles = ('items', 'additionalProperties', 'contains', 'not', 'if', 'then', 'else', 'propertyNames')
