@@ -24,7 +24,11 @@ def normalize_result(result):
     """Apply only the serializer's unknown optional values, never infer a fact."""
     from rest_framework import serializers
     from .facts import FactSchema, normalize_fact_fields
+    from .extraction_schema import extraction_schema
     fields = FactSchema().fields
+    variants = extraction_schema(fixed_slots=False)['properties']['facts']['items']['oneOf']
+    allowed = {variant['properties']['fact_type']['enum'][0]: set(variant['properties'])
+               for variant in variants}
     value = copy.deepcopy(result)
     normalized = set()
     for fact in value['facts']:
@@ -32,6 +36,11 @@ def normalize_result(result):
             continue
         for name, item in list(fact.items()):
             field = fields.get(name)
+            if (item is None and field is not None and fact.get('fact_type') in allowed
+                    and name not in allowed[fact['fact_type']]):
+                del fact[name]
+                normalized.add(name)
+                continue
             if item is None and field is not None and not field.required and not field.allow_null:
                 normalized.add(name)
                 if isinstance(field, serializers.CharField) and field.allow_blank:
