@@ -41,8 +41,13 @@ def validate_openai_extraction_response(data):
     if isinstance(message, dict) and isinstance(choice, dict) and choice.get("finish_reason") == "length":
         usage = root.get("usage")
         output = usage.get("completion_tokens") if isinstance(usage, dict) else None
+        reasoning = message.get('reasoning') if isinstance(message.get('reasoning'), str) else message.get('reasoning_content')
+        details = usage.get('completion_tokens_details') if isinstance(usage, dict) else None
+        reasoning_tokens = details.get('reasoning_tokens') if isinstance(details, dict) else None
         diagnostics.update(finish_reason="length", output_tokens=output if type(output) is int else None,
-                           response_characters=len(message["content"]) if isinstance(message.get("content"), str) else 0)
+                           response_characters=len(message["content"]) if isinstance(message.get("content"), str) else 0,
+                           reasoning_characters=len(reasoning) if isinstance(reasoning, str) else 0,
+                           reasoning_tokens=reasoning_tokens if type(reasoning_tokens) is int and reasoning_tokens >= 0 else None)
         raise ProviderUnavailable("provider_output_truncated", diagnostics=diagnostics)
     if (not isinstance(data, dict) or not isinstance(choice, dict)
             or not isinstance(message, dict) or not isinstance(message.get("content"), str)
