@@ -198,12 +198,16 @@ def recover(result, raw, trace, cfg):
             from .extraction_schema import extraction_schema
             payload['_ollama_format'] = extraction_schema(inputs)
         check_focused_budget(payload, counter, prepared, f'focused_fact_extraction:{kind}', [item.id for item in rows])
+        digest = payload_hash(payload)
         cache_key = f'{target.id}:{kind}'
         from .gpt_sol import enabled as sol_enabled, POLICY as SOL_POLICY
+        legacy_key = None
         if sol_enabled(prepared):
             cache_key += f':{SOL_POLICY}'
+            legacy_key, cache_key = cache_key, f'{cache_key}:{digest}'
         saved = trace.context_metadata.setdefault('focused_extraction', {}).get(cache_key)
-        digest = payload_hash(payload)
+        if saved is None and legacy_key is not None:
+            saved = trace.context_metadata['focused_extraction'].get(legacy_key)
         if saved and saved['payload_sha256'] == digest:
             supplemental = copy.deepcopy(saved['result'])
         else:

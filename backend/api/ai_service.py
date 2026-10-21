@@ -307,6 +307,9 @@ class AIService:
     ):
         extraction_limit = extraction_deadline.get()
         deadline = extraction_limit or analytics_deadline.get()
+        from .gpt_sol import MODEL as SOL_MODEL
+        if extraction_limit and payload.get('model') == SOL_MODEL:
+            deadline = min(extraction_limit, time.monotonic() + 180)
         if extraction_limit and isinstance(timeout, tuple):
             from .qwen_profile import MODEL
             request_limit = min(settings.AI_REQUEST_TIMEOUT, 1200) if payload.get('model') in (MODEL, "openrouter/free") else 180
