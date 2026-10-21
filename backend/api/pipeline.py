@@ -513,13 +513,18 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         from .dialogue_threads import prepare_themes, ready_facts, persist_themes, lock_source
         if cache_enabled and result_override is None:
             _preflight_thread_completion(result, raw, trace)
+        from .gpt_sol import enabled as sol_enabled, normalize_grounded_fields, POLICY as SOL_POLICY
         from .focused_extraction import recover
-        recover(result, raw, trace, cfg)
+        defer_focused = (defer_result and sol_enabled(cfg)
+                         and trace.context_metadata.get('full_history_policy') == 'thread-context-v2'
+                         and json.loads(_extraction_user_message(payload)['content']).get('analysis_transport') == SOL_POLICY)
+        trace.context_metadata['focused_recovery_deferred'] = defer_focused
+        if not defer_focused:
+            recover(result, raw, trace, cfg)
         # Bounded packets also carry evidence_ranges. Validate their literal
         # sources and complete source links after any focused extraction.
         from .full_history import validate_evidence
         validate_evidence(result, raw, trace)
-        from .gpt_sol import enabled as sol_enabled, normalize_grounded_fields
         if sol_enabled(cfg):
             normalize_grounded_fields(result, diagnostics)
         themes = prepare_themes(result, raw, trace)

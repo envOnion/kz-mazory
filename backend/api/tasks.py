@@ -365,8 +365,14 @@ def run_outbox(pk):
     analysis_timeout = 240
     if event.event_type in ANALYSIS_EVENTS:
         from .qwen_profile import enabled as qwen_enabled
+        from .gpt_sol import enabled as sol_enabled
         active = AISettings.get_active()
-        if active.chat_model_name == "openrouter/free" or qwen_enabled(active):
+        if sol_enabled(active):
+            # A main response and typed recovery each have their own bounded
+            # HTTP call. Do not cancel a valid recovery halfway through after
+            # spending most of a 240s phase on the main response.
+            analysis_timeout = min(600, max(1, settings.AI_WORKER_TIMEOUT - 60))
+        elif active.chat_model_name == "openrouter/free" or qwen_enabled(active):
             analysis_timeout = min(settings.AI_REQUEST_TIMEOUT, 1200)
     deadline_token = extraction_deadline.set(time.monotonic() + analysis_timeout if event.event_type in ANALYSIS_EVENTS else None)
     try:
