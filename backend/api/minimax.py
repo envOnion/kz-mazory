@@ -49,15 +49,36 @@ def enabled(cfg):
             and urlsplit(cfg.chat_provider_url).hostname in HOSTS)
 
 
+def _native_quote_system_messages(messages):
+    """Align trusted prompt quote wording with the native quote-ID schema."""
+    replacements = (
+        ("evidence — короткая точная непрерывная цитата оригинала этого ID.",
+         "evidence — целочисленный quote_id из источников для точной цитаты оригинала этого ID."),
+        ("evidence: короткая точная непрерывная цитата ИЗ evidence_message_id;",
+         "evidence: целочисленный quote_id из источников для точной цитаты ИЗ evidence_message_id;"),
+        ("quote: точная цитата,",
+         "quote: целочисленный quote_id из источников для точной цитаты,"),
+    )
+    for message in messages:
+        if message.get("role") != "system" or not isinstance(message.get("content"), str):
+            continue
+        for old, new in replacements:
+            message["content"] = message["content"].replace(old, new)
+
+
 def request(payload, max_tokens):
     wire = copy.deepcopy(payload)
     for key in ("provider", "plugins", "reasoning", "temperature", "top_p"):
         wire.pop(key, None)
     limit = wire.pop("max_tokens", wire.get("max_completion_tokens", max_tokens))
-    wire.update(max_completion_tokens=min(limit, max_tokens), reasoning_effort="low",
+    wire.update(max_completion_tokens=min(limit, max_tokens),
                 stream=True, stream_options={"include_usage": True})
     shape = wire.pop("response_format", {})
     schema = shape.get("json_schema", {}).get("schema") if isinstance(shape, dict) else None
+    if not schema:
+        # Keep short connection checks short; structured extraction uses the
+        # provider's reasoning default unless the caller explicitly chose one.
+        wire.setdefault("reasoning_effort", "low")
     if schema:
         plan = quote_plan(payload)
         quote_instruction = "Цитаты должны быть точными строками из источников, как требует схема."
@@ -66,6 +87,7 @@ def request(payload, max_tokens):
             user = next(row for row in wire["messages"] if row.get("role") == "user")
             user["content"] = json.dumps(native, ensure_ascii=False, separators=(",", ":"))
             if "quote_catalog_count" in native:
+                _native_quote_system_messages(wire["messages"])
                 quote_instruction = ("В evidence и quote выбирай целочисленные quote_id из источников, "
                                      "как требует схема; никаких строк и придуманных ID. Не повторяй текст источников.")
         wire["messages"].insert(0, {"role": "system", "content": (
@@ -75,7 +97,7 @@ def request(payload, max_tokens):
             "заполни все обязательные поля их допустимыми значениями и правильными типами. "
             "ID сообщений — JSON-числа, строго из integer enum, без строк и префикса m. "
             "Для новой темы thread_id=null, никогда не пустая строка. parent_key у корневой темы — null. "
-            "thread_key — только разрешённый tN; для c0 и одиночной target_classification обязательно t0. "
+            "thread_key — только разрешённый tN; для одиночной target_classification и cN, где raw_message_id=target_message_id, обязательно t0. "
             "Числовые поля — JSON-числа либо null, когда схема допускает null; не пустые строки. "
             "Создавай только реально обнаруженные темы, без пустых тем-заглушек. "
             "Для каждого целевого ID обязательна классификация. evidence_messages всегда массив объектов. "

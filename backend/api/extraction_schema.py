@@ -187,7 +187,7 @@ def extraction_schema(input_data=None, *, literal_quote_enums=True, fixed_slots=
             classifications = {"type":"object", "additionalProperties":False, "required":[], "properties":{}}
             for i, pk in enumerate(targets):
                 item = copy.deepcopy(classification)
-                if i:
+                if pk != input_data["target_message_id"]:
                     item["properties"]["thread_key"]["enum"] = [f"t{j}" for j in range(16)]
                 classifications["required"].append(f"c{i}")
                 classifications["properties"][f"c{i}"] = item
@@ -263,7 +263,8 @@ def extraction_schema(input_data=None, *, literal_quote_enums=True, fixed_slots=
                         item['properties']['raw_message_id'] = {'type':'integer','enum':[pk]}
                     sources[f'm{pk}'] = item
                 theme_slot['properties']['messages'] = {'type':'object','additionalProperties':False,
-                    'minProperties':1,'properties':sources,'required':[f'm{targets[0]}'] if key=='t0' else []}
+                    'minProperties':1,'properties':sources,
+                    'required':[f'm{input_data["target_message_id"]}'] if key=='t0' else []}
         properties = shape['properties']
         classification_key = 'target_classifications' if len(targets)>1 else 'target_classification'
         shape['properties'] = {classification_key:properties[classification_key],
