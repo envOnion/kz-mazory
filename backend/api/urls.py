@@ -44,6 +44,7 @@ from .messenger_api import (
     RecordTracesView,
     RecordTraceContextView,
     ReanalyzeView,
+    ReanalyzeErrorsView,
 )
 from .operations_api import (
     AnalyticsOperationsView,
@@ -145,6 +146,7 @@ urlpatterns = [
     path("candidates/crm-retry/", CandidateCrmRetryView.as_view()),
     # Messenger: единая лента коммуникаций, цепочки причинности, дельты.
     path("messenger/dialogs/", DialogsView.as_view()),
+    path("messenger/reanalyze-errors/", ReanalyzeErrorsView.as_view()),
     path("messenger/records/", RecordsView.as_view()),
     path("messenger/records/<int:pk>/", RecordDetailView.as_view()),
     path("messenger/records/<int:pk>/chain/", RecordChainView.as_view()),

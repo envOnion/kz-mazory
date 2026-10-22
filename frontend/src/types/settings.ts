@@ -33,7 +33,7 @@ export interface AiConnectionCheck {
   error_code: string
 }
 export interface AiSettingsGroup { title: string; names: string[] }
-export interface SettingsPage { items: SettingsRow[]; defaults?: SettingsRow; can_change?: boolean; fields: SettingField[] }
+export interface SettingsPage { items: SettingsRow[]; defaults?: SettingsRow; can_change?: boolean; can_delete?: boolean; fields: SettingField[] }
 export interface SettingsAccess { can_integrate: boolean; can_ai: boolean; can_create_ai: boolean; can_create_whatsapp: boolean; can_create_bitrix: boolean; can_bitrix: boolean; can_administer_access: boolean; mfa_required: boolean; mfa_enabled: boolean; teams: {id: number; name: string}[] }
 export interface HistoryPage { job: SettingsRow | null; fields: SettingField[]; runs: {id: number; state: string; progress: {total: number; processed: number; errors: number; pending: number}}[] }
 export interface SettingsAudit { id: number; actor_id: number | null; action: string; target_type: string; target_id: number; created_at: string }

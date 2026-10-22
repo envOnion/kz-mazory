@@ -246,7 +246,9 @@ class SettingsAIView(APIView):
             row['updated_at'] = cfg.updated_at.isoformat() if cfg.updated_at else None
         defaults = dict(serializer_for(AISettings, SAFE_AI_FIELDS)(AISettings(is_active=False)).data)
         defaults['id'] = 0
-        return Response({'items': rows, 'fields': schema_for(AISettings, SAFE_AI_FIELDS), 'defaults': defaults, 'can_change': request.user.has_perm('api.change_' + cfgs.model._meta.model_name)})
+        return Response({'items': rows, 'fields': schema_for(AISettings, SAFE_AI_FIELDS), 'defaults': defaults,
+            'can_change': request.user.has_perm('api.change_aisettings'),
+            'can_delete': request.user.has_perm('api.delete_aisettings')})
 
     @transaction.atomic
     def post(self, request):
@@ -259,6 +261,16 @@ class SettingsAIView(APIView):
 
 class SettingsAIDetailView(APIView):
     permission_classes = [IsAuthenticated]
+
+    @transaction.atomic
+    def delete(self, request, pk):
+        require_integration(request, AISettings, write=True)
+        if not request.user.has_perm('api.delete_aisettings'):
+            raise PermissionDenied('Нет права удалять конфигурации ИИ.')
+        from .ai_configurations import delete_configuration
+        cfg = get_object_or_404(AISettings, pk=pk)
+        delete_configuration(cfg, actor=request.user)
+        return Response(status=204)
 
     @transaction.atomic
     def patch(self, request, pk):

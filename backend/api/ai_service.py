@@ -299,7 +299,7 @@ class AIService:
     def _config(operation="chat"):
         cfg = AISettings.get_active()
         if not cfg.is_active:
-            raise ProviderUnavailable("ai_disabled")
+            raise ProviderUnavailable("ai_not_configured")
         if operation == "embedding":
             checked_base_url(cfg.embedding_provider_url)
             AIService._credential(cfg, operation="embedding")
@@ -365,9 +365,7 @@ class AIService:
         except (TypeError, ValueError):
             raise ProviderUnavailable("provider_invalid_request") from None
         day = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        today = ProviderUsage.objects.filter(created_at__gte=day).filter(
-            models.Q(config=cfg) | models.Q(config__isnull=True)
-        )
+        today = ProviderUsage.objects.filter(created_at__gte=day, config=cfg)
         spent = today.aggregate(total=Sum("cost_usd"))["total"] or Decimal(0)
         if (
             cfg.daily_request_limit > 0 and today.count() >= cfg.daily_request_limit
@@ -657,7 +655,7 @@ class AIService:
         from .ai_configurations import chat_candidates
         candidates = chat_candidates()
         if not candidates:
-            raise ProviderUnavailable("ai_disabled")
+            raise ProviderUnavailable("ai_not_configured")
         last_error = None
         primary_error = None
         attempts = []
@@ -932,7 +930,7 @@ class AIService:
         from .ai_configurations import chat_candidates
         candidates = chat_candidates()
         if not candidates:
-            raise ProviderUnavailable("ai_disabled")
+            raise ProviderUnavailable("ai_not_configured")
         last_error = None
         for cfg in candidates:
             try:

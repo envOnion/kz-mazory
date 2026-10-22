@@ -9,7 +9,7 @@ import { requestKey } from '../utils/requestKey'
 import { api, post } from '../composables/api'
 import { accessToken } from '../composables/session'
 import { EmptyState, ErrorState, Skeleton, StatusBadge, statusLabel, formatTime } from '../shell/bits'
-import type { ChainNode, ChangeRow, RecordChain, DialogSummary, Paged, RecordBrief, RecordDetail, TraceRow } from '../types/messenger'
+import type { ChainNode, ChangeRow, RecordChain, DialogSummary, Paged, RecordBrief, RecordDetail, TraceRow, ErrorRecoveryPreview, ErrorRecoveryProgress } from '../types/messenger'
 
 // Чаты: список диалогов, лента сообщений, инспектор (Решение / История / Диагностика ИИ).
 // Состояние (диалог, сообщение, вкладка, категория) — в URL; обновление — cursor polling 5 c.
@@ -153,10 +153,69 @@ const selected = computed<DialogSel | null>(() => {
 })
 const selKey = computed(() => selected.value ? `${selected.value.s}|${selected.value.c}|${selected.value.cat}|${selected.value.t}` : '')
 
+const recoveryPreview = ref<ErrorRecoveryPreview | null>(null)
+const recoveryProgress = ref<ErrorRecoveryProgress | null>(null)
+const recoveryError = ref(''), recoveryBusy = ref(false), recoveryOpen = ref(false)
+let recoveryTimer: number | undefined
+let recoveryRequestKey = requestKey()
+function recoveryParams() {
+  const params = new URLSearchParams()
+  const dialog = selected.value
+  if (dialog) {
+    params.set('session_name', dialog.s); params.set('chat_id', dialog.c); params.set('category', dialog.cat)
+    if (dialog.t) params.set('team', dialog.t)
+  }
+  return params
+}
+async function refreshRecovery(operationId: number) {
+  const selection = selKey.value
+  const params = recoveryParams(); params.set('operation_id', String(operationId))
+  try {
+    const progress = await api<ErrorRecoveryProgress>(`/messenger/reanalyze-errors/?${params}`)
+    if (selection !== selKey.value || stopped) return
+    recoveryProgress.value = progress; recoveryOpen.value = true
+    if (progress.status === 'queued' || progress.status === 'running' || progress.pending > 0) {
+      recoveryTimer = window.setTimeout(() => { void refreshRecovery(operationId) }, 5000)
+    }
+  } catch (error) { if (selection === selKey.value) recoveryError.value = error instanceof Error ? error.message : 'Не удалось обновить повторный анализ' }
+}
+async function openRecovery() {
+  recoveryOpen.value = !recoveryOpen.value
+  if (!recoveryOpen.value || recoveryProgress.value) return
+  const selection = selKey.value
+  recoveryBusy.value = true; recoveryError.value = ''
+  try {
+    const preview = await api<ErrorRecoveryPreview>(`/messenger/reanalyze-errors/?${recoveryParams()}`)
+    if (selection === selKey.value) { recoveryPreview.value = preview; recoveryRequestKey = requestKey() }
+  } catch (error) { if (selection === selKey.value) recoveryError.value = error instanceof Error ? error.message : 'Не удалось проверить ошибки' }
+  finally { if (selection === selKey.value) recoveryBusy.value = false }
+}
+async function startRecovery() {
+  const selection = selKey.value
+  recoveryBusy.value = true; recoveryError.value = ''
+  try {
+    const progress = await post<ErrorRecoveryProgress>(`/messenger/reanalyze-errors/?${recoveryParams()}`, { idempotency_key: recoveryRequestKey })
+    if (selection !== selKey.value) return
+    recoveryProgress.value = progress
+    await router.replace({ query: { ...route.query, recovery: String(progress.operation_id) } })
+  } catch (error) { if (selection === selKey.value) recoveryError.value = error instanceof Error ? error.message : 'Не удалось поставить повторный анализ' }
+  finally { if (selection === selKey.value) recoveryBusy.value = false }
+}
+watch(selKey, () => {
+  if (recoveryTimer) clearTimeout(recoveryTimer)
+  recoveryPreview.value = null; recoveryProgress.value = null; recoveryError.value = ''; recoveryBusy.value = false; recoveryOpen.value = false
+})
+watch(() => route.query.recovery, value => {
+  if (recoveryTimer) clearTimeout(recoveryTimer)
+  const id = routeId(value)
+  if (id) void refreshRecovery(id)
+}, { immediate: true })
+onBeforeUnmount(() => { if (recoveryTimer) clearTimeout(recoveryTimer) })
+
 function openDialog(dialog: DialogSummary) {
   listOpen.value = roomy.value
   void router.push({ path: '/messenger', query: {
-    ...route.query, record:searchInput.value.trim() && dialog.match_record_id ? String(dialog.match_record_id) : undefined, tab:undefined,
+    ...route.query, recovery:undefined, record:searchInput.value.trim() && dialog.match_record_id ? String(dialog.match_record_id) : undefined, tab:undefined,
     s: dialog.session_name, c: dialog.chat_id, cat: dialog.category,
     t: dialog.team_id === null ? '' : String(dialog.team_id),
     ...(searchInput.value.trim() ? { q: searchInput.value.trim() } : {}),
@@ -521,6 +580,7 @@ const timelineOrdered = computed(() => chain.value?.timeline || [])
         <div class="mx-muted text-[11px]">{{ dialogCategory }}<template v-if="CATEGORY_LABELS[selected.cat] && CATEGORY_LABELS[selected.cat] !== dialogCategory"> · {{ CATEGORY_LABELS[selected.cat] }}</template></div>
       </div>
       <span v-if="stale" class="mx-chip mx-chip-warn" title="Данные могут быть не самыми свежими"><RefreshCw :size="12" /> Данные могут быть не свежими</span>
+      <button class="mx-btn text-xs" :disabled="recoveryBusy" @click="openRecovery">Повторить ошибки</button>
       <button v-if="!wide" class="mx-btn" style="padding:6px" aria-label="Открыть инспектор" @click="inspectorOpen = true"><PanelRightOpen :size="16" /></button>
     </header>
 
@@ -529,6 +589,22 @@ const timelineOrdered = computed(() => chain.value?.timeline || [])
       <EmptyState title="Выберите диалог" text="Слева — чаты, к которым у вас есть доступ. Сообщения и их обработка откроются здесь." />
     </div>
     <template v-else>
+      <div v-if="recoveryOpen" class="mx-card m-3 p-3 space-y-2 text-sm" aria-label="Повторный анализ ошибок">
+        <p v-if="recoveryError" role="alert" class="text-rose-300">{{ recoveryError }}</p>
+        <p v-if="recoveryBusy" class="mx-muted">Проверяем сообщения…</p>
+        <template v-if="recoveryProgress">
+          <p>Найдено: {{ recoveryProgress.found }} · Поставлено: {{ recoveryProgress.scheduled }} · Ожидают: {{ recoveryProgress.pending }}</p>
+          <p>Обработано: {{ recoveryProgress.succeeded }} · Требуют проверки: {{ recoveryProgress.needs_review }} · Ошибки: {{ recoveryProgress.failed }}</p>
+          <p class="mx-muted text-xs">Уже обрабатываются: {{ recoveryProgress.already_processing }} · Изменились: {{ recoveryProgress.changed }} · Недоступны: {{ recoveryProgress.unavailable }}</p>
+          <p v-if="recoveryProgress.error_code" role="alert" class="text-amber-200">Повтор остановлен. Проверьте основную модель и доступ, затем запустите заново.</p>
+        </template>
+        <template v-else-if="recoveryPreview">
+          <p>Актуальных ошибок для повторного анализа: {{ recoveryPreview.found }}<span v-if="recoveryPreview.model"> · Модель: {{ recoveryPreview.model }}</span></p>
+          <p class="mx-muted text-xs">Создадим новые попытки. Результаты с новыми фактами потребуют проверки перед записью в CRM. История прежних попыток сохранится.</p>
+          <p v-if="recoveryPreview.blocker" class="text-amber-200">Сначала настройте и проверьте подключение основной чат-модели. <RouterLink class="mx-link" to="/settings?section=ai">Настройки ИИ</RouterLink></p>
+          <button class="mx-btn mx-btn-primary" :disabled="recoveryBusy || !recoveryPreview.can_start" @click="startRecovery">Подтвердить повторный анализ</button>
+        </template>
+      </div>
       <div v-if="feedLoading && !feed.length" class="p-4"><Skeleton :rows="7" height="54px" /></div>
       <ErrorState v-else-if="feedError" :text="feedError" :on-retry="() => loadFeed(null)" />
       <EmptyState v-else-if="!feed.length" title="Сообщений пока нет" text="История этого диалога пуста или ещё обрабатывается." />

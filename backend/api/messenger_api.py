@@ -12,6 +12,7 @@ from .communication import sanitize_body, sanitize_data
 from urllib.parse import urlencode
 
 from django.db import connection
+from django.shortcuts import get_object_or_404
 from django.db.models import BigIntegerField, BooleanField, Count, Exists, F, JSONField, Max, OuterRef, Q, Subquery, Window
 from django.db.models.functions import RowNumber
 from django.db.models.expressions import RawSQL
@@ -60,6 +61,7 @@ ANALYSIS_LABELS = {
     "analyzed": "Проанализировано",
     "no_crm_actions": "Без CRM-действий",
     "error": "Ошибка",
+    "needs_review": "Требует проверки",
 }
 DELIVERY_LABELS = {
     "not_applicable": "Не требуется",
@@ -156,6 +158,8 @@ def _axis_from_trace(trace, work, clar_state):
     if clar_state == "awaiting":
         return "need_context"
     if trace is not None:
+        if trace.axis_request_state == 'needs_review' and (trace.status != 'success' or getattr(trace, 'axis_pending_review', False)):
+            return 'needs_review'
         if trace.status == "error":
             return "error"
         if trace.status in ("sending", "accepted", "unknown"):
@@ -240,6 +244,7 @@ def axes_for_records(records):
         MessageProcessingTrace.objects.filter(pk__in=Subquery(latest_traces))
         .only('id','raw_message_id','status','pipeline_action')
         .annotate(axis_request_state=F('context_metadata__request_state'),
+                  axis_pending_review=Exists(FactCandidate.objects.filter(trace_id=OuterRef('pk'), status='pending')),
                   axis_retry_state=F('context_metadata__retry__state')),
         "raw_message_id",
     )
@@ -291,6 +296,8 @@ def axes_for_records(records):
         reasons = []
         if analysis == "error":
             reasons.append("analysis_error")
+        if analysis == 'needs_review':
+            reasons.append('analysis_needs_review')
         if delivery_axis in ("failed", "unknown"):
             reasons.append("delivery_problem")
         if crm_axis in ("failed", "unknown", "unavailable"):
@@ -311,7 +318,7 @@ def axes_for_records(records):
 def _possible_attention(qs):
     """Broad candidates only; historical failures need canonical rechecking."""
     return qs.filter(
-        Q(raw_message_id__in=MessageProcessingTrace.objects.filter(status='error').values('raw_message_id')) |
+        Q(raw_message_id__in=MessageProcessingTrace.objects.filter(Q(status='error') | Q(context_metadata__request_state='needs_review')).values('raw_message_id')) |
         Q(raw_message_id__in=SourceWorkItem.objects.filter(Q(state='error') | ~Q(error_code='')).values('raw_message_id')) |
         Q(raw_message_id__in=FactClarification.objects.filter(state__in=['awaiting','expired','unconfirmed']).values('candidate__trace__raw_message_id')) |
         Q(notification_id__in=FactClarification.objects.filter(state__in=['queued','awaiting','expired','unconfirmed']).values('notification_id')) |
@@ -390,6 +397,10 @@ def _current_axes_cte(qs):
             SELECT scoped.id,
                 CASE
                     WHEN COALESCE(notification_clar.state, trace_clar.state) = 'awaiting' THEN 'need_context'
+                    WHEN latest_trace.request_state = 'needs_review' AND (latest_trace.status <> 'success' OR EXISTS (
+                        SELECT 1 FROM {candidate_table} AS review_candidate
+                        WHERE review_candidate.{candidate_trace} = latest_trace.id AND review_candidate.status = 'pending'
+                    )) THEN 'needs_review'
                     WHEN latest_trace.id IS NOT NULL AND latest_trace.status = 'error' THEN 'error'
                     WHEN latest_trace.status IN ('sending', 'accepted', 'unknown') THEN 'analyzing'
                     WHEN latest_trace.status <> 'success'
@@ -414,6 +425,10 @@ def _current_axes_cte(qs):
                         WHEN COALESCE(notification_clar.state, trace_clar.state) IN ('awaiting', 'expired', 'unconfirmed')
                             THEN TRUE
                         WHEN latest_trace.status = 'error' THEN TRUE
+                        WHEN latest_trace.request_state = 'needs_review' AND (latest_trace.status <> 'success' OR EXISTS (
+                            SELECT 1 FROM {candidate_table} AS review_candidate
+                            WHERE review_candidate.{candidate_trace} = latest_trace.id AND review_candidate.status = 'pending'
+                        )) THEN TRUE
                         WHEN latest_trace.id IS NULL AND latest_work.id IS NOT NULL AND (
                             latest_work.state = 'error' OR COALESCE(latest_work.error_code, '') <> ''
                         ) THEN TRUE
@@ -1222,3 +1237,60 @@ class ReanalyzeView(APIView):
             return Response({'error': 'Для сообщения уже выполняется анализ. Дождитесь результата.'}, status=409)
         event = OutboxEvent.objects.get(deduplication_key=trace.operation_key)
         return Response({'operation_id': event.pk, 'trace_id': trace.pk, 'state': event.state}, status=202)
+
+
+class ReanalyzeErrorsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def scope(self, request):
+        from rest_framework import serializers
+        class Scope(serializers.Serializer):
+            session_name = serializers.CharField(max_length=64, required=False, allow_blank=True)
+            chat_id = serializers.CharField(max_length=128, required=False, allow_blank=True)
+            category = serializers.ChoiceField(choices=['group', 'private', 'system'], required=False)
+            team = serializers.IntegerField(min_value=1, max_value=9223372036854775807, required=False, allow_null=True)
+        schema = Scope(data=request.query_params)
+        schema.is_valid(raise_exception=True)
+        return dict(schema.validated_data)
+
+    def get(self, request):
+        from . import error_recovery
+        from .models import AsyncOperation
+        from .providers import ProviderUnavailable
+        operation_id = request.query_params.get('operation_id')
+        if operation_id is not None:
+            if not operation_id.isdecimal() or len(operation_id) > 18:
+                raise ValidationError({'error': 'Укажите ID операции.'})
+            operation = get_object_or_404(AsyncOperation, pk=int(operation_id), requested_by=request.user,
+                                         operation_type='error_reanalysis')
+            if operation.access_fingerprint != access.fingerprint(request.user):
+                return Response({'error': 'Доступ изменился. Обновите страницу.'}, status=403)
+            return Response(error_recovery.progress(operation))
+        count = error_recovery.candidates(request.user, self.scope(request)).count()
+        if not count:
+            return Response({'found': 0, 'can_start': False, 'model': '', 'blocker': ''})
+        model, blocker = '', ''
+        try:
+            cfg, _ = error_recovery.checked_configuration()
+            model = cfg.chat_model_name
+        except ProviderUnavailable as exc:
+            blocker = str(exc)
+        return Response({'found': count, 'can_start': count > 0 and not blocker, 'model': model, 'blocker': blocker})
+
+    def post(self, request):
+        from rest_framework import serializers
+        from . import error_recovery
+        from .mfa import require_privileged_mfa
+        from .providers import ProviderUnavailable
+        class Input(serializers.Serializer):
+            idempotency_key = serializers.UUIDField()
+        schema = Input(data=request.data)
+        schema.is_valid(raise_exception=True)
+        require_privileged_mfa(request)
+        try:
+            operation = error_recovery.start(request.user, self.scope(request), str(schema.validated_data['idempotency_key']))
+        except ProviderUnavailable as exc:
+            message = ('Сначала настройте и проверьте подключение основной чат-модели.'
+                if str(exc) in ('ai_not_configured', 'recovery_connection_check_required') else 'Конфигурация изменилась. Проверьте подключение ещё раз.')
+            return Response({'error': message}, status=409)
+        return Response(error_recovery.progress(operation), status=202)

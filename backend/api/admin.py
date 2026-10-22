@@ -877,6 +877,24 @@ class WhatsAppConfigAdmin(IntegrationAdmin):
 
 @admin.register(AISettings)
 class AISettingsAdmin(IntegrationAdmin):
+    def get_actions(self, request):
+        actions = super().get_actions(request)
+        actions.pop('delete_selected', None)
+        return actions
+
+    def delete_model(self, request, obj):
+        from .ai_configurations import delete_configuration
+        delete_configuration(obj, actor=request.user)
+
+    def delete_view(self, request, object_id, extra_context=None):
+        from django.http import HttpResponseRedirect
+        from .security import Conflict
+        try:
+            return super().delete_view(request, object_id, extra_context)
+        except Conflict as exc:
+            self.message_user(request, str(exc.detail), level=messages.ERROR)
+            return HttpResponseRedirect(reverse('admin:api_aisettings_change', args=[object_id]))
+
     form = AISettingsForm
     list_display = (
         "name",

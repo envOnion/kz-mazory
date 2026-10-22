@@ -394,6 +394,7 @@ def run_outbox(pk):
             "clarification_reply": clarification_reply,
             "price_question": price_question,
             "operation": run_operation,
+            "reanalyze_errors": reanalyze_errors,
             "crm_sync": sync_crm,
             "crm_import": import_crm,
             "crm_catalog": sync_catalog,
@@ -503,6 +504,7 @@ def run_outbox(pk):
             in (
                 "provider_context_overflow",
                 "reanalysis_access_revoked",
+                "recovery_configuration_changed",
                 "provider_output_truncated",
                 "invalid_extraction_schema",
                 "invalid_schema",
@@ -558,6 +560,8 @@ def run_outbox(pk):
             if current.state == "cancelled":
                 ai_retries.record_attempt(current, "cancelled", "history_run_cancelled")
             SourceWorkItem.objects.filter(raw_message_id=event.payload["raw_id"], processing_version=AISettings.get_active().autonomous_policy_version).update(state=current.state, error_code=current.error_code, lease_until=current.lease_until)
+            from .error_recovery import finalize_review
+            finalize_review(current)
         usage_event_id.reset(context_token)
 
 
@@ -851,6 +855,38 @@ from .context_window import bounded_operation
 
 @bounded_operation
 def extract_message(payload):
+    if not payload.get('error_recovery_id'):
+        return _extract_message(payload)
+    from .ai_configurations import pinned_configuration
+    from .error_recovery import validate_route
+    from .models import AsyncOperation, MessageProcessingTrace
+    operation = AsyncOperation.objects.get(pk=payload['error_recovery_id'], operation_type='error_reanalysis')
+    try:
+        from .processing_attempts import require_reanalysis
+        from rest_framework.exceptions import PermissionDenied
+        raw = RawMessage.objects.select_related('config__team', 'team', 'project').get(pk=payload['raw_id'])
+        try:
+            require_reanalysis(operation.requested_by, raw)
+        except PermissionDenied:
+            raise ProviderUnavailable('reanalysis_access_revoked') from None
+        validate_route(operation)
+    except ProviderUnavailable as exc:
+        trace = MessageProcessingTrace.objects.get(pk=payload['trace_id'])
+        trace.status, trace.error_code = 'error', str(exc)
+        trace.context_metadata['request_state'] = 'failed'
+        trace.result_summary = ('Доступ к исходному сообщению изменился. Повтор остановлен.'
+            if str(exc) == 'reanalysis_access_revoked' else
+            'Основная конфигурация изменилась. Повтор остановлен до новой проверки подключения.')
+        trace.save(update_fields=['status', 'error_code', 'context_metadata', 'result_summary'])
+        raise
+    token = pinned_configuration.set((operation.request['config_id'], operation.request['fingerprint']))
+    try:
+        return _extract_message(payload)
+    finally:
+        pinned_configuration.reset(token)
+
+
+def _extract_message(payload):
     raw = RawMessage.objects.select_related('config').get(pk=payload['raw_id'])
     if raw.processing_state == 'clarification_reply':
         return
@@ -897,6 +933,11 @@ def extract_message(payload):
         reanalyze=payload.get("reanalyze", False),
         **({"trace_ids": payload["trace_ids"]} if "trace_ids" in payload else {}),
     )
+
+
+def reanalyze_errors(payload):
+    from .error_recovery import process
+    return process(payload)
 
 
 @bounded_operation

@@ -106,6 +106,13 @@ export interface OperationPage<T> extends Paged<T> {teams:TeamOption[];state_lab
 export interface DialogsPage extends Paged<DialogSummary> {}
 export interface RecordsPage extends Paged<RecordBrief> {}
 
+export interface ErrorRecoveryPreview { found: number; can_start: boolean; model: string; blocker: string }
+export interface ErrorRecoveryProgress {
+  operation_id: number; status: string; error_code: string; model: string
+  found: number; scheduled: number; already_processing: number; changed: number; unavailable: number
+  pending: number; succeeded: number; needs_review: number; failed: number
+}
+
 export interface ChangeItem {
   type: 'record' | 'event'
   id: number
