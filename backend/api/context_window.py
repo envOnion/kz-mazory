@@ -27,6 +27,11 @@ def bounded_operation(function):
 
         arguments = signature.bind(*args, **kwargs).arguments
         payload = arguments.get('payload', arguments)
+        # The versioned entity coordinator owns explicit, fingerprinted source
+        # spans per stage and may retrieve one old promise by provenance. It
+        # must not inherit the legacy monolithic last-50 request contract.
+        if payload.get('entity_policy') == 'entity-stages-v1':
+            return function(*args, **kwargs)
         raw_id = payload['raw_id']
         if current_window() is not None:
             if raw_id not in current_window()["source_ids"]:

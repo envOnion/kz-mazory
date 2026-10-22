@@ -20,6 +20,7 @@ const enabled = computed(() => props.role !== 'decision' || draft.value.decision
 const primaryNames = computed(() => [`${props.role}_provider_url`, `${props.role}_model_name`, `${props.role}_api_format`])
 const primary = computed(() => primaryNames.value.flatMap(name => props.fields.filter(field => field.name === name)))
 const groups = computed<AiSettingsGroup[]>(() => props.role === 'chat' ? [
+  { title: 'Поэтапная обработка', names: ['entity_pipeline_enabled', 'entity_input_token_limit', 'entity_stage_attempts', 'entity_max_calls'] },
   { title: 'Контекст и генерация', names: ['chat_temperature', 'context_window_tokens', 'max_completion_tokens', 'context_safety_tokens', 'analysis_input_token_limit', 'analysis_target_message_limit', 'analysis_output_token_limit'] },
   { title: 'Токенизатор', names: ['tokenizer_id', 'tokenizer_revision'] },
   { title: 'Инструкции для обработки и ассистента', names: ['system_prompt_worker', 'system_prompt_assistant'] },

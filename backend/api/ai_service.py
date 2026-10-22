@@ -90,6 +90,8 @@ def extraction_schema_diagnostics(schema, result):
                      'is_null': error.instance[name] is None}
                     for name in sorted(unexpected & fact_fields)]
                 detail['unexpected_unknown_key_count'] = len(unexpected - fact_fields)
+            if error.validator == 'required' and isinstance(error.instance, dict):
+                detail['missing_fields'] = [name for name in error.validator_value if name not in error.instance]
             if error.validator == 'enum' and list(error.absolute_path)[-1:] == ['role']:
                 if isinstance(error.instance, str) and error.instance in safe_labels:
                     detail['known_enum_label'] = error.instance
@@ -224,6 +226,7 @@ commitment_status=fulfilled и fulfillment_message_id; иначе pending.
 Особое внимание уделяй точному извлечению:
 - контрагентов и компаний: company_name (название организации, контрагента, клиента или партнера);
 - сделок и объектов: object_name (название сделки, объекта строительства, договора, ЖК);
+- составных признаков: object_city, object_address, object_phase и object_external_id только если они прямо указаны; deal_contract_number и deal_period — только при явном номере/периоде сделки. Не переноси реквизиты из похожего объекта и не выдумывай отсутствующие значения;
 - обязательств и обещаний: commitment_text (действие, предмет обязательства), responsible_name (исполнитель/ответственный), deadline_at (срок исполнения с часовым поясом);
 - финансовых сумм: обязательно извлекай финансовые суммы в тенге KZT (₸, тенге, тыс./млн тенге; если валюта не указана в казахстанском контексте — по умолчанию KZT).
 Каждый факт: fact_type: project|payment|commitment; object_name; company_name;
@@ -766,7 +769,8 @@ class AIService:
         from .gpt_sol import enabled as sol_enabled, request as sol_request
         sol_schema = None
         sol_canonical_payload = None
-        if sol_enabled(cfg):
+        entity_contract = str(payload.get("response_format", {}).get("json_schema", {}).get("name", "")).startswith("mazory_entity_")
+        if sol_enabled(cfg) and not entity_contract:
             sol_canonical_payload = payload
             payload, sol_schema = sol_request(payload, cfg)
         if sol_schema is None and not payload.get("response_format") and isinstance(extraction_input_data, dict):
@@ -821,7 +825,7 @@ class AIService:
             )
             data = normalize_response(raw_data)
         else:
-            if cfg.chat_model_name == "openrouter/free":
+            if cfg.chat_model_name == "openrouter/free" and not entity_contract:
                 from .free_router import request, _extraction_input
                 from .quote_input_codec import POLICY as QUOTE_INPUT_POLICY
                 canonical_inputs = _extraction_input(payload)
@@ -884,11 +888,11 @@ class AIService:
                 raise ProviderUnavailable("extraction_json_parse", diagnostics=diagnostics) from None
             if not isinstance(result, dict):
                 raise ProviderUnavailable("extraction_top_level_type", diagnostics=diagnostics)
-            if "facts" not in result:
+            if not entity_contract and "facts" not in result:
                 raise ProviderUnavailable("extraction_facts_missing", diagnostics=diagnostics)
-            if not isinstance(result["facts"], list):
+            if not entity_contract and not isinstance(result["facts"], list):
                 raise ProviderUnavailable("extraction_facts_type", diagnostics=diagnostics)
-            if sol_enabled(cfg):
+            if sol_enabled(cfg) and not entity_contract:
                 from .gpt_sol import normalize_result
                 result, normalized_nulls = normalize_result(result)
                 if normalized_nulls:
@@ -922,7 +926,7 @@ class AIService:
                     diagnostics['native_quote_policy'] = QUOTE_INPUT_POLICY
                 result = restored
             from .qwen_profile import enabled as qwen_enabled
-            if qwen_enabled(cfg):
+            if qwen_enabled(cfg) and not entity_contract:
                 from jsonschema import Draft202012Validator
                 from .qwen_profile import order_promise_evidence
                 result, reordered = order_promise_evidence(result, json.loads(payload['messages'][-1]['content']))

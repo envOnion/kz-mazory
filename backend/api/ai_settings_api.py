@@ -14,7 +14,7 @@ from . import access
 from .models import AISettings, AsyncOperation
 from .settings_api import SAFE_AI_FIELDS, require_integration, update_model, audit
 
-CHAT_FIELDS = tuple(name for name in SAFE_AI_FIELDS if name.startswith(('chat_', 'tokenizer_', 'system_prompt_', 'analysis_')) or name in ('context_window_tokens', 'max_completion_tokens', 'context_safety_tokens'))
+CHAT_FIELDS = tuple(name for name in SAFE_AI_FIELDS if name.startswith(('chat_', 'tokenizer_', 'system_prompt_', 'analysis_', 'entity_')) or name in ('context_window_tokens', 'max_completion_tokens', 'context_safety_tokens'))
 EMBEDDING_FIELDS = tuple(name for name in SAFE_AI_FIELDS if name.startswith('embedding_'))
 DECISION_FIELDS = tuple(name for name in SAFE_AI_FIELDS if name.startswith('decision_') or name in ('thread_routing_mode', 'laya_match_threshold', 'laya_match_margin', 'routing_policy_version'))
 ROLE_FIELDS = {'chat': CHAT_FIELDS, 'embedding': EMBEDDING_FIELDS, 'decision': DECISION_FIELDS,

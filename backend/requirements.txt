@@ -54,7 +54,7 @@ django-q2==1.11.1
     # via mazory-backend
 django-unfold==0.108.0
     # via mazory-backend
-djangorestframework==3.18.1
+djangorestframework==3.18.2
     # via
     #   djangorestframework-simplejwt
     #   mazory-backend

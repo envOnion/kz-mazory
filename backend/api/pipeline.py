@@ -140,6 +140,14 @@ def _facts(result, raw, diagnostics=None, snapshot_id=None, threaded=False, targ
         if quote != fact["evidence"] and diagnostics is not None:
             diagnostics.setdefault("source_whitespace_restored", []).append(index)
         fact["evidence"] = quote
+        identity_quotes = [quote, *(ref["quote"] for ref in fact.get("evidence_messages", []) if isinstance(ref, dict) and isinstance(ref.get("quote"), str))]
+        normalized_evidence = " ".join(normalize_deal_name(value, max_length=None) for value in identity_quotes)
+        for field in ("object_name", "object_external_id", "object_city", "object_address", "object_phase", "deal_contract_number", "deal_period", "company_name", "payment_reference"):
+            value = fact.get(field, "")
+            normalized_value = normalize_deal_name(value, max_length=None) if value else ""
+            if normalized_value and normalized_value not in normalized_evidence:
+                fact[field] = ""
+                fact["uncertainties"].append(f"Не удалось подтвердить реквизит {field} буквальной цитатой; он исключён из идентификации.")
         if fact['fact_type'] in ('project','payment') and not any(ref['raw_message_id']==fact['evidence_message_id'] and ref['quote']==quote for ref in fact['evidence_messages']):
             # The separately supplied primary quote has just passed the same
             # source-scope and literal checks. Retain it in the evidence ledger.
@@ -314,11 +322,13 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         cfg = AIService._config()
         from .free_fallback import with_policy, policy_metadata, models as fallback_models
         cfg = with_policy(cfg, trace.context_metadata)
-        packet = trace.context_metadata.get("analysis_policy") == "history-packets-v1"
+        entity_mode = trace.context_metadata.get("entity_policy") == "entity-stages-v1"
+        packet = trace.context_metadata.get("analysis_policy") == "history-packets-v1" or entity_mode
         target_traces = {raw.id: trace}
         if packet:
             from .models import MessageProcessingTrace
             target_traces.update({entry["raw_id"]: MessageProcessingTrace.objects.get(pk=entry["trace_id"], raw_message_id=entry["raw_id"]) for entry in (trace_ids or []) if entry["raw_id"] != raw.id})
+        if packet and not entity_mode:
             cfg = copy.copy(cfg)
             limits = trace.context_metadata.get("analysis_limits", {})
             cfg.analysis_policy = "history-packets-v1"
@@ -395,7 +405,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             payload = _restore_request(trace, cfg)
         else:
             team = raw.config.team if raw.config_id else raw.team
-            known = json_value(
+            known = [] if trace.context_metadata.get("live_batch_policy") else json_value(
                 list(
                     Project.objects.filter(team=team, archived=False).filter(
                         Q(is_verified=True) | Q(identity_confirmed=True)
@@ -501,7 +511,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         trace.context_metadata['provider_result'] = copy.deepcopy(result)
         trace.save(update_fields=['context_metadata'])
         from .full_history import restore_continuity_topics
-        result, restored_topics = restore_continuity_topics(result, json.loads(_extraction_user_message(payload)['content']))
+        result, restored_topics = (result, []) if entity_mode else restore_continuity_topics(result, json.loads(_extraction_user_message(payload)['content']))
         if restored_topics:
             diagnostics.setdefault('schema_repairs', []).append('unchanged_prior_topic_restored')
             diagnostics['restored_topic_keys'] = restored_topics
@@ -522,7 +532,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                          and trace.context_metadata.get('full_history_policy') == 'thread-context-v2'
                          and json.loads(_extraction_user_message(payload)['content']).get('analysis_transport') == SOL_POLICY)
         trace.context_metadata['focused_recovery_deferred'] = defer_focused
-        if not defer_focused:
+        if not defer_focused and not entity_mode:
             recover(result, raw, trace, cfg)
         # Bounded packets also carry evidence_ranges. Validate their literal
         # sources and complete source links after any focused extraction.
@@ -533,7 +543,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         themes = prepare_themes(result, raw, trace)
         targets = set(trace.context_metadata.get('batch_message_ids') or [raw.id])
         facts = _facts(ready_facts(result, themes), raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True, target_ids=targets, trace=trace)
-        if not defer_result:
+        if not defer_result and not entity_mode:
             from .focused_extraction import reconcile_promises
             facts = reconcile_promises(facts,raw,trace,cfg)
             facts = _facts({'facts':json_value(facts)},raw,diagnostics,trace.context_metadata['snapshot_max_id'],threaded=True,target_ids=targets,trace=trace)
@@ -548,7 +558,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             trace.save()
             return (result, usage, diagnostics)
         from .commitment_resolution import resolve_remaining
-        resolved = resolve_remaining(facts, raw, cfg, trace)
+        resolved = facts if entity_mode else resolve_remaining(facts, raw, cfg, trace)
         facts = _facts({"facts": json_value(resolved)}, raw, diagnostics, trace.context_metadata["snapshot_max_id"], threaded=True, target_ids=targets, trace=trace)
         if packet:
             # Only add closing sources after their quote, source and chronology
@@ -665,21 +675,56 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                 if approved_obligation and fulfillment_update:
                     fact["commitment_id"] = approved_obligation.accepted_commitment.id
                     fact["base_commitment_version"] = approved_obligation.accepted_commitment.version
-                if fact['fact_type'] != 'commitment' and any(fact_identity(item.proposed_changes) == fact_identity(fact) for item in related_approved) and not fulfillment_update:
+                if not entity_mode and fact['fact_type'] != 'commitment' and any(fact_identity(item.proposed_changes) == fact_identity(fact) for item in related_approved) and not fulfillment_update:
                     duplicates.append(index)
                     continue
                 if approved_obligation and not fulfillment_update:
                     duplicates.append(index)
                     continue
-                matches = Project.objects.filter(
-                    team=team,
-                    archived=False,
-                ).filter(Q(normalized_name=normalize_deal_name(fact["object_name"])) | Q(source="bitrix_crm", name__iexact=fact["object_name"]))
-                project = (
-                    matches.first()
-                    if fact["object_name"] and matches.count() == 1
-                    else None
+                normalized_object = normalize_deal_name(fact["object_name"])
+                from .object_identity import resolve_existing
+                object_resolution = resolve_existing(team.pk, {
+                    "object_name": fact.get("object_name", ""),
+                    "object_external_id": fact.get("object_external_id", ""),
+                    "object_city": fact.get("object_city", ""),
+                    "object_address": fact.get("object_address", ""),
+                    "object_phase": fact.get("object_phase", ""),
+                })
+                matches = Project.objects.filter(team=team, archived=False).filter(
+                    Q(normalized_name=normalized_object)
+                    | Q(source="bitrix_crm", name__iexact=fact["object_name"])
+                ) if normalized_object else Project.objects.none()
+                if object_resolution["state"] == "matched":
+                    matches = matches.filter(object_identity=object_resolution["object"])
+                has_composite_deal_identity = bool(
+                    normalized_object and (
+                        fact.get("deal_contract_number") and fact.get("company_name")
+                        or fact.get("company_name") and fact.get("deal_period")
+                    )
                 )
+                if fact.get("company_name"):
+                    matches = matches.filter(company__name__iexact=fact["company_name"])
+                if fact.get("deal_contract_number"):
+                    matches = matches.filter(contract_number=fact["deal_contract_number"])
+                if fact.get("deal_period"):
+                    matches = matches.filter(deal_period=fact["deal_period"])
+                project = matches.first() if has_composite_deal_identity and matches.count() == 1 else None
+                entity_resolution = next((row for row in trace.context_metadata.get("entity_resolutions", [])
+                    if row["thread_key"] == fact["thread_key"] and row["evidence_message_id"] == fact["evidence_message_id"]), None)
+                if entity_mode:
+                    project = None
+                    if entity_resolution and entity_resolution.get("project_id"):
+                        project = Project.objects.select_for_update().filter(pk=entity_resolution["project_id"], team=team,
+                            version=entity_resolution["project_version"], archived=False).first()
+                        if project is None:
+                            raise ProviderUnavailable("entity_projection_changed")
+                    if entity_resolution and entity_resolution.get("object_id"):
+                        from .models import ObjectIdentity
+                        obj = ObjectIdentity.objects.filter(pk=entity_resolution["object_id"], team=team, state="confirmed",
+                            version=entity_resolution["object_version"]).first()
+                        if obj is None:
+                            raise ProviderUnavailable("entity_projection_changed")
+                        object_resolution = {"state": "matched", "object": obj}
                 if any(item.fact_type == fact["fact_type"] for item in accepted):
                     fact["uncertainties"].append(
                         "Есть ранее подтверждённый факт из этого сообщения. Проверьте, является ли предложение корректировкой."
@@ -703,6 +748,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                         "thread_revision": revisions[fact["thread_key"]],
                         "trace": target_traces.get(fact["evidence_message_id"], trace),
                         "project": project,
+                        "object_identity": object_resolution["object"] if object_resolution["state"] == "matched" else None,
                         "team": team,
                         "manager": sender if fact["fact_type"] == "commitment" else sender or (project.manager if project else None),
                         "fact_type": fact["fact_type"],
@@ -721,11 +767,15 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                         quote=reference["quote"],
                         field_name=reference["role"],
                     )
-                if created and (candidate.fact_type == "project" or fact["object_name"] or fact["company_name"] or project):
+                if created and not entity_mode and (candidate.fact_type == "project" or fact["object_name"] or fact["company_name"] or project):
                     from .tasks import enqueue_crm_match
 
                     enqueue_crm_match(candidate.id)
                 from .autonomous import enqueue_decision
+                if entity_mode and entity_resolution:
+                    candidate.materialization_snapshot = {"entity_resolution": {**entity_resolution,
+                        "root_event_id": usage_event_id.get()}}
+                    candidate.save(update_fields=["materialization_snapshot"])
                 enqueue_decision(candidate.id)
                 if created and not cfg.autonomous_enabled and not trace.context_metadata.get("analysis_limits", {}).get("maintenance_quiet"):
                     from .notifications import notify_on_new_candidate
@@ -750,8 +800,9 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             if (cfg.autonomous_enabled or packet) and batch_covered:
                 source_scope(locked).filter(pk__in=batch_covered).update(processed=True, processing_state="analyzed")
                 from .models import SourceWorkItem
-                SourceWorkItem.objects.bulk_create([SourceWorkItem(raw_message_id=pk, processing_version=cfg.autonomous_policy_version, state="done") for pk in batch_covered], ignore_conflicts=True)
-                SourceWorkItem.objects.filter(raw_message_id__in=batch_covered, processing_version=cfg.autonomous_policy_version).update(state="done", error_code="", lease_until=None)
+                version = trace.context_metadata.get("entity_processing_version") or cfg.autonomous_policy_version
+                SourceWorkItem.objects.bulk_create([SourceWorkItem(raw_message_id=pk, processing_version=version, state="done") for pk in batch_covered], ignore_conflicts=True)
+                SourceWorkItem.objects.filter(raw_message_id__in=batch_covered, processing_version=version).update(state="done", error_code="", lease_until=None)
             trace.ai_extracted_facts = json_value({"facts": facts})
             trace.context_metadata["already_approved_fact_indices"] = duplicates
             trace.pipeline_action = "proposed_facts" if proposed else "non_commercial"

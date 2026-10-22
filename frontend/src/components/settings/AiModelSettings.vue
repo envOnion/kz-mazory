@@ -15,7 +15,7 @@ const roles: AiModelRole[] = ['chat', 'embedding', 'decision']
 const chatNames = ['context_window_tokens', 'max_completion_tokens', 'context_safety_tokens', 'tokenizer_id', 'tokenizer_revision', 'system_prompt_worker', 'system_prompt_assistant', 'analysis_input_token_limit', 'analysis_target_message_limit', 'analysis_output_token_limit']
 const decisionNames = ['thread_routing_mode', 'laya_match_threshold', 'laya_match_margin', 'routing_policy_version']
 function roleFor(name: string): AiSettingsRole {
-  if (name.startsWith('chat_') || chatNames.includes(name)) return 'chat'
+  if (name.startsWith('chat_') || name.startsWith('entity_') || chatNames.includes(name)) return 'chat'
   if (name.startsWith('embedding_')) return 'embedding'
   if (name.startsWith('decision_') || decisionNames.includes(name)) return 'decision'
   return 'shared'

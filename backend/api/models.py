@@ -128,6 +128,46 @@ class Company(TimestampedModel):
         return self.name
 
 
+class ObjectIdentity(TimestampedModel):
+    """Team-scoped identity for a physical/commercial object, separate from deals."""
+
+    team = models.ForeignKey("Team", on_delete=models.PROTECT, related_name="object_identities")
+    canonical_name = models.CharField(max_length=255)
+    identity_attributes = models.JSONField(default=dict, blank=True)
+    external_id = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    city = models.CharField(max_length=128, blank=True, default="", db_index=True)
+    address = models.CharField(max_length=255, blank=True, default="", db_index=True)
+    phase = models.CharField(max_length=128, blank=True, default="")
+    identity_key = models.CharField(max_length=64, null=True, blank=True)
+    identity_version = models.PositiveIntegerField(default=1)
+    version = models.PositiveIntegerField(default=1)
+    state = models.CharField(max_length=16, default="unresolved", choices=[
+        ("unresolved", "Требует уточнения"), ("confirmed", "Подтверждён")
+    ], db_index=True)
+
+    class Meta:
+        verbose_name = "Локальный объект"
+        verbose_name_plural = "Локальные объекты"
+        constraints = [models.UniqueConstraint(
+            fields=["team", "identity_key"],
+            condition=models.Q(identity_key__isnull=False) & ~models.Q(identity_key=""),
+            name="object_identity_team_key_unique",
+        )]
+        indexes = [models.Index(fields=["team", "state", "canonical_name"], name="object_identity_lookup_idx")]
+
+
+class ObjectAlias(TimestampedModel):
+    object_identity = models.ForeignKey(ObjectIdentity, on_delete=models.PROTECT, related_name="aliases")
+    normalized_name = models.CharField(max_length=255, db_index=True)
+    provenance = models.JSONField(default=dict, blank=True)
+    decision = models.ForeignKey("FactDecision", null=True, blank=True, on_delete=models.PROTECT)
+
+    class Meta:
+        verbose_name = "Вариант названия объекта"
+        verbose_name_plural = "Варианты названий объектов"
+        constraints = [models.UniqueConstraint(fields=["object_identity", "normalized_name"], name="object_alias_unique")]
+
+
 class Project(TimestampedModel):
     """
     Объекты / сделки компании Aqua Kip (соответствуют crm_deal).
@@ -174,6 +214,10 @@ class Project(TimestampedModel):
     ]
 
     name = models.CharField("Название объекта", max_length=255, db_index=True)
+    object_identity = models.ForeignKey(
+        ObjectIdentity, null=True, blank=True, on_delete=models.PROTECT,
+        related_name="deals", verbose_name="Локальный объект",
+    )
     normalized_name = models.CharField(
         "Каноническое название для дедупликации",
         max_length=255,
@@ -307,12 +351,14 @@ class Project(TimestampedModel):
         ordering = ["-contract_amount"]
         constraints = [
             models.UniqueConstraint(
-                fields=["team", "normalized_name"],
+                fields=["team", "normalized_name", "company", "contract_number", "deal_period"],
+                nulls_distinct=False,
                 condition=models.Q(team__isnull=False, archived=False)
                 & ~models.Q(normalized_name=""),
-                name="project_team_identity_unique",
+                name="project_team_deal_identity_unique",
             )
         ]
+        indexes = [models.Index(fields=["team", "contract_number"], name="deal_team_contract_idx")]
 
     def __str__(self):
         return f"{self.name} ({self.get_status_display()})"
@@ -502,6 +548,7 @@ class Commitment(TimestampedModel):
         verbose_name = "Обязательство / Обещание"
         verbose_name_plural = "Обязательства / Обещания"
         ordering = ["deadline", "id"]
+        indexes = [models.Index(fields=["team", "project", "responsible_name"], name="promise_team_actor_idx")]
 
     def __str__(self):
         return f"[{self.status}] {self.commitment_text[:50]} (до {self.deadline})"
@@ -721,6 +768,10 @@ class AISettings(TimestampedModel):
     analysis_input_token_limit = models.PositiveIntegerField("Вход анализа, токены", default=0,
         help_text="0 — всё доступное окно модели за вычетом ответа и технического запаса. Положительное число — отдельный пользовательский предел.")
     analysis_target_message_limit = models.PositiveIntegerField("Сообщений в пакете анализа", default=8)
+    entity_pipeline_enabled = models.BooleanField("Поэтапный разбор сообщений", default=False)
+    entity_input_token_limit = models.PositiveIntegerField("Вход одного этапа, токены", default=16384)
+    entity_stage_attempts = models.PositiveIntegerField("Попыток одного этапа", default=3)
+    entity_max_calls = models.PositiveIntegerField("Вызовов на операцию", default=128)
     analysis_output_token_limit = models.PositiveIntegerField("Ответ анализа, токены", default=4096)
     autonomous_daily_token_limit = models.PositiveBigIntegerField(default=1000000)
     autonomous_max_in_flight = models.PositiveIntegerField(default=2)
@@ -878,6 +929,8 @@ class AISettings(TimestampedModel):
             raise ValidationError("Ожидание извлечения должно быть положительным; пакет — от 1 до 30 сообщений.")
         if not 1 <= self.analysis_target_message_limit <= 50:
             raise ValidationError({"analysis_target_message_limit": "Допустимо от 1 до 50 сообщений."})
+        if not 1 <= self.entity_stage_attempts <= 5 or not 1 <= self.entity_max_calls <= 512 or self.entity_input_token_limit < 1024:
+            raise ValidationError("Для поэтапного разбора: вход от 1024, попыток 1–5, вызовов 1–512.")
         if not self.analysis_output_token_limit:
             raise ValidationError("Резерв ответа анализа должен быть положительным.")
         if self.analysis_output_token_limit > self.max_completion_tokens:
@@ -1534,6 +1587,10 @@ class DialogueThread(TimestampedModel):
     identity = models.CharField(max_length=64, unique=True)
     parent = models.ForeignKey("self", null=True, blank=True, on_delete=models.PROTECT, related_name="children")
     project = models.ForeignKey(Project, null=True, blank=True, on_delete=models.PROTECT)
+    object_identity = models.ForeignKey(
+        ObjectIdentity, null=True, blank=True, on_delete=models.PROTECT,
+        related_name="dialogue_threads",
+    )
     topic = models.CharField(max_length=255)
     summary = models.TextField(blank=True)
     state = models.CharField(max_length=16, choices=[(s, s) for s in ("open", "ready", "unknown", "superseded")], default="open", db_index=True)
@@ -1643,6 +1700,10 @@ class FactCandidate(TimestampedModel):
         null=True,
         blank=True,
         related_name="candidates",
+    )
+    object_identity = models.ForeignKey(
+        ObjectIdentity, null=True, blank=True, on_delete=models.PROTECT,
+        related_name="fact_candidates",
     )
     team = models.ForeignKey(Team, on_delete=models.PROTECT)
     manager = models.ForeignKey(

@@ -33,6 +33,8 @@ def resolution_schema(input_data):
 def field_schema(field, *, strict_strings=False):
     if isinstance(field, serializers.ListSerializer):
         shape = {"type": "array", "items": serializer_schema(field.child, strict_strings=strict_strings)}
+    elif isinstance(field, serializers.Serializer):
+        shape = serializer_schema(field, strict_strings=strict_strings)
     elif isinstance(field, serializers.ListField):
         shape = {"type": "array", "items": field_schema(field.child, strict_strings=strict_strings)}
     elif isinstance(field, serializers.ChoiceField):
@@ -94,10 +96,10 @@ def extraction_schema(input_data=None, *, literal_quote_enums=True, fixed_slots=
     # Serializer defaults do not express cross-field validate() requirements.
     # Generate separate business variants so "payment" cannot silently omit
     # its amount, and a promise cannot omit the action/source/actor.
-    common = {"thread_key", "evidence_message_id", "fact_type", "object_name", "company_name", "party_role", "evidence", "evidence_messages", "confidence", "uncertainties", "sender_phone", "in_progress"}
+    common = {"thread_key", "evidence_message_id", "fact_type", "object_name", "object_external_id", "object_city", "object_address", "object_phase", "deal_contract_number", "deal_period", "company_name", "party_role", "evidence", "evidence_messages", "confidence", "uncertainties", "sender_phone", "in_progress"}
     extra = {
         "project": {"contract_amount", "sale_amount", "cost_amount", "currency", "stage", "sales_stage", "equipment_type", "meeting_at", "project_received", "current_action", "next_action"},
-        "payment": {"amount", "currency", "payment_date", "payment_kind", "direction", "amount_precision", "reverses_id"},
+        "payment": {"amount", "currency", "payment_date", "payment_kind", "direction", "amount_precision", "reverses_id", "payment_reference", "payment_reference_kind"},
         "commitment": {"commitment_text", "responsible_name", "assignment_kind", "commitment_status", "promise_message_id", "deadline_at", "deadline_precision", "deadline_basis", "deadline_message_id", "fulfillment_message_id", "fulfilled_at", "commitment_id", "base_commitment_version"},
     }
     required = {

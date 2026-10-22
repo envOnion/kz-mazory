@@ -30,6 +30,7 @@ SAFE_AI_FIELDS = (
     'thread_extract_idle_seconds', 'thread_extract_max_wait_seconds',
     'thread_extract_batch_size', 'analysis_input_token_limit',
     'analysis_target_message_limit', 'analysis_output_token_limit',
+    'entity_pipeline_enabled', 'entity_input_token_limit', 'entity_stage_attempts', 'entity_max_calls',
     'autonomous_daily_token_limit', 'autonomous_max_in_flight',
     'autonomous_enabled', 'autonomous_crm_enabled', 'autonomous_policy_version', 'autonomous_context_messages',
     'autonomous_input_tokens', 'chat_api_format', 'chat_provider_url',
