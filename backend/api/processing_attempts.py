@@ -69,7 +69,7 @@ def reserve_attempt(raw, operation_key, *, cfg=None, snapshot_max_id=None,
     )
 
 
-def schedule_reanalysis(raw_id, user, request_key):
+def schedule_reanalysis(raw_id, user, request_key, *, recovery_id=None, expected_trace_id=None):
     with transaction.atomic():
         raw = (
             RawMessage.objects.select_for_update(of=("self",))
@@ -83,6 +83,8 @@ def schedule_reanalysis(raw_id, user, request_key):
         ).first()
         if previous:
             return previous
+        if recovery_id is not None and raw.traces.order_by('-id').values_list('pk', flat=True).first() != expected_trace_id:
+            raise ProviderUnavailable('reanalysis_source_changed')
         active = OutboxEvent.objects.filter(
             event_type="extract_message",
             payload__raw_id=raw.id,
@@ -94,6 +96,15 @@ def schedule_reanalysis(raw_id, user, request_key):
                 return raw.traces.get(pk=trace_id)
             raise ProviderUnavailable("context_processing_in_progress")
         trace = reserve_attempt(raw, operation_key)
+        if recovery_id is not None:
+            trace.context_metadata['analysis_limits'].update(
+                review_before_delivery=True, maintenance_quiet=True,
+                error_recovery_operation_id=recovery_id,
+            )
+            trace.save(update_fields=['context_metadata'])
+            if raw.processing_state == 'failed':
+                raw.processing_state = 'received'
+                raw.save(update_fields=['processing_state', 'updated_at'])
         OutboxEvent.objects.create(
             event_type="extract_message",
             deduplication_key=operation_key,
@@ -101,6 +112,7 @@ def schedule_reanalysis(raw_id, user, request_key):
                 "raw_id": raw.id,
                 "trace_id": trace.id,
                 "requested_by_id": user.id,
+                **({'error_recovery_id': recovery_id} if recovery_id is not None else {}),
             },
         )
         AuditEvent.objects.create(

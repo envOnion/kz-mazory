@@ -740,15 +740,15 @@ class AISettings(TimestampedModel):
         ANTHROPIC_MESSAGES = "anthropic_messages", "Anthropic Messages"
 
     name = models.CharField(
-        "Конфигурация", max_length=128, default="Основная конфигурация OpenRouter"
+        "Конфигурация", max_length=128, default="Новая конфигурация ИИ"
     )
 
     # Embeddings
     embedding_provider_url = models.CharField(
-        "Embeddings Base URL", max_length=255, default="https://openrouter.ai/api/v1"
+        "Embeddings Base URL", max_length=255, blank=True, default=""
     )
     embedding_model_name = models.CharField(
-        "Embeddings Model", max_length=128, default="liquid/lfm-2.5-embedding-350m:free"
+        "Embeddings Model", max_length=128, blank=True, default=""
     )
     embedding_api_key = models.CharField(
         "Embeddings API Key",
@@ -776,12 +776,13 @@ class AISettings(TimestampedModel):
         ),
     )
     chat_provider_url = models.CharField(
-        "Chat Base URL", max_length=255, default="https://openrouter.ai/api/v1"
+        "Chat Base URL", max_length=255, blank=True, default=""
     )
     chat_model_name = models.CharField(
         "Chat LLM Model",
         max_length=128,
-        default="nvidia/nemotron-3-ultra-550b-a55b:free",
+        blank=True,
+        default="",
     )
     chat_api_key = models.CharField(
         "Chat API Key",
@@ -852,6 +853,8 @@ class AISettings(TimestampedModel):
         from django.core.exceptions import ValidationError
 
         super().clean()
+        if self.is_active and (not self.chat_provider_url.strip() or not self.chat_model_name.strip()):
+            raise ValidationError({"is_active": "Перед включением укажите маршрут и модель диалога."})
         from .ai_model_profiles import validate_profile
         validate_profile(self.chat_model_profile)
         if self.decision_enabled:
@@ -2024,7 +2027,7 @@ class PrivateAttachment(TimestampedModel):
 
 class ProviderUsage(TimestampedModel):
     config = models.ForeignKey(
-        AISettings, null=True, blank=True, on_delete=models.PROTECT,
+        AISettings, null=True, blank=True, on_delete=models.SET_NULL,
         related_name="provider_usage",
     )
     outbox_event = models.ForeignKey(
@@ -2578,7 +2581,7 @@ class CrmDelivery(TimestampedModel):
 
 class ProviderReservation(TimestampedModel):
     purpose = models.CharField(max_length=16, default="live")
-    config = models.ForeignKey(AISettings, on_delete=models.PROTECT)
+    config = models.ForeignKey(AISettings, null=True, blank=True, on_delete=models.SET_NULL)
     usage = models.OneToOneField(ProviderUsage, null=True, blank=True, on_delete=models.PROTECT)
     operation = models.CharField(max_length=32)
     reserved_tokens = models.PositiveBigIntegerField()

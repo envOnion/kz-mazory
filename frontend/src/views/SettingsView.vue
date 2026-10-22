@@ -17,6 +17,7 @@ const route = useRoute(), router = useRouter()
 const access = ref<SettingsAccess | null>(null), data = ref<SettingsPage | null>(null)
 const history = ref<HistoryPage | null>(null), selectedConfig = ref<number | null>(null)
 const selectedAiConfig = ref<number | null>(null), newAiConfigName = ref('')
+const deletingAiConfig = ref<number | null>(null)
 const error = ref(''), notice = ref(''), loading = ref(true), busy = ref(false), code = ref(''), qr = ref('')
 const creating = ref(false)
 const active = computed(() => typeof route.query.section === 'string' ? route.query.section : 'whatsapp')
@@ -90,6 +91,15 @@ async function updateAiConfiguration(row: SettingsRow, changes: Record<string, b
     await api(`/settings/ai/${row.id}/`, { method: 'PATCH', body: JSON.stringify(changes) })
     data.value = await api<SettingsPage>('/settings/ai/')
   }, 'Состояние конфигураций обновлено.')
+}
+async function deleteAiConfiguration(row: SettingsRow) {
+  if (row.is_active) { error.value = 'Сначала выключите конфигурацию.'; return }
+  if (deletingAiConfig.value !== row.id) { deletingAiConfig.value = row.id; return }
+  await action(async () => {
+    await api(`/settings/ai/${row.id}/`, { method: 'DELETE' })
+    deletingAiConfig.value = null
+    await load()
+  }, 'Конфигурация и её ключи удалены. История запросов сохранена.')
 }
 function setAiActive(row: SettingsRow, activeState: boolean) {
   if (!activeState && row.is_primary && data.value?.items.some(other => other.id !== row.id && other.is_active)) {
@@ -186,7 +196,10 @@ onBeforeUnmount(() => { generation++; if (timer) clearInterval(timer) })
                 <label class="flex items-center gap-2 text-sm"><input type="checkbox" class="w-4 h-4 accent-violet-400" :checked="Boolean(data.items.find(row => row.id === selectedAiConfig)?.is_active)" :disabled="data.can_change === false || busy" @change="setAiActive(data.items.find(row => row.id === selectedAiConfig)!, ($event.target as HTMLInputElement).checked)" />Активная конфигурация</label>
                 <button v-if="!data.items.find(row => row.id === selectedAiConfig)?.is_primary" class="mx-btn" :disabled="data.can_change === false || busy" @click="setAiPrimary(data.items.find(row => row.id === selectedAiConfig)!)">Сделать основной</button>
                 <span v-else class="mx-chip text-violet-200">Основная конфигурация</span>
+                <button v-if="data.can_delete" type="button" class="mx-btn" :disabled="busy || data.can_change === false" @click="deleteAiConfiguration(data.items.find(row => row.id === selectedAiConfig)!)">{{ deletingAiConfig === selectedAiConfig ? 'Подтвердить удаление' : 'Удалить конфигурацию' }}</button>
+                <button v-if="deletingAiConfig === selectedAiConfig" type="button" class="mx-btn" :disabled="busy" @click="deletingAiConfig = null">Отмена</button>
               </div>
+              <p v-if="deletingAiConfig === selectedAiConfig" role="alert" class="text-sm text-amber-200">Профиль и сохранённые API-ключи будут удалены. История расхода останется. Это действие нельзя отменить.</p>
               <SettingsForm v-if="selectedAiConfig !== null && data.items.find(row => row.id === selectedAiConfig) && data.fields.some(field => field.name === 'name')" :fields="data.fields.filter(field => field.name === 'name')" :row="data.items.find(row => row.id === selectedAiConfig)!" :endpoint="`/settings/ai/${selectedAiConfig}/`" :readonly="data.can_change === false" @saved="load" />
             </section>
             <AiModelSettings v-if="data.items.find(row => row.id === selectedAiConfig)" :row="data.items.find(row => row.id === selectedAiConfig)!" :fields="data.fields.filter(field => field.name !== 'name')" :defaults="data.defaults" :readonly="data.can_change === false" />

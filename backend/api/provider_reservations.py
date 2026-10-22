@@ -12,6 +12,8 @@ from .providers import ProviderUnavailable
 
 
 def reserve(cfg, payload, operation, *, lease_seconds=600):
+    if not cfg.pk:
+        raise ProviderUnavailable("ai_not_configured")
     from .ai_service import usage_event_id
     event = OutboxEvent.objects.filter(pk=usage_event_id.get()).first() if usage_event_id.get() else None
     purpose = "history" if event and event.payload.get("priority") == "history" else "live"
@@ -20,9 +22,14 @@ def reserve(cfg, payload, operation, *, lease_seconds=600):
     tokens = len(json.dumps(payload, ensure_ascii=False).encode()) + (0 if operation in ("embedding", "model_metadata", "token_count") else cfg.max_completion_tokens)
     with transaction.atomic():
         policy = AISettings.objects.select_for_update().filter(is_primary=True, is_active=True).first()
-        locked = policy if policy and policy.pk == cfg.pk else AISettings.objects.select_for_update().get(pk=cfg.pk)
+        locked = policy if policy and policy.pk == cfg.pk else AISettings.objects.select_for_update().filter(pk=cfg.pk).first()
+        if locked is None:
+            raise ProviderUnavailable("ai_not_configured")
+        from .ai_configurations import validate_configuration_pin
+        validate_configuration_pin(locked)
         policy = policy or locked
-        if not locked.is_active:
+        from .ai_connection_checks import checking_configuration
+        if not locked.is_active and checking_configuration.get() != locked.pk:
             raise ProviderUnavailable("provider_config_inactive")
         # Take the clock after the lock: another worker may have held it across
         # a minute/day boundary. Reservations count request starts, not finishes.
@@ -44,7 +51,7 @@ def reserve(cfg, payload, operation, *, lease_seconds=600):
             raise ProviderUnavailable("provider_in_flight_budget", retry_after=10,
                                       diagnostics={"request_admission_denied": True, "budget_scope": "autonomous_shared"})
         global_usage = ProviderUsage.objects.filter(created_at__gte=day)
-        usage = global_usage.filter(Q(config=locked) | Q(config__isnull=True))
+        usage = global_usage.filter(config=locked)
         failures = list(global_usage.filter(config=locked, operation=operation).order_by("-id").values("error_code", "created_at")[:3])
         if len(failures) == 3 and all(row["error_code"] in ("provider_server_error", "provider_overloaded", "provider_timeout", "provider_connection_failed") for row in failures) and failures[0]["created_at"] > now - timedelta(seconds=60):
             raise ProviderUnavailable("provider_circuit_open", retry_after=60,

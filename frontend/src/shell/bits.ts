@@ -6,7 +6,7 @@ import { defineComponent, h, type PropType } from 'vue'
 const TONE_BY_STATE: Record<string, string> = {
   received: 'info', queued: 'info', enqueued: 'info', pending: 'info', preparing: 'info',
   analyzing: 'info', sending: 'info', processing: 'info', reading: 'info', accepted: 'info',
-  need_context: 'warn', awaiting: 'warn', preparing_send: 'warn', stale: 'warn',
+  need_context: 'warn', needs_review: 'warn', awaiting: 'warn', preparing_send: 'warn', stale: 'warn',
   unknown: 'warn', unavailable: 'warn', expired: 'warn', unconfirmed: 'warn', partial: 'warn',
   error: 'err', failed: 'err',
   analyzed: 'ok', no_crm_actions: 'ok', delivered: 'ok', delivered_provider: 'ok',
@@ -21,6 +21,7 @@ const LABELS: Record<string, string> = {
   analysis_error:'Ошибка анализа',delivery_problem:'Проблема доставки',crm_problem:'Проблема CRM',clarification_awaiting:'Ожидает ответа',clarification_expired:'Уточнение истекло',clarification_unconfirmed:'Ответ не подтверждён',
   received: 'Получено', queued: 'В очереди', analyzing: 'Анализируется', need_context: 'Нужен контекст',
   analyzed: 'Проанализировано', no_crm_actions: 'Без CRM-действий', error: 'Ошибка',
+  needs_review: 'Требует проверки', analysis_needs_review: 'Нужна проверка данных',
   not_applicable: 'Не требуется', not_required: 'Не требуется', preparing: 'Готовится',
   sending: 'Отправляется', awaiting: 'Ожидает ответа', answered: 'Ответ получен',
   processing: 'Обработка', unconfirmed: 'Не подтверждено', resolved: 'Разрешено',

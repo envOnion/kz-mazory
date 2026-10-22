@@ -1,6 +1,7 @@
 """Background-only connection checks with permission and configuration snapshots."""
 import hashlib
 import json
+from contextvars import ContextVar
 from types import SimpleNamespace
 
 from django.contrib.auth import get_user_model
@@ -10,6 +11,8 @@ from . import access
 from .ai_credentials import CredentialError
 from .models import AISettings, AsyncOperation
 from .providers import ProviderUnavailable, checked_base_url
+
+checking_configuration = ContextVar('checking_ai_configuration', default=None)
 
 
 def config_fingerprint(cfg, role):
@@ -23,6 +26,7 @@ def check_connection(operation_id):
     op = AsyncOperation.objects.filter(pk=operation_id, status='queued', operation_type='ai_connection_check').first()
     if not op or not AsyncOperation.objects.filter(pk=op.id, status='queued').update(status='running'):
         return
+    check_token = None
     try:
         user = get_user_model().objects.get(pk=op.requested_by_id, is_active=True)
         if op.expires_at <= timezone.now() or access.fingerprint(user) != op.access_fingerprint or not access.integration_allowed(user) or not user.has_perm('api.change_aisettings'):
@@ -31,6 +35,7 @@ def check_connection(operation_id):
         role = op.request['role']
         if config_fingerprint(cfg, role) != op.request['fingerprint']:
             raise ProviderUnavailable('configuration_changed')
+        check_token = checking_configuration.set(cfg.pk)
         from .ai_service import AIService
         base = checked_base_url(getattr(cfg, f'{role}_provider_url')).rstrip('/')
         key = getattr(cfg, f'get_{role}_api_key')()
@@ -68,3 +73,6 @@ def check_connection(operation_id):
         import logging
         logging.getLogger(__name__).warning('AI connection check failed operation=%s error_type=%s', op.id, type(exc).__name__)
         AsyncOperation.objects.filter(pk=op.id).update(status='failed', error_code='connection_check_failed', result={})
+    finally:
+        if check_token is not None:
+            checking_configuration.reset(check_token)
