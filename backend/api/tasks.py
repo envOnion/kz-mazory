@@ -360,7 +360,8 @@ def run_outbox(pk):
         from .history_analysis import synchronize
         synchronize(event)
         from .models import SourceWorkItem
-        version = AISettings.get_active().autonomous_policy_version
+        from .live_batching import work_version
+        version = event.payload.get("processing_version") or work_version(AISettings.get_active(), bool(event.payload.get("entity_policy")))
         target_ids = event.payload.get("batch_ids") or [event.payload["raw_id"]]
         SourceWorkItem.objects.bulk_create([SourceWorkItem(raw_message_id=pk, processing_version=version)
                                            for pk in target_ids], ignore_conflicts=True)
@@ -388,6 +389,7 @@ def run_outbox(pk):
             "extract_message": extract_message,
             "route_message": route_message,
             "extract_thread": extract_thread,
+            "entity_reconcile": reconcile_entity,
             "decide_fact": decide_fact,
             "autonomous_reconcile": autonomous_reconcile,
             "whatsapp_artifact": process_message_artifact,
@@ -415,7 +417,7 @@ def run_outbox(pk):
         }
         result = handlers[event.event_type](event.payload)
         if isinstance(result, dict) and result.get("history_continuation"):
-            OutboxEvent.objects.filter(pk=pk, state="processing", payload__claim_generation=event.payload["claim_generation"]).update(state="pending", attempt_count=0, lease_until=None, next_attempt_at=timezone.now())
+            OutboxEvent.objects.filter(pk=pk, state="processing", payload__claim_generation=event.payload["claim_generation"]).update(state="pending", error_code="", attempt_count=0, lease_until=None, next_attempt_at=timezone.now())
             return
         if event.event_type == "delivery_ack":
             event.payload = {**event.payload, "receipt_outcome": result}
@@ -432,6 +434,9 @@ def run_outbox(pk):
         )
         logger.warning("outbox_unknown id=%s type=%s", pk, event.event_type)
     except requests.Timeout:
+        from .entity_pipeline import retry_failure
+        if retry_failure(event, ProviderUnavailable("provider_timeout")):
+            return
         if ai_retries.handle_failure(event, ProviderUnavailable("provider_timeout")):
             return
         state = (
@@ -491,6 +496,9 @@ def run_outbox(pk):
             )
             event.attempt_count = max(0, event.attempt_count - 1)
             ai_retries.record_attempt(event, "budget_wait", code, tomorrow)
+            return
+        from .entity_pipeline import retry_failure
+        if retry_failure(event, exc):
             return
         if ai_retries.handle_failure(event, exc):
             logger.warning(
@@ -566,11 +574,17 @@ def run_outbox(pk):
             current = OutboxEvent.objects.get(pk=event.pk)
             if current.state == "cancelled":
                 ai_retries.record_attempt(current, "cancelled", "history_run_cancelled")
-            SourceWorkItem.objects.filter(raw_message_id__in=event.payload.get("batch_ids") or [event.payload["raw_id"]], processing_version=AISettings.get_active().autonomous_policy_version).update(state=current.state, error_code=current.error_code, lease_until=current.lease_until)
+            from .live_batching import work_version
+            version = current.payload.get("processing_version") or work_version(AISettings.get_active(), bool(current.payload.get("entity_policy")))
+            SourceWorkItem.objects.filter(raw_message_id__in=event.payload.get("batch_ids") or [event.payload["raw_id"]], processing_version=version).update(state=current.state, error_code=current.error_code, lease_until=current.lease_until)
             from .live_batching import synchronize_failure
             synchronize_failure(current)
             from .error_recovery import finalize_review
             finalize_review(current)
+        current = OutboxEvent.objects.get(pk=event.pk)
+        if current.payload.get("entity_policy") == "entity-stages-v1" and current.payload.get("entity_sources"):
+            from .entity_pipeline import _progress
+            _progress(current.pk)
         usage_event_id.reset(context_token)
 
 
@@ -910,6 +924,9 @@ def _extract_message(payload):
     if payload.get("live_batch_policy"):
         from .live_batching import prepare
         payload = prepare(payload)
+    if payload.get("entity_policy") == "entity-stages-v1":
+        from .entity_pipeline import process
+        return process(payload)
     if not payload.get("routing_bypass") and not payload.get("history_run_id") and not payload.get("requested_by_id") and not payload.get("reanalyze"):
         from .thread_routing import enabled, route_message as route
         if enabled(raw.config):
@@ -951,6 +968,11 @@ def _extract_message(payload):
 
 def reanalyze_errors(payload):
     from .error_recovery import process
+    return process(payload)
+
+
+def reconcile_entity(payload):
+    from .entity_reconciliation import process
     return process(payload)
 
 

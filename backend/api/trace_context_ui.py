@@ -9,6 +9,15 @@ from . import access
 from .plain_text import clean_context
 
 ERRORS = {
+    "entity_stage_budget_exhausted": "Исчерпан бюджет этапа; предыдущие результаты сохранены, требуется проверка.",
+    "entity_stage_input_too_large": "Конкретный этап не помещается в настроенный вход; данные сохранены для проверки.",
+    "entity_quote_reference_invalid": "Модель выбрала цитату другого источника или неизвестный ID цитаты.",
+    "entity_target_coverage_invalid": "Этап не классифицировал все предложенные цели.",
+    "entity_comparison_invalid": "Этап сопоставления выбрал недопустимый ID или не дал доказательств.",
+    "entity_projection_changed": "Сущность изменилась после сопоставления; устаревшее изменение не применено.",
+    "entity_configuration_changed": "Конфигурация AI изменилась; сохранённый разбор требует нового запуска.",
+    "entity_source_changed": "Исходное сообщение изменилось; сохранённый ответ не применён.",
+    "entity_candidate_changed": "Наблюдение изменилось после постановки сопоставления; прежний результат не применён.",
     "extraction_json_parse": "Ответ модели не является целым корректным JSON.",
     "extraction_top_level_type": "Модель вернула неверный тип результата вместо объекта JSON.",
     "extraction_facts_missing": "В ответе модели отсутствует обязательный массив facts.",

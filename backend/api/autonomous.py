@@ -42,6 +42,10 @@ def enqueue_decision(candidate_id, trigger="extracted"):
     cfg = AISettings.get_active()
     if not cfg.autonomous_enabled:
         return
+    candidate = FactCandidate.objects.select_related("trace__raw_message__config").get(pk=candidate_id)
+    from .entity_reconciliation import enqueue_if_changed
+    if enqueue_if_changed(candidate):
+        return
     # Each external update has its own generation; unchanged decisions are also
     # deduplicated against an immutable input fingerprint inside decide().
     OutboxEvent.objects.get_or_create(
@@ -112,6 +116,54 @@ def _evidence(candidate):
 
 
 def _resolve_project(candidate, data):
+    entity = candidate.materialization_snapshot.get("entity_resolution")
+    if entity:
+        if entity.get("state") not in ("matched", "new"):
+            raise Deferred("entity_resolution_review", entity.get("reason") or "Идентичность требует проверки.")
+        if not candidate.project_id and entity.get("state") == "new" and candidate.fact_type == "project":
+            # An earlier observation from this operation may already have
+            # created the same proven deal. Reuse its strong composite key.
+            from .entity_resolution import Resolver
+            raw = candidate.trace.raw_message
+            resolver = Resolver(data, raw, None)
+            resolver.obj = candidate.object_identity
+            name = normalize_deal_name(data.get("object_name", ""))
+            if name and data.get("deal_contract_number") and data.get("company_name"):
+                rows = list(Project.objects.select_for_update(of=("self",)).filter(team=candidate.team, archived=False,
+                    contract_number__iexact=data["deal_contract_number"]).select_related("company")[:31])
+                matches = [row for row in rows if row.company_id and not resolver.project_conflict(row) and (
+                    normalize_deal_name(row.name) == name or row.aliases.filter(normalized_name=name).exists()
+                    or candidate.object_identity_id and row.object_identity_id == candidate.object_identity_id)]
+                if len(rows) <= 30 and len(matches) == 1:
+                    candidate.project = matches[0]
+                    entity = {**entity, "state": "matched", "project_id": matches[0].pk, "project_version": matches[0].version}
+                    candidate.materialization_snapshot = {**candidate.materialization_snapshot, "entity_resolution": entity}
+                    candidate.save(update_fields=["project", "materialization_snapshot"])
+        if candidate.project_id:
+            project = Project.objects.select_for_update().get(pk=candidate.project_id)
+            expected = entity.get("project_version")
+            # Earlier accepted siblings of this same immutable operation can
+            # advance the version. Every intervening version must be accounted
+            # for; a manual edit or another operation still requires review.
+            sibling_versions = set()
+            if isinstance(expected, int) and project.version > expected and entity.get("root_event_id"):
+                snapshots = FactCandidate.objects.filter(project=project, status="approved",
+                    materialization_snapshot__entity_resolution__root_event_id=entity["root_event_id"]).values_list("materialization_snapshot", flat=True)
+                sibling_versions = {value.get("project_after", {}).get("version") for value in snapshots}
+            same_operation = isinstance(expected, int) and project.version >= expected and set(range(expected + 1, project.version + 1)) <= sibling_versions
+            if project.team_id != candidate.team_id or project.archived or not (project.version == expected or same_operation):
+                raise Deferred("entity_projection_changed", "Сделка изменилась после сопоставления; нужна повторная проверка.")
+            candidate.project = project
+            candidate.base_project_version = project.version
+            candidate.save(update_fields=["base_project_version"])
+        elif candidate.fact_type == "commitment" and not entity.get("object_id"):
+            return
+        elif entity.get("state") != "new" or candidate.fact_type != "project":
+            raise Deferred("entity_deal_unresolved", "Событие не связано с доказанной сделкой.")
+        else:
+            candidate.crm_match_state = "not_found"
+            candidate.save(update_fields=["crm_match_state"])
+        return
     if candidate.project_id:
         if candidate.project.team_id != candidate.team_id or candidate.project.archived:
             raise Deferred("ambiguous_project", "Связь проекта выходит за пределы команды или архивна.")
@@ -172,6 +224,41 @@ def _resolve_project(candidate, data):
         candidate.save(update_fields=["project", "base_project_version", "crm_match_state"])
 
 
+def _recheck_financial_entity(candidate, data, primary):
+    """Recheck new receipts against siblings accepted since their AI snapshot."""
+    entity = candidate.materialization_snapshot.get("entity_resolution")
+    if not entity or candidate.fact_type != "payment" or not candidate.project_id:
+        return
+    from .entity_resolution import Resolver, catalog_fingerprint
+    if (entity.get("state") == "new" and entity.get("catalog_fingerprint")
+            and entity["catalog_fingerprint"] == catalog_fingerprint(candidate.team_id, json_value(data),
+                object_id=candidate.object_identity_id, project_id=candidate.project_id)):
+        # The project is already locked by _resolve_project. An unchanged
+        # journal permits reuse of its validated semantic comparison; otherwise
+        # explicit separate-operation evidence would be deferred forever.
+        return
+    def needs_comparison(*_):
+        raise Deferred("entity_payment_identity_pending", "Новое финансовое событие требует отдельного сопоставления с уже принятыми записями.")
+    resolver = Resolver(json_value(data), primary, needs_comparison)
+    resolver.project = candidate.project
+    resolver.obj = candidate.object_identity
+    try:
+        state = resolver.payment() if resolver.evidence() else "invalid_source_evidence"
+    except Deferred:
+        state = "payment_identity_unresolved"
+    if state == "duplicate":
+        raise Deferred("duplicate_event", "Событие уже учтено по доказанному происхождению; повторная запись не создаётся.", True)
+    if state != "new":
+        candidate.materialization_snapshot = {**candidate.materialization_snapshot,
+            "entity_resolution": {**entity, "state": "review", "reason": state}}
+        candidate.save(update_fields=["materialization_snapshot"])
+        raise Deferred("entity_payment_identity_pending", "Изменился финансовый журнал; наблюдение сохранено для адресного сопоставления.")
+    candidate.materialization_snapshot = {**candidate.materialization_snapshot,
+        "entity_resolution": {**entity, "retrieval": {**entity.get("retrieval", {}),
+            "stages": {**entity.get("retrieval", {}).get("stages", {}), **resolver.retrieval["stages"]}}}}
+    candidate.save(update_fields=["materialization_snapshot"])
+
+
 def _validate(candidate, data, primary, text):
     from .clarifications import confirmed_identity
     human_identity = confirmed_identity(candidate)
@@ -194,13 +281,17 @@ def _validate(candidate, data, primary, text):
         candidate._discarded_fields = {**getattr(candidate, "_discarded_fields", {}), "party_role": "Роль стороны не доказана цитатой; упоминание сохранено без подмены юридического заказчика."}
     if candidate.project_id:
         labels = {normalize_deal_name(candidate.project.name), normalize_deal_name(candidate.project.normalized_name)} | set(candidate.project.aliases.values_list("normalized_name", flat=True))
+        alias_proof = candidate.materialization_snapshot.get("entity_resolution", {}).get("retrieval", {}).get("confirmed_project_alias", {})
+        if alias_proof.get("project_id") == candidate.project_id and alias_proof.get("normalized_name") == normalize_deal_name(data.get("object_name", "")):
+            labels.add(alias_proof["normalized_name"])
         labels |= {normalize_deal_name(option.object_label or option.deal_title) for option in candidate.crm_matches.filter(project_id=candidate.project_id, crm_match_revision=candidate.crm_match_revision)}
         if data.get("object_name") and normalize_deal_name(data["object_name"]) not in labels and not human_identity:
             raise Deferred("ambiguous_project", "Название в источнике не соответствует выбранному проекту или его доказанным обозначениям.")
         named = any(_project_label_quoted(label, text) for label in labels)
         label = normalize_deal_name(data.get("object_name", ""))
         collisions = list(Project.objects.filter(team_id=candidate.team_id).filter(Q(normalized_name=label) | Q(name__iexact=data["object_name"]) | Q(aliases__normalized_name=label)).values_list("pk", flat=True).distinct()[:2]) if label else []
-        if len(collisions) > 1 and primary.project_id != candidate.project_id and not human_identity:
+        resolved_composite = candidate.materialization_snapshot.get("entity_resolution", {}).get("project_id") == candidate.project_id
+        if len(collisions) > 1 and primary.project_id != candidate.project_id and not human_identity and not resolved_composite:
             raise Deferred("ambiguous_project", "Одно обозначение соответствует активному и/или архивному объекту; статус активности не доказывает выбор.")
         if not named and primary.project_id != candidate.project_id and not human_identity:
             raise Deferred("ambiguous_project", "Цитаты не подтверждают связь события с выбранным объектом.")
@@ -356,7 +447,13 @@ def _validate(candidate, data, primary, text):
             origin = prior.candidate.trace.raw_message if prior.candidate_id else None
             if origin and origin.source == primary.source and origin.session_name == primary.session_name and origin.message_id == primary.message_id:
                 raise Deferred("duplicate_event", f"Это движение уже учтено в записи №{prior.id}.", True)
-            raise Deferred("possible_duplicate", f"Есть совпадающая запись №{prior.id}; переписка не доказывает вторую операцию.")
+            resolution = candidate.materialization_snapshot.get("entity_resolution", {})
+            proof = resolution.get("retrieval", {}).get("stages", {}).get("payment", {})
+            distinct_operation = (resolution.get("state") == "new" and proof.get("complete") is True
+                and proof.get("matching_shortlist_checked") is True
+                and proof.get("distinguishing_proof", {}).get("kind") in {"different_grounded_references", "explicit_separate_operation"})
+            if not distinct_operation:
+                raise Deferred("possible_duplicate", f"Есть совпадающая запись №{prior.id}; переписка не доказывает вторую операцию.")
     else:
         if not data.get("commitment_id") and data["assignment_kind"] == "promise":
             data["responsible_name"] = source_time(primary)[1] or primary.sender_phone
@@ -377,11 +474,30 @@ def _validate(candidate, data, primary, text):
             elif not re.search(r"обещаю|сделаю|отправлю|предоставлю|проверю|позвоню|подготовлю|найду|уточню|узнаю|проведу|займусь|скину|вышлю|передам|согласую|беру|буду|жіберемін|тексеремін|I(?:'ll| will)", promise_text, re.I):
                 raise Deferred("promise_unproven", "Нет явного обещания автора; необходим связанный контекст принятия поручения.")
         if data.get("commitment_id"):
-            existing = Commitment.objects.filter(pk=data["commitment_id"], team=candidate.team).first()
+            existing = Commitment.objects.select_for_update().filter(pk=data["commitment_id"], team=candidate.team).first()
             if not existing or existing.source_message_id != data.get("promise_message_id"):
                 raise Deferred("ambiguous_commitment", "Изменение не связано с исходным поручением.")
             if data.get("base_commitment_version") != existing.version:
-                raise Deferred("commitment_version_conflict", "Контекст обязательства устарел; требуется новая обработка.")
+                entity = candidate.materialization_snapshot.get("entity_resolution", {})
+                expected = data.get("base_commitment_version")
+                siblings = list(FactCandidate.objects.filter(status="approved", fact_type="commitment",
+                    team=candidate.team, materialization_snapshot__entity_resolution__root_event_id=entity.get("root_event_id"),
+                    materialization_snapshot__commitment_after__id=existing.pk)) if entity.get("root_event_id") else []
+                versions = {row.materialization_snapshot.get("commitment_after", {}).get("version") for row in siblings}
+                same_operation = (isinstance(expected, int) and existing.version > expected
+                    and set(range(expected + 1, existing.version + 1)) <= versions)
+                if not same_operation:
+                    raise Deferred("commitment_version_conflict", "Контекст обязательства устарел; требуется новая обработка.")
+                incoming_ids = {ref["raw_message_id"] for ref in data.get("evidence_messages", []) if ref["role"] in {"deadline", "fulfillment", "cancellation"}}
+                previous_ids = {ref["raw_message_id"] for row in siblings for ref in row.proposed_changes.get("evidence_messages", []) if ref["role"] in {"deadline", "fulfillment", "cancellation"}}
+                times = {row.pk: source_time(row)[0] for row in source_scope(candidate.trace.raw_message).filter(pk__in=incoming_ids | previous_ids)}
+                if (not incoming_ids or not all(times.get(pk) for pk in incoming_ids | previous_ids)
+                        or max(times[pk] for pk in incoming_ids) < max((times[pk] for pk in previous_ids), default=source_time(primary)[0])
+                        or existing.status in {"fulfilled", "cancelled"} and data["commitment_status"] != existing.status):
+                    raise Deferred("stale_commitment_update", "Изменение старше принятого события либо отменяет конечное состояние.")
+                data["base_commitment_version"] = existing.version
+                candidate.proposed_changes = {**candidate.proposed_changes, "base_commitment_version": existing.version}
+                candidate.save(update_fields=["proposed_changes"])
             fulfillment_texts = [delivery_action(ref['quote'], existing.commitment_text)
                 for ref in data.get('evidence_messages', []) if ref['role']=='fulfillment']
             if data["commitment_status"] == "cancelled":
@@ -492,6 +608,8 @@ def decide(candidate_id, *, preview=False):
         if candidate.status != "pending":
             return None
         fingerprint_input = [candidate.proposed_changes, candidate.project.version if candidate.project_id else None, candidate.crm_match_revision, candidate.crm_match_state, candidate.trace.model_version, cfg.chat_model_name, list(candidate.evidence.values_list("raw_message_id", "quote"))]
+        if candidate.materialization_snapshot.get("entity_resolution"):
+            fingerprint_input.append(candidate.materialization_snapshot["entity_resolution"])
         from .clarifications import hold, plan
         clarification_hold = hold(candidate)
         if clarification_hold:
@@ -520,7 +638,8 @@ def decide(candidate_id, *, preview=False):
             schema.is_valid(raise_exception=True)
             data = schema.validated_data
             _resolve_project(candidate, data)
-            if not preview and not candidate.project_id and data.get("object_name") and candidate.crm_match_state == "not_requested":
+            _recheck_financial_entity(candidate, data, primary)
+            if not preview and not candidate.materialization_snapshot.get("entity_resolution") and not candidate.project_id and data.get("object_name") and candidate.crm_match_state == "not_requested":
                 from .tasks import enqueue_crm_match
                 enqueue_crm_match(candidate.id)
                 candidate.refresh_from_db()
@@ -540,6 +659,9 @@ def decide(candidate_id, *, preview=False):
             with transaction.atomic():
                 decision = FactDecision.objects.create(candidate=candidate, supersedes=previous, outcome=outcome, policy_version=cfg.autonomous_policy_version, input_fingerprint=fingerprint, reason_code=code, explanation=explanation, validation={"trace_id": candidate.trace_id, "model": candidate.trace.model_version, "coverage": candidate.trace.context_metadata.get("history_complete_in_request", False), "mode": mode, "discarded_fields": getattr(candidate, "_discarded_fields", {})})
                 if outcome == "accepted":
+                    alias_proof = candidate.materialization_snapshot.get("entity_resolution", {}).get("retrieval", {}).get("confirmed_project_alias", {})
+                    if candidate.project_id and alias_proof.get("project_id") == candidate.project_id and alias_proof.get("normalized_name"):
+                        ProjectAlias.objects.get_or_create(project=candidate.project, normalized_name=alias_proof["normalized_name"], defaults={"decision": decision})
                     event=None
                     if mode == "apply":
                         from .temporal import provenance
@@ -565,6 +687,8 @@ def decide(candidate_id, *, preview=False):
                 if preview:
                     transaction.set_rollback(True)
                     return {"candidate_id": candidate.id, "outcome": outcome, "reason_code": code, "explanation": explanation}
+                from .entity_reconciliation import refresh_outcome
+                transaction.on_commit(lambda: refresh_outcome(candidate.trace_id))
                 return decision
         except (Conflict, ValidationError) as exc:
             # Failed domain application is rolled back completely, then recorded
@@ -654,8 +778,10 @@ def reconcile(limit=100):
     candidates = list(FactCandidate.objects.filter(status="pending", team__is_active=True, pk__gt=cursor).exclude(source_key__startswith='price-question:').order_by("id")[:limit])
     if not candidates:
         candidates = list(FactCandidate.objects.filter(status="pending", team__is_active=True).exclude(source_key__startswith='price-question:').order_by("id")[:limit])
+    from .entity_reconciliation import enqueue_if_changed
     for candidate in candidates:
-        decide(candidate.id)
+        if not enqueue_if_changed(candidate):
+            decide(candidate.id)
     if candidates:
         AISettings.objects.filter(pk=cfg.pk).update(autonomous_reconcile_cursor=candidates[-1].pk)
     from .thread_routing import ANALYSIS_EVENTS, schedule_extraction
@@ -666,8 +792,9 @@ def reconcile(limit=100):
         "id", "team_id", "config_id", "processing_state", "processed", "config__id",
         "config__thread_routing_enabled",
     ).order_by("id")[:limit])
+    from .live_batching import work_version
     work_items = list(SourceWorkItem.objects.filter(
-        processing_version=cfg.autonomous_policy_version, state="pending"
+        processing_version__in=[cfg.autonomous_policy_version, work_version(cfg, True)], state="pending"
     ).select_related("raw_message").only(
         "id", "raw_message_id", "raw_message__processing_state"
     ).order_by("id")[:limit])

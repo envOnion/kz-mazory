@@ -98,6 +98,7 @@ def schedule(run):
                 "raw_id": raw.id, "trace_id": traces[raw.id],
                 "trace_ids": [{"raw_id":pk,"trace_id":trace_id} for pk,trace_id in traces.items()], "batch_ids": [x.raw_message_id for x in packet],
                 "history_run_id": run.id, "analysis_policy": POLICY,
+                **({"entity_policy": "entity-stages-v1"} if cfg.entity_pipeline_enabled else {}),
             },
         })
         for item in packet:

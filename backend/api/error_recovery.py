@@ -4,7 +4,7 @@ from datetime import timedelta
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
-from django.db.models import OuterRef, Q, Subquery
+from django.db.models import OuterRef, Q, Subquery, Sum, Count
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied
 
@@ -148,11 +148,15 @@ def progress(operation):
     for anchor, batch in OutboxEvent.objects.filter(payload__error_recovery_id=operation.pk,
             state__in=['pending', 'enqueued', 'processing']).values_list('payload__raw_id', 'payload__batch_ids'):
         active_raws.update(batch or [anchor])
+    trace_ids = [trace.pk for trace in traces.values()]
+    active_raws.update(OutboxEvent.objects.filter(event_type='entity_reconcile',
+        payload__trace_id__in=trace_ids, state__in=['pending', 'enqueued', 'processing'])
+        .values_list('payload__raw_id', flat=True))
     for item in scheduled:
         trace = traces.get(item['raw_id'])
-        if not trace or trace.pk < item['trace_id']:
+        if item['raw_id'] in active_raws or not trace or trace.pk < item['trace_id']:
             result['pending'] += 1
-        elif (trace.context_metadata.get('request_state') == 'needs_review' and trace.status != 'success') or trace.pk in pending_candidates:
+        elif trace.context_metadata.get('request_state') == 'needs_review' or trace.pk in pending_candidates:
             result['needs_review'] += 1
         elif trace.status == 'success':
             result['succeeded'] += 1
@@ -160,8 +164,20 @@ def progress(operation):
             result['pending' if item['raw_id'] in active_raws else 'failed'] += 1
         else:
             result['pending' if item['raw_id'] in active_raws else 'failed'] += 1
-    return {'operation_id': operation.pk, 'status': operation.status, 'error_code': operation.error_code,
-            'model': operation.request['model'], **result}
+    from .models import ProviderUsage
+    roots = OutboxEvent.objects.filter(event_type='extract_message', payload__error_recovery_id=operation.pk)
+    root_ids = list(roots.values_list('id', flat=True))
+    root_ids.extend(OutboxEvent.objects.filter(event_type='entity_reconcile',
+        payload__entity_operation_root_id__in=root_ids).values_list('id', flat=True))
+    usage = ProviderUsage.objects.filter(Q(outbox_event_id__in=root_ids) | Q(outbox_event__payload__root_event_id__in=root_ids)).aggregate(
+        calls=Count('id'), input_known=Count('input_tokens'), output_known=Count('output_tokens'),
+        input_tokens=Sum('input_tokens'), output_tokens=Sum('output_tokens'))
+    for field in ('input', 'output'):
+        if usage.pop(f'{field}_known') != usage['calls']:
+            usage[f'{field}_tokens'] = None
+    status = ('running' if result['pending'] else 'completed') if operation.status == 'succeeded' else operation.status
+    return {'operation_id': operation.pk, 'status': status, 'error_code': operation.error_code,
+            'model': operation.request['model'], 'usage': usage, **result}
 
 
 def finalize_review(event):
@@ -175,7 +191,9 @@ def finalize_review(event):
         'target_classification_conflict', 'thread_completion_unproven', 'thread_sources_unavailable',
         'thread_source_conflict', 'thread_sources_duplicate', 'thread_keys_duplicate', 'thread_parent_invalid',
         'thread_revision_conflict', 'extraction_top_level_type', 'extraction_facts_missing',
-        'extraction_facts_type', 'payment_evidence_contradiction'}
+        'extraction_facts_type', 'payment_evidence_contradiction', 'entity_comparison_invalid',
+        'entity_fact_source_invalid', 'entity_target_coverage_invalid', 'entity_stage_budget_exhausted',
+        'entity_stage_input_too_large', 'entity_projection_changed'}
     trace_ids = [row['trace_id'] for row in event.payload.get('trace_ids', [])] or [event.payload.get('trace_id')]
     for trace in MessageProcessingTrace.objects.filter(pk__in=trace_ids):
         _finalize_trace(event, trace, review_codes)

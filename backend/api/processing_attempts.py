@@ -126,8 +126,12 @@ def schedule_reanalysis(raw_id, user, request_key, *, recovery_id=None, expected
 
 
 def _enqueue_reanalysis(raw, trace, user, operation_key):
+    cfg = AISettings.get_active()
+    from .live_batching import work_version
     OutboxEvent.objects.create(
         event_type="extract_message",
         deduplication_key=operation_key,
-        payload={"raw_id": raw.id, "trace_id": trace.id, "requested_by_id": user.id},
+        payload={"raw_id": raw.id, "trace_id": trace.id, "requested_by_id": user.id,
+                 "processing_version": work_version(cfg, cfg.entity_pipeline_enabled),
+                 **({"entity_policy": "entity-stages-v1"} if cfg.entity_pipeline_enabled else {})},
     )

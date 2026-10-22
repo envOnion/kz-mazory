@@ -66,7 +66,7 @@ def analysis_position(raw):
     return max(0, delta.days * 86_400_000_000 + delta.seconds * 1_000_000 + delta.microseconds)
 
 
-def context_threads(raw):
+def context_threads(raw, *, limit=20, commitments_per_thread=10, messages_per_thread=40):
     qs = DialogueThread.objects.filter(source_key=source_key(raw)).exclude(
         state="superseded"
     )
@@ -85,10 +85,10 @@ def context_threads(raw):
     named = Q(pk__in=[])
     for word in words:
         named |= Q(topic__icontains=word)
-    preferred = list(qs.filter(named).order_by("-updated_at")[:10])
+    preferred = list(qs.filter(named).order_by("-updated_at")[:max(1, min(10, limit))])
     ids = {item.id for item in preferred}
     items = preferred + list(
-        qs.exclude(pk__in=ids).order_by("-updated_at")[: 20 - len(preferred)]
+        qs.exclude(pk__in=ids).order_by("-updated_at")[: max(0, limit - len(preferred))]
     )
     item_ids = [item.id for item in items]
     commitments_by_thread = {thread_id: [] for thread_id in item_ids}
@@ -105,7 +105,7 @@ def context_threads(raw):
         expression=RowNumber(),
         partition_by=[F("candidate__thread_revision__thread_id")],
         order_by=[F("deadline").asc(), F("id").asc()],
-    )).filter(thread_rank__lte=10).order_by("candidate__thread_revision__thread_id", "deadline", "id").values(
+    )).filter(thread_rank__lte=commitments_per_thread).order_by("candidate__thread_revision__thread_id", "deadline", "id").values(
         "candidate__thread_revision__thread_id", "id", "version", "commitment_text",
         "responsible_name", "source_message_id", "deadline_at",
     )
@@ -118,7 +118,7 @@ def context_threads(raw):
         expression=RowNumber(),
         partition_by=[F("thread_id")],
         order_by=[F("raw_message__timestamp").desc(), F("raw_message_id").desc()],
-    )).filter(thread_rank__lte=40).order_by(
+    )).filter(thread_rank__lte=messages_per_thread).order_by(
         "thread_id", "-raw_message__timestamp", "-raw_message_id"
     ).values_list("thread_id", "raw_message_id")
     for thread_id, raw_message_id in links:

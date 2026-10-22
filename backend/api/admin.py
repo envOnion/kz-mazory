@@ -967,6 +967,10 @@ class AISettingsAdmin(IntegrationAdmin):
                     "analysis_input_token_limit",
                     "analysis_target_message_limit",
                     "analysis_output_token_limit",
+                    "entity_pipeline_enabled",
+                    "entity_input_token_limit",
+                    "entity_stage_attempts",
+                    "entity_max_calls",
                     "tokenizer_id",
                     "tokenizer_revision",
                 ),
@@ -2419,7 +2423,7 @@ from . import job_admin  # noqa: F401, E402 — register job views after source 
 from .models import (FactDecision, FactEvent, FieldAssertion, SourceCheckpoint,
                      SourceWorkItem, MessageArtifact, CrmDelivery,
                      ExternalObjectLink, ProviderReservation, Participant,
-                     ParticipantIdentity, ProjectParty, ProjectAlias, CompanyAlias)
+                     ParticipantIdentity, ProjectParty, ProjectAlias, CompanyAlias, ObjectIdentity, ObjectAlias)
 
 
 @admin.register(Participant)
@@ -2432,7 +2436,7 @@ class ParticipantAdmin(ScopedReadOnlyAdmin):
 for model in (FactDecision, FactEvent, FieldAssertion, SourceCheckpoint,
               SourceWorkItem, MessageArtifact, CrmDelivery, ExternalObjectLink,
               ProviderReservation, ParticipantIdentity,
-              ProjectParty, ProjectAlias, CompanyAlias):
+              ProjectParty, ProjectAlias, CompanyAlias, ObjectIdentity, ObjectAlias):
     admin.site.register(model, ScopedReadOnlyAdmin)
 
 

@@ -101,6 +101,10 @@ export interface Paged<T> {
   coverage: string
 }
 export interface TeamOption {id:number;name:string}
+export interface EntityStageProgress {
+  stage: string; state: string; attempts: number; error: string; wireBytes: number
+  inputTokens: number | null; outputTokens: number | null; reasoningTokens: number | null
+}
 export interface OperationPage<T> extends Paged<T> {teams:TeamOption[];state_labels?:Record<string,string>}
 
 export interface DialogsPage extends Paged<DialogSummary> {}
@@ -111,6 +115,7 @@ export interface ErrorRecoveryProgress {
   operation_id: number; status: string; error_code: string; model: string
   found: number; scheduled: number; already_processing: number; changed: number; unavailable: number
   pending: number; succeeded: number; needs_review: number; failed: number
+  usage: { calls: number; input_tokens: number | null; output_tokens: number | null }
 }
 
 export interface ChangeItem {

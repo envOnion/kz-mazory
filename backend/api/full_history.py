@@ -588,7 +588,7 @@ def validate_evidence(result, raw, trace):
     FactSchema(data=result.get('facts'), many=True).is_valid(raise_exception=True)
     from .pipeline import _source_quote
     from .qwen_profile import MODEL
-    exact = trace.model_version == MODEL
+    exact = trace.model_version == MODEL or trace.context_metadata.get('entity_policy') == 'entity-stages-v1'
     if raw.config_id and raw.config.thread_routing_enabled and not exact:
         # Native decoding restricts quotes to the supplied originals, but a
         # model can still pair a literal quote with another supplied numeric ID.

@@ -4,6 +4,7 @@ from decimal import Decimal
 from datetime import datetime
 import math
 import re
+import unicodedata
 from zoneinfo import ZoneInfo
 from django.db import IntegrityError, transaction, connection
 from django.shortcuts import get_object_or_404
@@ -19,6 +20,7 @@ from .models import (
     StageTransition,
     FactCandidate,
     FactEvidence,
+    FieldAssertion,
     FinancialRecord,
     Commitment,
     UserProfile,
@@ -55,6 +57,12 @@ class FactSchema(serializers.Serializer):
     evidence_message_id = serializers.IntegerField(min_value=1, required=False)
     fact_type = serializers.ChoiceField(choices=["project", "payment", "commitment"])
     object_name = serializers.CharField(max_length=255, allow_blank=True, default="")
+    object_external_id = serializers.CharField(max_length=128, allow_blank=True, default="")
+    object_city = serializers.CharField(max_length=128, allow_blank=True, default="")
+    object_address = serializers.CharField(max_length=255, allow_blank=True, default="")
+    object_phase = serializers.CharField(max_length=128, allow_blank=True, default="")
+    deal_contract_number = serializers.CharField(max_length=128, allow_blank=True, default="")
+    deal_period = serializers.CharField(max_length=128, allow_blank=True, default="")
     company_name = serializers.CharField(max_length=255, allow_blank=True, default="")
     party_role = serializers.ChoiceField(choices=["unknown", "customer", "contractor", "supplier", "payer", "designer"], default="unknown")
     direction = serializers.ChoiceField(choices=["income", "expense"], default="income")
@@ -74,6 +82,8 @@ class FactSchema(serializers.Serializer):
     payment_kind = serializers.ChoiceField(
         choices=["increment", "cumulative", "promise", "reversal", "balance", "debt", "invoice", "transfer"], default="increment"
     )
+    payment_reference = serializers.CharField(max_length=128, allow_blank=True, default="")
+    payment_reference_kind = serializers.ChoiceField(choices=["transaction", "invoice", "unknown"], default="unknown")
     reverses_id = serializers.IntegerField(min_value=1, required=False)
     stage = serializers.ChoiceField(
         choices=[x[0] for x in Project.STATUS_CHOICES], required=False
@@ -230,6 +240,8 @@ def fact_identity(data):
             "payment_date",
             "payment_kind",
             "reverses_id",
+            "payment_reference",
+            "payment_reference_kind",
         ),
         "commitment": ("commitment_text", "deadline_at", "deadline_precision"),
         "project": (
@@ -318,21 +330,39 @@ def sync_crm_stages(project):
     return True
 
 
-def _project_identity_conflict(team_id, name, normalized):
-    """Check the shared pipeline/CRM canonical key under a team lock."""
+def _project_identity_conflict(team_id, name, normalized, *, company_name="", contract_number="", deal_period=""):
+    """Reject an existing deal key while allowing a proven second deal on the object."""
     canonical = normalize_deal_name(name)
     identity_values = {value for value in (normalized, canonical) if value}
     projects = Project.objects.select_for_update(of=("self",)).filter(
         team_id=team_id, archived=False
     )
-    if identity_values and projects.filter(
-        normalized_name__in=identity_values
-    ).exists():
+    matching = list(projects.filter(
+        Q(normalized_name__in=identity_values)
+        | Q(normalized_name="")
+    ).select_related("company").only("id", "name", "normalized_name", "company__name", "contract_number", "deal_period"))
+    matching = [project for project in matching if normalize_deal_name(project.name) == canonical]
+    if not matching:
+        return False
+    company_key = normalize_deal_name(company_name)
+    def identifier(value):
+        return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+    new_contract = identifier(contract_number)
+    new_period = identifier(deal_period)
+    if not company_key or not (new_contract or new_period):
         return True
-    return any(
-        normalize_deal_name(project.name) == canonical
-        for project in projects.filter(Q(normalized_name="") | Q(source="bitrix_crm")).only("name")
-    )
+    for project in matching:
+        old_company = normalize_deal_name(project.company.name) if project.company_id else ""
+        old_contract = identifier(project.contract_number)
+        old_period = identifier(project.deal_period)
+        if not old_company or not (old_contract or old_period):
+            return True
+        company_differs = old_company != company_key
+        contract_differs = bool(old_contract and new_contract and old_contract != new_contract)
+        period_differs = bool(old_period and new_period and old_period != new_period)
+        if not (company_differs or contract_differs or period_differs):
+            return True
+    return False
 
 
 def _review_currency(data, currency_was_explicit, project=None, crm_match=None):
@@ -617,12 +647,25 @@ def _materialize_crm_project(candidate, crm_match, data):
     Team.objects.select_for_update(of=("self",)).get(pk=candidate.team_id)
     if Project.objects.select_for_update().filter(bitrix_id=bitrix_deal_id).exists():
         raise Conflict("Сделка CRM уже связана с другим локальным проектом.")
-    if _project_identity_conflict(candidate.team_id, name, normalized):
+    if _project_identity_conflict(
+        candidate.team_id, name, normalized,
+        company_name=crm_match.company_name or data.get("company_name", ""),
+        contract_number=data.get("deal_contract_number", ""),
+        deal_period=data.get("deal_period", ""),
+    ):
         raise Conflict(
             "Проект с таким названием уже существует. Сопоставьте его явно."
         )
 
     company = _company_from_crm_match(crm_match, data)
+    from .object_identity import resolve_existing
+    object_resolution = resolve_existing(candidate.team_id, {
+        "object_name": data.get("object_name", name),
+        "object_external_id": data.get("object_external_id", ""),
+        "object_city": data.get("object_city", ""),
+        "object_address": data.get("object_address", ""),
+        "object_phase": data.get("object_phase", ""),
+    })
     # CRM opportunity is a commercial price; it does not prove a contract.
     sale_amount = data.get("sale_amount")
     if sale_amount is None and crm_match.opportunity and crm_match.opportunity > 0:
@@ -637,6 +680,9 @@ def _materialize_crm_project(candidate, crm_match, data):
                 normalized_name=normalized,
                 source="bitrix_crm",
                 bitrix_id=bitrix_deal_id,
+                object_identity=object_resolution["object"] if object_resolution["state"] == "matched" else None,
+                contract_number=data.get("deal_contract_number", ""),
+                deal_period=data.get("deal_period", ""),
                 contract_amount=data.get("contract_amount", Decimal(0)),
                 sale_amount=sale_amount,
                 currency=data["currency"],
@@ -835,7 +881,7 @@ def edit_candidate(candidate_id, user, reason, changes, remove_fields, base_vers
 
 def _link_thread_project(candidate, project):
     """A report containing different objects cannot identify one shared project."""
-    if not candidate.thread_revision_id or not project:
+    if not candidate.thread_revision_id:
         return
     from .models import DialogueThread
     related = list(FactCandidate.objects.filter(
@@ -843,16 +889,21 @@ def _link_thread_project(candidate, project):
         team=candidate.team, status__in=("pending", "approved"),
     ).exclude(pk=candidate.pk))
     identity = normalize_deal_name(candidate.proposed_changes.get("object_name", ""))
-    compatible = bool(identity) and all(
+    compatible = bool(identity and project) and all(
         item.project_id == project.id or (
             item.project_id is None
             and normalize_deal_name(item.proposed_changes.get("object_name", "")) == identity
         ) for item in related
     )
-    DialogueThread.objects.filter(pk=candidate.thread_revision.thread_id, team=candidate.team).update(
-        project=project if compatible else None,
+    object_identity_id = candidate.object_identity_id or (project.object_identity_id if project else None)
+    object_compatible = bool(object_identity_id) and all(
+        item.object_identity_id in (None, object_identity_id) for item in related
     )
-    if compatible:
+    DialogueThread.objects.filter(pk=candidate.thread_revision.thread_id, team=candidate.team).update(
+        project=project if compatible and project else None,
+        object_identity_id=object_identity_id if object_compatible else None,
+    )
+    if compatible and project:
         ids = [item.id for item in related if item.project_id is None and item.id != candidate.id]
         FactCandidate.objects.filter(pk__in=ids, status="pending").update(project=project, base_project_version=project.version)
 
@@ -996,10 +1047,13 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                             pk=candidate.team_id
                         )
                         if _project_identity_conflict(
-                            candidate.team_id, data["object_name"], normalized
+                            candidate.team_id, data["object_name"], normalized,
+                            company_name=data.get("company_name", ""),
+                            contract_number=data.get("deal_contract_number", ""),
+                            deal_period=data.get("deal_period", ""),
                         ):
                             raise Conflict(
-                                "Объект уже существует. Сопоставьте предложение с ним."
+                                "Сделка с такими составными признаками уже существует либо новых данных недостаточно для отдельной сделки. Сопоставьте существующую сделку или уточните реквизиты."
                             )
                         company = None
                         if data.get("company_name") and (not system or data["party_role"] == "customer"):
@@ -1009,12 +1063,27 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                             company = companies[0] if companies else None
                             if company is None:
                                 company = Company.objects.create(name=data["company_name"], team=candidate.team)
+                        from .object_identity import resolve_existing
+                        object_resolution = resolve_existing(candidate.team_id, {
+                            "object_name": data.get("object_name", ""),
+                            "object_external_id": data.get("object_external_id", ""),
+                            "object_city": data.get("object_city", ""),
+                            "object_address": data.get("object_address", ""),
+                            "object_phase": data.get("object_phase", ""),
+                        })
+                        if candidate.materialization_snapshot.get("entity_resolution") and candidate.object_identity_id:
+                            from .models import ObjectIdentity
+                            resolved_object = ObjectIdentity.objects.get(pk=candidate.object_identity_id, team_id=candidate.team_id, state="confirmed")
+                            object_resolution = {"state": "matched", "object": resolved_object}
                         project = Project(
                             team=candidate.team,
                             manager=candidate.manager,
                             company=company,
                             name=data["object_name"],
                             normalized_name=normalized,
+                            object_identity=object_resolution["object"] if object_resolution["state"] == "matched" else None,
+                            contract_number=data.get("deal_contract_number", ""),
+                            deal_period=data.get("deal_period", ""),
                             source="chat",
                         )
                 if not projection["project_before"]:
@@ -1256,7 +1325,7 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                 if not system and candidate.fact_type == "project" and reviewed_fields & data.keys():
                     # Preserve source time and field-level evidence for later
                     # idempotent CRM delivery and stale-update protection.
-                    from .models import FactEvent, FieldAssertion
+                    from .models import FactEvent
                     from .message_time import source_time
                     source = candidate.trace.raw_message
                     anchor = data.get("evidence_message_id")
@@ -1295,7 +1364,8 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                         enqueue_project(project, reviewed_event, force=True)
         if action == "approve":
             projection["project_after"]=row_snapshot(project)
-            candidate.materialization_snapshot=projection
+            candidate.materialization_snapshot={**projection, **({"entity_resolution": candidate.materialization_snapshot["entity_resolution"]}
+                if candidate.materialization_snapshot.get("entity_resolution") else {})}
             candidate.proposed_changes = json_value(data)
             _link_thread_project(candidate, project)
         candidate.status = "approved" if action == "approve" else "rejected"

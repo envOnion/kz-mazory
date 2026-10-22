@@ -4,12 +4,17 @@ import { useRoute, useRouter } from 'vue-router'
 import { Search, RefreshCw, ChevronDown, PanelRightOpen, PanelLeftOpen, X } from 'lucide-vue-next'
 import TraceContextPanel from '../shell/TraceContextPanel.vue'
 import FullHistoryProgress from '../shell/FullHistoryProgress.vue'
+import EntityStageProgress from '../shell/EntityStageProgress.vue'
 import { routeId } from '../utils/routeId'
 import { requestKey } from '../utils/requestKey'
 import { api, post } from '../composables/api'
 import { accessToken } from '../composables/session'
 import { EmptyState, ErrorState, Skeleton, StatusBadge, statusLabel, formatTime } from '../shell/bits'
 import type { ChainNode, ChangeRow, RecordChain, DialogSummary, Paged, RecordBrief, RecordDetail, TraceRow, ErrorRecoveryPreview, ErrorRecoveryProgress } from '../types/messenger'
+
+function entityReconciliations(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}
+}
 
 // Чаты: список диалогов, лента сообщений, инспектор (Решение / История / Диагностика ИИ).
 // Состояние (диалог, сообщение, вкладка, категория) — в URL; обновление — cursor polling 5 c.
@@ -595,6 +600,7 @@ const timelineOrdered = computed(() => chain.value?.timeline || [])
         <template v-if="recoveryProgress">
           <p>Найдено: {{ recoveryProgress.found }} · Поставлено: {{ recoveryProgress.scheduled }} · Ожидают: {{ recoveryProgress.pending }}</p>
           <p>Обработано: {{ recoveryProgress.succeeded }} · Требуют проверки: {{ recoveryProgress.needs_review }} · Ошибки: {{ recoveryProgress.failed }}</p>
+          <p v-if="recoveryProgress.usage" class="mx-muted text-xs">Вызовов: {{ recoveryProgress.usage.calls }} · Токены: {{ recoveryProgress.usage.input_tokens ?? '—' }} вход / {{ recoveryProgress.usage.output_tokens ?? '—' }} выход</p>
           <p class="mx-muted text-xs">Уже обрабатываются: {{ recoveryProgress.already_processing }} · Изменились: {{ recoveryProgress.changed }} · Недоступны: {{ recoveryProgress.unavailable }}</p>
           <p v-if="recoveryProgress.error_code" role="alert" class="text-amber-200">Повтор остановлен. Проверьте основную модель и доступ, затем запустите заново.</p>
         </template>
@@ -745,7 +751,8 @@ const timelineOrdered = computed(() => chain.value?.timeline || [])
                 <span v-if="row.prompt_version">Prompt: {{ row.prompt_version }}</span>
                 <span v-if="row.error_code">Код: {{ row.error_code }}</span>
               </div>
-              <FullHistoryProgress :value="row.context_metadata.full_history" /><TraceContextPanel v-if="row.has_context" :record-id="detail.id" :trace-id="row.id" />
+              <FullHistoryProgress :value="row.context_metadata.full_history" /><EntityStageProgress :value="row.context_metadata.entity_pipeline" /><TraceContextPanel v-if="row.has_context" :record-id="detail.id" :trace-id="row.id" />
+              <EntityStageProgress v-for="(progress, key) in entityReconciliations(row.context_metadata.entity_reconciliations)" :key="key" :value="progress" label="Сопоставление с обновлённым справочником" />
               <details class="mt-2"><summary>Контекст и извлечённые факты</summary><pre class="whitespace-pre-wrap break-words text-xs">{{ row.context_metadata }}</pre><pre class="whitespace-pre-wrap break-words text-xs">{{ row.ai_extracted_facts }}</pre></details>
               <div v-if="row.result_summary" class="mt-1.5">{{ row.result_summary }}</div>
               <div v-if="row.bitrix_matched_deal_id" class="mx-muted text-[12px] mt-1">

@@ -112,7 +112,8 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
         from .full_history import prepare
         return prepare(raw, cfg, known_projects, snapshot_id, batch_ids, full_state or {})
     from .dialogue_threads import context_threads
-    themes = context_threads(raw)
+    live_batch = bool(getattr(cfg, "live_batch_policy", None))
+    themes = context_threads(raw, limit=5, commitments_per_thread=3, messages_per_thread=10) if live_batch else context_threads(raw)
     counter, endpoint = context_runtime(cfg)
     qs, time_field = history_queryset(raw, snapshot_id, include_following)
     if themes and include_following:

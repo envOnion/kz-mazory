@@ -179,7 +179,7 @@ def recover(result, raw, trace, cfg):
         inputs['analysis_instructions'] = f' Отдельный разбор только {kind} из target_message_id. '+instructions[kind]+' Не извлекай отдельные факты контекста, если цель их не изменяет. Не угадывай недостающие поля. Верни только facts.'
         inputs.pop('batch_message_ids', None)
         inputs.pop('target_messages', None)
-        focused_system = ('Извлеки только факты типа '+kind+' из целевой реплики. Верни JSON facts и topic_updates по схеме. Для каждого факта укажи предмет темы в topic_updates: конкретное действие/объект, summary, state=open если предмет доказан, unknown если не хватает контекста. Контекст — источники для предмета, первого обещания и доказанного исполнения, не дополнительные цели. Для thread_key выбери тему из extraction_topics. Вопрос не факт. Обязательство — будущее действие автора или явно названного исполнителя, даже без сделки/суммы. Первое обещание сохраняет promise_message_id; повтор не новое обязательство. Последующее отправленное КП закрывает соответствующее обещание, общая ссылка/сумма — нет. Оплата на банковский расчётный счёт — increment, выставленный счёт — invoice. Подписанный договор и техническое изменение — project с current_action. Общий портфель/таблица не сделка. company_name — организация, не автор или исполнитель. Все доказательства — буквальные цитаты по ID; для обещания role=promise, для исполнения role=fulfillment. Имя, дата и срок только из оригиналов. Если известен день, deadline_precision=date, точное время не выдумывай. '+instructions[kind])
+        focused_system = ('Извлеки только факты типа '+kind+' из целевой реплики. Верни JSON строго по переданной схеме: threads и facts. Темы указывай в threads, не создавай поле topic_updates. Контекст — источники для предмета, первого обещания и доказанного исполнения, не дополнительные цели. Для thread_key выбери тему из extraction_topics. Вопрос не факт. Обязательство — будущее действие автора или явно названного исполнителя, даже без сделки/суммы. Первое обещание сохраняет promise_message_id; повтор не новое обязательство. Последующее отправленное КП закрывает соответствующее обещание, общая ссылка/сумма — нет. Оплата на банковский расчётный счёт — increment, выставленный счёт — invoice. Подписанный договор и техническое изменение — project с current_action. Общий портфель/таблица не сделка. company_name — организация, не автор или исполнитель. Все доказательства — буквальные цитаты по ID; для обещания role=promise, для исполнения role=fulfillment. Имя, дата и срок только из оригиналов. Если известен день, deadline_precision=date, точное время не выдумывай. '+instructions[kind])
         payload['messages'][-1]['content'] = extraction_input(inputs)
         from .commercial_amounts import SALE_AMOUNT_RULES
         focused_system += SALE_AMOUNT_RULES
@@ -308,8 +308,6 @@ def reconcile_promises(facts, raw, trace, cfg):
     from .free_fallback import with_policy, local_runtime
     prepared = local_runtime(with_policy(prepared, trace.context_metadata))
     from .qwen_profile import enabled as qwen_enabled
-    if not qwen_enabled(prepared):
-        prepared.max_completion_tokens = min(2048, prepared.max_completion_tokens)
     prepared.analysis_policy, prepared.full_history_policy = 'history-packets-v1','focused-facts-v1'
     counter, endpoint = context_runtime(prepared)
     source = source_metadata(raw)

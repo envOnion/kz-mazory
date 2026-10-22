@@ -18,7 +18,7 @@ from .models import AISettings, DialogueThread, OutboxEvent, RawMessage, ThreadM
 from .providers import ProviderUnavailable, checked_base_url
 from .decision_models import fingerprint
 
-ANALYSIS_EVENTS = frozenset({"extract_message", "route_message", "extract_thread"})
+ANALYSIS_EVENTS = frozenset({"extract_message", "route_message", "extract_thread", "entity_reconcile"})
 
 
 def digest(value):
