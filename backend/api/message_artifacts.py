@@ -60,7 +60,8 @@ def process(artifact_id):
             artifact.checksum, artifact.extracted_text, artifact.state, artifact.error_code = checksum, text, "ready", ""
             artifact.save()
             derived, _ = RawMessage.objects.get_or_create(source="waha", session_name=raw.session_name, message_id="media:" + hashlib.sha256((str(raw.config_id) + raw.message_id).encode()).hexdigest(), source_revision=revision, defaults={"team_id": raw.team_id, "config_id": raw.config_id, "chat_id": raw.chat_id, "project_id": raw.project_id, "sender_name": raw.sender_name, "sender_phone": raw.sender_phone, "timestamp": raw.timestamp, "sent_at_known": raw.sent_at_known, "content": transcript, "raw_payload": {"artifact_id": artifact.id, "original_raw_id": raw.id, "recognition_precision": "unknown"}})
-            OutboxEvent.objects.get_or_create(deduplication_key=f"extract:{derived.id}", defaults={"event_type": "extract_message", "payload": {"raw_id": derived.id, "priority": "live"}})
+            from .live_batching import enqueue
+            enqueue(derived)
     except Exception as exc:
         artifact.state, artifact.error_code = "failed", str(exc)[:64] if isinstance(exc, ProviderUnavailable) else type(exc).__name__
         artifact.save(update_fields=["state", "error_code"])

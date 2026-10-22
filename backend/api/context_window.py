@@ -42,7 +42,7 @@ def bounded_operation(function):
                 raise ProviderUnavailable("context_configuration_changed")
             maximum = metadata.get("snapshot_max_id") or source_scope(raw).aggregate(last=Max("id"))["last"] or raw.id
             targets = list(dict.fromkeys(payload.get("batch_ids") or [raw.id]))
-            following = bool(payload.get("requested_by_id") or payload.get("reanalyze") or payload.get("history_run_id"))
+            following = bool(payload.get("requested_by_id") or payload.get("reanalyze") or payload.get("history_run_id") or payload.get("live_batch_policy"))
             qs, _ = history_queryset(raw, maximum, include_following=following, target_ids=targets)
             manifest = {"policy": POLICY, "anchor_id": raw.id, "snapshot_max_id": maximum,
                         "include_following": following, "source_ids": [raw.id, *qs.values_list("id", flat=True)],

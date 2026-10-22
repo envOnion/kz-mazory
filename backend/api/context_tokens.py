@@ -386,6 +386,15 @@ def context_runtime(cfg):
         }
     if api_format != "openai_compatible":
         raise ProviderUnavailable("context_provider_unsupported")
+    from .minimax import enabled as minimax_enabled, Counter as MiniMaxCounter
+    if minimax_enabled(cfg):
+        if cfg.context_window_tokens > 1000000 or cfg.max_completion_tokens > 524288:
+            raise ProviderUnavailable("context_invalid_budget")
+        return MiniMaxCounter(), {
+            "tag": "minimax", "transport": "openai_profile", "context_length": cfg.context_window_tokens,
+            "supported_parameters": [], "api_format": api_format,
+            "effective_provider_url": cfg.chat_provider_url.rstrip("/"),
+        }
     if getattr(cfg, "tokenizer_id", "") == "utf8-byte-upper-bound-v1":
         class Utf8ByteUpperBoundCounter:
             strategy = "utf8_byte_upper_bound_v1"
@@ -604,6 +613,11 @@ def extraction_payload(
         ],
     }
     from .gpt_sol import enabled as sol_enabled, POLICY as SOL_POLICY
+    from .minimax import enabled as minimax_enabled, POLICY as MINIMAX_POLICY
+    if minimax_enabled(cfg):
+        inputs = json.loads(payload['messages'][-1]['content'])
+        inputs['analysis_transport'] = MINIMAX_POLICY
+        payload['messages'][-1]['content'] = extraction_input(inputs)
     if sol_enabled(cfg):
         inputs = json.loads(payload['messages'][-1]['content'])
         inputs['analysis_transport'] = SOL_POLICY

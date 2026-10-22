@@ -1,7 +1,7 @@
 """Immutable attempt identity and explicit, permission-checked reanalysis scheduling."""
 
 from django.db import transaction
-from django.db.models import Max
+from django.db.models import Max, Q
 from rest_framework.exceptions import PermissionDenied
 
 from . import access
@@ -71,6 +71,9 @@ def reserve_attempt(raw, operation_key, *, cfg=None, snapshot_max_id=None,
 
 def schedule_reanalysis(raw_id, user, request_key, *, recovery_id=None, expected_trace_id=None):
     with transaction.atomic():
+        from .dialogue_threads import lock_source
+        source = RawMessage.objects.select_related("config__team", "team", "project").get(pk=raw_id)
+        lock_source(source)
         raw = (
             RawMessage.objects.select_for_update(of=("self",))
             .select_related("config__team", "team", "project")
@@ -87,11 +90,13 @@ def schedule_reanalysis(raw_id, user, request_key, *, recovery_id=None, expected
             raise ProviderUnavailable('reanalysis_source_changed')
         active = OutboxEvent.objects.filter(
             event_type="extract_message",
-            payload__raw_id=raw.id,
             state__in=["pending", "enqueued", "processing"],
-        ).first()
+        ).filter(Q(payload__raw_id=raw.id) | Q(payload__batch_ids__contains=[raw.id])).first()
         if active:
-            trace_id = active.payload.get("trace_id")
+            trace_id = next((entry["trace_id"] for entry in active.payload.get("trace_ids", [])
+                             if entry["raw_id"] == raw.id), None)
+            if trace_id is None and active.payload.get("raw_id") == raw.id:
+                trace_id = active.payload.get("trace_id")
             if trace_id:
                 return raw.traces.get(pk=trace_id)
             raise ProviderUnavailable("context_processing_in_progress")
@@ -105,16 +110,11 @@ def schedule_reanalysis(raw_id, user, request_key, *, recovery_id=None, expected
             if raw.processing_state == 'failed':
                 raw.processing_state = 'received'
                 raw.save(update_fields=['processing_state', 'updated_at'])
-        OutboxEvent.objects.create(
-            event_type="extract_message",
-            deduplication_key=operation_key,
-            payload={
-                "raw_id": raw.id,
-                "trace_id": trace.id,
-                "requested_by_id": user.id,
-                **({'error_recovery_id': recovery_id} if recovery_id is not None else {}),
-            },
-        )
+        from .live_batching import BUFFER_EVENT
+        OutboxEvent.objects.filter(event_type=BUFFER_EVENT, payload__raw_id=raw.id, state="pending").update(
+            state="done", payload={"raw_id": raw.id, "manual_trace_id": trace.id})
+        if recovery_id is None:
+            _enqueue_reanalysis(raw, trace, user, operation_key)
         AuditEvent.objects.create(
             actor=user,
             target_type="MessageProcessingTrace",
@@ -123,3 +123,11 @@ def schedule_reanalysis(raw_id, user, request_key, *, recovery_id=None, expected
             before_after={"raw_message_id": raw.id, "attempt_no": trace.attempt_no},
         )
         return trace
+
+
+def _enqueue_reanalysis(raw, trace, user, operation_key):
+    OutboxEvent.objects.create(
+        event_type="extract_message",
+        deduplication_key=operation_key,
+        payload={"raw_id": raw.id, "trace_id": trace.id, "requested_by_id": user.id},
+    )

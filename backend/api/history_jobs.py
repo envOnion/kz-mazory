@@ -496,6 +496,14 @@ def persist_items(run, config, batch):
             run.no_text_count += int(not bool(raw.content.strip()))
             if run.settings_snapshot.get("only_new"):
                 run.fetched_count += 1
+        if run.settings_snapshot.get("only_new"):
+            if run.settings_snapshot.get("analyze_after_import"):
+                from .live_batching import enqueue
+                event = enqueue(raw)
+                if event is not None and event.deduplication_key not in queued:
+                    run.scheduled_count += 1
+                    queued.add(event.deduplication_key)
+            continue
         if run.settings_snapshot.get("analysis_policy") or raw.processing_state in ("deduplication_ambiguous", "clarification_reply"):
             continue
         if (

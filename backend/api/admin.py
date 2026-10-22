@@ -926,6 +926,7 @@ class AISettingsAdmin(IntegrationAdmin):
         (
             "Chat / Reasoning",
             {
+                "description": "MiniMax M3.1 Flash: OpenAI-compatible, Base URL https://api.minimax.io/v1, модель MiniMax-M3.1-Flash. Вставьте Subscription Key в Chat API Key. Для максимальной длины ответа задайте Резерв ответа и Резерв ответа анализа равными 524288 токенам, а окно контекста — 1000000. Генерация поступает полным потоком и проверяется после сигнала завершения.",
                 "fields": (
                     "chat_api_format",
                     "chat_provider_url",

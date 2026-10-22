@@ -175,7 +175,9 @@ def build_context(raw, cfg, known_projects, snapshot_id, include_following=False
             known_threads=themes, batch_message_ids=requested_batch,
         )
 
-    incremental = getattr(cfg, "autonomous_enabled", False)
+    # A due batch owns its complete targets and the configured context budget;
+    # the older per-message autonomous caps must not drop targets from it.
+    incremental = getattr(cfg, "autonomous_enabled", False) and not getattr(cfg, 'live_batch_policy', None)
     if incremental:
         qs = qs[:max(1, cfg.autonomous_context_messages)]
     max_input = (

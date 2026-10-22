@@ -322,6 +322,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             cfg = copy.copy(cfg)
             limits = trace.context_metadata.get("analysis_limits", {})
             cfg.analysis_policy = "history-packets-v1"
+            cfg.live_batch_policy = trace.context_metadata.get('live_batch_policy')
             cfg.full_history_policy = trace.context_metadata.get('full_history_policy')
             cfg.analysis_chunk_input_limit = trace.context_metadata.get('analysis_chunk_input_limit')
             if cfg.full_history_policy == 'thread-context-v2':
@@ -441,6 +442,7 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             if packet:
                 metadata.update(analysis_policy="history-packets-v1", analysis_limits=limits,
                                 full_history_policy=cfg.full_history_policy,
+                                live_batch_policy=cfg.live_batch_policy,
                                 retry=trace.context_metadata.get("retry", {}), repair_reason=cfg.analysis_repair_reason,
                                 output_retry_generation=trace.context_metadata.get('output_retry_generation', 0))
             metadata.setdefault("snapshot_max_id", trace.context_metadata["snapshot_max_id"])
@@ -457,7 +459,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
             sources.extend(offered.get('target_messages', []))
             sources.extend(item for item in offered.get('context', []) if not item.get('partial'))
             trace.context_metadata['evidence_ranges'] = {str(item['raw_message_id']): len(item['content']) for item in sources}
-        cache_enabled = getattr(cfg, 'full_history_policy', None) == 'thread-context-v2'
+        cache_enabled = (getattr(cfg, 'full_history_policy', None) == 'thread-context-v2'
+                         or bool(trace.context_metadata.get('live_batch_policy')))
         cached_response = _main_response_cache(trace, payload) if cache_enabled and result_override is None else None
         trace.context_metadata["request_state"] = "responded" if cached_response else "sent"
         trace.context_metadata.setdefault("timings_ms", {})["prepare"] = round((time.monotonic()-preparation_started)*1000)
@@ -590,6 +593,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
                     raise ProviderUnavailable("routing_snapshot_changed")
             if requested_by_id:
                 require_reanalysis(User.objects.get(pk=requested_by_id), locked)
+                for member in source_scope(locked).filter(pk__in=batch_ids or []):
+                    require_reanalysis(User.objects.get(pk=requested_by_id), member)
             if RawMessage.objects.filter(
                 source=raw.source,
                 session_name=raw.session_name,
@@ -781,7 +786,8 @@ def extract_message(raw_id, trace_id=None, requested_by_id=None, commitment_refr
         PermissionDenied,
         User.DoesNotExist,
     ) as exc:
-        if isinstance(exc, ProviderUnavailable) and str(exc) == "thread_revision_conflict" and not trace.historyanalysisitem_set.exists():
+        if (isinstance(exc, ProviderUnavailable) and str(exc) == "thread_revision_conflict"
+                and not trace.context_metadata.get("live_batch_policy") and not trace.historyanalysisitem_set.exists()):
             # Never reuse an immutable request containing obsolete thread versions.
             # Reserve a fresh snapshot and let the durable queue retry the analysis.
             with transaction.atomic():

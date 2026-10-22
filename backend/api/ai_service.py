@@ -338,7 +338,7 @@ class AIService:
         if extraction_limit and isinstance(timeout, tuple):
             from .qwen_profile import MODEL
             request_limit = (settings.AI_REQUEST_TIMEOUT if sol_extraction else
-                             min(settings.AI_REQUEST_TIMEOUT, 1200) if payload.get('model') in (MODEL, "openrouter/free") else 180)
+                             min(settings.AI_REQUEST_TIMEOUT, 1200) if payload.get('model') in (MODEL, "openrouter/free", "MiniMax-M3.1-Flash") else 180)
             timeout = (min(timeout[0], 10), min(timeout[1], request_limit))
         if deadline is not None:
             remaining = deadline - time.monotonic()
@@ -350,6 +350,11 @@ class AIService:
                 else tuple(min(t, remaining) for t in timeout)
             )
         cfg = config if config is not None else AISettings.get_active()
+        from .minimax import enabled as minimax_enabled, request as minimax_request
+        minimax_chat = operation == "chat" and minimax_enabled(cfg)
+        minimax_canonical_payload = payload if minimax_chat else None
+        if minimax_chat:
+            payload = minimax_request(payload, cfg.max_completion_tokens)
         if payload.get("model") == "openrouter/free":
             from .free_router import request
             payload = request(payload, cfg.max_completion_tokens)
@@ -431,7 +436,14 @@ class AIService:
             retry_after = retry_after_seconds(response.headers.get("Retry-After"))
             json_parsed = False
             try:
-                data = json.loads(response_body)
+                if minimax_chat and response.status_code < 300 and "text/event-stream" in response.headers.get("Content-Type", ""):
+                    from .minimax import parse_stream
+                    data = parse_stream(response_body)
+                else:
+                    data = json.loads(response_body)
+                    if minimax_chat and response.status_code < 300:
+                        from .minimax import normalize
+                        data = normalize(data)
                 json_parsed = True
             except ValueError:
                 if response.status_code < 400:
@@ -485,6 +497,9 @@ class AIService:
                 failure.diagnostics.update(finish_reason=choice.get("finish_reason"))
                 raise failure
             if response_validator is not None:
+                if minimax_chat:
+                    from .minimax import restore_response
+                    data = restore_response(data, minimax_canonical_payload)
                 response_validator(data)
             succeeded = True
             return data
@@ -756,11 +771,12 @@ class AIService:
             payload, sol_schema = sol_request(payload, cfg)
         if sol_schema is None and not payload.get("response_format") and isinstance(extraction_input_data, dict):
             from .extraction_schema import compatible_extraction_schema, extraction_schema
+            from .minimax import enabled as minimax_enabled
             schema_name = "mazory_extraction" if cfg.chat_model_name == "openrouter/free" else "grounded_whatsapp"
             payload["response_format"] = {"type": "json_schema", "json_schema": {
                 "name": schema_name, "strict": True,
                 "schema": (extraction_schema(extraction_input_data) if cfg.chat_model_name == "openrouter/free"
-                           else compatible_extraction_schema(extraction_input_data)),
+                           else compatible_extraction_schema(extraction_input_data, fixed_slots=not minimax_enabled(cfg))),
             }}
         json_schema = payload.get("response_format", {}).get("json_schema", {}) if isinstance(payload.get("response_format"), dict) else {}
         validation_schema = sol_schema if sol_schema is not None else json_schema.get("schema") if isinstance(json_schema, dict) else None
