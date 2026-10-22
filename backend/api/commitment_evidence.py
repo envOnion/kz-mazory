@@ -13,8 +13,9 @@ def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, aut
     if autonomous is None:
         autonomous = AISettings.get_active().autonomous_enabled or bool(raw.config_id and raw.config.thread_routing_enabled)
     scope = source_scope(raw).filter(id__lte=snapshot_id)
+    origin_role = "request" if fact.get("assignment_kind") == "assignment" else "promise"
     refs = fact.get("evidence_messages") or [
-        {"raw_message_id": raw.id, "quote": fact["evidence"], "role": "promise"}
+        {"raw_message_id": raw.id, "quote": fact["evidence"], "role": origin_role}
     ]
     ids = {item["raw_message_id"] for item in refs}
     rows = {item.id: item for item in scope.filter(id__in=ids).select_related("config")}
@@ -24,7 +25,7 @@ def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, aut
         item["quote"] = quote_match(item["quote"], rows[item["raw_message_id"]].content)
     fact["evidence_messages"] = refs
     if fact.get("evidence_messages") and not any(
-        ref["raw_message_id"] == raw.id and ref["role"] == "promise" for ref in refs
+        ref["raw_message_id"] == raw.id and ref["role"] == origin_role for ref in refs
     ):
         raise ProviderUnavailable("commitment_promise_evidence_unavailable")
     body = EXPORT_HEADER.sub("", raw.content if body_text is None else body_text).strip().casefold().rstrip(".! ")
@@ -58,7 +59,7 @@ def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, aut
         fact['deadline_message_id'] = deadline_id
     # Never trust an arbitrary source ID or a model supplied fulfillment timestamp.
     if deadline_id not in rows:
-        primary_text = ' '.join(item['quote'] for item in refs if item['raw_message_id']==raw.id and item['role']=='promise')
+        primary_text = ' '.join(item['quote'] for item in refs if item['raw_message_id']==raw.id and item['role']==origin_role)
         if autonomous and grounded_dates(primary_text, raw):
             deadline_id = raw.id
             fact['deadline_message_id'] = raw.id
@@ -72,7 +73,7 @@ def validate_commitment(fact, raw, snapshot_id, quote_match, threaded=False, aut
     deadline_text = EXPORT_HEADER.sub("", deadline_text)
     deadline_text = delivery_action(deadline_text, fact.get('commitment_text',''))
     if autonomous and deadline_id != raw.id and not grounded_dates(deadline_text, date_message):
-        initial_text = delivery_action(' '.join(item['quote'] for item in refs if item['raw_message_id']==raw.id and item['role']=='promise'), fact.get('commitment_text',''))
+        initial_text = delivery_action(' '.join(item['quote'] for item in refs if item['raw_message_id']==raw.id and item['role']==origin_role), fact.get('commitment_text',''))
         if grounded_dates(initial_text, raw):
             deadline_id, date_message, deadline_text = raw.id, raw, initial_text
             sent, _, _ = source_time(raw)

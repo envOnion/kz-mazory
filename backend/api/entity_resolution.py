@@ -24,6 +24,10 @@ MAX_PAGES = 3
 ROLES = {"request", "promise", "deadline", "fulfillment", "cancellation", "source", "identity", "amount", "date", "contract", "party"}
 
 
+def _origin_role(fact):
+    return "request" if fact.get("assignment_kind") == "assignment" else "promise"
+
+
 def catalog_fingerprint(team_id, fact, *, object_id=None, project_id=None):
     """Track only identity candidates relevant to this observation, locally."""
     import hashlib
@@ -119,7 +123,7 @@ class Resolver:
         if not refs and isinstance(self.fact.get("evidence"), str):
             anchor = self.fact.get("evidence_message_id", self.raw.id)
             refs = [{"raw_message_id": anchor, "quote": self.fact["evidence"],
-                     "role": "promise" if self.fact.get("fact_type") == "commitment" else "source"}]
+                     "role": _origin_role(self.fact) if self.fact.get("fact_type") == "commitment" else "source"}]
         if not refs or any(not isinstance(ref, dict) or not _integer(ref.get("raw_message_id"))
                            or not isinstance(ref.get("quote"), str) or not ref["quote"].strip()
                            or ref.get("role") not in ROLES for ref in refs):
@@ -130,7 +134,7 @@ class Resolver:
             return False
         self.fact["evidence_messages"] = refs
         if self.fact.get("fact_type") == "commitment" and not self.fact.get("promise_message_id"):
-            promises = {ref["raw_message_id"] for ref in refs if ref["role"] == "promise"}
+            promises = {ref["raw_message_id"] for ref in refs if ref["role"] == _origin_role(self.fact)}
             if len(promises) == 1:
                 self.fact["promise_message_id"] = next(iter(promises))
         return True
@@ -160,6 +164,11 @@ class Resolver:
         coverage["new_identity_eligible"] = bool(coverage["complete"] and (
             stage == "object" and strong_identity_key(normalize_attributes(self.fact))
             or stage == "deal" and self.obj and self.fact.get("deal_contract_number") and self.fact.get("company_name")
+            or stage == "commitment" and self.fact.get("commitment_status", "pending") == "pending"
+                and self.fact.get("responsible_name") and self.fact.get("commitment_text")
+                and any(ref["role"] == _origin_role(self.fact)
+                    and ref["raw_message_id"] == self.fact.get("promise_message_id")
+                    for ref in self.fact.get("evidence_messages", []))
         ))
         chunks = [rows[index:index + PAGE_SIZE] for index in range(0, len(rows), PAGE_SIZE)] or [[]]
         matches, distinct = [], True
@@ -429,7 +438,8 @@ class Resolver:
         if row.candidate_id:
             refs = (row.candidate.proposed_changes or {}).get("evidence_messages", [])
         if not refs and row.source_message_id:
-            refs = [{"raw_message_id": row.source_message_id, "quote": row.source_message.content, "role": "promise"}]
+            original = row.candidate.proposed_changes if row.candidate_id else {}
+            refs = [{"raw_message_id": row.source_message_id, "quote": row.source_message.content, "role": _origin_role(original)}]
         ids = {ref.get("raw_message_id") for ref in refs if isinstance(ref, dict) and _integer(ref.get("raw_message_id"))}
         allowed = set(self.scope.filter(pk__in=ids).values_list("id", flat=True))
         return {"id": row.pk, "project_id": row.project_id, "action": row.commitment_text,
@@ -448,7 +458,9 @@ class Resolver:
         if supplied is not None and (not _integer(supplied) or supplied != row.pk
                                     or self.fact.get("base_commitment_version") != row.version):
             return "commitment_version_conflict"
-        original = [ref for ref in self.commitment_snapshot(row)["evidence_messages"] if ref.get("role") == "promise"
+        original_kind = (row.candidate.proposed_changes or {}).get("assignment_kind", "promise") if row.candidate_id else "promise"
+        origin_role = _origin_role({"assignment_kind": original_kind})
+        original = [ref for ref in self.commitment_snapshot(row)["evidence_messages"] if ref.get("role") == origin_role
                     and ref.get("raw_message_id") == row.source_message_id]
         if not original:
             return "commitment_original_evidence_unavailable"
@@ -495,12 +507,13 @@ class Resolver:
         self.fact["commitment_id"] = row.pk
         self.fact["base_commitment_version"] = row.version
         self.fact["promise_message_id"] = row.source_message_id
+        self.fact["assignment_kind"] = original_kind
         # Preserve the promise/action/actor; lifecycle evidence only proposes
         # status/deadline changes to the existing versioned commitment.
         self.fact["commitment_text"] = row.commitment_text
         self.fact["responsible_name"] = row.responsible_name
         self.fact["evidence_messages"] = list({(ref["raw_message_id"], ref["quote"], ref["role"]): ref for ref in original + refs
-                                               if ref["role"] != "promise" or ref["raw_message_id"] == row.source_message_id}.values())
+                                               if ref["role"] != origin_role or ref["raw_message_id"] == row.source_message_id}.values())
         if role == "fulfillment":
             self.fact["fulfillment_message_id"] = latest.pk
             self.fact["fulfilled_at"] = _when(latest).isoformat()
@@ -544,7 +557,7 @@ class Resolver:
         if selected:
             return self.bind_commitment(selected)
         if distinct and self.fact.get("commitment_status", "pending") == "pending" and origin:
-            if not any(ref["role"] == "promise" and ref["raw_message_id"] == origin for ref in self.fact["evidence_messages"]):
+            if not any(ref["role"] == _origin_role(self.fact) and ref["raw_message_id"] == origin for ref in self.fact["evidence_messages"]):
                 return "commitment_original_evidence_unavailable"
             return "new"
         return reason
