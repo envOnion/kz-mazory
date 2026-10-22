@@ -1037,6 +1037,7 @@ class BitrixSettingsAdmin(IntegrationAdmin):
     )
     readonly_fields = (
         "webhook_url_masked",
+        "sync_timeline_comments",
         "last_sync_at",
         "last_hourly_sync_at",
         "last_sync_status",
@@ -1070,6 +1071,8 @@ class BitrixSettingsAdmin(IntegrationAdmin):
                     "auto_import_deals",
                     "auto_create_tasks",
                     "sync_timeline_comments",
+                    "deal_stage_map",
+                    "deal_field_map",
                     "default_assigned_by_id",
                 )
             },

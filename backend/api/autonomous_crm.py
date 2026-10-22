@@ -1,6 +1,5 @@
 """Versioned, field-limited CRM commands run exclusively by the CRM worker."""
 
-from django.conf import settings
 from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
@@ -55,9 +54,9 @@ def _price_has_own_delivery(project):
     return bool(assertion and assertion.fact_event.event_key.startswith('sale-clarification-reply:'))
 
 
-def enqueue_project(project, fact_event, cfg=None, *, price_only=False, crm_baseline=None):
+def enqueue_project(project, fact_event, cfg=None, *, price_only=False, crm_baseline=None, force=False):
     cfg = cfg or AISettings.get_active()
-    if not cfg.autonomous_crm_enabled:
+    if not cfg.autonomous_crm_enabled and not force:
         return
     integration = BitrixSettings.get_active()
     if not integration.is_active:
@@ -71,24 +70,73 @@ def enqueue_project(project, fact_event, cfg=None, *, price_only=False, crm_base
     })
     if price_only and not isinstance(crm_baseline, dict):
         raise ValueError('price_delivery_baseline_required')
-    patch = {"TITLE": project.name} if project.source == "chat" and not price_only else {}
-    known = set(project.whatsapp_fields)
-    from .commercial_amounts import commercial_amount
-    price = commercial_amount(project)
-    if price is not None and (price_only or not _price_has_own_delivery(project)):
-        patch.update(OPPORTUNITY=str(price), CURRENCY_ID=project.currency)
-    if not price_only and "stage" in known and settings.BITRIX_STAGE_MAP.get(project.status):
-        patch["STAGE_ID"] = settings.BITRIX_STAGE_MAP[project.status]
-    payload = {"project_id": project.id, "version": project.version}
+    data = fact_event.payload if isinstance(fact_event.payload, dict) else {}
+    patch = {}
+    field_map = integration.deal_field_map if isinstance(integration.deal_field_map, dict) else {}
+    for source, key in (("object_name", "object_name"), ("equipment_type", "equipment_type"),
+                        ("meeting_at", "meeting_at"), ("project_received", "project_received"),
+                        ("deal_period", "deal_period")):
+        value = data.get(source)
+        code = field_map.get(key)
+        if value is not None and value != "" and code:
+            if key == "project_received":
+                value = "82" if value is True else "84"
+            patch[code] = value
+    for key in ("paid_amount", "due_amount"):
+        code = field_map.get(key)
+        value = data.get(key)
+        if code and value is not None and value != "":
+            patch[code] = str(value)
+    stage_missing = False
+    if data.get("sales_stage"):
+        stage_id = integration.deal_stage_map.get(data["sales_stage"])
+        if stage_id and (project.bitrix_id or project.identity_confirmed):
+            patch["STAGE_ID"] = stage_id
+        elif not stage_id and (project.bitrix_id or project.identity_confirmed):
+            stage_missing = True
+    if ("sale_amount" in data or "contract_amount" in data) or price_only and "OPPORTUNITY" in (crm_baseline or {}):
+        from .commercial_amounts import commercial_amount
+        price = commercial_amount(project)
+        if price is not None and not price_only:
+            patch.update(OPPORTUNITY=str(price), CURRENCY_ID=project.currency)
+    if data.get("fact_type") == "payment" or fact_event.event_type == "payment":
+        if data.get("direction") == "income" and data.get("amount_precision") == "exact" and project.paid_amount is not None and data.get("payment_kind", "increment") in ("increment", "reversal"):
+            for key, value in (("paid_amount", project.paid_amount),
+                               ("due_amount", project.due_amount if project.contract_known else None)):
+                code = field_map.get(key)
+                if code and value is not None:
+                    patch[code] = str(value)
     if price_only:
-        if set(patch) != {'OPPORTUNITY', 'CURRENCY_ID'}:
+        patch = {key: value for key, value in patch.items() if key in {"OPPORTUNITY", "CURRENCY_ID"}}
+    if not project.bitrix_id and not project.identity_confirmed:
+        patch.pop("STAGE_ID", None)
+        stage_missing = False
+        patch = {key: value for key, value in patch.items() if key != "OPPORTUNITY"}
+    if not integration.auto_create_deals and not project.bitrix_id:
+        return
+    snapshot = getattr(project, "crm_snapshot", None)
+    external_fields = snapshot.external_fields if snapshot and isinstance(snapshot.external_fields, dict) else {}
+    baseline = {key: external_fields[key] for key in patch if key in external_fields}
+    if "STAGE_ID" in patch and snapshot:
+        baseline["STAGE_ID"] = snapshot.external_stage_id
+    payload = {"project_id": project.id, "version": project.version,
+               "crm_baseline": crm_baseline if price_only else None,
+               "field_baseline": baseline,
+               "crm_baseline_synced_at": snapshot.synced_at.isoformat() if snapshot else None}
+    if price_only:
+        if patch and set(patch) != {'OPPORTUNITY', 'CURRENCY_ID'}:
             raise ValueError('price_delivery_amount_required')
-        payload.update(price_only=True, crm_baseline=crm_baseline)
+        if patch:
+            payload.update(price_only=True, crm_baseline=crm_baseline)
+        else:
+            return
+    if not patch and not stage_missing:
+        return
     event, created = OutboxEvent.objects.get_or_create(deduplication_key=f"autonomous-crm:{project.id}:{project.version}", defaults={
         "event_type": "autonomous_crm", "payload": payload,
     })
-    if created:
-        CrmDelivery.objects.create(outbox_event=event, external_object_link=link, fact_event=fact_event, target_version=project.version, patch=patch)
+    if created and (patch or price_only or stage_missing) and (project.bitrix_id or project.identity_confirmed):
+        CrmDelivery.objects.create(outbox_event=event, external_object_link=link, fact_event=fact_event, target_version=project.version, patch=patch, error_code="crm_stage_mapping_missing" if stage_missing else "")
 
 
 def deliver(payload):
@@ -104,7 +152,15 @@ def deliver(payload):
     with transaction.atomic():
         project = Project.objects.select_for_update().get(pk=project_id)
         delivery = CrmDelivery.objects.select_for_update(of=("self",)).select_related("external_object_link").get(outbox_event__deduplication_key=f"autonomous-crm:{project.id}:{version}")
-        if delivery.state in ("delivered", "superseded", "blocked"):
+        if delivery.state in ("delivered", "superseded", "blocked", "partial", "cancelled"):
+            return
+        if delivery.error_code == "crm_stage_mapping_missing":
+            delivery.state = "blocked"
+            delivery.save(update_fields=["state", "updated_at"])
+            return
+        if not delivery.patch:
+            delivery.state, delivery.error_code = "blocked", "crm_no_safe_fields"
+            delivery.save(update_fields=["state", "error_code", "updated_at"])
             return
         price_only = payload.get('price_only') is True
         current_price = _current_price_assertion(project) if price_only else None
@@ -131,10 +187,6 @@ def deliver(payload):
             delivery.patch.pop('OPPORTUNITY', None)
             delivery.patch.pop('CURRENCY_ID', None)
             delivery.save(update_fields=['patch'])
-        stage_missing = not price_only and "stage" in project.whatsapp_fields and project.status not in settings.BITRIX_STAGE_MAP
-        if not price_only and "stage" in project.whatsapp_fields and settings.BITRIX_STAGE_MAP.get(project.status):
-            delivery.patch["STAGE_ID"] = settings.BITRIX_STAGE_MAP[project.status]
-            delivery.save(update_fields=["patch"])
         integration = BitrixSettings.get_active()
         if not integration.is_active:
             raise ProviderUnavailable("crm_disabled")
@@ -167,8 +219,26 @@ def deliver(payload):
                     delivery.state, delivery.error_code = 'blocked', 'crm_price_changed'
                     delivery.save(update_fields=['state', 'error_code', 'updated_at'])
                     return
-            # Human-owned CRM values are not read back as WhatsApp facts.
-            patch = {key: value for key, value in delivery.patch.items() if str(current.get(key, "")) != str(value)}
+            # Only fields unchanged since the captured CRM baseline are writable.
+            baseline = payload.get("field_baseline", {})
+            patch, conflicts = {}, []
+            category = integration.deal_category_id
+            stage_code = "DEAL_STAGE" if category == 0 else f"DEAL_STAGE_{category}"
+            stages = BitrixService.call("crm.status.list", {"filter": {"ENTITY_ID": stage_code}}).get("result", []) if "STAGE_ID" in delivery.patch else []
+            valid_stages = {str(row.get("STATUS_ID")) for row in stages if isinstance(row, dict) and str(row.get("ENTITY_ID")) == stage_code}
+            for key, value in delivery.patch.items():
+                if key == "STAGE_ID" and str(value) not in valid_stages:
+                    conflicts.append("STAGE_ID")
+                    continue
+                if key == "STAGE_ID" and current.get("STAGE_SEMANTIC_ID") in ("S", "F"):
+                    conflicts.append(key)
+                    continue
+                if str(current.get(key, "")) == str(value):
+                    continue
+                if key not in baseline or str(current.get(key, "")) != str(baseline[key]):
+                    conflicts.append(key)
+                    continue
+                patch[key] = value
             if patch:
                 BitrixService.call("crm.deal.update", {"id": external, "fields": patch})
         else:
@@ -177,21 +247,36 @@ def deliver(payload):
             candidate = delivery.fact_event.decision.candidate if delivery.fact_event and delivery.fact_event.decision_id else None
             if not candidate or candidate.crm_match_state != "not_found":
                 raise ProviderUnavailable("crm_identity_unresolved")
-            fields = {**delivery.patch, "ORIGINATOR_ID": "MAZORY", "ORIGIN_ID": link.origin_key, "CATEGORY_ID": integration.deal_category_id}
+            if "STAGE_ID" in delivery.patch:
+                category = integration.deal_category_id
+                stage_code = "DEAL_STAGE" if category == 0 else f"DEAL_STAGE_{category}"
+                stages = BitrixService.call("crm.status.list", {"filter": {"ENTITY_ID": stage_code}}).get("result", [])
+                if str(delivery.patch["STAGE_ID"]) not in {str(row.get("STATUS_ID")) for row in stages if isinstance(row, dict) and str(row.get("ENTITY_ID")) == stage_code}:
+                    delivery.state, delivery.error_code = "blocked", "crm_invalid_stage_mapping"
+                    delivery.save(update_fields=["state", "error_code", "updated_at"])
+                    return
+            fields = {
+                **delivery.patch,
+                "TITLE": project.name,
+                "ORIGINATOR_ID": "MAZORY",
+                "ORIGIN_ID": link.origin_key,
+                "CATEGORY_ID": integration.deal_category_id,
+            }
             external = str(BitrixService.call("crm.deal.add", {"fields": fields})["result"])
+            patch, conflicts = fields, []
         if not external or not external.isdigit():
             raise ProviderUnavailable("crm_invalid_response")
-        verify_deal(external, delivery.patch)
+        if patch:
+            verify_deal(external, patch)
         link.external_id = external
         link.save(update_fields=["external_id"])
         sync_state = {'bitrix_id': external, 'last_bitrix_synced_at': timezone.now()}
         if project.version == version:
             sync_state['needs_bitrix_sync'] = False
         Project.objects.filter(pk=project.id).update(**sync_state)
-        delivery.state, delivery.error_code = ("partial", "crm_stage_mapping_missing") if stage_missing else ("delivered", "")
+        delivery.state = "partial" if conflicts else "delivered"
+        delivery.error_code = "crm_human_edit_conflict" if conflicts else ""
         delivery.save(update_fields=["state", "error_code", "updated_at"])
-    if stage_missing:
-        raise ProviderUnavailable("crm_stage_mapping_missing")
 
 
 def enqueue_effects(candidate, fact_event, cfg):
@@ -208,8 +293,6 @@ def enqueue_effects(candidate, fact_event, cfg):
         event, created = OutboxEvent.objects.get_or_create(deduplication_key=f"autonomous-{kind}:{local.id}:{version}", defaults={"event_type": "autonomous_crm", "payload": {"kind": kind, "local_id": local.id, "version": version}})
         if created:
             CrmDelivery.objects.create(outbox_event=event, external_object_link=link, fact_event=fact_event, target_version=version, patch=patch)
-    if integration.sync_timeline_comments and candidate.project_id:
-        queue("timeline", fact_event, 1, {})
     if candidate.fact_type == "commitment" and integration.auto_create_tasks:
         task = Commitment.objects.filter(pk=candidate.proposed_changes.get("commitment_id")).first() if candidate.proposed_changes.get("commitment_id") else Commitment.objects.filter(candidate=candidate).first()
         if task:
@@ -230,6 +313,12 @@ def _result_id(value):
 
 def deliver_effect(payload):
     from .bitrix_service import BitrixService
+    if payload.get("kind") == "timeline":
+        CrmDelivery.objects.filter(
+            outbox_event__deduplication_key=f"autonomous-timeline:{payload['local_id']}:1",
+            state__in=("pending", "retrying"),
+        ).update(state="cancelled", error_code="crm_timeline_disabled")
+        return
     if not AISettings.get_active().autonomous_crm_enabled:
         raise ProviderUnavailable("autonomous_crm_paused")
     integration = BitrixSettings.get_active()
@@ -238,43 +327,15 @@ def deliver_effect(payload):
     kind, local_id, version = payload["kind"], payload["local_id"], payload["version"]
     with transaction.atomic():
         delivery = CrmDelivery.objects.select_for_update(of=("self",)).select_related("external_object_link", "fact_event__project", "fact_event__decision__candidate").get(outbox_event__deduplication_key=f"autonomous-{kind}:{local_id}:{version}")
-        if delivery.state in ("delivered", "superseded"):
+        if delivery.state in ("delivered", "superseded", "blocked", "partial", "cancelled"):
+            return
+        if delivery.error_code == "crm_stage_mapping_missing":
+            delivery.state = "blocked"
+            delivery.save(update_fields=["state", "updated_at"])
             return
         link = delivery.external_object_link
         external = link.external_id
-        if kind == "timeline":
-            if not integration.sync_timeline_comments:
-                raise ProviderUnavailable("crm_timeline_disabled")
-            project = delivery.fact_event.project
-            if not project or not project.bitrix_id:
-                raise ProviderUnavailable("crm_deal_delivery_pending")
-            marker = f"[MAZORY-EVENT:{delivery.fact_event_id}]"
-            # The documented filter supports only the parent entity. Search
-            # pages explicitly; never use an undocumented COMMENT filter.
-            if not external:
-                for page in range(10):
-                    response = BitrixService.call("crm.timeline.comment.list", {"filter": {"ENTITY_ID": project.bitrix_id, "ENTITY_TYPE": "deal"}, "order": {"ID": "DESC"}, "start": page * 50})
-                    rows = response.get("result")
-                    if not isinstance(rows, list):
-                        raise ProviderUnavailable("crm_invalid_response")
-                    matches = [row for row in rows if marker in str(row.get("COMMENT", ""))]
-                    if len(matches) > 1:
-                        raise ProviderUnavailable("crm_origin_conflict")
-                    if matches:
-                        external = _result_id(matches[0]["ID"])
-                        break
-                    if not response.get("next"):
-                        break
-                else:
-                    raise ProviderUnavailable("crm_reconciliation_incomplete")
-            if not external:
-                candidate = delivery.fact_event.decision.candidate
-                decision = delivery.fact_event.decision
-                text = f"{marker}\nWhatsApp · {delivery.fact_event.event_type}\n{candidate.proposed_changes.get('evidence', '')}\nОснование: {decision.explanation}\nMazory: факт {candidate.id}, событие {delivery.fact_event_id}."
-                if candidate.proposed_changes.get('stage'):
-                    text += f"\nСтадия Mazory: {dict(Project.STATUS_CHOICES)[candidate.proposed_changes['stage']]}"
-                external = _result_id(BitrixService.call("crm.timeline.comment.add", {"fields": {"ENTITY_ID": project.bitrix_id, "ENTITY_TYPE": "deal", "COMMENT": text}}).get("result"))
-        elif kind == "company":
+        if kind == "company":
             company = Company.objects.select_for_update().get(pk=local_id)
             external = external or company.bitrix_company_id
             if not external:

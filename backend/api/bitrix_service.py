@@ -881,76 +881,7 @@ class BitrixService:
             return
         # Once autonomous accounting owns delivery, old scheduled jobs may
         # only enqueue its field-limited command, never restore a full snapshot.
-        from .models import AISettings, FactEvent
-        if AISettings.get_active().autonomous_enabled:
-            from .autonomous_crm import enqueue_project
-            event = FactEvent.objects.filter(project=project).exclude(event_type="daily_report").order_by("-id").first()
-            if event:
-                enqueue_project(project, event)
-            return
-        revision = ProjectRevision.objects.get(project=project, version=version)
-        snapshot = revision.snapshot
-        stage = settings.BITRIX_STAGE_MAP.get(snapshot["status"])
-        from .commercial_amounts import commercial_amount
-        price = commercial_amount(project)
-        if price is None and snapshot.get("contract_known") and Decimal(str(snapshot.get("contract_amount") or 0)) > 0:
-            price = Decimal(snapshot["contract_amount"])
-        fields = {
-            "STAGE_ID": stage,
-            "TITLE": snapshot["name"],
-            "OPPORTUNITY": str(price) if price is not None else None,
-            "CURRENCY_ID": snapshot["currency"],
-            "ORIGINATOR_ID": "MAZORY",
-            "ORIGIN_ID": str(project.id),
-            "COMMENTS": escape(snapshot.get("current_action", ""))
-            + "\n"
-            + escape(snapshot.get("next_action", "")),
-        }
-        if not stage:
-            fields.pop("STAGE_ID", None)
-        if price is None:
-            fields.pop("OPPORTUNITY", None)
-        if not project.is_verified:
-            fields = {"TITLE": snapshot["name"], "ORIGINATOR_ID": "MAZORY", "ORIGIN_ID": str(project.id)}
-        # Stable external key permits reconciliation after an unknown create outcome.
-        if not project.bitrix_id:
-            matches = BitrixService.call(
-                "crm.deal.list",
-                {
-                    "filter": {
-                        "=ORIGINATOR_ID": "MAZORY",
-                        "=ORIGIN_ID": str(project.id),
-                    },
-                    "select": ["ID"],
-                },
-            ).get("result", [])
-            if len(matches) > 1:
-                raise ProviderUnavailable("crm_origin_conflict")
-            if matches:
-                project.bitrix_id = str(matches[0]["ID"])
-                Project.objects.filter(pk=project.id).update(
-                    bitrix_id=project.bitrix_id
-                )
-        from .bitrix_journal import project_context
-        with project_context(project.id, f"approved_revision:{version}"):
-            if not project.bitrix_id:
-                if not cfg.auto_create_deals:
-                    raise ProviderUnavailable("crm_creation_disabled")
-                result = BitrixService.call("crm.deal.add", {"fields": fields})
-                external = str(result["result"])
-            else:
-                external = project.bitrix_id
-                result = BitrixService.call(
-                    "crm.deal.update", {"id": external, "fields": fields}
-                )
-        with transaction.atomic():
-            Project.objects.filter(pk=project.id, version=version).update(
-                bitrix_id=external,
-                needs_bitrix_sync=False,
-                last_bitrix_synced_at=timezone.now(),
-            )
-            # Provider mutations already have durable receipts in the shared
-            # journal, including when this local transaction is rolled back.
+        return
 
     @staticmethod
     def propose_import(payload):

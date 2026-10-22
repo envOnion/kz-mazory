@@ -171,6 +171,11 @@ def project_row(p, *, paid_total=None, payments_known=None):
         "margin_alert": margin is not None and margin < 15,
         "status": stage_label,
         "status_code": stage,
+        "sales_stage": p.sales_stage,
+        "sales_stage_label": p.get_sales_stage_display() if p.sales_stage else "",
+        "meeting_at": p.meeting_at.isoformat() if p.meeting_at else None,
+        "meeting_at_formatted": p.meeting_at.astimezone(timezone.get_current_timezone()).strftime("%d.%m.%Y %H:%M") if p.meeting_at else "",
+        "project_received": p.project_received,
         "stage_source": stage_source,
         "crm_amount": money(crm.opportunity)
         if crm and crm.opportunity is not None

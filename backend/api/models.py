@@ -1,4 +1,5 @@
 from decimal import Decimal
+import re
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.conf import settings
@@ -143,6 +144,17 @@ class Project(TimestampedModel):
         ("stalled", "Завис / Требует внимания"),
         ("lost", "Проигран / Архив"),
     ]
+    SALES_STAGE_CHOICES = [
+        ("new", "Новая сделка"),
+        ("in_work", "В работе"),
+        ("visit_scheduled", "Назначен выезд"),
+        ("visit_completed", "Выезд совершен"),
+        ("project_received", "Проект получен"),
+        ("calculation", "Просчет"),
+        ("proposal_sent", "КП отправлено клиенту"),
+        ("contract", "Договор"),
+        ("invoicing", "Оплата по счетам"),
+    ]
     PROJECT_TYPE_CHOICES = [
         ("private", "Частный"),
         ("state", "Государственный"),
@@ -208,6 +220,12 @@ class Project(TimestampedModel):
     status = models.CharField(
         "Статус сделки", max_length=64, choices=STATUS_CHOICES, default="qualification"
     )
+    sales_stage = models.CharField(
+        "Стадия продаж в CRM", max_length=32, choices=SALES_STAGE_CHOICES,
+        null=True, blank=True, default=None,
+    )
+    meeting_at = models.DateTimeField("Дата выезда / встречи", null=True, blank=True)
+    project_received = models.BooleanField("Проектная документация получена", null=True, blank=True)
 
     team = models.ForeignKey("Team", on_delete=models.PROTECT, null=True, blank=True)
     version = models.PositiveIntegerField(default=0)
@@ -316,6 +334,12 @@ class Project(TimestampedModel):
         self.due_amount = contract - Decimal(str(self.paid_amount or 0))
         super().save(*args, **kwargs)
 
+    def clean(self):
+        super().clean()
+        if self.sales_stage == "project_received" and self.project_received is False:
+            from django.core.exceptions import ValidationError
+            raise ValidationError({"project_received": "Стадия «Проект получен» требует подтверждённой проектной документации."})
+
 
 class CrmProjectSnapshot(TimestampedModel):
     """Current CRM metadata, separate from accepted business facts."""
@@ -323,6 +347,7 @@ class CrmProjectSnapshot(TimestampedModel):
     project = models.OneToOneField(Project, on_delete=models.CASCADE, related_name="crm_snapshot")
     external_stage_id = models.CharField(max_length=128, blank=True, default="")
     external_stage_name = models.CharField(max_length=255, blank=True, default="")
+    external_fields = models.JSONField(default=dict, blank=True)
     external_manager_id = models.CharField(max_length=64, blank=True, default="")
     external_manager_name = models.CharField(max_length=255, blank=True, default="")
     opportunity = models.DecimalField(max_digits=14, decimal_places=2, null=True, blank=True)
@@ -1018,6 +1043,27 @@ class AISettings(TimestampedModel):
         return cls.objects.filter(is_primary=True, is_active=True).first() or cls(is_active=False)
 
 
+def default_bitrix_deal_stages():
+    return {
+        "new": "NEW", "in_work": "PREPARATION",
+        "visit_scheduled": "PREPAYMENT_INVOICE", "visit_completed": "EXECUTING",
+        "project_received": "FINAL_INVOICE", "calculation": "1",
+        "proposal_sent": "UC_VF1EID", "contract": "UC_WB6P16", "invoicing": "2",
+    }
+
+
+def default_bitrix_deal_fields():
+    return {
+        "object_name": "UF_CRM_1731131779572",
+        "equipment_type": "UF_CRM_1778166248543",
+        "deal_period": "UF_CRM_1778164670507",
+        "meeting_at": "UF_CRM_1728849397",
+        "project_received": "UF_CRM_1729073444",
+        "paid_amount": "UF_CRM_1728500826",
+        "due_amount": "UF_CRM_1728500835",
+    }
+
+
 class BitrixSettings(TimestampedModel):
     """
     Настройки интеграции с Bitrix24 REST API.
@@ -1047,9 +1093,19 @@ class BitrixSettings(TimestampedModel):
         "Создавать задачи в Bitrix24 по дедлайнам", default=True
     )
     sync_timeline_comments = models.BooleanField(
-        "Публиковать саммари в таймлайн сделки", default=True
+        "Публиковать комментарии в таймлайн сделки", default=False
     )
     deal_category_id = models.IntegerField("ID воронки сделок", default=0)
+    deal_stage_map = models.JSONField(
+        "Стадии CRM для воронки",
+        default=default_bitrix_deal_stages, blank=True,
+        help_text="ID берутся из crm.status.list выбранной воронки. Девять стадий продаж не заменяют успешное/неуспешное закрытие.",
+    )
+    deal_field_map = models.JSONField(
+        "Поля CRM для данных объекта",
+        default=default_bitrix_deal_fields, blank=True,
+        help_text="Логические поля → коды UF_CRM_* этой CRM. Значения сотрудников защищаются снимком перед записью.",
+    )
     deal_object_field_code = models.CharField(
         "Код поля объекта сделки",
         max_length=64,
@@ -1085,10 +1141,24 @@ class BitrixSettings(TimestampedModel):
 
     def clean(self):
         super().clean()
+        from django.core.exceptions import ValidationError
         if type(self).objects.exclude(pk=self.pk).exists():
             raise ValidationError(
                 "Допускается только одна конфигурация Bitrix24."
             )
+        allowed_stages = {value for value, _ in Project.SALES_STAGE_CHOICES}
+        if not isinstance(self.deal_stage_map, dict) or any(
+            key not in allowed_stages or not isinstance(value, str) or not value.strip()
+            for key, value in self.deal_stage_map.items()
+        ) or set(self.deal_stage_map) != allowed_stages:
+            raise ValidationError({"deal_stage_map": "Укажите ID CRM стадий для известных стадий продаж."})
+        allowed_fields = {"object_name", "equipment_type", "deal_period", "meeting_at", "project_received", "paid_amount", "due_amount"}
+        if not isinstance(self.deal_field_map, dict) or any(
+            key not in allowed_fields or not isinstance(value, str)
+            or not re.fullmatch(r"UF_CRM_[A-Z0-9_]+", value.strip().upper())
+            for key, value in self.deal_field_map.items()
+        ):
+            raise ValidationError({"deal_field_map": "Укажите коды UF_CRM_* для поддерживаемых полей."})
 
     def __str__(self):
         return f"{self.name} ({'Активен' if self.is_active else 'Выключен'})"

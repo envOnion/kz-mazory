@@ -230,7 +230,7 @@ def _validate(candidate, data, primary, text):
             if rounded_restatement(candidate.project, data["sale_amount"], sale_clause):
                 data.pop("sale_amount")
                 candidate._discarded_fields = {**getattr(candidate, "_discarded_fields", {}), "sale_amount": "Округлённый пересказ цены в миллионах без сообщения об изменении: сохранена ранее указанная точная сумма продажи."}
-        if candidate.project_id and occurred and FieldAssertion.objects.filter(fact_event__is_superseded=False,project_id=candidate.project_id, field_name__in=[key for key in ("contract_amount", "cost_amount", "stage") if key in data], fact_event__occurred_at__gt=occurred).exists():
+        if candidate.project_id and occurred and FieldAssertion.objects.filter(fact_event__is_superseded=False,project_id=candidate.project_id, field_name__in=[key for key in ("contract_amount", "cost_amount", "stage", "sales_stage", "meeting_at", "project_received", "equipment_type") if key in data], fact_event__occurred_at__gt=occurred).exists():
             raise Deferred("older_source_revision", "Более поздняя переписка уже уточнила значение; старый факт не заменяет текущий.")
         if "contract_amount" in data and not re.search(r"договор|контракт", text, re.I):
             raise Deferred("plan_not_contract", "Сумма без договорного основания не является суммой договора.")
@@ -247,6 +247,14 @@ def _validate(candidate, data, primary, text):
                 raise Deferred("unsupported_stage", "План завершения или отрицание не подтверждают завершенный объект.")
             if not re.search(words[data["stage"]], text, re.I):
                 raise Deferred("unsupported_stage", "Стадия не имеет основания в цитатах.")
+        if "sales_stage" in data:
+            from .crm_lifecycle import stage_has_evidence, sales_stage_rank
+            if occurred is None or not stage_has_evidence(data["sales_stage"], text):
+                data.pop("sales_stage")
+                data["uncertainties"] = [*data.get("uncertainties", []), "Стадия продаж не обновлена: нет прямого подтверждения совершённого события."][:20]
+            elif candidate.project_id and sales_stage_rank(data["sales_stage"]) < sales_stage_rank(candidate.project.sales_stage):
+                data.pop("sales_stage")
+                data["uncertainties"] = [*data.get("uncertainties", []), "Стадия продаж не возвращена назад по более старому или неподтверждённому событию."][:20]
         if candidate.project_id and occurred and FieldAssertion.objects.filter(
             fact_event__is_superseded=False, project_id=candidate.project_id,
             field_name__in=[key for key in ('current_action', 'next_action') if data.get(key)],
@@ -430,7 +438,7 @@ def _participant(candidate, data, raw):
 def _source_event(candidate, decision, data, raw, mode):
     return FactEvent.objects.create(
         decision=decision, team=candidate.team, project=candidate.project,
-        event_key=f"decision:{decision.id}", event_type="payment_schedule" if mode == "schedule" else f"reported_{data['payment_kind']}" if mode == "observation" and candidate.fact_type == 'payment' else candidate.fact_type,
+        event_key=f"decision:{decision.id}", event_type="payment_schedule" if mode == "schedule" else f"reported_{data['payment_kind']}" if mode == "observation" and candidate.fact_type == 'payment' else "project_update" if candidate.fact_type == "project" else candidate.fact_type,
         occurred_at=source_time(raw)[0], payload=json_value(data),
     )
 
@@ -458,9 +466,9 @@ def _publish(candidate, decision, data, raw, mode, event=None):
             normalized = normalize_deal_name(label)
             if normalized:
                 ProjectAlias.objects.get_or_create(project=project, normalized_name=normalized, defaults={"decision": decision})
-        for field in ("contract_amount", "sale_amount", "cost_amount", "current_action", "next_action", "stage"):
+        for field in ("contract_amount", "sale_amount", "cost_amount", "current_action", "next_action", "stage", "sales_stage", "equipment_type", "meeting_at", "project_received"):
             if field in data and data[field] != "":
-                FieldAssertion.objects.create(fact_event=event, project=project, field_name=field, value=json_value(data[field]))
+                FieldAssertion.objects.get_or_create(fact_event=event, project=project, field_name=field, defaults={"value": json_value(data[field])})
         # Mentioning a party does not authorize replacing the legal customer.
         if data.get("company_name"):
             parties = list(Company.objects.filter(name__iexact=data["company_name"]).filter(Q(team=candidate.team) | Q(team__isnull=True))[:2])
@@ -546,7 +554,7 @@ def decide(candidate_id, *, preview=False):
                     event = _publish(candidate, decision, data, primary, mode,event=event)
                     from .autonomous_crm import enqueue_effects, enqueue_project
                     if not preview:
-                        if candidate.project_id:
+                        if candidate.project_id and candidate.fact_type == "project":
                             enqueue_project(candidate.project, event, cfg)
                         enqueue_effects(candidate, event, cfg)
                 elif outcome == "rejected":

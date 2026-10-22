@@ -96,7 +96,7 @@ def extraction_schema(input_data=None, *, literal_quote_enums=True, fixed_slots=
     # its amount, and a promise cannot omit the action/source/actor.
     common = {"thread_key", "evidence_message_id", "fact_type", "object_name", "company_name", "party_role", "evidence", "evidence_messages", "confidence", "uncertainties", "sender_phone", "in_progress"}
     extra = {
-        "project": {"contract_amount", "sale_amount", "cost_amount", "currency", "stage", "current_action", "next_action"},
+        "project": {"contract_amount", "sale_amount", "cost_amount", "currency", "stage", "sales_stage", "equipment_type", "meeting_at", "project_received", "current_action", "next_action"},
         "payment": {"amount", "currency", "payment_date", "payment_kind", "direction", "amount_precision", "reverses_id"},
         "commitment": {"commitment_text", "responsible_name", "assignment_kind", "commitment_status", "promise_message_id", "deadline_at", "deadline_precision", "deadline_basis", "deadline_message_id", "fulfillment_message_id", "fulfilled_at", "commitment_id", "base_commitment_version"},
     }

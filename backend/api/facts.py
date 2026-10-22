@@ -78,6 +78,12 @@ class FactSchema(serializers.Serializer):
     stage = serializers.ChoiceField(
         choices=[x[0] for x in Project.STATUS_CHOICES], required=False
     )
+    sales_stage = serializers.ChoiceField(
+        choices=[x[0] for x in Project.SALES_STAGE_CHOICES], required=False
+    )
+    equipment_type = serializers.CharField(max_length=255, allow_blank=True, required=False)
+    meeting_at = serializers.DateTimeField(required=False, allow_null=True)
+    project_received = serializers.BooleanField(required=False, allow_null=True)
     current_action = serializers.CharField(
         max_length=1000, allow_blank=True, default=""
     )
@@ -121,6 +127,10 @@ class FactSchema(serializers.Serializer):
         return value
 
     def validate(self, data):
+        if data.get("sales_stage") == "project_received" and data.get("project_received") is False:
+            raise serializers.ValidationError({"project_received": "Стадия «Проект получен» требует подтверждённой документации."})
+        if "meeting_at" in data and data["meeting_at"] is None and data.get("sales_stage") == "visit_scheduled":
+            raise serializers.ValidationError({"meeting_at": "Для запланированного выезда укажите подтверждённую дату или не задавайте это поле."})
         if data["fact_type"] == "payment" and "amount" not in data and data["amount_precision"] != "unknown":
             raise serializers.ValidationError("Для платежа требуется сумма.")
         if data["fact_type"] == "commitment" and not data.get("commitment_text"):
@@ -263,6 +273,9 @@ def snapshot(project):
         "due_amount",
         "currency",
         "status",
+        "sales_stage",
+        "meeting_at",
+        "project_received",
         "team_id",
         "manager_id",
         "company_id",
@@ -288,6 +301,21 @@ def record_revision(project, actor, previous_stage=""):
             to_stage=project.status,
         )
     return revision
+
+
+def sync_crm_stages(project):
+    """Update local stage from an imported CRM snapshot without claiming WhatsApp provenance."""
+    from .models import CrmProjectSnapshot, BitrixSettings
+    snapshot_row = getattr(project, "crm_snapshot", None)
+    if not snapshot_row:
+        return False
+    stage = next((key for key, value in BitrixSettings.get_active().deal_stage_map.items()
+                  if str(value) == str(snapshot_row.external_stage_id)), None)
+    if not stage or stage == project.sales_stage:
+        return False
+    project.sales_stage = stage
+    project.save(update_fields=["sales_stage", "updated_at"])
+    return True
 
 
 def _project_identity_conflict(team_id, name, normalized):
@@ -887,6 +915,21 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
         data = schema.validated_data
         if data["fact_type"] != candidate.fact_type:
             raise serializers.ValidationError("Тип факта изменить нельзя.")
+        if action == "approve" and "sales_stage" in data:
+            from .crm_lifecycle import sales_stage_rank, stage_has_evidence
+            source_text = " ".join(candidate.evidence.values_list("quote", flat=True))
+            if not stage_has_evidence(data["sales_stage"], source_text):
+                raise serializers.ValidationError("Стадия продаж не подтверждена явным описанием состоявшегося события.")
+            if candidate.project_id and sales_stage_rank(data["sales_stage"]) < sales_stage_rank(candidate.project.sales_stage):
+                raise Conflict("Более старая стадия не может вернуть сделку назад.")
+            if candidate.project_id and candidate.trace.raw_message.timestamp and FieldAssertion.objects.filter(
+                fact_event__is_superseded=False, project_id=candidate.project_id,
+                field_name="sales_stage", fact_event__occurred_at__gt=candidate.trace.raw_message.timestamp,
+            ).exists():
+                raise Conflict("Есть более позднее подтверждённое изменение стадии продаж.")
+        if action == "approve" and "meeting_at" in data and data["meeting_at"] is not None:
+            if candidate.trace.raw_message.timestamp and data["meeting_at"] < candidate.trace.raw_message.timestamp:
+                raise serializers.ValidationError({"meeting_at": "Дата выезда раньше сообщения-основания."})
         if action == "approve":
             if candidate.project_id:
                 candidate_project = Project.objects.select_for_update(
@@ -994,12 +1037,18 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                     "cost_amount",
                     "current_action",
                     "next_action",
+                    "sales_stage",
+                    "equipment_type",
+                    "meeting_at",
+                    "project_received",
                 ):
                     if field in data and data[field] != "":
                         setattr(project, field, data[field])
+                if data.get("sales_stage") == "project_received":
+                    project.project_received = True
                 if "contract_amount" in data:
                     project.contract_known = True
-                project.whatsapp_fields = sorted(set(project.whatsapp_fields) | {field for field in ("contract_amount", "sale_amount", "cost_amount", "current_action", "next_action", "stage") if field in data and data[field] != ""})
+                project.whatsapp_fields = sorted(set(project.whatsapp_fields) | {field for field in ("contract_amount", "sale_amount", "cost_amount", "current_action", "next_action", "stage", "sales_stage", "equipment_type", "meeting_at", "project_received") if field in data and data[field] not in ("", None)})
                 if "cost_amount" in data:
                     project.cost_confirmed = True
                 if "stage" in data:
@@ -1202,9 +1251,11 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                     raise Conflict("Проект конфликтует с существующей записью.") from exc
                 candidate.project = project
                 candidate.proposed_changes = json_value(data)
-                if not system and candidate.fact_type == "project" and {"sale_amount", "contract_amount"} & data.keys():
-                    # Human review uses the same source chronology as autonomous
-                    # approval; a later CRM sync must not select an older price.
+                reviewed_fields = {"sale_amount", "contract_amount", "cost_amount", "sales_stage", "equipment_type", "meeting_at", "project_received", "current_action", "next_action"}
+                reviewed_event = None
+                if not system and candidate.fact_type == "project" and reviewed_fields & data.keys():
+                    # Preserve source time and field-level evidence for later
+                    # idempotent CRM delivery and stale-update protection.
                     from .models import FactEvent, FieldAssertion
                     from .message_time import source_time
                     source = candidate.trace.raw_message
@@ -1213,15 +1264,18 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                         ref = candidate.evidence.select_related("raw_message").filter(raw_message_id=anchor).first()
                         if ref:
                             source = ref.raw_message
-                    event = FactEvent.objects.create(
+                    event, created = FactEvent.objects.get_or_create(
                         team=candidate.team, project=project,
-                        event_key=f"reviewed-price:{candidate.id}", event_type="project_update",
-                        occurred_at=source_time(source)[0] if source else None,
-                        payload={**json_value(data), "reviewed_by": user.id, "candidate_id": candidate.id},
+                        event_key=f"reviewed-project:{candidate.id}",
+                        defaults={"event_type":"project_update",
+                            "occurred_at":source_time(source)[0] if source else None,
+                            "payload":{**json_value(data), "reviewed_by": user.id, "candidate_id": candidate.id}},
                     )
-                    for field in ("sale_amount", "contract_amount"):
-                        if field in data:
-                            FieldAssertion.objects.create(fact_event=event, project=project, field_name=field, value=json_value(data[field]))
+                    if created:
+                        for field in reviewed_fields:
+                            if field in data:
+                                FieldAssertion.objects.get_or_create(fact_event=event, project=project, field_name=field, defaults={"value": json_value(data[field])})
+                    reviewed_event = event
                 record_revision(project, user, old_stage)
                 AuditEvent.objects.create(
                     actor=user,
@@ -1235,16 +1289,10 @@ def _apply_candidate(candidate_id, user, action, reason="", changes=None, base_v
                     },
                 )
                 if not system and project.needs_bitrix_sync and BitrixSettings.objects.filter(is_active=True).exists():
-                    OutboxEvent.objects.get_or_create(
-                        deduplication_key=f"crm:{project.id}:{project.version}",
-                        defaults={
-                            "event_type": "crm_sync",
-                            "payload": {
-                                "project_id": project.id,
-                                "version": project.version,
-                            },
-                        },
-                    )
+                    OutboxEvent.objects.filter(deduplication_key=f"crm:{project.id}:{project.version}").update(deduplication_key=f"legacy-crm:{project.id}:{project.version}", state="cancelled", error_code="crm_legacy_sync_disabled")
+                    if reviewed_event:
+                        from .autonomous_crm import enqueue_project
+                        enqueue_project(project, reviewed_event, force=True)
         if action == "approve":
             projection["project_after"]=row_snapshot(project)
             candidate.materialization_snapshot=projection
