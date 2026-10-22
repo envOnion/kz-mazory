@@ -6,6 +6,8 @@ export interface ManagerProjectSummary {
   paid_amount: Money | null; paid_formatted: string; due_amount: Money | null; due_formatted: string; overpayment: Money | null;
   stage_source?: string; crm_amount?: Money | null; crm_formatted?: string | null; crm_synced_at?: string | null;
   status: string; status_code: string; margin_percent: number | null; equipment: string; is_verified: boolean;
+  sales_stage?: string | null; sales_stage_label?: string; meeting_at?: string | null; project_received?: boolean | null;
+  sales_stage_id?: string | null; meeting_at_formatted?: string | null;
   margin_alert: boolean; priority: string; version: number; currency: string; current_action: string; next_action: string
 }
 export interface ProjectWorkspaceSummary extends ManagerProjectSummary {

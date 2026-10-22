@@ -43,7 +43,7 @@ class BitrixSettingsForm(forms.ModelForm):
 
     class Meta:
         model = BitrixSettings
-        exclude = ("webhook_url", "inbound_token")
+        exclude = ("webhook_url", "inbound_token", "sync_timeline_comments")
 
     def clean_new_webhook_url(self):
         value = self.cleaned_data["new_webhook_url"]

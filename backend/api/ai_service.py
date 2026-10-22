@@ -231,7 +231,9 @@ currency: KZT|USD|EUR|RUB; evidence: короткая точная непрер�
 confidence: 0..1; uncertainties: список пояснений НА РУССКОМ.
 Для проекта: sale_amount (сумма продажи или нашего КП), contract_amount, cost_amount (десятичные строки), stage (lead,
 qualification, design, proposal_sent, contract_signing, in_execution, completed, stalled,
-lost), current_action, next_action. Для платежа: amount, payment_date (YYYY-MM-DD),
+lost), sales_stage (new, in_work, visit_scheduled, visit_completed, project_received,
+calculation, proposal_sent, contract, invoicing), equipment_type, meeting_at (ISO8601 with offset),
+project_received (true/false only when explicitly known), current_action, next_action. sales_stage — отдельная стадия продажи; выбирай только по прямому описанию состоявшегося события, не по плану и не по общему упоминанию. «КП отправлено» требует явной отправки клиенту; упоминание или подготовка КП недостаточны. Не возвращай sales_stage, если источник не доказывает смену стадии. Для платежа: amount, payment_date (YYYY-MM-DD),
 payment_kind: increment|cumulative|promise|reversal|balance|debt|invoice|transfer.
 direction: income|expense; amount_precision: exact|approximate|range|unknown.
 Неизвестную сумму не выдумывай; для нее amount_precision=unknown без amount.

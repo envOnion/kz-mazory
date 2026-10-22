@@ -170,6 +170,7 @@ def _sync_deals_page(sync, config, cfg, payload):
                 "OPPORTUNITY",
                 "STAGE_ID",
                 "DATE_CREATE", "DATE_MODIFY", "MOVED_TIME", "BEGINDATE", "CLOSEDATE", "CLOSED",
+                *cfg.deal_field_map.values(),
             ],
         },
         config=config,
@@ -329,9 +330,12 @@ def _sync_deals_page(sync, config, cfg, payload):
                     "opportunity": opportunity,
                     "currency": str(row.get("CURRENCY_ID") or project.currency)[:3],
                     "synced_at": timezone.now(),
+                    "external_fields": {code: row[code] for code in cfg.deal_field_map.values() if code in row},
                     **{field: value for key, (field, value) in source_fields.items() if key in row},
                 },
             )
+            from .facts import sync_crm_stages
+            sync_crm_stages(project)
         locked.imported_count += len(rows)
         locked.error_code = ""
         if next_cursor is None:

@@ -47,6 +47,7 @@ class ProjectSerializer(serializers.ModelSerializer):
     company_name = serializers.CharField(source="company.name", read_only=True)
     manager_name = serializers.CharField(source="manager.full_name", read_only=True)
     status_display = serializers.CharField(source="get_status_display", read_only=True)
+    sales_stage_display = serializers.CharField(source="get_sales_stage_display", read_only=True)
     profit_amount = serializers.ReadOnlyField()
 
     class Meta:
@@ -62,6 +63,10 @@ class ProjectSerializer(serializers.ModelSerializer):
             "project_type",
             "status",
             "status_display",
+            "sales_stage",
+            "sales_stage_display",
+            "meeting_at",
+            "project_received",
             "equipment_type",
             "contract_number",
             "deal_period",

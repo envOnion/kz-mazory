@@ -42,7 +42,7 @@ SAFE_AI_FIELDS = (
 SAFE_BITRIX_FIELDS = (
     'name', 'is_active', 'crm_matching_enabled', 'auto_create_deals',
     'auto_import_deals', 'hourly_sync_enabled', 'auto_create_tasks',
-    'sync_timeline_comments', 'deal_category_id', 'deal_object_field_code',
+    'deal_category_id', 'deal_stage_map', 'deal_field_map', 'deal_object_field_code',
     'default_assigned_by_id',
 )
 SAFE_WHATSAPP_FIELDS = ('name', 'team', 'group_jid', 'session_name', 'is_active', 'thread_routing_enabled')
@@ -56,6 +56,8 @@ SAFE_HISTORY_FIELDS = (
 LABELS = {
     'name': 'Название', 'team': 'Команда', 'group_jid': 'Идентификатор группы WhatsApp',
     'session_name': 'Сессия WAHA', 'is_active': 'Активно',
+    'deal_category_id': 'ID воронки продаж', 'deal_stage_map': 'ID стадий продаж CRM',
+    'deal_field_map': 'Коды полей CRM',
     'thread_extract_idle_seconds': 'Ожидание пакета, секунды',
     'thread_extract_max_wait_seconds': 'Максимальное ожидание, секунды',
     'thread_extract_batch_size': 'Размер пакета', 'autonomous_daily_token_limit': 'Токенов в сутки для автономной обработки',
@@ -381,7 +383,7 @@ class SettingsBitrixView(APIView):
                 request.user.has_perm('api.view_aisettings') or request.user.has_perm('api.change_aisettings')) else None
         defaults = dict(serializer_for(BitrixSettings, SAFE_BITRIX_FIELDS)(BitrixSettings(
             is_active=False, auto_create_deals=False, auto_create_tasks=False,
-            auto_import_deals=False, hourly_sync_enabled=False, sync_timeline_comments=False)).data)
+            auto_import_deals=False, hourly_sync_enabled=False)).data)
         defaults['id'] = 0
         return Response({'items': rows, 'defaults': defaults, 'fields': schema_for(BitrixSettings, SAFE_BITRIX_FIELDS), 'can_change': request.user.has_perm('api.change_bitrixsettings')})
 
@@ -402,7 +404,7 @@ class SettingsBitrixView(APIView):
                 raise PermissionDenied('Нет права создавать конфигурацию Bitrix24.')
             cfg = update_model(request, BitrixSettings(is_active=False, auto_create_deals=False,
                 auto_create_tasks=False, auto_import_deals=False, hourly_sync_enabled=False,
-                sync_timeline_comments=False), SAFE_BITRIX_FIELDS)
+                ), SAFE_BITRIX_FIELDS)
             return Response({'id':cfg.pk},status=201)
         if not isinstance(data, dict) or set(data) - {'key', 'value', 'clear'}:
             raise ValidationError({'error': 'Неверные параметры подключения.'})

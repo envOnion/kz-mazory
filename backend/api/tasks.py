@@ -984,9 +984,11 @@ def run_operation(payload):
 
 
 def sync_crm(payload):
-    from .bitrix_service import BitrixService
-
-    BitrixService.sync_project(payload["project_id"], payload["version"])
+    from .models import OutboxEvent
+    OutboxEvent.objects.filter(
+        deduplication_key=f"crm:{payload['project_id']}:{payload['version']}",
+        state__in=("pending", "processing"),
+    ).update(state="cancelled", error_code="crm_legacy_sync_disabled", lease_until=None)
 
 
 def sync_catalog(payload):
@@ -1227,13 +1229,13 @@ def enqueue_hourly_bitrix_sync_task():
     for p in Project.objects.filter(
         Q(is_verified=True) | Q(identity_confirmed=True), needs_bitrix_sync=True, team__isnull=False
     ):
-        OutboxEvent.objects.get_or_create(
+        # Legacy jobs are deliberately retired: only approved, evidenced
+        # FactEvents may produce field-limited autonomous CRM patches.
+        from .models import OutboxEvent
+        OutboxEvent.objects.filter(
             deduplication_key=f"crm:{p.id}:{p.version}",
-            defaults={
-                "event_type": "crm_sync",
-                "payload": {"project_id": p.id, "version": p.version},
-            },
-        )
+            state__in=("pending", "processing"),
+        ).update(state="cancelled", error_code="crm_legacy_sync_disabled", lease_until=None)
 
 
 def sync_single_deal_to_bitrix_task(project_id):
