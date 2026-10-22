@@ -101,7 +101,8 @@ def record_attempt(event, state, code="", next_at=None, *, focused_payload_sha25
 def _main_response_checkpoint(event):
     """Plan one retry-phase transition after durable native main progress."""
     trace = MessageProcessingTrace.objects.filter(pk=event.payload.get('trace_id')).first()
-    if trace is None or trace.context_metadata.get('full_history_policy') != 'thread-context-v2':
+    if trace is None or (trace.context_metadata.get('full_history_policy') != 'thread-context-v2'
+                         and not trace.context_metadata.get('live_batch_policy')):
         return None
     metadata = trace.context_metadata
     if metadata.get('request_state') != 'responded' or not metadata.get('main_response_cache'):
@@ -465,6 +466,21 @@ def handle_failure(event, exc):
                                "trace_ids":[{"raw_id":trace.raw_message_id,"trace_id":trace.id}],
                                "root_event_id":current.id}
             current.save(update_fields=["payload"])
+    from .live_batching import POLICY as LIVE_POLICY, split as split_live
+    live_trace = (MessageProcessingTrace.objects.filter(pk=current.payload.get('trace_id')).first()
+                  if current.payload.get("live_batch_policy") == LIVE_POLICY and code == "provider_timeout" else None)
+    live_main_saved = bool(live_trace and live_trace.context_metadata.get('main_response_cache'))
+    if current.payload.get("live_batch_policy") == LIVE_POLICY and code in {
+        "provider_output_truncated", "provider_timeout", "provider_context_overflow",
+        "context_batch_too_large", "context_fixed_input_too_large", "invalid_extraction_schema",
+        "invalid_schema", "extraction_json_parse", "batch_classification_missing",
+        "target_classification_invalid", "thread_classification_invalid",
+    } and not (code == "provider_timeout" and live_main_saved):
+        current.error_code = code
+        current.save(update_fields=["error_code"])
+        if split_live(current):
+            record_attempt(current, "failed", code)
+            return True
     if current.payload.get("analysis_policy") == "history-packets-v1":
         if code == 'focused_context_budget_exceeded' and _retry_focused_context(current, exc):
             return True
@@ -490,6 +506,9 @@ def handle_failure(event, exc):
             current.error_code = code
             current.save(update_fields=["error_code"])
             if split(current):
+                record_attempt(current, "failed", code)
+                return True
+            if split_live(current):
                 record_attempt(current, "failed", code)
                 return True
             from .replay_replacement import LABELS
@@ -539,7 +558,7 @@ def handle_failure(event, exc):
                     allowed = {f't{i}' for i in range(16)}
                     trace.context_metadata['required_thread_keys'] = sorted({row.get('thread_key') for row in references
                         if isinstance(row, dict) and isinstance(row.get('thread_key'), str) and row['thread_key'] in allowed})
-                for field in ('full_history_policy', 'full_history', 'analysis_chunk_input_limit', 'output_retry_generation', 'context_window'):
+                for field in ('full_history_policy', 'full_history', 'analysis_chunk_input_limit', 'output_retry_generation', 'context_window', 'live_batch_policy'):
                     if field in previous.context_metadata:
                         if field in ('analysis_chunk_input_limit', 'output_retry_generation'):
                             trace.context_metadata.setdefault(field, previous.context_metadata[field])

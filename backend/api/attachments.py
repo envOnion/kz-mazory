@@ -175,11 +175,8 @@ def extract_attachment(pk):
                     "processing_state": "transcribed",
                 },
             )
-            OutboxEvent.objects.get_or_create(
-                event_type="extract_message",
-                deduplication_key=f"extract:{raw.id}",
-                defaults={"payload": {"raw_id": raw.id}},
-            )
+            from .live_batching import enqueue
+            enqueue(raw)
     except Exception:
         PrivateAttachment.objects.filter(pk=pk).update(state="failed")
         raise

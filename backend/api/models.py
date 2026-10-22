@@ -876,8 +876,8 @@ class AISettings(TimestampedModel):
             raise ValidationError("Порог и разница вероятностей LAYA должны лежать в пределах 0–1.")
         if not 1 <= self.thread_extract_idle_seconds <= self.thread_extract_max_wait_seconds or not 1 <= self.thread_extract_batch_size <= 30:
             raise ValidationError("Ожидание извлечения должно быть положительным; пакет — от 1 до 30 сообщений.")
-        if not 1 <= self.analysis_target_message_limit <= 30:
-            raise ValidationError({"analysis_target_message_limit": "Допустимо от 1 до 30 сообщений."})
+        if not 1 <= self.analysis_target_message_limit <= 50:
+            raise ValidationError({"analysis_target_message_limit": "Допустимо от 1 до 50 сообщений."})
         if not self.analysis_output_token_limit:
             raise ValidationError("Резерв ответа анализа должен быть положительным.")
         if self.analysis_output_token_limit > self.max_completion_tokens:

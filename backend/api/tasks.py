@@ -129,6 +129,8 @@ def verify_history_packets():
 
 
 def dispatch_outbox(limit=100):
+    from .live_batching import release_due, BUFFER_EVENT
+    release_due(limit)
     now = timezone.now()
     # A crash after a non-idempotent HTTP request has an unknown external outcome.
     expired = OutboxEvent.objects.filter(state="processing", lease_until__lte=now)
@@ -158,7 +160,7 @@ def dispatch_outbox(limit=100):
     OutboxEvent.objects.filter(state="enqueued", lease_until__lte=now).update(
         state="pending"
     )
-    pending = OutboxEvent.objects.filter(state="pending", next_attempt_at__lte=now)
+    pending = OutboxEvent.objects.filter(state="pending", next_attempt_at__lte=now).exclude(event_type=BUFFER_EVENT)
     occupied_sources = OutboxEvent.objects.filter(state__in=["enqueued", "processing"]).exclude(analysis_source_key=None).values("analysis_source_key")
     pending = pending.filter(Q(analysis_source_key__isnull=True) | ~Q(analysis_source_key__in=occupied_sources))
     from django.db.models import Window, F, CharField
@@ -358,21 +360,26 @@ def run_outbox(pk):
         from .history_analysis import synchronize
         synchronize(event)
         from .models import SourceWorkItem
-        item, _ = SourceWorkItem.objects.get_or_create(raw_message_id=event.payload["raw_id"], processing_version=AISettings.get_active().autonomous_policy_version)
-        SourceWorkItem.objects.filter(pk=item.pk).update(state="processing", lease_until=event.lease_until, error_code="")
+        version = AISettings.get_active().autonomous_policy_version
+        target_ids = event.payload.get("batch_ids") or [event.payload["raw_id"]]
+        SourceWorkItem.objects.bulk_create([SourceWorkItem(raw_message_id=pk, processing_version=version)
+                                           for pk in target_ids], ignore_conflicts=True)
+        SourceWorkItem.objects.filter(raw_message_id__in=target_ids, processing_version=version).update(
+            state="processing", lease_until=event.lease_until, error_code="")
     context_token = usage_event_id.set(event.id)
     claim_token = outbox_claim.set(event.payload.get("claim_generation"))
     analysis_timeout = 240
     if event.event_type in ANALYSIS_EVENTS:
         from .qwen_profile import enabled as qwen_enabled
         from .gpt_sol import enabled as sol_enabled
+        from .minimax import enabled as minimax_enabled
         active = AISettings.get_active()
         if sol_enabled(active):
             # A main response and typed recovery each have their own bounded
             # HTTP call. Do not cancel a valid recovery halfway through after
             # spending most of a 240s phase on the main response.
             analysis_timeout = min(600, max(1, settings.AI_WORKER_TIMEOUT - 60))
-        elif active.chat_model_name == "openrouter/free" or qwen_enabled(active):
+        elif active.chat_model_name == "openrouter/free" or qwen_enabled(active) or minimax_enabled(active):
             analysis_timeout = min(settings.AI_REQUEST_TIMEOUT, 1200)
     deadline_token = extraction_deadline.set(time.monotonic() + analysis_timeout if event.event_type in ANALYSIS_EVENTS else None)
     try:
@@ -559,7 +566,9 @@ def run_outbox(pk):
             current = OutboxEvent.objects.get(pk=event.pk)
             if current.state == "cancelled":
                 ai_retries.record_attempt(current, "cancelled", "history_run_cancelled")
-            SourceWorkItem.objects.filter(raw_message_id=event.payload["raw_id"], processing_version=AISettings.get_active().autonomous_policy_version).update(state=current.state, error_code=current.error_code, lease_until=current.lease_until)
+            SourceWorkItem.objects.filter(raw_message_id__in=event.payload.get("batch_ids") or [event.payload["raw_id"]], processing_version=AISettings.get_active().autonomous_policy_version).update(state=current.state, error_code=current.error_code, lease_until=current.lease_until)
+            from .live_batching import synchronize_failure
+            synchronize_failure(current)
             from .error_recovery import finalize_review
             finalize_review(current)
         usage_event_id.reset(context_token)
@@ -864,20 +873,22 @@ def extract_message(payload):
     try:
         from .processing_attempts import require_reanalysis
         from rest_framework.exceptions import PermissionDenied
-        raw = RawMessage.objects.select_related('config__team', 'team', 'project').get(pk=payload['raw_id'])
         try:
-            require_reanalysis(operation.requested_by, raw)
+            for raw in RawMessage.objects.select_related('config__team', 'team', 'project').filter(
+                    pk__in=payload.get('batch_ids') or [payload['raw_id']]):
+                require_reanalysis(operation.requested_by, raw)
         except PermissionDenied:
             raise ProviderUnavailable('reanalysis_access_revoked') from None
         validate_route(operation)
     except ProviderUnavailable as exc:
-        trace = MessageProcessingTrace.objects.get(pk=payload['trace_id'])
-        trace.status, trace.error_code = 'error', str(exc)
-        trace.context_metadata['request_state'] = 'failed'
-        trace.result_summary = ('Доступ к исходному сообщению изменился. Повтор остановлен.'
-            if str(exc) == 'reanalysis_access_revoked' else
-            'Основная конфигурация изменилась. Повтор остановлен до новой проверки подключения.')
-        trace.save(update_fields=['status', 'error_code', 'context_metadata', 'result_summary'])
+        ids = [row['trace_id'] for row in payload.get('trace_ids', [])] or [payload['trace_id']]
+        for trace in MessageProcessingTrace.objects.filter(pk__in=ids):
+            trace.status, trace.error_code = 'error', str(exc)
+            trace.context_metadata['request_state'] = 'failed'
+            trace.result_summary = ('Доступ к исходному сообщению изменился. Повтор остановлен.'
+                if str(exc) == 'reanalysis_access_revoked' else
+                'Основная конфигурация изменилась. Повтор остановлен до новой проверки подключения.')
+            trace.save(update_fields=['status', 'error_code', 'context_metadata', 'result_summary'])
         raise
     token = pinned_configuration.set((operation.request['config_id'], operation.request['fingerprint']))
     try:
@@ -896,6 +907,9 @@ def _extract_message(payload):
     # an automatic trace must not turn that event into explicit reanalysis.
     if raw.processed and not manual and not remaining:
         return
+    if payload.get("live_batch_policy"):
+        from .live_batching import prepare
+        payload = prepare(payload)
     if not payload.get("routing_bypass") and not payload.get("history_run_id") and not payload.get("requested_by_id") and not payload.get("reanalyze"):
         from .thread_routing import enabled, route_message as route
         if enabled(raw.config):

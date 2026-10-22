@@ -675,12 +675,11 @@ def reconcile(limit=100):
     tracked_ids.update(item.raw_message_id for item in work_items)
     active_ids = set()
     if tracked_ids:
-        from django.db.models import Q
         ownership = Q(payload__raw_id__in=tracked_ids)
         for raw_id in tracked_ids:
             ownership |= Q(payload__batch_ids__contains=[raw_id])
         active_rows = OutboxEvent.objects.filter(
-            event_type__in=ANALYSIS_EVENTS,
+            event_type__in=[*ANALYSIS_EVENTS, "buffer_message"],
             state__in=("pending", "enqueued", "processing"),
         ).filter(ownership).values_list("payload__raw_id", "payload__batch_ids")
         for raw_id, batch_ids in active_rows:
@@ -691,15 +690,19 @@ def reconcile(limit=100):
     # without creating a competing full-history extraction for the same source.
     for thread in DialogueThread.objects.filter(config__is_active=True, team__is_active=True, message_links__raw_message__processed=False, message_links__raw_message__processing_state="routed").exclude(state="superseded").distinct().order_by("id")[:limit]:
         schedule_extraction(thread)
-    failed_ids = set(OutboxEvent.objects.filter(
-        event_type__in=ANALYSIS_EVENTS, payload__raw_id__in=[raw.id for raw in raw_rows], state="failed"
-    ).values_list("payload__raw_id", flat=True))
-    routing_enabled = cfg.decision_enabled
+    failed_scope = Q(payload__raw_id__in=[raw.id for raw in raw_rows])
+    for raw in raw_rows:
+        failed_scope |= Q(payload__batch_ids__contains=[raw.id])
+    failed_ids = set()
+    for anchor, batch in OutboxEvent.objects.filter(
+            event_type__in=ANALYSIS_EVENTS, state="failed").filter(failed_scope).values_list("payload__raw_id", "payload__batch_ids"):
+        failed_ids.update(batch or [anchor])
     for raw in raw_rows:
         if raw.id not in active_ids and raw.id not in failed_ids:
-            event_type = "route_message" if raw.config_id and raw.config.thread_routing_enabled and routing_enabled else "extract_message"
-            OutboxEvent.objects.get_or_create(deduplication_key=f"recover:{raw.id}:{cfg.autonomous_policy_version}", defaults={"event_type": event_type, "payload": {"raw_id": raw.id}})
-            active_ids.add(raw.id)
+            from .live_batching import enqueue
+            event = enqueue(RawMessage.objects.select_related("config__team", "team", "project").get(pk=raw.id))
+            if event is not None and event.state in ("pending", "enqueued", "processing"):
+                active_ids.add(raw.id)
     for item in work_items:
         if item.raw_message_id in active_ids or item.raw_message.processing_state == "routed":
             continue

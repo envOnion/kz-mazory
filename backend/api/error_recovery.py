@@ -106,6 +106,7 @@ def process(payload):
     items = operation.result.get('items', [])
     cursor = operation.result.get('cursor', 0)
     targets = operation.request['targets']
+    scheduled = []
     for target in targets[cursor:cursor + 50]:
         key = f"error-recovery-{operation.pk}"
         try:
@@ -113,6 +114,8 @@ def process(payload):
                                        expected_trace_id=target['latest_trace_id'])
             disposition = 'scheduled' if trace.operation_key == f"reanalysis:{target['id']}:{key}" else 'already_processing'
             items.append({'raw_id': target['id'], 'trace_id': trace.pk, 'disposition': disposition})
+            if disposition == 'scheduled':
+                scheduled.append(trace)
         except (PermissionDenied, RawMessage.DoesNotExist):
             items.append({'raw_id': target['id'], 'disposition': 'unavailable'})
         except ProviderUnavailable as exc:
@@ -120,6 +123,8 @@ def process(payload):
                 'changed' if str(exc) == 'reanalysis_source_changed' else
                 'already_processing' if str(exc) == 'context_processing_in_progress' else 'unavailable'})
         cursor += 1
+    from .live_batching import enqueue_recovery
+    enqueue_recovery(scheduled, operation, user)
     operation.result = {'items': items, 'cursor': cursor}
     operation.status = 'succeeded' if cursor >= len(targets) else 'running'
     operation.save(update_fields=['status', 'result', 'updated_at'])
@@ -139,8 +144,10 @@ def progress(operation):
     traces = {trace.raw_message_id: trace for trace in MessageProcessingTrace.objects.filter(pk__in=Subquery(latest_ids))}
     pending_candidates = set(FactCandidate.objects.filter(trace_id__in=[trace.pk for trace in traces.values()], status='pending').values_list('trace_id', flat=True))
     failed_raws = set(RawMessage.objects.filter(pk__in=raw_ids, processing_state='failed').values_list('pk', flat=True))
-    active_raws = set(OutboxEvent.objects.filter(payload__error_recovery_id=operation.pk,
-        state__in=['pending', 'enqueued', 'processing']).values_list('payload__raw_id', flat=True))
+    active_raws = set()
+    for anchor, batch in OutboxEvent.objects.filter(payload__error_recovery_id=operation.pk,
+            state__in=['pending', 'enqueued', 'processing']).values_list('payload__raw_id', 'payload__batch_ids'):
+        active_raws.update(batch or [anchor])
     for item in scheduled:
         trace = traces.get(item['raw_id'])
         if not trace or trace.pk < item['trace_id']:
@@ -162,12 +169,21 @@ def finalize_review(event):
     if not event.payload.get('error_recovery_id') or event.state not in ('failed', 'done'):
         return
     from .ai_retries import EVIDENCE_ERRORS
-    from .models import AuditEvent, RawMessage
     review_codes = EVIDENCE_ERRORS | {'invalid_schema', 'invalid_extraction_schema', 'extraction_json_parse',
         'fact_thread_missing', 'fact_thread_evidence_missing', 'fact_thread_evidence_conflict',
-        'batch_classification_missing', 'thread_classification_invalid', 'target_classification_invalid'}
-    trace = MessageProcessingTrace.objects.filter(pk=event.payload.get('trace_id')).first()
-    if not trace or trace.context_metadata.get('request_state') == 'needs_review':
+        'batch_classification_missing', 'thread_classification_invalid', 'target_classification_invalid',
+        'target_classification_conflict', 'thread_completion_unproven', 'thread_sources_unavailable',
+        'thread_source_conflict', 'thread_sources_duplicate', 'thread_keys_duplicate', 'thread_parent_invalid',
+        'thread_revision_conflict', 'extraction_top_level_type', 'extraction_facts_missing',
+        'extraction_facts_type', 'payment_evidence_contradiction'}
+    trace_ids = [row['trace_id'] for row in event.payload.get('trace_ids', [])] or [event.payload.get('trace_id')]
+    for trace in MessageProcessingTrace.objects.filter(pk__in=trace_ids):
+        _finalize_trace(event, trace, review_codes)
+
+
+def _finalize_trace(event, trace, review_codes):
+    from .models import RawMessage
+    if not trace.raw_message_id or trace.context_metadata.get('request_state') == 'needs_review':
         return
     if event.state == 'done':
         if not FactCandidate.objects.filter(trace=trace, status='pending').exists():

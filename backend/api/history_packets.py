@@ -103,9 +103,11 @@ def merge_segments(traces):
 def extract_packet(payload):
     from .pipeline import extract_message
     event_id = payload.get("root_event_id")
-    if event_id and ProviderUsage.objects.filter(outbox_event__payload__root_event_id=event_id, operation="chat").count() >= 16:
+    if event_id and ProviderUsage.objects.filter(outbox_event__payload__root_event_id=event_id, operation="chat").count() >= payload.get("request_limit", 16):
         raise ProviderUnavailable("analysis_request_limit")
     common = dict(raw_id=payload["raw_id"], trace_id=payload["trace_id"], batch_ids=payload.get("batch_ids"), trace_ids=payload.get("trace_ids"))
+    if payload.get('requested_by_id'):
+        common['requested_by_id'] = payload['requested_by_id']
     if not payload.get("segment_ranges"):
         return extract_message(**common)
     cursor = payload["segment_cursor"]

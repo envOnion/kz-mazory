@@ -218,6 +218,8 @@ class SourceView(APIView):
         raw = get_object_or_404(access.messages_for(request.user), pk=pk)
         access.require_team_role(request.user, raw.config.team_id, ["team_lead"])
         with transaction.atomic():
+            from .dialogue_threads import lock_source
+            lock_source(raw)
             raw = RawMessage.objects.select_for_update().get(pk=raw.id)
             if raw.processing_state != "failed":
                 raise Conflict("Повтор доступен только после ошибки обработки.")
@@ -228,12 +230,20 @@ class SourceView(APIView):
             )
             if event.state in ("processing", "enqueued"):
                 raise Conflict("Обработка ещё выполняется.")
-            event.state, event.attempt_count, event.next_attempt_at = (
-                "pending",
-                0,
-                timezone.now(),
-            )
-            event.save()
+            from .live_batching import BUFFER_EVENT
+            if event.event_type == BUFFER_EVENT:
+                from .processing_attempts import schedule_reanalysis
+                from .providers import ProviderUnavailable
+                import uuid
+                try:
+                    schedule_reanalysis(raw.id, request.user, uuid.uuid4().hex)
+                except ProviderUnavailable as exc:
+                    raise Conflict("Сообщение уже входит в выполняемый разбор.") from exc
+            else:
+                event.state, event.attempt_count, event.next_attempt_at = (
+                    "pending", 0, timezone.now(),
+                )
+                event.save()
             AuditEvent.objects.create(
                 actor=request.user,
                 target_type="RawMessage",
@@ -395,12 +405,8 @@ class MessageIngestView(APIView):
                 raise Conflict("Идентификатор источника уже связан с другим чатом.")
             analyze = not job or not job.only_new or job.analyze_after_import
             if created and analyze and raw.processing_state != "deduplication_ambiguous":
-                from .thread_routing import incoming_event_type
-                OutboxEvent.objects.create(
-                    event_type=incoming_event_type(cfg),
-                    deduplication_key=f"extract:{raw.id}",
-                    payload={"raw_id": raw.id},
-                )
+                from .live_batching import enqueue
+                enqueue(raw)
             if created and job and job.only_new:
                 run = (
                     WhatsAppHistoryRun.objects.select_for_update()
