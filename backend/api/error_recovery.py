@@ -142,7 +142,18 @@ def progress(operation):
     raw_ids = [item['raw_id'] for item in scheduled]
     latest_ids = MessageProcessingTrace.objects.filter(raw_message_id__in=raw_ids).order_by('raw_message_id', '-id').distinct('raw_message_id').values('id')
     traces = {trace.raw_message_id: trace for trace in MessageProcessingTrace.objects.filter(pk__in=Subquery(latest_ids))}
-    pending_candidates = set(FactCandidate.objects.filter(trace_id__in=[trace.pk for trace in traces.values()], status='pending').values_list('trace_id', flat=True))
+    pending_candidate_rows = list(FactCandidate.objects.filter(
+        trace_id__in=[trace.pk for trace in traces.values()], status='pending'
+    ).values_list('id', 'trace_id'))
+    pending_candidate_ids = [candidate_id for candidate_id, _ in pending_candidate_rows]
+    pending_candidates = {trace_id for _, trace_id in pending_candidate_rows}
+    active_candidates = set(OutboxEvent.objects.filter(
+        event_type__in=('decide_fact', 'crm_match'),
+        state__in=['pending', 'enqueued', 'processing'],
+        payload__candidate_id__in=pending_candidate_ids,
+    ).values_list('payload__candidate_id', flat=True))
+    active_candidate_traces = {trace_id for candidate_id, trace_id in pending_candidate_rows
+                               if candidate_id in active_candidates}
     failed_raws = set(RawMessage.objects.filter(pk__in=raw_ids, processing_state='failed').values_list('pk', flat=True))
     active_raws = set()
     for anchor, batch in OutboxEvent.objects.filter(payload__error_recovery_id=operation.pk,
@@ -155,6 +166,8 @@ def progress(operation):
     for item in scheduled:
         trace = traces.get(item['raw_id'])
         if item['raw_id'] in active_raws or not trace or trace.pk < item['trace_id']:
+            result['pending'] += 1
+        elif trace.pk in active_candidate_traces:
             result['pending'] += 1
         elif trace.context_metadata.get('request_state') == 'needs_review' or trace.pk in pending_candidates:
             result['needs_review'] += 1
@@ -205,6 +218,10 @@ def _finalize_trace(event, trace, review_codes):
         return
     if event.state == 'done':
         if not FactCandidate.objects.filter(trace=trace, status='pending').exists():
+            return
+        if AISettings.get_active().autonomous_enabled:
+            trace.result_summary = 'Повторный анализ завершён. Автономная проверка и сопоставление предложений продолжаются.'
+            trace.save(update_fields=['result_summary'])
             return
         trace.result_summary = 'Повторный анализ завершён. Новые предложения ожидают проверки перед записью в CRM.'
     else:
