@@ -562,10 +562,6 @@ def run_outbox(pk):
         if event.event_type == "extract_message":
             from .history_analysis import synchronize
             synchronize(OutboxEvent.objects.get(pk=event.pk))
-        if event.event_type == "autonomous_crm":
-            from .models import CrmDelivery
-            current = OutboxEvent.objects.get(pk=event.pk)
-            CrmDelivery.objects.filter(outbox_event=event).exclude(state__in=("delivered", "superseded", "blocked")).update(state=current.state, error_code=current.error_code)
         if event.event_type == "extract_message":
             from .models import SourceWorkItem
             OutboxEvent.objects.filter(
