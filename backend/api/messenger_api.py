@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 from django.db import connection
 from django.shortcuts import get_object_or_404
 from django.db.models import BigIntegerField, BooleanField, Count, Exists, F, JSONField, Max, OuterRef, Q, Subquery, Window
-from django.db.models.functions import RowNumber
+from django.db.models.functions import RowNumber, Substr
 from django.db.models.expressions import RawSQL
 from rest_framework.exceptions import ValidationError
 from django.utils import timezone
@@ -465,6 +465,9 @@ def _current_axes_cte(qs):
                     ORDER BY source_trace.id DESC LIMIT 1
                 ) AS chosen_trace
                 INNER JOIN {trace_table} AS trace ON trace.id = chosen_trace.id
+                -- Keep a projection boundary: each JSON scalar is evaluated
+                -- once, without losing the LATERAL lookup's one-row estimate.
+                OFFSET 0
             ) AS latest_trace ON TRUE
             LEFT JOIN LATERAL (
                 SELECT work.id, work.{work_state} AS state, work.{work_error} AS error_code
@@ -472,13 +475,8 @@ def _current_axes_cte(qs):
                 WHERE work.{work_raw_id} = scoped.raw_message_id
                 ORDER BY work.id DESC LIMIT 1
             ) AS latest_work ON TRUE
-            LEFT JOIN LATERAL (
-                SELECT clarification.{clarification_state} AS state
-                FROM {clarification_table} AS clarification
-                WHERE clarification.{clarification_notification} = scoped.notification_id
-                  AND scoped.notification_id IS NOT NULL
-                ORDER BY clarification.id DESC LIMIT 1
-            ) AS notification_clar ON TRUE
+            LEFT JOIN {clarification_table} AS notification_clar
+                ON notification_clar.{clarification_notification} = scoped.notification_id
             LEFT JOIN LATERAL (
                 SELECT clarification.{clarification_state} AS state
                 FROM {clarification_table} AS clarification
@@ -494,12 +492,7 @@ def _current_axes_cte(qs):
                   AND scoped.notification_id IS NOT NULL
                 ORDER BY delivery.{delivery_attempt} DESC, delivery.id DESC LIMIT 1
             ) AS latest_delivery ON TRUE
-            LEFT JOIN LATERAL (
-                SELECT outbox.id, outbox.{outbox_state} AS state
-                FROM {outbox_table} AS outbox
-                WHERE outbox.id = scoped.otp_outbox_id
-                LIMIT 1
-            ) AS otp ON TRUE
+            LEFT JOIN {outbox_table} AS otp ON otp.id = scoped.otp_outbox_id
         )
     """
     return sql, scoped_params
@@ -591,6 +584,16 @@ def serialize_record_brief(record, axes):
     }
 
 
+def _brief_records(qs):
+    """List/poll responses use only the sender name from the source message."""
+    return qs.select_related('raw_message').only(
+        'id', 'raw_message_id', 'notification_id', 'otp_outbox_id',
+        'session_name', 'chat_id', 'category', 'team_id', 'direction', 'purpose',
+        'sanitized_body', 'occurred_at', 'time_is_estimated',
+        'raw_message__id', 'raw_message__sender_name',
+    )
+
+
 def _dialog_key(row):
     return (row["session_name"], row["chat_id"], row["category"], row["team_id"])
 
@@ -611,6 +614,61 @@ def _name_for(record):
     return "Система"
 
 
+def _dialog_page(request, qs):
+    """Group and choose previews from one evaluation of the scoped status filter.
+
+    Only keys, timestamps and IDs enter the window/aggregate. Message bodies and
+    related configuration data are fetched for the selected preview IDs later.
+    """
+    matched_sql, params = qs.order_by().values(
+        'id', 'session_name', 'chat_id', 'category', 'team_id', 'occurred_at',
+    ).query.sql_with_params()
+    params = list(params)
+    cursor = decode_cursor(request.query_params.get('cursor'))
+    cursor_sql = ''
+    if cursor:
+        if not isinstance(cursor, dict) or type(cursor.get('i')) is not int:
+            raise ValidationError({'error': 'Некорректный курсор диалогов.'})
+        moment, ident = cursor.get('t'), cursor['i']
+        if moment:
+            # Keep Django's datetime validation before binding raw SQL values.
+            moment = CommunicationRecord._meta.get_field('occurred_at').get_prep_value(moment)
+            cursor_sql = 'WHERE last_at < %s OR (last_at = %s AND last_id < %s) OR last_at IS NULL'
+            params.extend([moment, moment, ident])
+        else:
+            cursor_sql = 'WHERE last_at IS NULL AND last_id < %s'
+            params.append(ident)
+    limit = page_size(request, DIALOG_PAGE)
+    params.append(limit + 1)
+    sql = f"""
+        WITH matched_records AS MATERIALIZED ({matched_sql}),
+        ranked_records AS (
+            SELECT *, ROW_NUMBER() OVER (
+                PARTITION BY session_name, chat_id, category, team_id
+                ORDER BY occurred_at DESC NULLS LAST, id DESC
+            ) AS preview_rank
+            FROM matched_records
+        ), grouped_dialogs AS (
+            SELECT session_name, chat_id, category, team_id,
+                   MAX(occurred_at) AS last_at, MAX(id) AS last_id,
+                   COUNT(*) AS attention_count,
+                   MAX(id) FILTER (WHERE preview_rank = 1) AS preview_id
+            FROM ranked_records
+            GROUP BY session_name, chat_id, category, team_id
+        )
+        SELECT * FROM grouped_dialogs {cursor_sql}
+        ORDER BY last_at DESC NULLS LAST, last_id DESC LIMIT %s
+    """
+    with connection.cursor() as db_cursor:
+        db_cursor.execute(sql, params)
+        columns = [column[0] for column in db_cursor.description]
+        dialogs = [dict(zip(columns, row)) for row in db_cursor.fetchall()]
+    has_more = len(dialogs) > limit
+    dialogs = dialogs[:limit]
+    next_cursor = encode_cursor({'t': dialogs[-1]['last_at'], 'i': dialogs[-1]['last_id']}) if has_more else None
+    return dialogs, next_cursor
+
+
 # ---------------------------------------------------------------- dialogs
 
 class DialogsView(APIView):
@@ -628,25 +686,8 @@ class DialogsView(APIView):
                            | Q(raw_message__sender_phone__icontains=q) | Q(sanitized_body__icontains=q))
 
         qs = filter_record_statuses(request, qs)
-        grouped = qs.values("session_name", "chat_id", "category", "team_id").annotate(
-            last_at=Max("occurred_at"), last_id=Max("id"))
         attention_only = request.query_params.get('attention') == '1'
-        if attention_only:
-            grouped = grouped.annotate(attention_count=Count('pk'))
-        cursor = decode_cursor(request.query_params.get('cursor'))
-        if cursor:
-            if not isinstance(cursor, dict) or type(cursor.get('i')) is not int:
-                raise ValidationError({'error':'Некорректный курсор диалогов.'})
-            moment, ident = cursor.get('t'), cursor['i']
-            if moment:
-                grouped = grouped.filter(Q(last_at__lt=moment) | Q(last_at=moment,last_id__lt=ident) | Q(last_at__isnull=True))
-            else:
-                grouped = grouped.filter(last_at__isnull=True,last_id__lt=ident)
-        limit = page_size(request, DIALOG_PAGE)
-        dialogs = list(grouped.order_by(F('last_at').desc(nulls_last=True),'-last_id')[:limit+1])
-        has_more = len(dialogs) > limit
-        dialogs = dialogs[:limit]
-        next_cursor = encode_cursor({'t':dialogs[-1]['last_at'],'i':dialogs[-1]['last_id']}) if has_more else None
+        dialogs, next_cursor = _dialog_page(request, qs)
         attention_counts = {}
         if attention_only:
             attention_counts = {_dialog_key(row): row['attention_count'] for row in dialogs}
@@ -659,14 +700,14 @@ class DialogsView(APIView):
 
         previews = {}
         if dialogs:
-            ranked = qs.filter(_dialog_filter(dialogs)).annotate(
-                rn=Window(
-                    expression=RowNumber(),
-                    partition_by=[F("session_name"), F("chat_id"), F("category"), F("team_id")],
-                    order_by=[F("occurred_at").desc(nulls_last=True), F("id").desc()],
-                ),
-            ).filter(rn=1).select_related("recipient","config")
-            for record in ranked:
+            selected = CommunicationRecord.objects.filter(
+                pk__in=[dialog['preview_id'] for dialog in dialogs],
+            ).select_related('recipient', 'config').only(
+                'id', 'session_name', 'chat_id', 'category', 'team_id', 'direction',
+                'recipient_id', 'config_id', 'recipient__first_name',
+                'recipient__last_name', 'recipient__username', 'config__name',
+            ).annotate(dialog_preview=Substr('sanitized_body', 1, 120))
+            for record in selected:
                 previews[(record.session_name, record.chat_id, record.category, record.team_id)] = record
 
         items = []
@@ -682,7 +723,7 @@ class DialogsView(APIView):
                 "name": _name_for(preview) if preview is not None else (
                     dialog["session_name"] or dialog["chat_id"] or "Система"),
                 "last_at": dialog["last_at"].isoformat() if dialog["last_at"] else None,
-                "last_preview": preview.sanitized_body[:120] if preview is not None else "",
+                "last_preview": preview.dialog_preview if preview is not None else "",
                 "last_direction": preview.direction if preview is not None else None,
                 "match_record_id": preview.pk if q and preview is not None else None,
                 "attention_count": attention_counts.get(key, 0),
@@ -771,7 +812,7 @@ class RecordsView(APIView):
             qs = qs.filter(sanitized_body__icontains=q)
 
         qs = filter_record_statuses(request, qs)
-        rows, next_cursor = _records_feed(request, qs.select_related('raw_message'))
+        rows, next_cursor = _records_feed(request, _brief_records(qs))
         axes = axes_for_records(rows) if rows else {}
         return Response({
             "items": [serialize_record_brief(row, axes) for row in rows],
@@ -1180,7 +1221,7 @@ class ChangesView(APIView):
             after_record = after_event = 0
         limit = page_size(request)
 
-        records = list(scope.filter(id__gt=after_record).select_related('raw_message').order_by("id")[:limit])
+        records = list(_brief_records(scope.filter(id__gt=after_record)).order_by("id")[:limit])
         events = list(
             CommunicationEvent.objects.filter(record__in=scope, id__gt=after_event)
             .order_by("id")[:limit]

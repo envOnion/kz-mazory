@@ -4,7 +4,7 @@ from django.contrib.auth.models import User
 from django.conf import settings
 from django.core import signing
 from django.db import transaction
-from django.db.models import Max, Count, Sum, Avg, Q, F
+from django.db.models import Max, Count, Sum, Avg, Q, F, Prefetch
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers
@@ -19,6 +19,8 @@ from . import access
 from .dialogue_threads import lock_candidate_source
 from .models import (
     FactCandidate,
+    FactDecision,
+    CandidateCrmMatch,
     AISettings,
     Project,
     Commitment,
@@ -43,11 +45,64 @@ from .security import Conflict
 from .views import Filters, filters_for, create_operation
 
 
+def _candidate_read_queryset(queryset):
+    # Review DTOs need source identity, not the saved AI/history snapshots.
+    return (
+        queryset.select_related("project__company", "trace", "thread_revision__thread")
+        .only(
+            "id", "trace_id", "project_id", "team_id", "manager_id", "fact_type",
+            "thread_revision_id", "proposed_changes", "status", "base_project_version",
+            "confidence", "uncertainties", "review_reason", "created_at",
+            "crm_match_state", "crm_match_revision", "crm_checked_at", "crm_match_error_code",
+            "trace__id", "trace__raw_message_id",
+            "thread_revision__id", "thread_revision__thread_id", "thread_revision__topic",
+            "thread_revision__version", "thread_revision__thread__id", "thread_revision__thread__topic",
+            "project__id", "project__name", "project__company_id", "project__company__id",
+            "project__company__name", "project__contract_amount", "project__sale_amount",
+            "project__cost_amount", "project__currency", "project__status",
+            "project__current_action", "project__next_action", "project__version",
+        )
+        .prefetch_related(
+            "evidence",
+            Prefetch(
+                "decisions",
+                queryset=FactDecision.objects.order_by("-id").only(
+                    "id", "candidate_id", "outcome", "reason_code", "explanation", "policy_version"
+                )[:1],
+                to_attr="latest_decisions",
+            ),
+            Prefetch(
+                "crm_matches",
+                queryset=CandidateCrmMatch.objects.filter(
+                    crm_match_revision=F("candidate__crm_match_revision")
+                ).select_related("project").only(
+                    "id", "candidate_id", "crm_match_revision", "project_id", "project__id",
+                    "project__version", "bitrix_deal_id", "bitrix_company_id", "deal_title",
+                    "company_name", "object_label", "stage_id", "opportunity", "currency",
+                    "score", "match_reasons", "selection_state", "captured_at",
+                ),
+                to_attr="current_crm_matches",
+            ),
+        )
+    )
+
+
+def _candidate_source_map(user, ids):
+    return {
+        message.id: message
+        for message in access.messages_for(user).filter(pk__in=ids).select_related("config").only(
+            "id", "config_id", "chat_id", "source", "timestamp", "received_at", "sent_at_known",
+            "sender_name", "content", "raw_payload", "session_name", "message_id",
+            "config__id", "config__name", "config__snapshot",
+        )
+    }
+
+
 def candidate_data(candidate, user, source_map=None, project_ids=None):
     evidence_records = list(candidate.evidence.all())
     if source_map is None:
         ids = [e.raw_message_id for e in evidence_records] + [candidate.trace.raw_message_id]
-        source_map = {m.id: m for m in access.messages_for(user).filter(pk__in=ids).select_related("config")}
+        source_map = _candidate_source_map(user, ids)
     evidence = [
         {"id": e.id, "quote": e.quote, "source_id": e.raw_message_id,
          "source_url": f"/api/messages/{e.raw_message_id}/", "role": e.field_name}
@@ -76,11 +131,18 @@ def candidate_data(candidate, user, source_map=None, project_ids=None):
     if 'evidence_message_id' in values:
         anchor = values['evidence_message_id']
         source = source_map.get(anchor) if type(anchor) is int else None
-    crm_matches = [
-        match
-        for match in candidate.crm_matches.all()
-        if match.crm_match_revision == candidate.crm_match_revision
-    ]
+    crm_matches = getattr(candidate, "current_crm_matches", None)
+    if crm_matches is None:
+        crm_matches = [
+            match
+            for match in candidate.crm_matches.all()
+            if match.crm_match_revision == candidate.crm_match_revision
+        ]
+    latest_decisions = getattr(candidate, "latest_decisions", None)
+    if latest_decisions is None:
+        decision = candidate.decisions.order_by("-id").first()
+    else:
+        decision = latest_decisions[0] if latest_decisions else None
     crm_options = [
         {
             "id": match.id,
@@ -131,7 +193,10 @@ def candidate_data(candidate, user, source_map=None, project_ids=None):
         "source_metadata": source_metadata(source) if source else None,
         "evidence": evidence,
         "review_reason": candidate.review_reason,
-        "automatic_decision": (lambda d: {"outcome": d.outcome, "reason_code": d.reason_code, "explanation": d.explanation, "policy_version": d.policy_version} if d else None)(candidate.decisions.order_by("-id").first()),
+        "automatic_decision": {
+            "outcome": decision.outcome, "reason_code": decision.reason_code,
+            "explanation": decision.explanation, "policy_version": decision.policy_version,
+        } if decision else None,
         "created_at": candidate.created_at,
         "crm_resolution": {
             "state": candidate.crm_match_state,
@@ -152,10 +217,8 @@ class CandidateListView(APIView):
         if state not in ("pending", "approved", "rejected", "superseded"):
             raise ValidationError("Неизвестный статус.")
         qs = (
-            access.candidates_for(request.user)
+            _candidate_read_queryset(access.candidates_for(request.user))
             .filter(status=state)
-            .select_related("project__company", "trace", "thread_revision__thread")
-            .prefetch_related("evidence", "crm_matches__project")
             .order_by("id")
         )
         fact_type = request.query_params.get("fact_type", "")
@@ -172,7 +235,7 @@ class CandidateListView(APIView):
         page = pagination.paginate_queryset(qs, request)
         source_ids = {c.trace.raw_message_id for c in page}
         source_ids.update(e.raw_message_id for c in page for e in c.evidence.all())
-        source_map = {m.id: m for m in access.messages_for(request.user).filter(pk__in=source_ids).select_related("config")}
+        source_map = _candidate_source_map(request.user, source_ids)
         project_ids = set(access.projects_for(request.user).filter(pk__in=[c.project_id for c in page]).values_list("id", flat=True))
         return pagination.get_paginated_response(
             [candidate_data(c, request.user, source_map, project_ids) for c in page]
@@ -1005,9 +1068,7 @@ class CandidateDetailView(APIView):
 
     def get(self, request, pk):
         candidate = get_object_or_404(
-            access.candidates_for(request.user)
-            .select_related("project__company", "trace", "thread_revision__thread")
-            .prefetch_related("evidence", "crm_matches__project"),
+            _candidate_read_queryset(access.candidates_for(request.user)),
             pk=pk,
         )
         return Response(candidate_data(candidate, request.user))
