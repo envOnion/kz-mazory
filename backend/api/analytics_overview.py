@@ -414,6 +414,8 @@ class Selection:
                 identity_facts.setdefault(row['object_identity_id'], row)
                 raw_ids.add(row['trace__raw_message_id'])
         records = {r.raw_message_id: r for r in records_scope(self.user).filter(raw_message_id__in=raw_ids)}
+        allowed_question_targets = set(self.candidates.filter(
+            pk__in=[obj.candidate_id for obj in objects]).values_list('pk', flat=True)) if kind == 'question' else set()
         allowed_projects = set(access.projects_for(self.user, include_archived=True).filter(
             pk__in=[obj.fact_event.project_id for obj in objects if kind == 'crm' and obj.fact_event_id]).values_list('id', flat=True)) if kind == 'crm' else set()
         result = []
@@ -441,7 +443,7 @@ class Selection:
                 item.update(label={'project': 'Изменение сделки', 'commitment': 'Обязательство', 'payment': 'Платёж'}.get(obj.fact_type, 'Факт'), description=sanitize_body(getattr(obj, 'decision_explanation', '') or obj.review_reason or 'Проверьте основание и предложенные изменения.')[:500], state=obj.status, href=f'/analytics?view=review&candidate={obj.pk}')
             elif kind == 'question':
                 recipient = obj.recipient.get_full_name() or obj.recipient.get_username()
-                item.update(label='Уточнение суммы' if obj.kind == 'sale_amount' else 'Уточнение объекта/сделки', description=f'Получатель: {sanitize_body(recipient)}. Состояние: ' + {'queued': 'готовится', 'awaiting': 'ожидается ответ', 'answered': 'ответ получен, применение ожидается', 'unconfirmed': 'ответ не подтверждён', 'expired': 'срок ответа истёк'}.get(obj.state, obj.state), state=obj.state, href=f'/analytics?view=review&candidate={obj.candidate_id}')
+                item.update(label='Уточнение суммы' if obj.kind == 'sale_amount' else 'Уточнение объекта/сделки', description=f'Получатель: {sanitize_body(recipient)}. Состояние: ' + {'queued': 'готовится', 'awaiting': 'ожидается ответ', 'answered': 'ответ получен, применение ожидается', 'unconfirmed': 'ответ не подтверждён', 'expired': 'срок ответа истёк'}.get(obj.state, obj.state), state=obj.state, href=f'/analytics?view=review&candidate={obj.candidate_id}' if obj.candidate_id in allowed_question_targets else None)
             elif kind == 'task':
                 item.update(label=sanitize_body(obj.commitment_text)[:255], description='Срок: ' + (_iso(obj.deadline_at) or str(obj.deadline or 'не указан')) + '. Ответственный: ' + sanitize_body(obj.responsible_name or 'не указан'), state=obj.status, href='/analytics?view=tasks')
             elif kind == 'crm':
