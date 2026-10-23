@@ -437,6 +437,26 @@ def process(payload):
         raise
 
 
+def _publication_issue(fact, raw, root):
+    """Check one observation against the existing domain publication contract."""
+    from .ai_retries import EVIDENCE_ERRORS
+    from .dialogue_threads import ready_facts
+    from .pipeline import _facts
+    candidate = copy.deepcopy(fact)
+    candidate["thread_key"] = "validation"
+    ids = {candidate["evidence_message_id"], *[ref["raw_message_id"] for ref in candidate.get("evidence_messages", [])]}
+    theme = {"state": "ready", "messages": [{"raw_message_id": pk} for pk in ids]}
+    try:
+        result = ready_facts({"facts": [candidate]}, {"validation": theme})
+        accepted = _facts(result, raw, snapshot_id=max(row["raw_message_id"] for row in root.payload["entity_sources"]),
+                          threaded=True, target_ids=root.payload.get("batch_ids") or [raw.pk])
+    except ProviderUnavailable as exc:
+        if str(exc) not in EVIDENCE_ERRORS | {"payment_evidence_contradiction"}:
+            raise
+        return str(exc)
+    return "" if accepted else "entity_fact_unproven"
+
+
 def _advance(root, raw, cfg):
     originals = root.payload["entity_sources"]
     observations, classifications = [], []
@@ -460,7 +480,7 @@ def _advance(root, raw, cfg):
         originals = root.payload["entity_sources"]
         observations.extend(value["observations"])
         classifications.extend(value["classifications"])
-    facts, resolutions, threads = [], [], []
+    facts, resolutions, threads, withheld = [], [], [], []
     known_threads = {}
     seen = set()
     seen_facts = set()
@@ -547,6 +567,15 @@ def _advance(root, raw, cfg):
         _validate_refs(value, root.payload["entity_sources"])
         if resolved["state"] == "duplicate":
             continue
+        issue = _publication_issue(value, raw, root)
+        if issue:
+            withheld.append({"observation_index": index, "fact_type": value["fact_type"],
+                             "evidence_message_id": value["evidence_message_id"], "reason": issue,
+                             "checkpoint_stage": f"fact-{index}"})
+            for classification in classifications:
+                if classification["raw_message_id"] == observation["raw_message_id"]:
+                    classification.update(state="unknown", reason=issue)
+            continue
         # Existing explicit source membership is stronger than topic similarity.
         from .models import DialogueThread, ThreadMessage
         links = ThreadMessage.objects.filter(raw_message_id__in=[ref["raw_message_id"] for ref in value.get("evidence_messages", [])],
@@ -598,7 +627,7 @@ def _advance(root, raw, cfg):
     for resolution in resolutions:
         if resolution["state"] == "review":
             review_ids.update(link["raw_message_id"] for thread in threads if thread["key"] == resolution["thread_key"] for link in thread["messages"])
-    _publish(root, raw, result, resolutions, list(known_threads.values()), review_ids, uncertain_ids)
+    _publish(root, raw, result, resolutions, list(known_threads.values()), review_ids, uncertain_ids, withheld)
     return None
 
 
@@ -693,7 +722,7 @@ def _progress(root_id):
 
 
 @transaction.atomic
-def _publish(root, raw, result, resolutions, known_threads, review_ids, uncertain_ids):
+def _publish(root, raw, result, resolutions, known_threads, review_ids, uncertain_ids, withheld):
     owner = _owner()
     if owner.payload.get("entity_published"):
         return
@@ -713,6 +742,7 @@ def _publish(root, raw, result, resolutions, known_threads, review_ids, uncertai
     trace.earlier_messages_context, trace.earlier_messages_count = context, len(context)
     trace.model_version = cfg.chat_model_name
     trace.context_metadata.update(entity_policy=POLICY, entity_resolutions=resolutions,
+        entity_withheld_observations=withheld,
         entity_root_event_id=root.pk,
         request_state="not_sent", request_envelope=envelope, api_format=cfg.chat_api_format,
         provider_url=AIService.effective_chat_provider_url(cfg), effective_provider_url=AIService.effective_chat_provider_url(cfg),
