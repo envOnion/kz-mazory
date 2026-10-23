@@ -138,6 +138,20 @@ def _metrics(cfg, request, counter):
             "input_tokens_estimate": counter.count_payload(request), "counter": counter.strategy}
 
 
+def _repair_request(cfg, request, counter, available, errors):
+    """Optional retry advice must fit without changing sources or the schema."""
+    if not errors:
+        return request
+    hint = "\nПредыдущая попытка отклонена валидатором. Исправь только формат нового полного ответа по схеме."
+    for feedback in (hint + " " + canonical_json(errors[:8]),
+                     hint + " " + canonical_json(errors[:1]), hint):
+        candidate = copy.deepcopy(request)
+        candidate["messages"][0]["content"] += feedback
+        if _metrics(cfg, candidate, counter)["input_tokens_estimate"] <= available:
+            return candidate
+    return request
+
+
 def _call(root, cfg, key, prompt, inputs, validator, name, validate_result=None):
     request = _request(cfg, prompt, inputs, validator, name)
     fingerprint = _digest({"policy": POLICY, "config": root.payload["entity_config"], "request": request})
@@ -170,8 +184,7 @@ def _call(root, cfg, key, prompt, inputs, validator, name, validate_result=None)
         if step.attempt_count >= cfg.entity_stage_attempts or operation_attempts >= call_limit:
             raise ProviderUnavailable("entity_stage_budget_exhausted", diagnostics={"stage": key, "calls": attempts})
         repair = step.payload.get("diagnostics", {}).get("schema_errors", [])
-        if repair:
-            request["messages"][0]["content"] += "\nПредыдущая попытка отклонена валидатором. Исправь только формат нового полного ответа по схеме: " + canonical_json(repair[:8])
+        request = _repair_request(cfg, request, counter, available, repair)
         step.attempt_count += 1
         step.error_code = ""
         step.payload = {**step.payload, "claim_generation": outbox_claim.get()}
