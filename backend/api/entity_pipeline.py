@@ -70,6 +70,25 @@ def _request(cfg, prompt, inputs, validator, name):
     project(native)
     native["source_quotes"] = catalog
     shape = schema(validator)
+    if name == "observe":
+        target_ids = inputs["target_ids"]
+        for collection in ("observations", "classifications"):
+            shape["properties"][collection]["items"]["properties"]["raw_message_id"]["enum"] = target_ids
+        classifications = shape["properties"]["classifications"]
+        classifications.update(minItems=len(target_ids), maxItems=len(target_ids), allOf=[
+            {"contains": {"type": "object", "properties": {"raw_message_id": {"const": pk}},
+                          "required": ["raw_message_id"]}, "minContains": 1, "maxContains": 1}
+            for pk in target_ids])
+        shape["properties"]["observations"]["items"]["allOf"] = [
+            {"if": {"properties": {"raw_message_id": {"const": pk}}, "required": ["raw_message_id"]},
+             "then": {"properties": {"evidence_messages": {"contains": {
+                 "type": "object", "properties": {"raw_message_id": {"const": pk}}, "required": ["raw_message_id"]}}}}}
+            for pk in target_ids]
+    if name == "fact":
+        target_id = inputs["observation"]["raw_message_id"]
+        fact_shape = shape["properties"]["fact"]
+        object_shape = next(item for item in fact_shape["anyOf"] if item.get("type") == "object")
+        object_shape["properties"]["evidence_message_id"]["enum"] = [target_id]
     def quote_fields(node):
         if isinstance(node, dict):
             properties = node.get("properties", {})
@@ -450,7 +469,7 @@ def _advance(root, raw, cfg):
             if response["state"] != "ready":
                 return
             value = response["fact"]
-            if value["fact_type"] != observation["fact_type"] or value.get("evidence_message_id") not in {row["raw_message_id"] for row in selected}:
+            if value["fact_type"] != observation["fact_type"] or value.get("evidence_message_id") != observation["raw_message_id"]:
                 raise ProviderUnavailable("entity_fact_source_invalid")
             _validate_refs(value, selected)
             if not any(value["evidence"] in row["content"] for row in selected if row["raw_message_id"] == value["evidence_message_id"]):
