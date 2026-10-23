@@ -103,7 +103,7 @@ def schedule_reanalysis(raw_id, user, request_key, *, recovery_id=None, expected
         trace = reserve_attempt(raw, operation_key)
         if recovery_id is not None:
             trace.context_metadata['analysis_limits'].update(
-                review_before_delivery=True, maintenance_quiet=True,
+                maintenance_quiet=True,
                 error_recovery_operation_id=recovery_id,
             )
             trace.save(update_fields=['context_metadata'])
