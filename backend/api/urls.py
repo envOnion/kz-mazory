@@ -2,6 +2,7 @@ from django.urls import path
 from .health import health
 from .ai_settings_api import SettingsModelView, SettingsModelCheckView
 from .analytics.dialogue import ConversationList, ConversationDetail, TurnList, ArtifactDetail
+from .analytics_overview import OverviewView, OverviewDetailsView
 from .thread_views import ThreadListView, ThreadDetailView, ThreadBackfillView, ThreadSubscribeView, ThreadFlushView
 from .platform_views import CrmCatalogSyncView, ParticipantsSyncView
 from .candidate_context import CandidateContextView, CandidatePaymentsView
@@ -167,6 +168,8 @@ urlpatterns = [
     path("settings/bitrix/", SettingsBitrixView.as_view()),
     # Операционные разделы новой оболочки.
     path("analytics/operations/", AnalyticsOperationsView.as_view()),
+    path("analytics/overview/", OverviewView.as_view()),
+    path("analytics/overview/details/", OverviewDetailsView.as_view()),
     path("processing/jobs/", ProcessingJobsView.as_view()),
     path("crm/changes/", CrmChangesView.as_view()),
 ]
