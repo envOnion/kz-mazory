@@ -4,7 +4,8 @@ from urllib.parse import urlencode
 
 from django.conf import settings
 from django.db import connection, transaction
-from django.db.models import Exists, F, Func, JSONField, Max, Min, OuterRef, Q, Subquery
+from django.db.models import BigIntegerField, Exists, F, Func, JSONField, Max, Min, OuterRef, Q, Subquery
+from django.db.models.expressions import RawSQL
 from django.db.models.functions import Lower, TruncDate, Trim
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
@@ -15,10 +16,10 @@ from rest_framework.views import APIView
 
 from . import access
 from .communication import sanitize_body
-from .messenger_api import _analysis_match_ids, aggregate_analysis_axes, record_href, records_scope
+from .messenger_api import _current_axes_cte, record_href, records_scope
 from .models import (AISettings, BitrixDealChangeLog, BitrixSettings, DialogueThread, FactCandidate,
                      FactClarification, FactDecision, FactEvidence, MessageProcessingTrace, ObjectIdentity,
-                     OutboxEvent, SourceWorkItem, Team, ThreadMessage, WhatsAppHistoryRun)
+                     CommunicationRecord, OutboxEvent, RawMessage, SourceWorkItem, Team, ThreadMessage, WhatsAppHistoryRun)
 from .operation_scopes import crm_scope
 
 GOOD_CRM = ('delivered', 'confirmed')
@@ -49,6 +50,40 @@ def _date(value, name):
 
 def _iso(value):
     return value.isoformat() if value else None
+
+
+def overview_axes(qs):
+    """Canonical latest state, corrected once for unfinished source processing."""
+    sql, params = _current_axes_cte(qs)
+    record_table = connection.ops.quote_name(CommunicationRecord._meta.db_table)
+    raw_table = connection.ops.quote_name(RawMessage._meta.db_table)
+    sql += f""", overview_axes AS MATERIALIZED (
+        SELECT axes.id, raw.received_at,
+            CASE WHEN NOT raw.processed AND axes.analysis IN ('analyzed', 'no_crm_actions')
+                 THEN 'queued' ELSE axes.analysis END AS analysis
+        FROM current_axes AS axes
+        INNER JOIN {record_table} AS record ON record.id = axes.id
+        INNER JOIN {raw_table} AS raw ON raw.id = record.raw_message_id
+    ) """
+    return sql, params
+
+
+def overview_match_ids(qs, states):
+    sql, params = overview_axes(qs)
+    return RawSQL(sql + 'SELECT id FROM overview_axes WHERE analysis = ANY(%s)',
+                  [*params, list(states)], output_field=BigIntegerField())
+
+
+def overview_state_totals(qs):
+    sql, params = overview_axes(qs)
+    sql += """SELECT analysis, COUNT(*),
+        MIN(received_at) FILTER (WHERE analysis IN ('received', 'queued', 'analyzing'))
+        FROM overview_axes GROUP BY analysis"""
+    with connection.cursor() as cursor:
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+    oldest = min((row[2] for row in rows if row[2] is not None), default=None)
+    return {state: total for state, total, _ in rows}, oldest
 
 
 def cohort_candidates(user, raw_ids, team_id=None):
@@ -185,14 +220,7 @@ class Selection:
                 'description': description, 'tone': tone}
 
     def messages(self):
-        self.states = {} if self.register_only else aggregate_analysis_axes(self.records)[0]
-        incomplete = self.records.filter(raw_message__processed=False).filter(
-            Q(pk__in=_analysis_match_ids(self.records, 'analyzed')) |
-            Q(pk__in=_analysis_match_ids(self.records, 'no_crm_actions')))
-        if not self.register_only:
-            for state, total in aggregate_analysis_axes(incomplete)[0].items():
-                self.states[state] -= total
-                self.states['queued'] = self.states.get('queued', 0) + total
+        self.states, self.oldest_analysis = ({}, None) if self.register_only else overview_state_totals(self.records)
         definitions = [
             ('total', 'Получено сообщений', None, 'Уникальные входящие сообщения в выбранном периоде.', 'normal'),
             ('analyzed', 'Разобрано', ['analyzed', 'no_crm_actions'], 'Успешно разобраны, включая сообщения без коммерческих действий. Не число попыток.', 'normal'),
@@ -207,14 +235,7 @@ class Selection:
         for key, label, states, description, tone in definitions:
             qs = self.records
             if states:
-                predicate = Q(pk__in=_analysis_match_ids(self.records, states[0]))
-                for state in states[1:]:
-                    predicate |= Q(pk__in=_analysis_match_ids(self.records, state))
-                qs = self.records.filter(predicate)
-                if key in ('analyzed', 'no_actions'):
-                    qs = qs.filter(raw_message__processed=True)
-                elif key == 'queued':
-                    qs = self.records.filter(predicate | Q(pk__in=incomplete.values('pk')))
+                qs = self.records.filter(pk__in=overview_match_ids(self.records, states))
             # Register exact predicates but reuse the single aggregate for totals.
             self.registry['messages.' + key] = (label, qs, 'record', None)
             value = sum(self.states.get(s, 0) for s in states) if states else sum(self.states.values())
@@ -229,7 +250,9 @@ class Selection:
         self.media = self.records.filter(raw_message__artifacts__isnull=False).exclude(raw_message__artifacts__state='ready')
         result.append(self.metric('messages.media', 'Вложения недоступны', self.media, 'record',
                                   'Извлечение содержимого вложения ещё не завершено или недоступно.', 'warning'))
-        waiting = self.registry['messages.queued'][1] | self.registry['messages.processing'][1] | self.background
+        waiting = self.records.filter(
+            Q(pk__in=overview_match_ids(self.records, ['received', 'queued', 'analyzing'])) |
+            Q(pk__in=self.background.values('pk')))
         self.registry['messages.delayed'] = ('Сообщения без завершённого результата более 30 минут',
                                              waiting.filter(raw_message__received_at__lt=self.as_of - timedelta(minutes=30)), 'record', None)
         return result
@@ -461,8 +484,8 @@ class Selection:
         messages, dialogues, outcomes = self.messages(), self.dialogues(), self.outcomes()
         attention, sources = self.attention(), self.sources()
         count = sum(self.states.values())
-        active_records = self.registry['messages.queued'][1] | self.registry['messages.processing'][1] | self.background
-        oldest = active_records.aggregate(at=Min('raw_message__received_at'))['at']
+        oldest_background = self.background.aggregate(at=Min('raw_message__received_at'))['at']
+        oldest = min((at for at in (self.oldest_analysis, oldest_background) if at is not None), default=None)
         open_crm = self.crm.filter(state__in=OPEN_CRM).count()
         bad_crm = self.crm.exclude(state__in=GOOD_CRM + OPEN_CRM).count()
         questions = self.questions.count()
@@ -574,6 +597,7 @@ class OverviewView(APIView):
         # All aggregates in a response observe one database snapshot.
         with connection.cursor() as cursor:
             cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+            cursor.execute('SET LOCAL jit=off')
         return Response(Selection(request).summary())
 
 
@@ -584,6 +608,7 @@ class OverviewDetailsView(APIView):
     def get(self, request):
         with connection.cursor() as cursor:
             cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+            cursor.execute('SET LOCAL jit=off')
         selection = Selection(request, register_only=True)
         selection.messages()
         selection.dialogues()
