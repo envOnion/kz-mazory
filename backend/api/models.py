@@ -1448,6 +1448,14 @@ class MessageProcessingTrace(TimestampedModel):
         verbose_name = "Трассировка пайплайна"
         verbose_name_plural = "Трассировки пайплайна"
         ordering = ["-created_at"]
+        indexes = [
+            models.Index(
+                fields=["raw_message"],
+                condition=models.Q(status="error") | models.Q(context_metadata__request_state="needs_review"),
+                name="trace_attention_source_idx",
+            ),
+            models.Index(fields=["raw_message", "-id"], name="trace_source_latest_idx"),
+        ]
         constraints = [
             models.UniqueConstraint(
                 fields=["raw_message", "attempt_no"],

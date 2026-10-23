@@ -3,9 +3,9 @@ from datetime import datetime, timedelta
 from urllib.parse import urlsplit
 
 from django.conf import settings
-from django.db.models import BooleanField, Case, CharField, Count, Exists, F, Func, OuterRef, Q, Value, When, Window
+from django.db.models import CharField, Count, F, Func, Q, Value, Window
 from django.db.models.fields.json import KeyTextTransform, KeyTransform
-from django.db.models.functions import Cast, RowNumber, TruncDate
+from django.db.models.functions import Cast, Coalesce, RowNumber, TruncDate
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from rest_framework.exceptions import ValidationError
@@ -251,22 +251,24 @@ class ProcessingJobsView(APIView):
                 qs = qs.filter(state=state)
             # Filter duplicate logical AI jobs before slicing so skipped rows cannot
             # shorten a page or push its cursor past unseen records.
-            source_work = SourceWorkItem.objects.annotate(
+            source_ids = SourceWorkItem.objects.order_by().annotate(
                 _raw_message_id_text=Cast('raw_message_id', CharField()),
-            ).filter(
-                _raw_message_id_text=KeyTextTransform('raw_id', OuterRef('payload')),
-            )
+            ).values('_raw_message_id_text')
             qs = qs.annotate(
-                _payload_raw_id_type=Func(
-                    KeyTransform('raw_id', F('payload')),
-                    function='jsonb_typeof', output_field=CharField(),
+                _payload_raw_id_type=Coalesce(
+                    Func(KeyTransform('raw_id', F('payload')),
+                         function='jsonb_typeof', output_field=CharField()),
+                    Value(''), output_field=CharField(),
                 ),
-            ).annotate(
-                _has_source_work=Case(
-                    When(_payload_raw_id_type='number', then=Exists(source_work)),
-                    default=Value(False), output_field=BooleanField(),
-                ),
-            ).exclude(event_type__in=AI_TYPES, _has_source_work=True)
+                _payload_raw_id_text=KeyTextTransform('raw_id', F('payload')),
+            ).exclude(
+                # An explicit set subquery is hashed once, without the high cost
+                # of a correlated EXISTS inside CASE. Never cast untrusted JSON
+                # to bigint: malformed/out-of-range values simply do not match.
+                event_type__in=AI_TYPES,
+                _payload_raw_id_type='number',
+                _payload_raw_id_text__in=source_ids,
+            )
             rows = qs.order_by(F('updated_at').desc(nulls_last=True),'-id').values(
                 'id', 'event_type', 'state', 'attempt_count', 'error_code',
                 'next_attempt_at', 'lease_until', 'created_at', 'updated_at',
