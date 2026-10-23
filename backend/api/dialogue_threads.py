@@ -448,6 +448,10 @@ def persist_themes(themes, raw, trace, facts):
             thread.version += 1
             thread.snapshot_max_id = trace.context_metadata["snapshot_max_id"]
             thread.save()
+            if theme["thread_id"] is not None:
+                # Later themes in this transaction may address the same locked
+                # thread. Its first use still validates the original snapshot.
+                expected[thread.pk] = thread.version
             from .thread_routing import update_descriptor
             update_descriptor(thread, theme)
             if old_state != thread.state:
