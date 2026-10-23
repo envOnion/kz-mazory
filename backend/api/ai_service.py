@@ -92,6 +92,9 @@ def extraction_schema_diagnostics(schema, result):
                 detail['unexpected_unknown_key_count'] = len(unexpected - fact_fields)
             if error.validator == 'required' and isinstance(error.instance, dict):
                 detail['missing_fields'] = [name for name in error.validator_value if name not in error.instance]
+            if (error.validator == 'enum' and list(error.absolute_path)[-1:] in [['raw_message_id'], ['evidence_message_id']]
+                    and all(type(value) is int for value in error.validator_value)):
+                detail['allowed_ids'] = error.validator_value[:40]
             if error.validator == 'enum' and list(error.absolute_path)[-1:] == ['role']:
                 if isinstance(error.instance, str) and error.instance in safe_labels:
                     detail['known_enum_label'] = error.instance
