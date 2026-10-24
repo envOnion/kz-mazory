@@ -60,7 +60,7 @@ djangorestframework==3.18.2
     #   mazory-backend
 djangorestframework-simplejwt==5.5.1
     # via mazory-backend
-filelock==4.0.5
+filelock==4.2.4
     # via huggingface-hub
 fsspec==2026.9.0
     # via huggingface-hub
