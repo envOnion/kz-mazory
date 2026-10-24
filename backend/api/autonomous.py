@@ -79,7 +79,10 @@ def _project_label_quoted(label, text):
     if label.isdecimal():
         # A payment amount equal to a numeric project label is not identity evidence.
         return bool(re.search(r"\b(?:объект\w*|проект\w*|жк|бц|мжд|мкр)\s*(?:№\s*)?" + re.escape(label) + r"(?![\w.,])", text, re.I))
-    return bool(re.search(r"(?<!\w)" + re.escape(label) + r"(?!\w)", normalize_deal_name(text, max_length=None)))
+    normalized_label = normalize_deal_name(label, max_length=None)
+    if not normalized_label:
+        return False
+    return bool(re.search(r"(?<!\w)" + re.escape(normalized_label) + r"(?!\w)", normalize_deal_name(text, max_length=None)))
 
 
 def _evidence(candidate):
@@ -115,9 +118,82 @@ def _evidence(candidate):
     return raw, primary.raw_message, refs, "\n".join(ref.quote for ref in refs)
 
 
-def _resolve_project(candidate, data):
+def _bridge_entity_review_from_crm(candidate, data, evidence_text, entity):
+    """Bind only the single strong CRM deal already selected by this generation."""
+    if candidate.crm_match_state != "matched" or not candidate.crm_match_revision:
+        return False
+    selected = list(candidate.crm_matches.filter(
+        crm_match_revision=candidate.crm_match_revision,
+        selection_state="selected",
+    ).order_by("id")[:2])
+    if len(selected) != 1:
+        return False
+    match = selected[0]
+    strong_signals = {"title_exact", "object_field_exact", "existing_project_bitrix_id"}
+    if not strong_signals.intersection(match.match_reasons or []) or not match.project_id:
+        return False
+
+    project = Project.objects.select_for_update().filter(pk=match.project_id).first()
+    if (not project or project.team_id != candidate.team_id or project.archived
+            or str(project.bitrix_id or "") != str(match.bitrix_deal_id)
+            or candidate.project_id != project.pk
+            or project.version != candidate.base_project_version):
+        return False
+
+    # CRM retrieval can identify a deal only when the source independently
+    # names the same object. Never promote an inferred label or an ungrounded
+    # composite-key attribute into identity evidence.
+    identity_fields = (
+        "object_name", "object_external_id", "object_city", "object_address",
+        "object_phase", "deal_contract_number", "deal_period", "company_name",
+    )
+    if not data.get("object_name") or not _project_label_quoted(data["object_name"], evidence_text):
+        return False
+    additional_identity_values = (
+        data.get(field) for field in identity_fields if field != "object_name"
+    )
+    if any(value and not _project_label_quoted(value, evidence_text) for value in additional_identity_values):
+        return False
+
+    before = {key: entity.get(key) for key in ("state", "reason", "project_id", "project_version")}
+    linked = {
+        **entity,
+        "state": "matched",
+        "reason": "Единственная сильная CRM-сделка совпала с названием объекта в исходной цитате.",
+        "project_id": project.pk,
+        "project_version": project.version,
+        "object_id": project.object_identity_id,
+        "crm_match": {
+            "candidate_crm_match_id": match.pk,
+            "crm_match_revision": candidate.crm_match_revision,
+            "bitrix_deal_id": match.bitrix_deal_id,
+            "match_reasons": sorted(str(reason) for reason in strong_signals.intersection(match.match_reasons or [])),
+        },
+    }
+    candidate.project = project
+    candidate.base_project_version = project.version
+    candidate.materialization_snapshot = {
+        **candidate.materialization_snapshot,
+        "entity_resolution": linked,
+    }
+    candidate.save(update_fields=["project", "base_project_version", "materialization_snapshot"])
+    AuditEvent.objects.create(
+        target_type="FactCandidate", target_id=candidate.pk,
+        action="entity_resolution_crm_match_linked",
+        before_after={"before": before, "after": {key: linked[key] for key in before},
+                      "candidate_crm_match_id": match.pk,
+                      "crm_match_revision": candidate.crm_match_revision,
+                      "bitrix_deal_id": match.bitrix_deal_id},
+    )
+    return True
+
+
+def _resolve_project(candidate, data, evidence_text=""):
     entity = candidate.materialization_snapshot.get("entity_resolution")
     if entity:
+        if entity.get("state") not in ("matched", "new"):
+            _bridge_entity_review_from_crm(candidate, data, evidence_text, entity)
+            entity = candidate.materialization_snapshot.get("entity_resolution", entity)
         if entity.get("state") not in ("matched", "new"):
             raise Deferred("entity_resolution_review", entity.get("reason") or "Идентичность требует проверки.")
         if not candidate.project_id and entity.get("state") == "new" and candidate.fact_type == "project":
@@ -637,7 +713,7 @@ def decide(candidate_id, *, preview=False):
             schema = FactSchema(data=candidate.proposed_changes)
             schema.is_valid(raise_exception=True)
             data = schema.validated_data
-            _resolve_project(candidate, data)
+            _resolve_project(candidate, data, text)
             _recheck_financial_entity(candidate, data, primary)
             if not preview and not candidate.materialization_snapshot.get("entity_resolution") and not candidate.project_id and data.get("object_name") and candidate.crm_match_state == "not_requested":
                 from .tasks import enqueue_crm_match
