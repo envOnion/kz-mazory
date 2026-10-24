@@ -134,7 +134,7 @@ def dispatch_outbox(limit=100):
     now = timezone.now()
     # A crash after a non-idempotent HTTP request has an unknown external outcome.
     expired = OutboxEvent.objects.filter(state="processing", lease_until__lte=now)
-    expired.filter(event_type="extract_message", payload__history_cancelled=True).update(
+    expired.filter(event_type__in=["extract_message", "classify_message_batch"], payload__history_cancelled=True).update(
         state="cancelled", lease_until=None
     )
     from .models import HistoryAnalysisItem
@@ -356,6 +356,9 @@ def run_outbox(pk):
     ai_retries.record_attempt(event, "processing")
     from .ai_service import usage_event_id, extraction_deadline, outbox_claim
 
+    if event.event_type == "classify_message_batch":
+        from .history_analysis import synchronize
+        synchronize(event)
     if event.event_type == "extract_message":
         from .history_analysis import synchronize
         synchronize(event)
@@ -386,6 +389,7 @@ def run_outbox(pk):
     try:
         from .temporal import backfill as temporal_backfill
         handlers = {
+            "classify_message_batch": classify_message_batch,
             "extract_message": extract_message,
             "route_message": route_message,
             "extract_thread": extract_thread,
@@ -434,6 +438,9 @@ def run_outbox(pk):
         )
         logger.warning("outbox_unknown id=%s type=%s", pk, event.event_type)
     except requests.Timeout:
+        from .batch_screening import retry_failure as retry_screening
+        if retry_screening(event, ProviderUnavailable("provider_timeout")):
+            return
         from .entity_pipeline import retry_failure
         if retry_failure(event, ProviderUnavailable("provider_timeout")):
             return
@@ -497,6 +504,9 @@ def run_outbox(pk):
             event.attempt_count = max(0, event.attempt_count - 1)
             ai_retries.record_attempt(event, "budget_wait", code, tomorrow)
             return
+        from .batch_screening import retry_failure as retry_screening
+        if retry_screening(event, exc):
+            return
         from .entity_pipeline import retry_failure
         if retry_failure(event, exc):
             return
@@ -559,7 +569,8 @@ def run_outbox(pk):
     finally:
         extraction_deadline.reset(deadline_token)
         outbox_claim.reset(claim_token)
-        if event.event_type == "extract_message":
+        if event.event_type in ("extract_message", "classify_message_batch"):
+            OutboxEvent.objects.filter(pk=event.pk, state="processing", payload__history_cancelled=True).update(state="cancelled", lease_until=None)
             from .history_analysis import synchronize
             synchronize(OutboxEvent.objects.get(pk=event.pk))
         if event.event_type == "extract_message":
@@ -909,7 +920,7 @@ def extract_message(payload):
 
 def _extract_message(payload):
     raw = RawMessage.objects.select_related('config').get(pk=payload['raw_id'])
-    if raw.processing_state == 'clarification_reply':
+    if raw.processing_state in ('clarification_reply', 'offtopic'):
         return
     manual = any(payload.get(key) for key in ('history_run_id','requested_by_id','reanalyze','commitment_refresh'))
     remaining = RawMessage.objects.filter(pk__in=payload.get('batch_ids') or [],processed=False).exists()
@@ -917,7 +928,10 @@ def _extract_message(payload):
     # an automatic trace must not turn that event into explicit reanalysis.
     if raw.processed and not manual and not remaining:
         return
-    if payload.get("live_batch_policy"):
+    from .batch_screening import defer_extraction
+    if defer_extraction(payload):
+        return
+    if payload.get("live_batch_policy") or payload.get("screening_event_id"):
         from .live_batching import prepare
         payload = prepare(payload)
     if payload.get("entity_policy") == "entity-stages-v1":
@@ -960,6 +974,11 @@ def _extract_message(payload):
         reanalyze=payload.get("reanalyze", False),
         **({"trace_ids": payload["trace_ids"]} if "trace_ids" in payload else {}),
     )
+
+
+def classify_message_batch(payload):
+    from .batch_screening import process
+    return process(payload)
 
 
 def reanalyze_errors(payload):
@@ -1031,7 +1050,7 @@ def index_message(payload):
     from .qdrant_service import qdrant_service
 
     raw = RawMessage.objects.select_related("config").get(pk=payload["raw_id"])
-    if not raw.config_id or not raw.config.is_active or not raw.content.strip():
+    if raw.processing_state == "offtopic" or not raw.config_id or not raw.config.is_active or not raw.content.strip():
         return
     point = qdrant_service.upsert_message(
         raw.message_id,

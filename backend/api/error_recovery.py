@@ -23,7 +23,7 @@ def candidates(user, scope):
     if 'team' in scope:
         records = records.filter(team_id=scope['team'])
     raws = access.messages_for(user).filter(pk__in=records.values('raw_message_id')).exclude(
-        processing_state__in=['clarification_reply', 'deleted', 'superseded'])
+        processing_state__in=['clarification_reply', 'deleted', 'superseded', 'offtopic'])
     if not user.is_superuser:
         teams = access.team_ids(user, ['team_lead'])
         raws = raws.filter(Q(config__team_id__in=teams) | Q(config__isnull=True, team_id__in=teams))
