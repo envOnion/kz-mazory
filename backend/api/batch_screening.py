@@ -251,12 +251,6 @@ def defer_extraction(payload):
     """Guard old/manual extraction routes without repeating a successful screen."""
     if screened(payload):
         return False
-    # Pre-deployment continuations own durable cursors, validated segment
-    # results and (for local-budget intents) an authorization bound to this
-    # exact event. Moving them into a new child would lose or invalidate that
-    # state. Finish those existing operations in place; fresh work is screened.
-    if any(payload.get(key) for key in ("full_history_state", "segment_ranges", "free_local_budget_intent")):
-        return False
     ids = payload.get("batch_ids") or [payload["raw_id"]]
     rows = list(RawMessage.objects.filter(pk__in=ids).exclude(processing_state__in=["offtopic", "clarification_reply"]).select_related("config__team", "team", "project"))
     if rows:
