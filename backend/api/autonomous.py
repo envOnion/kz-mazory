@@ -684,8 +684,20 @@ def decide(candidate_id, *, preview=False):
         if candidate.status != "pending":
             return None
         fingerprint_input = [candidate.proposed_changes, candidate.project.version if candidate.project_id else None, candidate.crm_match_revision, candidate.crm_match_state, candidate.trace.model_version, cfg.chat_model_name, list(candidate.evidence.values_list("raw_message_id", "quote"))]
-        if candidate.materialization_snapshot.get("entity_resolution"):
+        entity_resolution = candidate.materialization_snapshot.get("entity_resolution")
+        entity_resolution_fingerprint_index = None
+        if entity_resolution:
+            entity_resolution_fingerprint_index = len(fingerprint_input)
             fingerprint_input.append(candidate.materialization_snapshot["entity_resolution"])
+        selected_crm_matches = [
+            list(match) for match in candidate.crm_matches.filter(
+                crm_match_revision=candidate.crm_match_revision,
+                selection_state="selected",
+            ).order_by("id").values_list("id", "project_id", "bitrix_deal_id", "match_reasons")
+        ]
+        # A CRM selection is an input to identity resolution. Include it so
+        # an earlier deferred decision cannot mask a newly available match.
+        fingerprint_input.append(["selected_crm_matches", selected_crm_matches])
         from .clarifications import hold, plan
         clarification_hold = hold(candidate)
         if clarification_hold:
@@ -714,6 +726,13 @@ def decide(candidate_id, *, preview=False):
             schema.is_valid(raise_exception=True)
             data = schema.validated_data
             _resolve_project(candidate, data, text)
+            current_entity_resolution = candidate.materialization_snapshot.get("entity_resolution")
+            if current_entity_resolution != entity_resolution:
+                if entity_resolution_fingerprint_index is None:
+                    fingerprint_input.append(current_entity_resolution)
+                else:
+                    fingerprint_input[entity_resolution_fingerprint_index] = current_entity_resolution
+                fingerprint = hashlib.sha256(json.dumps(fingerprint_input, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
             _recheck_financial_entity(candidate, data, primary)
             if not preview and not candidate.materialization_snapshot.get("entity_resolution") and not candidate.project_id and data.get("object_name") and candidate.crm_match_state == "not_requested":
                 from .tasks import enqueue_crm_match
