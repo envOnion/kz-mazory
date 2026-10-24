@@ -54,7 +54,6 @@ GOOD_EVENT_STATES = {
 }
 
 ANALYSIS_LABELS = {
-    "offtopic": "Оффтоп",
     "received": "Получено",
     "queued": "В очереди",
     "analyzing": "Анализируется",
@@ -279,7 +278,6 @@ def axes_for_records(records):
     for row in crm_rows:
         crm_by_trace.setdefault(row.axis_trace_id, []).append(row)
 
-    off_topic_ids = set(RawMessage.objects.filter(pk__in=raw_ids, processing_state="offtopic").values_list("pk", flat=True))
     result = {}
     for record in records:
         trace = traces.get(record.raw_message_id) if record.raw_message_id else None
@@ -291,7 +289,7 @@ def axes_for_records(records):
             clar = clars_by_raw.get(record.raw_message_id)
         otp = otps.get(record.otp_outbox_id) if record.otp_outbox_id else None
         delivery = deliveries.get(record.notification_id) if record.notification_id else None
-        analysis = "offtopic" if record.raw_message_id in off_topic_ids else _axis_from_trace(trace, work, clar.state if clar else None)
+        analysis = _axis_from_trace(trace, work, clar.state if clar else None)
         delivery_axis = _delivery_axis(delivery, otp)
         clar_axis = _clarification_axis(clar, delivery_axis)
         crm_axis = _crm_axis(crm_by_trace.get(trace.id) if trace else [])
@@ -370,8 +368,8 @@ def _current_axes_cte(qs):
     def column(model_fields, name):
         return connection.ops.quote_name(model_fields.get_field(name).column)
 
-    scoped_sql, scoped_params = qs.order_by().annotate(raw_state=F("raw_message__processing_state")).values(
-        'id', 'raw_message_id', 'notification_id', 'otp_outbox_id', 'raw_state'
+    scoped_sql, scoped_params = qs.order_by().values(
+        'id', 'raw_message_id', 'notification_id', 'otp_outbox_id'
     ).query.sql_with_params()
     trace_raw_id = column(trace_fields, 'raw_message')
     trace_status = column(trace_fields, 'status')
@@ -398,7 +396,6 @@ def _current_axes_cte(qs):
         current_axes AS MATERIALIZED (
             SELECT scoped.id,
                 CASE
-                    WHEN scoped.raw_state = 'offtopic' THEN 'offtopic'
                     WHEN COALESCE(notification_clar.state, trace_clar.state) = 'awaiting' THEN 'need_context'
                     WHEN latest_trace.request_state = 'needs_review' AND (latest_trace.status <> 'success' OR EXISTS (
                         SELECT 1 FROM {candidate_table} AS review_candidate
@@ -425,7 +422,6 @@ def _current_axes_cte(qs):
                 END AS analysis,
                 (
                     CASE
-                        WHEN scoped.raw_state = 'offtopic' THEN FALSE
                         WHEN COALESCE(notification_clar.state, trace_clar.state) IN ('awaiting', 'expired', 'unconfirmed')
                             THEN TRUE
                         WHEN latest_trace.status = 'error' THEN TRUE

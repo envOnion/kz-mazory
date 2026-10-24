@@ -33,8 +33,6 @@ def bounded_operation(function):
         if payload.get('entity_policy') == 'entity-stages-v1':
             return function(*args, **kwargs)
         raw_id = payload['raw_id']
-        if RawMessage.objects.filter(pk=raw_id, processing_state="offtopic").exists():
-            return None
         if current_window() is not None:
             if raw_id not in current_window()["source_ids"]:
                 raise ProviderUnavailable("context_source_unavailable")

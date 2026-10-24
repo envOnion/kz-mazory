@@ -772,8 +772,7 @@ class AIService:
         from .gpt_sol import enabled as sol_enabled, request as sol_request
         sol_schema = None
         sol_canonical_payload = None
-        contract_name = str(payload.get("response_format", {}).get("json_schema", {}).get("name", ""))
-        entity_contract = contract_name.startswith("mazory_entity_") or contract_name == "mazory_batch_screen"
+        entity_contract = str(payload.get("response_format", {}).get("json_schema", {}).get("name", "")).startswith("mazory_entity_")
         if sol_enabled(cfg) and not entity_contract:
             sol_canonical_payload = payload
             payload, sol_schema = sol_request(payload, cfg)

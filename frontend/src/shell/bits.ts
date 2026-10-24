@@ -4,7 +4,7 @@ import { defineComponent, h, type PropType } from 'vue'
 // Статусы: текст + иконка-символ вместе с цветом (WCAG AA, §3.2).
 
 const TONE_BY_STATE: Record<string, string> = {
-  offtopic: 'muted', received: 'info', queued: 'info', enqueued: 'info', pending: 'info', preparing: 'info',
+  received: 'info', queued: 'info', enqueued: 'info', pending: 'info', preparing: 'info',
   analyzing: 'info', sending: 'info', processing: 'info', reading: 'info', accepted: 'info',
   need_context: 'warn', needs_review: 'warn', awaiting: 'warn', preparing_send: 'warn', stale: 'warn',
   unknown: 'warn', unavailable: 'warn', expired: 'warn', unconfirmed: 'warn', partial: 'warn',
@@ -19,7 +19,7 @@ const LABELS: Record<string, string> = {
   WORKING:'Подключено',SCAN_QR_CODE:'Нужно подключение по QR',STOPPED:'Остановлено',STARTING:'Подключение',FAILED:'Ошибка подключения',
   open:'Открыт',ready:'Готов',cancelled:'Отменено',paused:'Приостановлено',partial:'Частично выполнено',blocked:'Заблокировано',
   analysis_error:'Ошибка анализа',delivery_problem:'Проблема доставки',crm_problem:'Проблема CRM',clarification_awaiting:'Ожидает ответа',clarification_expired:'Уточнение истекло',clarification_unconfirmed:'Ответ не подтверждён',
-  offtopic: 'Оффтоп', received: 'Получено', queued: 'В очереди', analyzing: 'Анализируется', need_context: 'Нужен контекст',
+  received: 'Получено', queued: 'В очереди', analyzing: 'Анализируется', need_context: 'Нужен контекст',
   analyzed: 'Проанализировано', no_crm_actions: 'Без CRM-действий', error: 'Ошибка',
   needs_review: 'Требует проверки', analysis_needs_review: 'Нужна проверка данных',
   not_applicable: 'Не требуется', not_required: 'Не требуется', preparing: 'Готовится',

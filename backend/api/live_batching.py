@@ -16,7 +16,7 @@ BUFFER_EVENT = "buffer_message"
 BATCH_SIZE = 50
 PROCESSING_BATCH_SIZE = 10
 MAX_WAIT = timedelta(hours=5)
-EXCLUDED_STATES = ("deleted", "superseded", "deduplication_ambiguous", "clarification_reply", "export_staged", "offtopic")
+EXCLUDED_STATES = ("deleted", "superseded", "deduplication_ambiguous", "clarification_reply", "export_staged")
 
 
 def processing_batch_size():
@@ -77,46 +77,30 @@ def _release(key, *, force):
         if len(members) < BATCH_SIZE and not (force and min(m.next_attempt_at for m in members) <= now):
             break
         batch = [raws[member.payload["raw_id"]] for member in members]
-        from .batch_screening import enqueue as screen
-        digest = hashlib.sha256(",".join(str(member.pk) for member in members).encode()).hexdigest()
-        root = screen(batch, f"live:{digest}", downstream={"live_batch_policy": POLICY})
-        for member in members:
-            member.state = "done"
-            member.payload = {**member.payload, "screening_event_id": root.id}
-        roots.append(root.id)
+        for offset in range(0, len(batch), target_limit):
+            target_batch = batch[offset:offset + target_limit]
+            target_members = members[offset:offset + target_limit]
+            digest = hashlib.sha256(",".join(str(m.pk) for m in target_members).encode()).hexdigest()
+            root, _ = OutboxEvent.objects.get_or_create(
+                deduplication_key=f"live-batch:{POLICY}:{digest}",
+                defaults={"event_type": "extract_message", "analysis_source_key": key,
+                          "analysis_position": analysis_position(target_batch[0]), "next_attempt_at": now,
+                          "payload": {"raw_id": target_batch[-1].id, "batch_ids": [raw.id for raw in target_batch],
+                                      "priority": "live", "routing_bypass": True,
+                                      "processing_version": work_version(AISettings.get_active(), AISettings.get_active().entity_pipeline_enabled),
+                                      "live_batch_policy": POLICY, "analysis_policy": "history-packets-v1",
+                                      "request_limit": max(16, len(target_batch) * 4),
+                                      **({"entity_policy": "entity-stages-v1"} if AISettings.get_active().entity_pipeline_enabled else {})}},
+            )
+            root.payload = {**root.payload, "root_event_id": root.id}
+            root.save(update_fields=["payload"])
+            for member in target_members:
+                member.state = "done"
+                member.payload = {**member.payload, "batch_event_id": root.id}
+            roots.append(root.id)
         OutboxEvent.objects.bulk_update(members, ["state", "payload"])
     return roots
 
-
-
-@transaction.atomic
-def enqueue_extraction(rows, operation, extras=None):
-    """Only a completed batch screen may fan out into extraction operations."""
-    cfg = AISettings.get_active()
-    allowed = {"history_run_id", "requested_by_id", "reanalyze", "commitment_refresh",
-               "error_recovery_id", "trace_id", "trace_ids", "live_batch_policy", "analysis_policy",
-               "screening_event_id", "priority"}
-    extras = {key: value for key, value in (extras or {}).items() if key in allowed}
-    ids = [row.pk for row in rows]
-    traces = [entry for entry in extras.get("trace_ids", []) if entry["raw_id"] in ids]
-    if traces:
-        extras["trace_ids"] = traces
-        extras["trace_id"] = next(entry["trace_id"] for entry in traces if entry["raw_id"] == ids[-1])
-    elif len(ids) != 1:
-        extras.pop("trace_id", None)
-        extras.pop("trace_ids", None)
-    payload = {"priority": "live", "routing_bypass": True, "analysis_policy": "history-packets-v1",
-               "processing_version": work_version(cfg, cfg.entity_pipeline_enabled),
-               "request_limit": max(16, len(ids) * 4),
-               **({"entity_policy": "entity-stages-v1"} if cfg.entity_pipeline_enabled else {}),
-               **extras, "raw_id": ids[-1], "batch_ids": ids}
-    event, _ = OutboxEvent.objects.get_or_create(deduplication_key=operation, defaults={
-        "event_type": "extract_message", "analysis_source_key": source_key(rows[0]),
-        "analysis_position": analysis_position(rows[0]), "payload": payload})
-    if "root_event_id" not in event.payload:
-        event.payload = {**event.payload, "root_event_id": event.pk}
-        event.save(update_fields=["payload"])
-    return event
 
 def release_due(limit=100):
     """Run before dispatch, including after a worker/Redis restart."""
@@ -136,24 +120,34 @@ def release_due(limit=100):
 
 
 def enqueue_recovery(traces, operation, user):
-    """Recovery also screens complete 50-message groups before extraction."""
-    from .batch_screening import enqueue as screen
+    """Explicit recovery is due now; preserve per-target attempts in shared calls."""
     groups = defaultdict(list)
+    target_limit = processing_batch_size()
     for trace in traces:
         groups[source_key(trace.raw_message)].append(trace)
     for key, group in sorted(groups.items()):
         group.sort(key=lambda trace: analysis_position(trace.raw_message))
-        for offset in range(0, len(group), BATCH_SIZE):
-            batch = group[offset:offset+BATCH_SIZE]
+        for offset in range(0, len(group), target_limit):
+            batch = group[offset:offset + target_limit]
             digest = hashlib.sha256(','.join(str(trace.pk) for trace in batch).encode()).hexdigest()
             for trace in batch:
                 trace.context_metadata.update(full_history_policy=None, live_batch_policy=POLICY)
+                trace.context_metadata['analysis_limits']['analysis_target_message_limit'] = len(batch)
                 trace.save(update_fields=['context_metadata'])
-            screen([trace.raw_message for trace in batch], f"recovery:{operation.pk}:{digest}", downstream={
-                "raw_id": batch[-1].raw_message_id, "trace_id": batch[-1].pk,
-                "trace_ids": [{"raw_id": trace.raw_message_id, "trace_id": trace.pk} for trace in batch],
-                "requested_by_id": user.pk, "error_recovery_id": operation.pk,
-                "live_batch_policy": POLICY, "analysis_policy": "history-packets-v1"})
+            event, _ = OutboxEvent.objects.get_or_create(
+                deduplication_key=f'error-recovery-batch:{operation.pk}:{digest}', defaults={
+                    'event_type': 'extract_message', 'analysis_source_key': key,
+                    'analysis_position': analysis_position(batch[0].raw_message),
+                    'payload': {'raw_id': batch[-1].raw_message_id, 'trace_id': batch[-1].pk,
+                        'batch_ids': [trace.raw_message_id for trace in batch],
+                        'trace_ids': [{'raw_id': trace.raw_message_id, 'trace_id': trace.pk} for trace in batch],
+                        'requested_by_id': user.pk, 'error_recovery_id': operation.pk,
+                        'processing_version': work_version(AISettings.get_active(), AISettings.get_active().entity_pipeline_enabled),
+                        'live_batch_policy': POLICY, 'analysis_policy': 'history-packets-v1',
+                        'routing_bypass': True, 'request_limit': max(16, len(batch) * 4),
+                        **({'entity_policy': 'entity-stages-v1'} if AISettings.get_active().entity_pipeline_enabled else {})}})
+            event.payload = {**event.payload, 'root_event_id': event.pk}
+            event.save(update_fields=['payload'])
 
 
 def synchronize_failure(event):
@@ -193,20 +187,7 @@ def prepare(payload):
     traces = []
     for pk in payload["batch_ids"]:
         trace = reserve_attempt(rows[pk], f"live-batch:{usage_event_id.get()}:target:{pk}", cfg=cfg)
-        trace.context_metadata.update(full_history_policy=None)
-        if payload.get("live_batch_policy"):
-            trace.context_metadata["live_batch_policy"] = POLICY
-        if payload.get("history_run_id"):
-            from .models import WhatsAppHistoryRun, HistoryAnalysisItem
-            from .processing_attempts import ANALYSIS_CONFIG_FIELDS
-            run = WhatsAppHistoryRun.objects.get(pk=payload["history_run_id"])
-            trace.context_metadata["analysis_limits"].update({
-                name: run.settings_snapshot.get(name, getattr(cfg, name))
-                for name in ("analysis_input_token_limit", "analysis_output_token_limit", *ANALYSIS_CONFIG_FIELDS)})
-            trace.context_metadata["full_history_policy"] = run.settings_snapshot.get("full_history_policy")
-            if run.settings_snapshot.get("replace_unsent"):
-                trace.context_metadata.update(replace_unsent=True, snapshot_max_id=run.settings_snapshot["snapshot_max_id"])
-            HistoryAnalysisItem.objects.filter(run=run, raw_message_id=pk).update(trace=trace)
+        trace.context_metadata.update(full_history_policy=None, live_batch_policy=POLICY)
         trace.context_metadata["analysis_limits"]["analysis_target_message_limit"] = len(payload["batch_ids"])
         trace.save(update_fields=["context_metadata"])
         traces.append({"raw_id": pk, "trace_id": trace.id})
