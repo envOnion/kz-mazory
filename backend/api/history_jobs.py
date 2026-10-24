@@ -194,7 +194,7 @@ def control_run(run_id, action, user):
         run.items.all().delete()
         from . import ai_retries
         for event in OutboxEvent.objects.select_for_update().filter(
-            event_type="extract_message", payload__history_run_id=run.id,
+            event_type__in=["extract_message", "classify_message_batch"], payload__history_run_id=run.id,
             state__in=["pending", "enqueued", "processing"],
         ).order_by("id"):
             if event.state == "processing":

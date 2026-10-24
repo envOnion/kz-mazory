@@ -34,7 +34,7 @@ def source_scope(raw):
             source__in=WHATSAPP_SOURCES if raw.source in WHATSAPP_SOURCES else [raw.source],
             session_name=raw.session_name,
             chat_id=raw.chat_id,
-        ).filter(Q(team_id=team.id) | Q(team_id__isnull=True))
+        ).filter(Q(team_id=team.id) | Q(team_id__isnull=True)).exclude(processing_state="offtopic")
     if not raw.project_id or raw.project.team_id != team.id or raw.project.archived:
         raise ProviderUnavailable("context_source_unavailable")
     return RawMessage.objects.filter(
@@ -42,7 +42,7 @@ def source_scope(raw):
         source=raw.source,
         project_id=raw.project_id,
         config__isnull=True,
-    )
+    ).exclude(processing_state="offtopic")
 
 
 def history_queryset(raw, snapshot_id, include_following=False, target_ids=None):

@@ -178,7 +178,7 @@ function stateLabel(state: string) {
   const labels: Record<string, string> = {
     received: 'Получено', queued: 'В очереди', enqueued: 'В очереди', pending: 'Ожидает', analyzing: 'Анализируется', processing: 'Выполняется',
     need_context: 'Нужен контекст', awaiting: 'Ожидает ответа', answered: 'Ответ получен', clarification: 'Уточнение',
-    analyzed: 'Проанализировано', no_crm_actions: 'Без действий CRM', non_commercial: 'Без изменений CRM', confirmed: 'Подтверждено', delivered: 'Доставлено',
+    offtopic: 'Оффтоп', analyzed: 'Проанализировано', no_crm_actions: 'Без действий CRM', non_commercial: 'Без изменений CRM', confirmed: 'Подтверждено', delivered: 'Доставлено',
     completed: 'Завершено', done: 'Выполнено', failed: 'Ошибка', error: 'Ошибка', expired: 'Истекло', stale: 'Задержка',
     unknown: 'Результат неизвестен', unavailable: 'Результат недоступен', superseded: 'Заменено', cancelled: 'Отменено',
     approved: 'Одобрено', open: 'Открыто', ready: 'Готово', partial: 'Частично выполнено', blocked: 'Заблокировано', unconfirmed: 'Не подтверждено',

@@ -90,9 +90,12 @@ def request(payload, max_tokens):
                 _native_quote_system_messages(wire["messages"])
                 quote_instruction = ("В evidence и quote выбирай целочисленные quote_id из источников, "
                                      "как требует схема; никаких строк и придуманных ID. Не повторяй текст источников.")
-        entity_contract = str(shape.get("json_schema", {}).get("name", "")).startswith("mazory_entity_")
+        contract_name = str(shape.get("json_schema", {}).get("name", ""))
+        entity_contract = contract_name.startswith("mazory_entity_") or contract_name == "mazory_batch_screen"
         if entity_contract:
             quote_instruction = "В evidence и quote выбирай числовой quote_id из source_quotes; текст цитат не переписывай."
+        if contract_name == "mazory_batch_screen":
+            quote_instruction = "Верни ровно одно решение для каждого raw_message_id пакета. Не извлекай факты и темы."
         wire["messages"].insert(0, {"role": "system", "content": (
             "Верни весь результат единственным вызовом mazory_extraction строго по JSON Schema. "
             "Соблюдай типы, required, enum и additionalProperties=false. "
