@@ -93,13 +93,16 @@ def _release(key, *, force):
 def enqueue_extraction(rows, operation, extras=None):
     """Only a completed batch screen may fan out into extraction operations."""
     cfg = AISettings.get_active()
-    extras = dict(extras or {})
+    allowed = {"history_run_id", "requested_by_id", "reanalyze", "commitment_refresh",
+               "error_recovery_id", "trace_id", "trace_ids", "live_batch_policy", "analysis_policy",
+               "screening_event_id", "priority"}
+    extras = {key: value for key, value in (extras or {}).items() if key in allowed}
     ids = [row.pk for row in rows]
     traces = [entry for entry in extras.get("trace_ids", []) if entry["raw_id"] in ids]
     if traces:
         extras["trace_ids"] = traces
         extras["trace_id"] = next(entry["trace_id"] for entry in traces if entry["raw_id"] == ids[-1])
-    elif extras.get("raw_id") not in ids:
+    elif len(ids) != 1:
         extras.pop("trace_id", None)
         extras.pop("trace_ids", None)
     payload = {"priority": "live", "routing_bypass": True, "analysis_policy": "history-packets-v1",

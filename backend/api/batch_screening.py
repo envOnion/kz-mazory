@@ -208,6 +208,12 @@ def publish(event_id):
                          .values_list("trace__raw_message_id", flat=True).distinct())
         off = [row["raw_message_id"] for row in result["decisions"] if row["action"] == "offtopic"]
         safe = set(off) - set(protected)
+        # A prior candidate is evidence that automatic disposal is unsafe.
+        # Keep the provider result intact and publish a conservative override.
+        for decision in result["decisions"]:
+            if decision["raw_message_id"] in protected and decision["action"] == "offtopic":
+                decision.update(action="analyze", reason="У сообщения уже есть кандидат факта: требуется сохранить деловой путь обработки.")
+        counts = Counter(row["action"] for row in result["decisions"])
         RawMessage.objects.filter(pk__in=safe).exclude(processing_state__in=["clarification_reply", "superseded", "deleted"]).update(
             processed=True, processing_state="offtopic")
         SourceWorkItem.objects.filter(raw_message_id__in=safe).update(state="done", error_code="", lease_until=None)
@@ -226,7 +232,8 @@ def publish(event_id):
             child = enqueue_extraction(members, f"screened:{event.pk}:{offset}", extras)
             HistoryAnalysisItem.objects.filter(outbox_event=event, raw_message_id__in=[row.pk for row in members]).update(
                 outbox_event=child, state="queued", reason_code="", reason_description="")
-    event.payload.update(screen_published=True, screen_counts=dict(counts), protected_ids=protected)
+    event.payload.update(screen_published=True, screen_counts=dict(counts), protected_ids=protected,
+                         screen_effective_result=result)
     event.save(update_fields=["payload"])
 
 
@@ -235,7 +242,8 @@ def screened(payload):
     if not event or not event.payload.get("screen_published") or event.payload.get("audit_id"):
         return False
     rows = _current(event)
-    actions = {row["raw_message_id"]: row["action"] for row in event.payload["screen_result"]["decisions"]}
+    effective = event.payload.get("screen_effective_result", event.payload["screen_result"])
+    actions = {row["raw_message_id"]: row["action"] for row in effective["decisions"]}
     return all(pk in rows and actions.get(pk) == "analyze" for pk in payload.get("batch_ids") or [payload["raw_id"]])
 
 

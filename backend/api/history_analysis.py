@@ -12,7 +12,6 @@ ACTIVE = ("queued", "processing", "retry_wait")
 
 @transaction.atomic
 def schedule(run):
-    cfg = AISettings.get_active()
     items = []
     raw_rows = list(run.messages.order_by("timestamp", "id"))
     raw_ids = [raw.id for raw in raw_rows]
