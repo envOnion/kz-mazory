@@ -5,6 +5,8 @@ from django.db import transaction
 from django.db.models import Count, Exists, Max, OuterRef, Q, Subquery
 from django.utils import timezone
 from .models import AISettings, HistoryAnalysisItem, MessageProcessingTrace, OutboxEvent, RawMessage
+from .processing_attempts import reserve_attempt
+from .dialogue_threads import source_key, analysis_position
 
 POLICY = "history-packets-v1"
 ACTIVE = ("queued", "processing", "retry_wait")
@@ -12,9 +14,20 @@ ACTIVE = ("queued", "processing", "retry_wait")
 
 @transaction.atomic
 def schedule(run):
+    cfg = AISettings.get_active()
+    from .context_window import LIMIT
+    limit = min(LIMIT + 1, run.settings_snapshot.get("analysis_target_message_limit", cfg.analysis_target_message_limit))
     items = []
     raw_rows = list(run.messages.order_by("timestamp", "id"))
     raw_ids = [raw.id for raw in raw_rows]
+    snapshot_max_id = run.settings_snapshot.get("snapshot_max_id")
+    if snapshot_max_id is None:
+        snapshot_max_id = RawMessage.objects.aggregate(last=Max("id"))["last"] or 0
+    latest_attempts = dict(MessageProcessingTrace.objects.filter(
+        raw_message_id__in=raw_ids
+    ).order_by().values("raw_message_id").annotate(last=Max("attempt_no")).values_list(
+        "raw_message_id", "last"
+    ))
     existing_items = {item.raw_message_id: item for item in HistoryAnalysisItem.objects.filter(
         run=run, raw_message_id__in=raw_ids
     )}
@@ -27,11 +40,6 @@ def schedule(run):
         )})
     for raw in raw_rows:
         item = existing_items[raw.id]
-        if raw.processing_state == 'offtopic':
-            item.state, item.disposition = 'succeeded', 'offtopic'
-            item.reason_code, item.reason_description = 'offtopic', 'Оффтоп: дальнейшая обработка завершена.'
-            item.save()
-            continue
         if raw.processing_state == 'clarification_reply':
             item.state, item.disposition = 'succeeded', 'clarification_reply'
             item.reason_code = 'human_clarification_source'
@@ -54,13 +62,52 @@ def schedule(run):
             item.save()
         elif item.state == "queued" and item.outbox_event_id is None:
             items.append(item)
-    from .batch_screening import enqueue as screen, BATCH_SIZE
-    for offset in range(0, len(items), BATCH_SIZE):
-        packet = items[offset:offset + BATCH_SIZE]
-        event = screen([item.raw_message for item in packet], f"history:{run.pk}:{packet[0].raw_message_id}",
-                       downstream={"history_run_id": run.pk, "analysis_policy": POLICY,
-                                   "requested_by_id": run.requested_by_id})
-        HistoryAnalysisItem.objects.filter(pk__in=[item.pk for item in packet]).update(outbox_event=event)
+    for offset in range(0, len(items), limit):
+        packet = items[offset:offset + limit]
+        raw = RawMessage.objects.select_for_update().get(pk=packet[0].raw_message_id)
+        operation = f"history:{run.id}:packet:{raw.id}"
+        operation_keys = [f"{operation}:target:{item.raw_message_id}" for item in packet]
+        existing_traces = MessageProcessingTrace.objects.filter(
+            operation_key__in=operation_keys
+        ).in_bulk(field_name="operation_key")
+        traces = {}
+        for item in packet:
+            operation_key = f"{operation}:target:{item.raw_message_id}"
+            previous = existing_traces.get(operation_key)
+            trace = reserve_attempt(
+                item.raw_message, operation_key,
+                cfg=cfg, snapshot_max_id=snapshot_max_id,
+                existing=previous,
+                latest_attempt_no=latest_attempts.get(item.raw_message_id, 0),
+            )
+            if previous is None:
+                latest_attempts[item.raw_message_id] = trace.attempt_no
+            from .processing_attempts import ANALYSIS_CONFIG_FIELDS
+            trace.context_metadata.update(analysis_policy=POLICY, analysis_limits={**trace.context_metadata['analysis_limits'], **{
+                name: run.settings_snapshot.get(name, getattr(cfg, name))
+                for name in ("analysis_input_token_limit", "analysis_output_token_limit", *ANALYSIS_CONFIG_FIELDS)
+            }})
+            trace.context_metadata['full_history_policy'] = run.settings_snapshot.get('full_history_policy')
+            if run.settings_snapshot.get("replace_unsent"):
+                trace.context_metadata.update(replace_unsent=True, snapshot_max_id=run.settings_snapshot["snapshot_max_id"])
+            trace.save(update_fields=["context_metadata"])
+            traces[item.raw_message_id] = trace.id
+        event, _ = OutboxEvent.objects.get_or_create(deduplication_key=operation, defaults={
+            "event_type": "extract_message", "analysis_source_key": source_key(raw),
+            "analysis_position": analysis_position(raw), "payload": {
+                "raw_id": raw.id, "trace_id": traces[raw.id],
+                "trace_ids": [{"raw_id":pk,"trace_id":trace_id} for pk,trace_id in traces.items()], "batch_ids": [x.raw_message_id for x in packet],
+                "history_run_id": run.id, "analysis_policy": POLICY,
+                **({"entity_policy": "entity-stages-v1"} if cfg.entity_pipeline_enabled else {}),
+            },
+        })
+        for item in packet:
+            item.outbox_event = event
+            item.trace_id = traces[item.raw_message_id]
+            item.save(update_fields=["outbox_event", "trace", "updated_at"])
+        if "root_event_id" not in event.payload:
+            event.payload = {**event.payload, "root_event_id":event.id}
+            event.save(update_fields=["payload"])
     run.scheduled_count = run.analysis_items.exclude(disposition__in=("no_text", "clarification_reply")).count()
     run.save(update_fields=["scheduled_count"])
 
@@ -139,7 +186,7 @@ def counts_many(runs):
                  "skipped_crm_delivered": outcome["skipped_crm_delivered"], "blocked": state["blocked"],
                  "pending": sum(state[name] for name in ACTIVE), "cancelled": state["cancelled"],
                  "facts": outcome["facts"], "no_facts": outcome["no_facts"],
-                 "offtopic": outcome["offtopic"], "human_answers": outcome["clarification_reply"], "insufficient_data": outcome["insufficient_data"],
+                 "human_answers": outcome["clarification_reply"], "insufficient_data": outcome["insufficient_data"],
                  "retry_wait": state["retry_wait"], "processing": state["processing"], "queued": state["queued"]}
         value.update({key: candidate_counts.get(pk, {}).get(key, 0) for key in ("candidates", "accepted", "rejected")})
         value["next_attempt_at"] = row["progress_next_attempt"].isoformat() if row["progress_next_attempt"] else None
@@ -160,7 +207,7 @@ def summary(value):
         return f"Обработано {value['processed']} / {value['total']}; ошибок: {value['errors']}"
     accounted = value["processed"] + value["no_text"] + value["errors"] + value["cancelled"] + value["pending"] + value.get("skipped_crm_delivered",0) + value.get("blocked",0)
     return (f"Учтено: {accounted} / {value['total']} · Отменено: {value['cancelled']} · Проанализировано: {value['processed']} / {value['total'] - value['no_text']} · "
-            f"Без текста: {value['no_text']} · Оффтоп: {value.get('offtopic', 0)} · Ответов на уточнения: {value.get('human_answers',0)} · Уже доставлено в CRM: {value.get('skipped_crm_delivered',0)} · Заблокировано: {value.get('blocked',0)} · С фактами: {value['facts']} · Без фактов: {value['no_facts']} · "
+            f"Без текста: {value['no_text']} · Ответов на уточнения: {value.get('human_answers',0)} · Уже доставлено в CRM: {value.get('skipped_crm_delivered',0)} · Заблокировано: {value.get('blocked',0)} · С фактами: {value['facts']} · Без фактов: {value['no_facts']} · "
             f"Недостаточно данных: {value['insufficient_data']} · В работе: {value['processing']} · "
             f"В очереди: {value['queued']} · Повторы: {value['retry_wait']} · Ошибки: {value['errors']} · "
             f"Кандидатов: {value['candidates']} · Принято: {value['accepted']}")

@@ -18,8 +18,6 @@ def require_reanalysis(user, raw):
         raise PermissionDenied("Нет доступа к исходному сообщению.")
     team_id = raw.config.team_id if raw.config_id else raw.team_id
     access.require_team_role(user, team_id, ["team_lead"])
-    if raw.processing_state == "offtopic":
-        raise PermissionDenied("Сообщение помечено как оффтоп и исключено из автоматического анализа.")
     if raw.processing_state == 'clarification_reply':
         raise PermissionDenied("Ответ на уточнение сохранён как человеческий факт и не передаётся на повторный анализ модели.")
     source_scope(raw)
@@ -28,8 +26,6 @@ def require_reanalysis(user, raw):
 def reserve_attempt(raw, operation_key, *, cfg=None, snapshot_max_id=None,
                     existing=_UNSET, latest_attempt_no=None):
     """Caller holds the source row lock; the unique constraint is the final guard."""
-    if raw.processing_state == "offtopic":
-        raise ProviderUnavailable("offtopic_not_model_input")
     if raw.processing_state == 'clarification_reply':
         raise ProviderUnavailable('clarification_reply_not_model_input')
     if existing is _UNSET:
@@ -130,6 +126,12 @@ def schedule_reanalysis(raw_id, user, request_key, *, recovery_id=None, expected
 
 
 def _enqueue_reanalysis(raw, trace, user, operation_key):
-    from .batch_screening import enqueue
-    enqueue([raw], operation_key, downstream={
-        "raw_id": raw.pk, "trace_id": trace.pk, "requested_by_id": user.pk})
+    cfg = AISettings.get_active()
+    from .live_batching import work_version
+    OutboxEvent.objects.create(
+        event_type="extract_message",
+        deduplication_key=operation_key,
+        payload={"raw_id": raw.id, "trace_id": trace.id, "requested_by_id": user.id,
+                 "processing_version": work_version(cfg, cfg.entity_pipeline_enabled),
+                 **({"entity_policy": "entity-stages-v1"} if cfg.entity_pipeline_enabled else {})},
+    )
